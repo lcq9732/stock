@@ -1,0 +1,61 @@
+<Window x:Class="StockPlatform.Analyzer.DetailWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:oxy="http://oxyplot.org/wpf"
+        Title="判断依据" Height="950" Width="1400" MinWidth="800" MinHeight="600"
+        WindowStartupLocation="CenterOwner" WindowState="Maximized">
+    <Grid Margin="10">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="320" />
+        </Grid.ColumnDefinitions>
+
+        <!-- 左：两张图上下堆叠，把原来被上方文字占掉的高度让出来给图表。 -->
+        <Grid Grid.Column="0" Margin="0,0,10,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="3*" />
+                <RowDefinition Height="2*" />
+            </Grid.RowDefinitions>
+
+            <!-- 悬浮信息直接叠在各自图表左上角（不再是图表上方单独一块），K线图叠OHLC/BOLL，
+                 MACD图叠DIF/DEA/MACD柱——离眼睛看的地方更近，不用来回扫视。两张图共用同一个
+                 PlotView所在的Grid单元格，后声明的TextBlock自然盖在PlotView上面。见
+                 DetailWindow.xaml.cs OnPlotMouseMove。 -->
+            <Grid Grid.Row="0">
+                <oxy:PlotView x:Name="MainPlot" Model="{Binding MainPlotModel}" />
+                <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="40,4,0,0"
+                        Padding="6,3" Background="#DDFFFFFF" BorderBrush="#DDDDDD" BorderThickness="1" CornerRadius="3" IsHitTestVisible="False">
+                    <TextBlock x:Name="MainInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" />
+                </Border>
+            </Grid>
+
+            <Grid Grid.Row="1" Margin="0,8,0,0">
+                <oxy:PlotView x:Name="MacdPlot" Model="{Binding MacdPlotModel}" />
+                <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="40,4,0,0"
+                        Padding="6,3" Background="#DDFFFFFF" BorderBrush="#DDDDDD" BorderThickness="1" CornerRadius="3" IsHitTestVisible="False">
+                    <TextBlock x:Name="MacdInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" />
+                </Border>
+            </Grid>
+        </Grid>
+
+        <!-- 右：标题 + 判断依据文字——原来在图表上方占一整行宽度，现在挪到侧边，让图表能用满
+             整个窗口高度。 -->
+        <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <TextBlock Text="{Binding Title}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" TextWrapping="Wrap" />
+                <ItemsControl ItemsSource="{Binding Criteria}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Margin="0,0,0,10" TextWrapping="Wrap">
+                                <Run Text="{Binding Icon}" FontWeight="Bold" />
+                                <Run Text="{Binding Name}" FontWeight="Bold" />
+                                <LineBreak />
+                                <Run Text="{Binding Basis}" Foreground="Gray" />
+                            </TextBlock>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Window>

@@ -1,0 +1,117 @@
+<Window x:Class="StockPlatform.Analyzer.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="A股批量分析" Height="700" Width="1100" MinWidth="900" MinHeight="500" WindowState="Maximized">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+    </Window.Resources>
+
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Where the local data file needs to live (manual copy, no netdisk sync) — shared by
+             both analysis methods, so it stays outside the Tab control. -->
+        <Border Grid.Row="0" Margin="0,0,0,6" Padding="6,3" HorizontalAlignment="Left"
+                Background="#E7F1FF" BorderBrush="#B6D4FE" BorderThickness="1" CornerRadius="3">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="{Binding LocalDbPathText}" Foreground="#084298" VerticalAlignment="Center" />
+                <Button Content="打开本地数据目录" Command="{Binding OpenDataFolderCommand}" Width="110" Margin="10,0,0,0" />
+            </StackPanel>
+        </Border>
+
+        <!-- Sync — also shared, both methods read the same local file. -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
+            <TextBlock Text="{Binding SyncStatusText}" VerticalAlignment="Center" FontWeight="Bold" />
+            <Button Content="刷新" Command="{Binding RefreshCommand}" Width="80" Margin="12,0,0,0"
+                    ToolTip="重新拷贝了数据库文件之后点这个，不用重启程序" />
+        </StackPanel>
+
+        <!-- Two independent analysis methods (doc/analysis-app-design.md section 3.2) — each tab
+             has its own controls/results/log, switching tabs doesn't affect the other's state. -->
+        <TabControl Grid.Row="2">
+            <TabItem Header="筑基法">
+                <Grid DataContext="{Binding FoundationTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="130" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <TextBlock Text="分析粒度：" VerticalAlignment="Center" />
+                        <ComboBox ItemsSource="{Binding TopLevelGranularities}" SelectedItem="{Binding SelectedTopLevel}" Width="80" Margin="4,0" />
+                        <ComboBox ItemsSource="{Binding MinutePeriods}" SelectedItem="{Binding SelectedMinutePeriod}" Width="80" Margin="4,0"
+                                  Visibility="{Binding IsMinuteGranularity, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                        <TextBlock Text="前N根K线：" VerticalAlignment="Center" Margin="16,0,0,0" />
+                        <TextBox Text="{Binding Lookback, UpdateSourceTrigger=PropertyChanged}" Width="50" Margin="4,0" />
+
+                        <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
+                        <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
+                                Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
+                        <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
+                    </StackPanel>
+
+                    <!-- Results — only stocks that satisfy all 3 criteria are ever added here (see
+                         FoundationTabViewModel.RunAnalyzeAsync). -->
+                    <DataGrid x:Name="FoundationGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="True"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5" MouseDoubleClick="FoundationGrid_MouseDoubleClick"
+                              ToolTip="双击查看该股票的判断依据图表">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" />
+                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" />
+                            <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
+                        <ListBox ItemsSource="{Binding LogLines}" FontFamily="Consolas" FontSize="12" />
+                    </GroupBox>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="金叉法">
+                <Grid DataContext="{Binding GoldenCrossTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="130" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <TextBlock Text="固定使用日线，7条规则内部窗口均为固定值" VerticalAlignment="Center" Foreground="Gray" />
+                        <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
+                        <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
+                                Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
+                        <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
+                    </StackPanel>
+
+                    <!-- Results — only stocks with >=5/7 satisfied are ever added here (see
+                         GoldenCrossTabViewModel.RunAnalyzeAsync). -->
+                    <DataGrid x:Name="GoldenCrossGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="True"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5" MouseDoubleClick="GoldenCrossGrid_MouseDoubleClick"
+                              ToolTip="双击查看该股票的判断依据图表">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" />
+                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" />
+                            <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" />
+                            <DataGridTextColumn Header="共几条" Binding="{Binding TotalCount}" Width="60" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
+                        <ListBox ItemsSource="{Binding LogLines}" FontFamily="Consolas" FontSize="12" />
+                    </GroupBox>
+                </Grid>
+            </TabItem>
+        </TabControl>
+    </Grid>
+</Window>
