@@ -5,10 +5,10 @@
         Title="A股历史数据获取程序" Height="560" Width="820" MinWidth="700" MinHeight="380">
     <Window.Resources>
         <vm:InverseBoolConverter x:Key="InverseBoolConverter" />
-        <vm:CountToBoolConverter x:Key="CountToBoolConverter" />
     </Window.Resources>
     <Grid Margin="10">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -23,19 +23,27 @@
                       ToolTip="每次抓取只用一个数据源，不会自动混用；如果当前数据源被限流/连不上，手动切换到另一个再重新点击开始抓取即可（未抓完的股票会被抓到）" />
 
             <Button Content="拉取全部" Command="{Binding FetchCommand}" Width="100" Margin="12,0,4,0"
-                    ToolTip="必须手动点击才会发起网络请求。程序会自动获取全市场股票列表并逐个抓取——首次拉取近3年历史，之后只抓增量。按股票逐个记录进度，中途点\停止\或部分股票抓取失败都没关系，重新点这个按钮会自动只补抓还没抓到的部分，不会重新来过" />
+                    ToolTip="必须手动点击才会发起网络请求。程序会自动获取全市场股票列表并逐个抓取——首次拉取近N年历史（N见右边\回看\框），之后只抓增量，也会顺带抓流通市值和中标/订单公告。按股票逐个记录进度，中途点\停止\或部分股票抓取失败都没关系，重新点这个按钮会自动只补抓还没抓到的部分，不会重新来过" />
+
+            <TextBlock Text="首次回看：" Margin="8,0,0,0" VerticalAlignment="Center"
+                       ToolTip="只影响本地完全没有历史的股票（真正首次运行，或者新上市还没抓过的股票）——已经抓过的股票永远从自己上次抓到的日期继续，不受这个设置影响" />
+            <TextBox Text="{Binding LookbackYearsText, UpdateSourceTrigger=PropertyChanged}" Width="36" Margin="4,0"
+                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBoolConverter}}" />
+            <TextBlock Text="年" VerticalAlignment="Center" />
 
             <TextBlock Text="日期：" Margin="12,0,0,0" VerticalAlignment="Center" />
             <TextBox Text="{Binding FetchDayText, UpdateSourceTrigger=PropertyChanged}" Width="90" Margin="4,0"
                      IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBoolConverter}}"
                      ToolTip="格式 yyyy-MM-dd，默认今天" />
             <Button Content="拉取当天" Command="{Binding FetchDayCommand}" Width="80" Margin="4,0"
-                    ToolTip="只用本地已有的股票列表（不重新扫描全市场），只抓上面日期这一天的数据，不管该股票之前抓到哪天了——用于手动补一天的数据，比如当天的自动更新没跑" />
+                    ToolTip="只用本地已有的股票列表（不重新扫描全市场），只抓上面日期这一天的数据（K线+流通市值+中标/订单公告），不管该股票之前抓到哪天了——用于手动补一天的数据，比如当天的自动更新没跑" />
 
-            <Button Content="合并" Command="{Binding MergeCommand}" Width="70" Margin="12,0,4,0"
-                    ToolTip="把当前所有已下载的日增量数据合并进总数据文件，生成新的总数据文件" />
-            <Button Content="停止" Command="{Binding StopCommand}" Width="70" Margin="4,0"
-                    ToolTip="中断当前正在进行的抓取/合并，已经写入本地数据库的部分不会回滚，可以随时重新开始抓取（增量判断会跳过已有数据）" />
+            <Button Content="停止" Command="{Binding StopCommand}" Width="70" Margin="12,0,4,0"
+                    ToolTip="中断当前正在进行的抓取，已经写入本地数据库的部分不会回滚，可以随时重新开始抓取（增量判断会跳过已有数据）" />
+
+            <Button Content="{Binding FailedCodeCount, StringFormat='重新拉取失败股票（{0}）'}"
+                    Command="{Binding RetryFailedCommand}" Width="150" Margin="12,0,4,0"
+                    ToolTip="只重新抓取上次记录的失败项——K线、流通市值、资金净流入各自独立记录失败，这里会分别重试（不重新扫描全市场股票列表，不重复跑公告）。市值本身是整轮扫描，重试不会比正常跑一次更快，但能正确清零失败记录；K线和资金净流入是逐只精确重试。可以反复点击——重试之后如果还有失败的，数字不会清零，可以继续点" />
         </StackPanel>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
@@ -43,36 +51,21 @@
             <TextBlock Text="{Binding ElapsedText}" Margin="10,0,0,0" VerticalAlignment="Center" Foreground="Gray" FontWeight="Bold" />
         </StackPanel>
 
-        <!-- Pending-merge nudge: neutral until there's actually something to merge, then highlighted -->
-        <Border Grid.Row="2" Margin="0,0,0,10" Padding="6,3" HorizontalAlignment="Left" BorderThickness="1" CornerRadius="3">
-            <Border.Style>
-                <Style TargetType="Border">
-                    <Setter Property="Background" Value="Transparent" />
-                    <Setter Property="BorderBrush" Value="Transparent" />
-                    <Style.Triggers>
-                        <DataTrigger Binding="{Binding PendingDailyCount, Converter={StaticResource CountToBoolConverter}}" Value="True">
-                            <Setter Property="Background" Value="#FFF3CD" />
-                            <Setter Property="BorderBrush" Value="#FFE69C" />
-                        </DataTrigger>
-                    </Style.Triggers>
-                </Style>
-            </Border.Style>
-            <TextBlock Text="{Binding PendingDailyText}">
-                <TextBlock.Style>
-                    <Style TargetType="TextBlock">
-                        <Setter Property="Foreground" Value="Gray" />
-                        <Style.Triggers>
-                            <DataTrigger Binding="{Binding PendingDailyCount, Converter={StaticResource CountToBoolConverter}}" Value="True">
-                                <Setter Property="Foreground" Value="#856404" />
-                            </DataTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </TextBlock.Style>
-            </TextBlock>
-        </Border>
+        <!-- Data coverage + last-fetch-time — lets the user tell what's already covered and when
+             it was last actually pulled, so they don't have to guess whether to fetch again. -->
+        <TextBlock Grid.Row="2" Text="{Binding DataStatusText}" Margin="0,0,0,10" Foreground="Gray" FontWeight="Bold" />
+
+        <!-- Order-win / contract announcement keywords — no longer a separately-triggered action,
+             both 拉取全部/拉取当天 use whatever's here automatically (see FetchOrchestrator). -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,10">
+            <TextBlock Text="中标/订单公告关键词：" VerticalAlignment="Center" />
+            <TextBox Text="{Binding AnnouncementKeywordsText, UpdateSourceTrigger=PropertyChanged}" Width="160" Margin="4,0"
+                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBoolConverter}}"
+                     ToolTip="逗号分隔的多个关键词，例如：中标,签订合同。清空则不抓公告。拉取全部/拉取当天时会自动按这里的关键词搜索（巨潮资讯网全文检索+东方财富公告正文提取金额），不需要单独点击" />
+        </StackPanel>
 
         <!-- Log -->
-        <GroupBox Grid.Row="3" Header="运行日志">
+        <GroupBox Grid.Row="4" Header="运行日志">
             <ListBox ItemsSource="{Binding LogLines}" FontFamily="Consolas" FontSize="12" />
         </GroupBox>
     </Grid>

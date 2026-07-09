@@ -28,14 +28,14 @@ public class SqliteFundamentalMetricRepository : IFundamentalMetricRepository
         SqliteSchema.EnsureSchema(conn);
     }
 
-    public void InsertOrIgnore(IEnumerable<FundamentalMetric> metrics)
+    public void Upsert(IEnumerable<FundamentalMetric> metrics)
     {
         using var conn = Open();
         using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT OR IGNORE INTO FundamentalMetric (code, metric_key, as_of_date, value, source, fetched_at)
+            INSERT OR REPLACE INTO FundamentalMetric (code, metric_key, as_of_date, value, source, fetched_at)
             VALUES ($code, $metric_key, $as_of_date, $value, $source, $fetched_at);
             """;
         var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);

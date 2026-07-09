@@ -13,6 +13,11 @@ public class AnalyzerPaths
     public string LocalDir => Path.Combine(BaseDir, "local");
     public string TotalDb => Path.Combine(LocalDir, "total.sqlite");
 
+    /// <summary>自选股列表——是分析程序自己的状态（用户手动挑选的、跨方法通用），不是从
+    /// Fetcher 那边拷贝来的共享只读数据，所以特意放在 LocalDir 外面、跟 TotalDb 分开，避免
+    /// 以后被误当成"可以直接删了重新拷贝"的那类文件（见 JsonWatchlistStore）。</summary>
+    public string WatchlistPath => Path.Combine(BaseDir, "watchlist.json");
+
     public AnalyzerPaths(string? baseDir = null)
     {
         BaseDir = baseDir ?? Path.Combine(AppContext.BaseDirectory, "data");

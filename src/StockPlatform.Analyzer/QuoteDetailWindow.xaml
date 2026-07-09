@@ -1,0 +1,133 @@
+<Window x:Class="StockPlatform.Analyzer.QuoteDetailWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:oxy="http://oxyplot.org/wpf"
+        Title="股票行情" Height="900" Width="1200" MinWidth="800" MinHeight="500"
+        WindowStartupLocation="CenterOwner" WindowState="Maximized">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="3*" />
+            <RowDefinition Height="1.5*" />
+            <RowDefinition Height="1.5*" />
+        </Grid.RowDefinitions>
+
+        <!-- 典型股票APP的抬头：代码/名称 + 最新价 + 涨跌幅（红涨绿跌）——固定按日线算，跟下面
+             图表显示的K线粒度无关（这是"现在的实际价格"，不是"图表这一根的价格"）。 -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+            <TextBlock x:Name="TitleText" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" />
+            <TextBlock x:Name="LatestCloseText" FontSize="18" FontWeight="Bold" Margin="16,0,0,0" VerticalAlignment="Center" />
+            <TextBlock x:Name="ChangeText" FontSize="14" Margin="8,0,0,0" VerticalAlignment="Center" />
+        </StackPanel>
+
+        <!-- 开/最高/最低/昨收/量/额/换手——固定按日线算（现手是逐笔实时数据，这套系统没有，
+             不硬凑）。见典型股票APP行情页的那两行统计，桌面端够宽，合并成一行。 -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="开:" Foreground="Gray" VerticalAlignment="Center" />
+            <TextBlock x:Name="OpenText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock Text="最高:" Foreground="Gray" VerticalAlignment="Center" />
+            <TextBlock x:Name="HighText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock Text="最低:" Foreground="Gray" VerticalAlignment="Center" />
+            <TextBlock x:Name="LowText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock Text="昨收:" Foreground="Gray" VerticalAlignment="Center" />
+            <TextBlock x:Name="PrevCloseText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock Text="量:" Foreground="Gray" VerticalAlignment="Center" />
+            <TextBlock x:Name="VolumeText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock Text="额:" Foreground="Gray" VerticalAlignment="Center" />
+            <TextBlock x:Name="AmountText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock Text="换手:" Foreground="Gray" VerticalAlignment="Center" />
+            <TextBlock x:Name="TurnoverText" Margin="2,0,0,0" VerticalAlignment="Center" />
+        </StackPanel>
+
+        <!-- K线粒度切换——分时/五日需要实时分时数据，这套系统目前只抓日线（周/月线是本地聚合），
+             没有分时数据源，先禁用并在ToolTip里说明，日K/周K/月K是真正可用的。 -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
+            <Button x:Name="IntradayButton" Content="分时" Width="56" Margin="0,0,4,0" IsEnabled="False"
+                    ToolTip="暂不支持——这套系统目前只抓日线历史数据（周/月线是本地聚合出来的），没有分时/实时数据源" />
+            <Button x:Name="FiveDayButton" Content="五日" Width="56" Margin="0,0,12,0" IsEnabled="False"
+                    ToolTip="暂不支持，原因同&quot;分时&quot;" />
+            <Button x:Name="DayButton" Content="日K" Width="56" Margin="0,0,4,0" Click="GranularityButton_Click" Tag="day" />
+            <Button x:Name="WeekButton" Content="周K" Width="56" Margin="0,0,4,0" Click="GranularityButton_Click" Tag="week" />
+            <Button x:Name="MonthButton" Content="月K" Width="56" Click="GranularityButton_Click" Tag="month" />
+        </StackPanel>
+
+        <Grid Grid.Row="3">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <!-- 表头：左边"前复权"固定标签（数据本来就是用fqt=1前复权抓的，不是真的可切换的下拉框）
+                 + 一行带涨跌箭头的MA当前值（默认显示最新一根K线，鼠标悬浮到某一天会跟着变成那天的
+                 OHLC+MA，见 QuoteDetailWindow.xaml.cs UpdateMainInfo）。颜色直接标在文字上，不需要
+                 单独的图例色块了。 -->
+            <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="K线" FontWeight="Bold" FontSize="12" Margin="0,0,14,0" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" x:Name="MainInfoText" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                </Grid>
+            </Border>
+            <oxy:PlotView Grid.Row="1" x:Name="MainPlot" Model="{Binding MainPlotModel}" />
+        </Grid>
+
+        <!-- 副图1/2——内容不固定，表头左边是一个下拉框（成交量/MACD/KDJ/RSI手工切换），默认
+             成交量+MACD。图例是代码里根据当前选的指标动态生成的（见 QuoteDetailWindow.xaml.cs
+             RebuildChart），不像其它窗口那样能写死在XAML里。 -->
+        <Grid Grid.Row="4" Margin="0,8,0,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ComboBox Grid.Column="0" x:Name="Sub1IndicatorCombo" Width="90" Margin="0,0,14,0" VerticalAlignment="Center"
+                              SelectionChanged="SubIndicatorCombo_SelectionChanged">
+                        <ComboBoxItem Content="成交量" />
+                        <ComboBoxItem Content="MACD" />
+                        <ComboBoxItem Content="KDJ" />
+                        <ComboBoxItem Content="RSI" />
+                    </ComboBox>
+                    <TextBlock Grid.Column="1" x:Name="Sub1InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="2" x:Name="Sub1LegendPanel" Orientation="Horizontal" VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+            <oxy:PlotView Grid.Row="1" x:Name="Sub1Plot" Model="{Binding Sub1PlotModel}" />
+        </Grid>
+
+        <Grid Grid.Row="5" Margin="0,8,0,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ComboBox Grid.Column="0" x:Name="Sub2IndicatorCombo" Width="90" Margin="0,0,14,0" VerticalAlignment="Center"
+                              SelectionChanged="SubIndicatorCombo_SelectionChanged">
+                        <ComboBoxItem Content="成交量" />
+                        <ComboBoxItem Content="MACD" />
+                        <ComboBoxItem Content="KDJ" />
+                        <ComboBoxItem Content="RSI" />
+                    </ComboBox>
+                    <TextBlock Grid.Column="1" x:Name="Sub2InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="2" x:Name="Sub2LegendPanel" Orientation="Horizontal" VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+            <oxy:PlotView Grid.Row="1" x:Name="Sub2Plot" Model="{Binding Sub2PlotModel}" />
+        </Grid>
+    </Grid>
+</Window>

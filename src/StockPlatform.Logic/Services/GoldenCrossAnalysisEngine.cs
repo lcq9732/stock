@@ -73,6 +73,8 @@ public class GoldenCrossAnalysisEngine
         {
             Code = code,
             Granularity = Granularity.Day,
+            DataDate = bars[i].PeriodStart,
+            LastClose = closes[i],
             Criteria = new List<CriterionResult>
             {
                 new()
@@ -119,7 +121,7 @@ public class GoldenCrossAnalysisEngine
                 },
             },
         };
-        result.Passed = result.Criteria.Count(c => c.Satisfied) >= PassThreshold;
+        result.Passed = result.Criteria.AtLeastSatisfiedIgnoringMissingData(PassThreshold);
         return result;
     }
 }

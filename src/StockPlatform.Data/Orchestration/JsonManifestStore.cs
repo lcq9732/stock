@@ -2,7 +2,7 @@ using System.Text.Json;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
-namespace StockPlatform.Data.CloudStorage;
+namespace StockPlatform.Data.Orchestration;
 
 public class JsonManifestStore : IManifestStore
 {

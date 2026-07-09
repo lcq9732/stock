@@ -21,12 +21,7 @@ public partial class GoldenCrossDetailWindow : Window
         DataContext = new GoldenCrossDetailViewModel
         {
             Title = $"{result.Code} {result.Name}（{result.Granularity}）",
-            Criteria = result.Criteria.Select(c => new CriterionDisplay
-            {
-                Icon = c.Satisfied ? "✓" : "✗",
-                Name = c.Name,
-                Basis = c.Basis,
-            }).ToList(),
+            Criteria = result.Criteria.Select(CriterionDisplay.From).ToList(),
             MainPlotModel = _chart.Main,
             MacdPlotModel = _chart.Macd,
             KdjPlotModel = _chart.Kdj,
@@ -93,19 +88,19 @@ public partial class GoldenCrossDetailWindow : Window
         _chart.Volume.InvalidatePlot(false);
 
         string Fmt(double v) => double.IsNaN(v) ? "—" : v.ToString("F2");
-        var dateLine = $"日期: {bar.PeriodStart:yyyy-MM-dd}";
 
+        // 日期只在主图表头出现一次，下面4张副图不重复（都跟着同一根十字线走）。
         MainInfoText.Text =
-            $"{dateLine}\n开:{bar.Open:F2}  高:{bar.High:F2}  低:{bar.Low:F2}  收:{bar.Close:F2}\nMA5:{Fmt(_chart.Ma5[idx])}  MA10:{Fmt(_chart.Ma10[idx])}";
+            $"日期:{bar.PeriodStart:yyyy-MM-dd}  开:{bar.Open:F2}  高:{bar.High:F2}  低:{bar.Low:F2}  收:{bar.Close:F2}  MA5:{Fmt(_chart.Ma5[idx])}  MA10:{Fmt(_chart.Ma10[idx])}";
         MacdInfoText.Text =
-            $"{dateLine}\nDIF:{Fmt(_chart.Dif[idx])}  DEA:{Fmt(_chart.Dea[idx])}  MACD柱:{Fmt(_chart.MacdHist[idx])}";
+            $"DIF:{Fmt(_chart.Dif[idx])}  DEA:{Fmt(_chart.Dea[idx])}  MACD柱:{Fmt(_chart.MacdHist[idx])}";
         KdjInfoText.Text =
-            $"{dateLine}\nK:{Fmt(_chart.K[idx])}  D:{Fmt(_chart.D[idx])}";
+            $"K:{Fmt(_chart.K[idx])}  D:{Fmt(_chart.D[idx])}";
         RsiInfoText.Text =
-            $"{dateLine}\nRSI:{Fmt(_chart.RsiValues[idx])}";
+            $"RSI:{Fmt(_chart.RsiValues[idx])}";
         var volMa5 = _chart.VolMa5[idx];
         var ratio = double.IsNaN(volMa5) || volMa5 == 0 ? "—" : (_chart.Volumes[idx] / volMa5).ToString("F2");
         VolumeInfoText.Text =
-            $"{dateLine}\n成交量:{_chart.Volumes[idx]:F0}  5日均量:{Fmt(volMa5)}  比值:{ratio}";
+            $"成交量:{_chart.Volumes[idx]:F0}  5日均量:{Fmt(volMa5)}  比值:{ratio}";
     }
 }

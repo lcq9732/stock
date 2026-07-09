@@ -1,7 +1,6 @@
 using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
-using OxyPlot.Legends;
 using OxyPlot.Series;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
@@ -52,7 +51,7 @@ public class GoldenCrossChartResult
 /// Builds the OxyPlot models for "金叉法" result detail windows — 5 panels, one per group of
 /// indicators its 7 conditions check (see GoldenCrossAnalysisEngine): 主图(K线+MA5+MA10+20日最高价
 /// 压力线，对应条件1/2/7)、MACD(条件3)、KDJ(条件4)、RSI(条件5)、成交量(条件6). This is a
-/// deliberately separate builder from ChartBuilder (筑基法, BOLL+MACD+breakout line) rather than
+/// deliberately separate builder from ChartBuilder (峰哥法, BOLL+MACD+breakout line) rather than
 /// one parametrized builder — the two methods' indicator sets don't overlap enough to share a
 /// single code path without a pile of conditionals, but they DO share the tricky axis/pan/zoom/
 /// label-density plumbing via ChartAxisSync and the BuildDateAxes/AddLine/AddHistogram helpers.
@@ -97,17 +96,25 @@ public static class GoldenCrossChartBuilder
         var (volDay, volMonth) = ChartBuilder.BuildDateAxes(bars, "GcVolDay", visibleStart, visibleEnd, initialDayStep, initialMonthStep);
 
         // 主图：K线 + MA5 + MA10（条件1“MA5上穿MA10”、条件2“MA10拐头向上”）+ 20日最高价压力线
-        // （条件7，注意用的是最高价不是收盘价——跟筑基法那条基于收盘价的参考线口径不一样）。
-        var main = new PlotModel { Title = "K线 / MA5 / MA10" };
+        // （条件7，注意用的是最高价不是收盘价——跟峰哥法那条基于收盘价的参考线口径不一样）。
+        // 不画横纵坐标（同 ChartBuilder 的做法），其它4个面板保留坐标轴。
+        ChartBuilder.HideAxisVisually(mainDay);
+        ChartBuilder.HideAxisVisually(mainMonth);
+
+        var main = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
         main.Axes.Add(mainDay);
         main.Axes.Add(mainMonth);
-        main.Axes.Add(new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true });
-        main.Legends.Add(NewLegend());
+        var mainYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
+        ChartBuilder.HideAxisVisually(mainYAxis);
+        main.Axes.Add(mainYAxis);
 
         var candles = new CandleStickSeries
         {
             Title = "K线",
             XAxisKey = mainDay.Key,
+            IncreasingColor = OxyColors.Red,
+            DecreasingColor = OxyColors.Green,
+            CandleWidth = 0.5,
             TrackerFormatString = "日期: {2}\n开盘: {3:F2}\n最高: {4:F2}\n最低: {5:F2}\n收盘: {6:F2}",
         };
         for (int i = 0; i < bars.Count; i++)
@@ -133,13 +140,19 @@ public static class GoldenCrossChartBuilder
 
         var mainCrosshair = NewCrosshair(mainDay.Key, last);
         main.Annotations.Add(mainCrosshair);
+        ChartBuilder.AddHighLowAnnotations(main, mainDay.Key, bars, (int)Math.Round(visibleStart), last);
 
-        // MACD副图（条件3“MACD金叉”）——跟筑基法那张结构完全一样，直接复用AddLine/AddHistogram。
-        var macd = new PlotModel { Title = "MACD" };
+        // MACD副图（条件3“MACD金叉”）——跟峰哥法那张结构完全一样，直接复用AddLine/AddHistogram。
+        // 4个副图现在都不画横纵坐标（跟主图一样），数值靠表头悬浮信息；IsAxisVisible只关渲染，
+        // 不影响IsPanEnabled/IsZoomEnabled，拖动缩放不受影响。
+        ChartBuilder.HideAxisVisually(macdDay);
+        ChartBuilder.HideAxisVisually(macdMonth);
+        var macd = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
         macd.Axes.Add(macdDay);
         macd.Axes.Add(macdMonth);
-        macd.Axes.Add(new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true });
-        macd.Legends.Add(NewLegend());
+        var macdYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
+        ChartBuilder.HideAxisVisually(macdYAxis);
+        macd.Axes.Add(macdYAxis);
         ChartBuilder.AddHistogram(macd, macdDay.Key, macdHist);
         ChartBuilder.AddLine(macd, macdDay.Key, dif, "DIF（快线）", OxyColors.Blue);
         ChartBuilder.AddLine(macd, macdDay.Key, dea, "DEA（慢线）", OxyColors.Orange);
@@ -156,11 +169,14 @@ public static class GoldenCrossChartBuilder
         macd.Annotations.Add(macdCrosshair);
 
         // KDJ副图（条件4“KDJ在20~50区域金叉”）——20/50两条参考线标出条件要求的区间。
-        var kdj = new PlotModel { Title = "KDJ" };
+        ChartBuilder.HideAxisVisually(kdjDay);
+        ChartBuilder.HideAxisVisually(kdjMonth);
+        var kdj = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
         kdj.Axes.Add(kdjDay);
         kdj.Axes.Add(kdjMonth);
-        kdj.Axes.Add(new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true, Minimum = 0, Maximum = 100 });
-        kdj.Legends.Add(NewLegend());
+        var kdjYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true, Minimum = 0, Maximum = 100 };
+        ChartBuilder.HideAxisVisually(kdjYAxis);
+        kdj.Axes.Add(kdjYAxis);
         ChartBuilder.AddLine(kdj, kdjDay.Key, k, "K", OxyColors.Blue);
         ChartBuilder.AddLine(kdj, kdjDay.Key, d, "D", OxyColors.Orange);
         kdj.Annotations.Add(new LineAnnotation { Type = LineAnnotationType.Horizontal, XAxisKey = kdjDay.Key, Y = 20, Color = OxyColors.Gray, LineStyle = LineStyle.Dot, Text = "20" });
@@ -170,11 +186,14 @@ public static class GoldenCrossChartBuilder
 
         // RSI副图（条件5“RSI从30附近向上突破50”）——50是突破线，35是"近30附近"的粗略参考线
         // （条件本身用的判定阈值是≤35，见GoldenCrossAnalysisEngine.rsiWasNear30）。
-        var rsiModel = new PlotModel { Title = "RSI" };
+        ChartBuilder.HideAxisVisually(rsiDay);
+        ChartBuilder.HideAxisVisually(rsiMonth);
+        var rsiModel = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
         rsiModel.Axes.Add(rsiDay);
         rsiModel.Axes.Add(rsiMonth);
-        rsiModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true, Minimum = 0, Maximum = 100 });
-        rsiModel.Legends.Add(NewLegend());
+        var rsiYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true, Minimum = 0, Maximum = 100 };
+        ChartBuilder.HideAxisVisually(rsiYAxis);
+        rsiModel.Axes.Add(rsiYAxis);
         ChartBuilder.AddLine(rsiModel, rsiDay.Key, rsi, "RSI", OxyColors.Purple);
         rsiModel.Annotations.Add(new LineAnnotation { Type = LineAnnotationType.Horizontal, XAxisKey = rsiDay.Key, Y = 50, Color = OxyColors.Black, LineStyle = LineStyle.Solid, Text = "50" });
         rsiModel.Annotations.Add(new LineAnnotation { Type = LineAnnotationType.Horizontal, XAxisKey = rsiDay.Key, Y = 35, Color = OxyColors.Gray, LineStyle = LineStyle.Dot, Text = "35" });
@@ -182,11 +201,14 @@ public static class GoldenCrossChartBuilder
         rsiModel.Annotations.Add(rsiCrosshair);
 
         // 成交量副图（条件6“成交量≥5日均量的1.5倍”）。
-        var volumeModel = new PlotModel { Title = "成交量" };
+        ChartBuilder.HideAxisVisually(volDay);
+        ChartBuilder.HideAxisVisually(volMonth);
+        var volumeModel = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
         volumeModel.Axes.Add(volDay);
         volumeModel.Axes.Add(volMonth);
-        volumeModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true });
-        volumeModel.Legends.Add(NewLegend());
+        var volumeYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
+        ChartBuilder.HideAxisVisually(volumeYAxis);
+        volumeModel.Axes.Add(volumeYAxis);
         AddVolumeBars(volumeModel, volDay.Key, bars, volumes);
         ChartBuilder.AddLine(volumeModel, volDay.Key, volMa5, "5日均量", OxyColors.Orange);
         var volumeCrosshair = NewCrosshair(volDay.Key, last);
@@ -196,7 +218,15 @@ public static class GoldenCrossChartBuilder
             new[] { main, macd, kdj, rsiModel, volumeModel },
             new[] { mainDay, macdDay, kdjDay, rsiDay, volDay },
             new[] { mainMonth, macdMonth, kdjMonth, rsiMonth, volMonth },
-            visibleStart, visibleEnd, ChartBuilder.InitialPlotWidthGuess, ChartBuilder.PxPerDayLabel, ChartBuilder.PxPerMonthLabel, ChartBuilder.TradingDaysPerMonth);
+            visibleStart, visibleEnd, ChartBuilder.InitialPlotWidthGuess, ChartBuilder.PxPerDayLabel, ChartBuilder.PxPerMonthLabel, ChartBuilder.TradingDaysPerMonth,
+            candleSeries: new[] { candles },
+            // KDJ/RSI不在这里——它们的Y轴是固定的0~100语义区间，不该跟着可见K线数据自适应缩放。
+            yAxisRanges: new[]
+            {
+                (mainYAxis, ChartBuilder.YRangeFn(highs, lows)),
+                (macdYAxis, ChartBuilder.YRangeFn(dif, dea, macdHist)),
+                (volumeYAxis, ChartBuilder.YRangeFn(volumes, volMa5)),
+            });
 
         return new GoldenCrossChartResult
         {
@@ -229,13 +259,6 @@ public static class GoldenCrossChartBuilder
             VolMa5 = volMa5,
         };
     }
-
-    private static Legend NewLegend() => new()
-    {
-        LegendPosition = LegendPosition.TopLeft,
-        LegendPlacement = LegendPlacement.Inside,
-        LegendBackground = OxyColor.FromAColor(180, OxyColors.White),
-    };
 
     private static LineAnnotation NewCrosshair(string xAxisKey, int last) => new()
     {

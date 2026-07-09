@@ -12,6 +12,10 @@ public interface IBarRepository
     /// show "本地数据最新到 X" without needing a separate sync-state file (see
     /// doc/analysis-app-design.md — the Analyzer reads the local database directly).</summary>
     DateTime? GetOverallLatestPeriodStart(string granularity);
+    /// <summary>Earliest period_start across ALL codes for a granularity — paired with
+    /// <see cref="GetOverallLatestPeriodStart"/> so the Fetcher UI can show "本地数据覆盖范围：X 至 Y"
+    /// (see doc/data-platform-design.md).</summary>
+    DateTime? GetOverallEarliestPeriodStart(string granularity);
     List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null);
     List<string> GetAllCodes();
 }

@@ -2,9 +2,11 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using StockPlatform.Analyzer.Watchlist;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
+using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Analyzer.ViewModels;
@@ -24,6 +26,7 @@ public class GoldenCrossTabViewModel : INotifyPropertyChanged
 
     private readonly AnalyzerPaths _paths;
     private readonly IBarRepository _barRepository;
+    private readonly JsonWatchlistStore _watchlistStore;
 
     public ObservableCollection<string> LogLines { get; } = new();
     public ObservableCollection<ResultRowViewModel> Results { get; } = new();
@@ -47,15 +50,22 @@ public class GoldenCrossTabViewModel : INotifyPropertyChanged
 
     public RelayCommand AnalyzeCommand { get; }
     public RelayCommand ShowCriteriaInfoCommand { get; }
+    public RelayCommand AddToWatchlistCommand { get; }
 
-    public GoldenCrossTabViewModel(AnalyzerPaths paths, IBarRepository barRepository)
+    public GoldenCrossTabViewModel(AnalyzerPaths paths, IBarRepository barRepository, JsonWatchlistStore watchlistStore)
     {
         _paths = paths;
         _barRepository = barRepository;
+        _watchlistStore = watchlistStore;
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
         ShowCriteriaInfoCommand = new RelayCommand(_ =>
             MessageBox.Show(CriteriaInfoText, "金叉法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
+        AddToWatchlistCommand = new RelayCommand(_ =>
+        {
+            var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "金叉法", Granularity.Day, lookback: null);
+            Log(added > 0 ? $"已将 {added} 只股票加入自选" : "没有勾选股票，或勾选的都已经在自选里了");
+        });
     }
 
     private void Log(string message) => LogLines.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {message}");
@@ -77,6 +87,7 @@ public class GoldenCrossTabViewModel : INotifyPropertyChanged
 
             var engine = new GoldenCrossAnalysisEngine(_barRepository);
             int passedCount = 0, errorCount = 0;
+            var missingDataCounts = new Dictionary<string, int>();
             await Task.Run(() =>
             {
                 for (int i = 0; i < codes.Count; i++)
@@ -87,14 +98,19 @@ public class GoldenCrossTabViewModel : INotifyPropertyChanged
                     result.Name = names.GetValueOrDefault(code, code);
 
                     if (result.Error != null) { errorCount++; continue; }
+                    foreach (var c in result.Criteria.Where(c => c.DataMissing))
+                        missingDataCounts[c.Name] = missingDataCounts.GetValueOrDefault(c.Name) + 1;
                     if (!result.Passed) continue; // results list only shows candidates with >=5/7 satisfied
 
                     passedCount++;
                     App.Current.Dispatcher.Invoke(() => Results.Add(ResultRowViewModel.From(result)));
                 }
             });
+            var missingSummary = missingDataCounts.Count > 0
+                ? "；" + string.Join("；", missingDataCounts.Select(kv => $"「{kv.Key}」这条条件因缺数据被跳过（不计入该条件，不代表股票被跳过，其余条件正常判断）：{kv.Value} 只涉及"))
+                : "";
             Log($"分析完成，共扫描 {codes.Count} 只股票，{passedCount} 只满足≥5/7条件" +
-                (errorCount > 0 ? $"，{errorCount} 只因历史数据不足被跳过" : ""));
+                (errorCount > 0 ? $"，{errorCount} 只因历史数据不足被跳过" : "") + missingSummary);
         }
         catch (Exception ex)
         {

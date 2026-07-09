@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows.Threading;
 using StockPlatform.Data.Orchestration;
@@ -41,14 +42,17 @@ public class MainViewModel : INotifyPropertyChanged
     private CancellationTokenSource? _cts;
     private DispatcherTimer? _heartbeat;
     private DateTime _runStartedAt;
+    private readonly StreamWriter? _logFileWriter;
 
-    /// <summary>How many daily increment files are waiting to be merged into a new master
-    /// (see doc/data-platform-design.md 6.2) — shown next to the "合并" button as a nudge.</summary>
-    private int _pendingDailyCount;
-    public int PendingDailyCount { get => _pendingDailyCount; private set => Set(ref _pendingDailyCount, value); }
+    /// <summary>失败股票的重试名单里还有多少只（见 FetchOrchestrator.GetFailedCodeCount）——
+    /// 只在这个数字大于0时"重新拉取失败股票"按钮才可点。</summary>
+    private int _failedCodeCount;
+    public int FailedCodeCount { get => _failedCodeCount; private set => Set(ref _failedCodeCount, value); }
 
-    private string _pendingDailyText = "";
-    public string PendingDailyText { get => _pendingDailyText; private set => Set(ref _pendingDailyText, value); }
+    /// <summary>本地数据覆盖范围 + 上次实际抓取时间（见 FetchOrchestrator.GetDataStatus）——帮用户
+    /// 判断该不该再点一次抓取，不用凭感觉重复点或者担心漏了哪天。</summary>
+    private string _dataStatusText = "";
+    public string DataStatusText { get => _dataStatusText; private set => Set(ref _dataStatusText, value); }
 
     /// <summary>Date typed in for "拉取当天" (see doc/data-platform-design.md) — free text so the
     /// user can pick any day, defaults to today. Parsed on click, not as-you-type, so a
@@ -56,12 +60,25 @@ public class MainViewModel : INotifyPropertyChanged
     private string _fetchDayText = DateOnly.FromDateTime(DateTime.Today).ToString("yyyy-MM-dd");
     public string FetchDayText { get => _fetchDayText; set => Set(ref _fetchDayText, value); }
 
+    /// <summary>"拉取全部"里，遇到本地完全没有历史的股票（真正的首次运行，或者新上市还没抓过的
+    /// 股票）时回看多少年——只影响这种股票，已经抓过的股票永远从自己上次抓到的日期+1继续，不受
+    /// 这个设置影响。用户可调，默认3年。</summary>
+    private string _lookbackYearsText = "3";
+    public string LookbackYearsText { get => _lookbackYearsText; set => Set(ref _lookbackYearsText, value); }
+
+    /// <summary>Comma-separated keywords for the 中标/订单公告 keyword sweep — see
+    /// AnnouncementFetchOrchestrator. Defaults to the two most common order-win announcement
+    /// phrasings. Used automatically by both "拉取全部" and "拉取当天" now (see
+    /// FetchOrchestrator.FetchAnnouncementsAsync) — not a separately-triggered action anymore.</summary>
+    private string _announcementKeywordsText = "中标,签订合同";
+    public string AnnouncementKeywordsText { get => _announcementKeywordsText; set => Set(ref _announcementKeywordsText, value); }
+
     public RelayCommand FetchCommand { get; }
     public RelayCommand FetchDayCommand { get; }
-    public RelayCommand MergeCommand { get; }
     public RelayCommand StopCommand { get; }
+    public RelayCommand RetryFailedCommand { get; }
 
-    public MainViewModel(FetchOrchestrator orchestrator, List<NamedBarSource> availableSources)
+    public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources)
     {
         _orchestrator = orchestrator;
         AvailableSources = availableSources;
@@ -70,15 +87,53 @@ public class MainViewModel : INotifyPropertyChanged
         // stable in practice. Falls back to the first source if "Tencent" isn't in the list.
         _selectedSource = availableSources.FirstOrDefault(s => s.Name == "Tencent") ?? availableSources[0];
 
+        // 每次程序启动清空重写（不是追加/不是按天滚动）——这只是给"程序意外退出时还能看到发生了
+        // 什么"用的诊断日志，不是长期审计记录，保持单文件+每次重开清零最简单。AutoFlush让每行
+        // 一写完就落盘，崩溃/被强制结束也不会丢失最后那几行。
+        try
+        {
+            _logFileWriter = new StreamWriter(paths.LogFilePath, append: false) { AutoFlush = true };
+        }
+        catch
+        {
+            _logFileWriter = null; // 日志文件打不开（比如被占用）不应该阻止程序正常使用
+        }
+
         FetchCommand = new RelayCommand(async _ => await RunFetchAsync(), _ => !IsBusy);
         FetchDayCommand = new RelayCommand(async _ => await RunFetchDayAsync(), _ => !IsBusy);
-        MergeCommand = new RelayCommand(async _ => await RunMergeAsync(), _ => !IsBusy);
         StopCommand = new RelayCommand(_ => _cts?.Cancel(), _ => IsBusy);
+        RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && FailedCodeCount > 0);
 
-        RefreshPendingDaily();
+        RefreshDataStatus();
+        RefreshFailedCodeCount();
     }
 
-    private void Log(string message) => LogLines.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {message}");
+    private List<string> ParseAnnouncementKeywords() =>
+        AnnouncementKeywordsText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    private void RefreshDataStatus()
+    {
+        var status = _orchestrator.GetDataStatus();
+        if (status.EarliestDay == null || status.LatestDay == null)
+        {
+            DataStatusText = "本地还没有任何K线数据";
+        }
+        else
+        {
+            DataStatusText = $"本地数据覆盖：{status.EarliestDay:yyyy-MM-dd} 至 {status.LatestDay:yyyy-MM-dd}";
+            if (status.LastFetchAt != null)
+                DataStatusText += $"；上次抓取：{status.LastFetchAt:yyyy-MM-dd HH:mm}（{status.LastFetchKind}）";
+        }
+    }
+
+    private void Log(string message)
+    {
+        var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
+        LogLines.Insert(0, line);
+        _logFileWriter?.WriteLine(line);
+    }
+
+    private void RefreshFailedCodeCount() => FailedCodeCount = _orchestrator.GetFailedCodeCount();
 
     private void StartHeartbeat()
     {
@@ -102,36 +157,22 @@ public class MainViewModel : INotifyPropertyChanged
         ElapsedText = "";
     }
 
-    private void RefreshPendingDaily()
-    {
-        var pending = _orchestrator.GetPendingDailyFiles();
-        PendingDailyCount = pending.Count;
-        PendingDailyText = pending.Count == 0
-            ? "暂无待合并的日增量文件"
-            : $"待合并的日增量文件：{pending.Count} 个（最早 {pending.Min(d => d.Date):yyyy-MM-dd}，最新 {pending.Max(d => d.Date):yyyy-MM-dd}），建议点击\"合并\"";
-    }
-
     private async Task RunFetchAsync()
     {
+        if (!int.TryParse(LookbackYearsText.Trim(), out var lookbackYears) || lookbackYears <= 0)
+        {
+            Log($"回看年数不对：\"{LookbackYearsText}\"，请填一个正整数（例如 3）");
+            return;
+        }
+
         IsBusy = true;
         StartHeartbeat();
         _cts = new CancellationTokenSource();
         try
         {
             var progress = new Progress<string>(Log);
-            var result = await _orchestrator.RunFetchAsync(SelectedSource, progress, _cts.Token);
-
+            var result = await _orchestrator.RunFetchAsync(SelectedSource, lookbackYears, ParseAnnouncementKeywords(), progress, _cts.Token);
             foreach (var err in result.Errors) Log($"错误：{err}");
-
-            if (result.ProducedFile == null)
-            {
-                Log("本次抓取没有产生新文件（所有股票均已是最新）");
-            }
-            else
-            {
-                Log($"已生成 {result.ProducedFile}，请手动上传到网盘");
-                if (result.OutboxPath != null) Log($"文件已放入本地暂存目录：{result.OutboxPath}");
-            }
         }
         catch (OperationCanceledException)
         {
@@ -146,13 +187,14 @@ public class MainViewModel : INotifyPropertyChanged
             StopHeartbeat();
             _cts?.Dispose();
             _cts = null;
-            RefreshPendingDaily();
+            RefreshDataStatus();
+            RefreshFailedCodeCount();
             IsBusy = false;
             // Unconditional, unmistakable end-of-run marker — regardless of success/error/cancel,
             // once we're here the run is definitively over and nothing will continue on its own.
             // Without this, a wall of per-stock error lines right before the run ends can read as
             // "still going wrong" rather than "already stopped" (see doc/data-platform-design.md).
-            Log("===== 本轮已结束，不会自动继续，需要再次抓取/合并请重新点击按钮 =====");
+            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
         }
     }
 
@@ -170,19 +212,8 @@ public class MainViewModel : INotifyPropertyChanged
         try
         {
             var progress = new Progress<string>(Log);
-            var result = await _orchestrator.RunFetchDayAsync(SelectedSource, date, progress, _cts.Token);
-
+            var result = await _orchestrator.RunFetchDayAsync(SelectedSource, date, ParseAnnouncementKeywords(), progress, _cts.Token);
             foreach (var err in result.Errors) Log($"错误：{err}");
-
-            if (result.ProducedFile == null)
-            {
-                Log("本次按天抓取没有产生新文件（该日期所有股票均已是最新）");
-            }
-            else
-            {
-                Log($"已生成 {result.ProducedFile}，请手动上传到网盘");
-                if (result.OutboxPath != null) Log($"文件已放入本地暂存目录：{result.OutboxPath}");
-            }
         }
         catch (OperationCanceledException)
         {
@@ -197,26 +228,27 @@ public class MainViewModel : INotifyPropertyChanged
             StopHeartbeat();
             _cts?.Dispose();
             _cts = null;
-            RefreshPendingDaily();
+            RefreshDataStatus();
+            RefreshFailedCodeCount();
             IsBusy = false;
             // Unconditional, unmistakable end-of-run marker — regardless of success/error/cancel,
             // once we're here the run is definitively over and nothing will continue on its own.
             // Without this, a wall of per-stock error lines right before the run ends can read as
             // "still going wrong" rather than "already stopped" (see doc/data-platform-design.md).
-            Log("===== 本轮已结束，不会自动继续，需要再次抓取/合并请重新点击按钮 =====");
+            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
         }
     }
 
-    private async Task RunMergeAsync()
+    private async Task RunRetryFailedAsync()
     {
         IsBusy = true;
         StartHeartbeat();
         _cts = new CancellationTokenSource();
         try
         {
-            var result = await _orchestrator.RunMergeAsync(_cts.Token);
-            Log($"合并完成，已生成新的总数据文件 {result.NewMasterFile}，请手动上传到网盘");
-            Log($"文件已放入本地暂存目录：{result.OutboxPath}");
+            var progress = new Progress<string>(Log);
+            var result = await _orchestrator.RunRetryFailedAsync(SelectedSource, progress, _cts.Token);
+            foreach (var err in result.Errors) Log($"错误：{err}");
         }
         catch (OperationCanceledException)
         {
@@ -224,20 +256,17 @@ public class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            Log($"合并失败：{ex.Message}");
+            Log($"重新拉取失败股票时出错：{ex.Message}");
         }
         finally
         {
             StopHeartbeat();
             _cts?.Dispose();
             _cts = null;
-            RefreshPendingDaily();
+            RefreshDataStatus();
+            RefreshFailedCodeCount();
             IsBusy = false;
-            // Unconditional, unmistakable end-of-run marker — regardless of success/error/cancel,
-            // once we're here the run is definitively over and nothing will continue on its own.
-            // Without this, a wall of per-stock error lines right before the run ends can read as
-            // "still going wrong" rather than "already stopped" (see doc/data-platform-design.md).
-            Log("===== 本轮已结束，不会自动继续，需要再次抓取/合并请重新点击按钮 =====");
+            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
         }
     }
 }

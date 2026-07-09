@@ -14,6 +14,11 @@ public class ResultRowViewModel
     public string? Error { get; init; }
     public StockScreenResult Result { get; init; } = new();
 
+    /// <summary>Bound to the DataGrid's checkbox column — plain mutable property (no
+    /// INotifyPropertyChanged) is enough since nothing needs to react live to a check/uncheck,
+    /// it's only read when "加入自选" is clicked (see FoundationTabViewModel etc.).</summary>
+    public bool IsSelected { get; set; }
+
     public static ResultRowViewModel From(StockScreenResult r) => new()
     {
         Code = r.Code,

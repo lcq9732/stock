@@ -4,8 +4,9 @@ using StockPlatform.Logic.Models;
 namespace StockPlatform.Logic.Services;
 
 /// <summary>
-/// "筑基法" — applies the checklist in doc/analysis-app-design.md section 3.2 to one stock at one
-/// granularity, using data already present in local storage — no network access.
+/// "峰哥法"（类名沿用 Foundation——这个名字描述算法本身，不随人名而变）— applies the checklist in
+/// doc/analysis-app-design.md section 3.2 to one stock at one granularity, using data already
+/// present in local storage — no network access.
 /// </summary>
 public class FoundationAnalysisEngine
 {
@@ -52,6 +53,8 @@ public class FoundationAnalysisEngine
         {
             Code = code,
             Granularity = granularity,
+            DataDate = bars[i].PeriodStart,
+            LastClose = closes[i],
             Criteria = new List<CriterionResult>
             {
                 new()
@@ -74,7 +77,7 @@ public class FoundationAnalysisEngine
                 },
             },
         };
-        result.Passed = result.Criteria.All(c => c.Satisfied);
+        result.Passed = result.Criteria.AllSatisfiedIgnoringMissingData();
         return result;
     }
 }

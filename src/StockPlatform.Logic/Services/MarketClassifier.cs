@@ -41,7 +41,9 @@ public static class MarketClassifier
         if (code.StartsWith("92") || code.StartsWith("43") || code.StartsWith("83") || code.StartsWith("87"))
             return MarketBoard.Beijing;
 
-        if (code.StartsWith("688")) return MarketBoard.ShanghaiStar;
+        // 689 is a small handful of CDRs (e.g. 689009 九号公司) listed on 科创板 alongside the
+        // main 688 range — same board, different prefix.
+        if (code.StartsWith("688") || code.StartsWith("689")) return MarketBoard.ShanghaiStar;
         if (code.StartsWith("900")) return MarketBoard.ShanghaiB;
         if (code[0] is '6' or '9') return MarketBoard.ShanghaiMain;
 

@@ -3,7 +3,8 @@ using StockPlatform.Logic.Models;
 namespace StockPlatform.Logic.Services;
 
 /// <summary>
-/// Detects the "筑基法" four-stage pattern (doc/analysis-app-design.md section 3.2): a low
+/// Detects the "峰哥法"（原名筑基法，类名不变）four-stage pattern (doc/analysis-app-design.md
+/// section 3.2): a low
 /// platform, then a higher platform, then a breakdown to a new low below the first platform, then
 /// — right now, at the most recent bar — a breakout back above the high platform's peak. All four
 /// stages must be found inside the same lookback window; the breakout stage is only satisfied if

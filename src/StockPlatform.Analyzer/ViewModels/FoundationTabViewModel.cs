@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using StockPlatform.Analyzer.Watchlist;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
@@ -17,7 +18,8 @@ public class GranularityOption
     public override string ToString() => Display;
 }
 
-/// <summary>"筑基法" tab — see doc/analysis-app-design.md section 3.2.1.</summary>
+/// <summary>"峰哥法"（代码内部沿用旧名 Foundation，因为这个名字描述的是算法本身——低位盘整/破位/
+/// 再突破的四段式形态——不随人名而变）tab — see doc/analysis-app-design.md section 3.2.1.</summary>
 public class FoundationTabViewModel : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -31,6 +33,7 @@ public class FoundationTabViewModel : INotifyPropertyChanged
 
     private readonly AnalyzerPaths _paths;
     private readonly IBarRepository _barRepository;
+    private readonly JsonWatchlistStore _watchlistStore;
 
     public ObservableCollection<string> LogLines { get; } = new();
     public ObservableCollection<ResultRowViewModel> Results { get; } = new();
@@ -80,7 +83,7 @@ public class FoundationTabViewModel : INotifyPropertyChanged
     /// doc/analysis-app-design.md section 3.2.1) so the criteria are always one click away
     /// instead of only living in the design doc.</summary>
     public string CriteriaInfoText =>
-        $"筑基法 — 入选条件（3条必须全部满足，N={Lookback}，基于当前选定的粒度）：\n\n" +
+        $"峰哥法 — 入选条件（3条必须全部满足，N={Lookback}，基于当前选定的粒度）：\n\n" +
         "1. 低位盘整-高位滞涨-破位新低-再破高点（四段式形态）\n" +
         $"    在最近{Math.Min(Lookback, 60)}根K线内寻找按时间顺序排列的4个阶段：\n" +
         "    ①低位平台：≤5根，区间振幅(最高-最低)/最低 ≤5%\n" +
@@ -95,18 +98,25 @@ public class FoundationTabViewModel : INotifyPropertyChanged
 
     public RelayCommand AnalyzeCommand { get; }
     public RelayCommand ShowCriteriaInfoCommand { get; }
+    public RelayCommand AddToWatchlistCommand { get; }
 
-    public FoundationTabViewModel(AnalyzerPaths paths, IBarRepository barRepository)
+    public FoundationTabViewModel(AnalyzerPaths paths, IBarRepository barRepository, JsonWatchlistStore watchlistStore)
     {
         _paths = paths;
         _barRepository = barRepository;
+        _watchlistStore = watchlistStore;
 
         _selectedTopLevel = TopLevelGranularities[1]; // default "日"
         _selectedMinutePeriod = MinutePeriods[2]; // default 15分钟
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
         ShowCriteriaInfoCommand = new RelayCommand(_ =>
-            MessageBox.Show(CriteriaInfoText, "筑基法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
+            MessageBox.Show(CriteriaInfoText, "峰哥法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
+        AddToWatchlistCommand = new RelayCommand(_ =>
+        {
+            var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "峰哥法", ResolveGranularity(), Lookback);
+            Log(added > 0 ? $"已将 {added} 只股票加入自选" : "没有勾选股票，或勾选的都已经在自选里了");
+        });
     }
 
     private void Log(string message) => LogLines.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {message}");
@@ -134,6 +144,7 @@ public class FoundationTabViewModel : INotifyPropertyChanged
 
             var engine = new FoundationAnalysisEngine(_barRepository);
             int passedCount = 0, errorCount = 0;
+            var missingDataCounts = new Dictionary<string, int>();
             await Task.Run(() =>
             {
                 for (int i = 0; i < codes.Count; i++)
@@ -145,14 +156,21 @@ public class FoundationTabViewModel : INotifyPropertyChanged
                     result.Name = names.GetValueOrDefault(code, code);
 
                     if (result.Error != null) { errorCount++; continue; }
+                    // 单独统计"因缺数据而判不满足"的条件（而不是真的算过不满足），避免"0只满足"
+                    // 看起来跟"条件本身太严"没区别——见 CriterionResult.DataMissing。
+                    foreach (var c in result.Criteria.Where(c => c.DataMissing))
+                        missingDataCounts[c.Name] = missingDataCounts.GetValueOrDefault(c.Name) + 1;
                     if (!result.Passed) continue; // results list only shows candidates that satisfy all 3 rules
 
                     passedCount++;
                     App.Current.Dispatcher.Invoke(() => Results.Add(ResultRowViewModel.From(result)));
                 }
             });
+            var missingSummary = missingDataCounts.Count > 0
+                ? "；" + string.Join("；", missingDataCounts.Select(kv => $"「{kv.Key}」这条条件因缺数据被跳过（不计入该条件，不代表股票被跳过，其余条件正常判断）：{kv.Value} 只涉及"))
+                : "";
             Log($"分析完成，粒度={granularity}，共扫描 {codes.Count} 只股票，{passedCount} 只满足全部条件" +
-                (errorCount > 0 ? $"，{errorCount} 只因历史数据不足被跳过" : ""));
+                (errorCount > 0 ? $"，{errorCount} 只因历史数据不足被跳过" : "") + missingSummary);
         }
         catch (Exception ex)
         {

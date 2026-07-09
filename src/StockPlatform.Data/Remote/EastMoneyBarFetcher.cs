@@ -133,6 +133,7 @@ public class EastMoneyBarFetcher : IBarDataFetcher
                     Amount = double.Parse(parts[6], CultureInfo.InvariantCulture),
                     PctChange = double.Parse(parts[8], CultureInfo.InvariantCulture),
                     Turnover = parts.Length > 10 ? double.Parse(parts[10], CultureInfo.InvariantCulture) : 0,
+                    FetchedAt = DateTime.Now,
                 });
             }
         }

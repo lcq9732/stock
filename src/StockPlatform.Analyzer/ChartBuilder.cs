@@ -1,7 +1,6 @@
 using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
-using OxyPlot.Legends;
 using OxyPlot.Series;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
@@ -80,9 +79,74 @@ public static class ChartBuilder
     // never gets denser than "about one label per month" even when heavily zoomed in.
     internal const int TradingDaysPerMonth = 21;
 
+    // Fixed left/right plot margins, applied to EVERY panel of a multi-panel chart (main+MACD,
+    // or main+MACD+KDJ+RSI+成交量, etc). Without this, each panel's left margin is auto-sized by
+    // OxyPlot based on that panel's OWN Y-axis label width — the main K线 panel hides its Y-axis
+    // entirely (margin ~0) while MACD/KDJ/RSI/成交量 show theirs (each a different width, since
+    // "-999.99" vs "100" vs a raw volume number all render at different widths) — so the panels'
+    // plot areas started at different X pixel offsets and never lined up vertically. Forcing the
+    // same fixed margins on every panel makes every panel's plot area start/end at identical X
+    // pixels, regardless of what that panel's own axis would have auto-sized to.
+    internal const double FixedLeftMargin = 60;
+    internal const double FixedRightMargin = 20;
+
+    /// <summary>
+    /// Builds a Y轴自适应 range function for <see cref="ChartAxisSync.Wire"/> — given the current
+    /// visible bar-index window, returns the min/max across all the given value arrays within that
+    /// window (skipping NaN). Combine every series a panel actually renders (e.g. High+Low for
+    /// candles, or Dif+Dea+MacdHist for a MACD panel) so the Y range covers everything visible, not
+    /// just one of several overlapping series.
+    /// </summary>
+    /// <summary>
+    /// Visually hides an axis (no line/ticks/labels rendered) while keeping
+    /// <see cref="Axis.IsAxisVisible"/> literally true. Setting IsAxisVisible=false looks
+    /// identical but silently breaks mouse pan/zoom: OxyPlot's PlotCommands.PanAt/ZoomWheel
+    /// manipulators refuse to grab any axis with IsAxisVisible=false — even with IsPanEnabled/
+    /// IsZoomEnabled=true — confirmed by directly calling PlotController.HandleMouseDown against a
+    /// minimal model with/without IsAxisVisible: true → handled=true, false → handled=false, no
+    /// other property differed. This was why every chart's drag/zoom silently did nothing.
+    /// </summary>
+    internal static void HideAxisVisually(Axis axis)
+    {
+        axis.IsAxisVisible = true;
+        axis.LabelFormatter = _ => "";
+        axis.MajorTickSize = 0;
+        axis.MinorTickSize = 0;
+        axis.AxislineStyle = LineStyle.None;
+        axis.MajorGridlineStyle = LineStyle.None;
+        axis.MinorGridlineStyle = LineStyle.None;
+        axis.TicklineColor = OxyColors.Transparent;
+        axis.TextColor = OxyColors.Transparent;
+    }
+
+    internal static Func<int, int, (double Min, double Max)?> YRangeFn(params IReadOnlyList<double>[] arrays)
+    {
+        return (startIdx, endIdx) =>
+        {
+            double min = double.MaxValue, max = double.MinValue;
+            bool any = false;
+            foreach (var arr in arrays)
+            {
+                int s = Math.Max(0, startIdx);
+                int e = Math.Min(arr.Count - 1, endIdx);
+                for (int i = s; i <= e; i++)
+                {
+                    var v = arr[i];
+                    if (double.IsNaN(v)) continue;
+                    if (v < min) min = v;
+                    if (v > max) max = v;
+                    any = true;
+                }
+            }
+            return any ? (min, max) : ((double, double)?)null;
+        };
+    }
+
     public static ChartResult Build(List<Bar> bars, int lookback)
     {
         var closes = bars.Select(b => b.Close).ToList();
+        var highs = bars.Select(b => b.High).ToList();
+        var lows = bars.Select(b => b.Low).ToList();
         var (boll, upper, lower) = TechnicalIndicators.BOLL(closes, lookback);
         var (dif, dea) = TechnicalIndicators.MACD(closes);
         // Chinese convention: MACD柱 = (DIF - DEA) * 2, red when >=0 (上涨动能), green when <0
@@ -105,23 +169,30 @@ public static class ChartBuilder
         var (mainDayAxis, mainMonthAxis) = BuildDateAxes(bars, "MainDay", visibleStart, visibleEnd, initialDayStep, initialMonthStep);
         var (macdDayAxis, macdMonthAxis) = BuildDateAxes(bars, "MacdDay", visibleStart, visibleEnd, initialDayStep, initialMonthStep);
 
-        var main = new PlotModel { Title = "K线 / BOLL" };
+        // 主K线图不画横纵坐标（典型股票APP的K线图也不画，价格靠最高/最低价标注和悬浮信息表头，
+        // 日期靠悬浮信息表头）——IsAxisVisible=false 只关渲染，拖动/缩放（IsPanEnabled/
+        // IsZoomEnabled）不受影响，其它面板（MACD/KDJ/RSI/成交量）保留坐标轴，不在这次改动范围内。
+        HideAxisVisually(mainDayAxis);
+        HideAxisVisually(mainMonthAxis);
+
+        var main = new PlotModel { PlotMargins = new OxyThickness(FixedLeftMargin, double.NaN, FixedRightMargin, double.NaN) };
         main.Axes.Add(mainDayAxis);
         main.Axes.Add(mainMonthAxis);
-        main.Axes.Add(new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true });
-        // Legend so each line's meaning (BOLL上/中/下轨 vs the K线 candles) doesn't have to be
-        // guessed from color alone.
-        main.Legends.Add(new Legend
-        {
-            LegendPosition = LegendPosition.TopLeft,
-            LegendPlacement = LegendPlacement.Inside,
-            LegendBackground = OxyColor.FromAColor(180, OxyColors.White),
-        });
+        var mainYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
+        HideAxisVisually(mainYAxis);
+        main.Axes.Add(mainYAxis);
+        // 图例不再画在图表里面（以前用 OxyPlot 自带的 Legend，跟悬浮信息叠在一起会互相挡），改成
+        // DetailWindow.xaml 表头那一行自己的 WPF 图例，跟这里的颜色手动对应，见该文件。
 
         var candles = new CandleStickSeries
         {
             Title = "K线",
             XAxisKey = mainDayAxis.Key,
+            // 国内看盘习惯：涨红跌绿——不设置的话 OxyPlot 默认是美股习惯（涨绿跌红），正好反过来。
+            IncreasingColor = OxyColors.Red,
+            DecreasingColor = OxyColors.Green,
+            // 默认宽度是相邻两根K线间距的0.8倍，看起来偏胖；调窄一些更接近常见炒股软件的样子。
+            CandleWidth = 0.5,
             TrackerFormatString = "日期: {2}\n开盘: {3:F2}\n最高: {4:F2}\n最低: {5:F2}\n收盘: {6:F2}",
         };
         for (int i = 0; i < bars.Count; i++)
@@ -159,17 +230,18 @@ public static class ChartBuilder
             StrokeThickness = 1,
         };
         main.Annotations.Add(mainCrosshair);
+        AddHighLowAnnotations(main, mainDayAxis.Key, bars, (int)Math.Round(visibleStart), last);
 
-        var macd = new PlotModel { Title = "MACD" };
+        // 副图（MACD/KDJ/RSI/成交量等）现在也跟主K线图一样不画横纵坐标——数值靠表头悬浮信息，
+        // 不靠坐标轴刻度；IsAxisVisible=false 只关渲染，不影响 IsPanEnabled/IsZoomEnabled。
+        HideAxisVisually(macdDayAxis);
+        HideAxisVisually(macdMonthAxis);
+        var macd = new PlotModel { PlotMargins = new OxyThickness(FixedLeftMargin, double.NaN, FixedRightMargin, double.NaN) };
         macd.Axes.Add(macdDayAxis);
         macd.Axes.Add(macdMonthAxis);
-        macd.Axes.Add(new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true });
-        macd.Legends.Add(new Legend
-        {
-            LegendPosition = LegendPosition.TopLeft,
-            LegendPlacement = LegendPlacement.Inside,
-            LegendBackground = OxyColor.FromAColor(180, OxyColors.White),
-        });
+        var macdYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
+        HideAxisVisually(macdYAxis);
+        macd.Axes.Add(macdYAxis);
 
         // MACD柱 first so the DIF/DEA lines draw on top of it, not hidden underneath.
         AddHistogram(macd, macdDayAxis.Key, macdHist);
@@ -203,7 +275,13 @@ public static class ChartBuilder
             new[] { main, macd },
             new[] { mainDayAxis, macdDayAxis },
             new[] { mainMonthAxis, macdMonthAxis },
-            visibleStart, visibleEnd, InitialPlotWidthGuess, PxPerDayLabel, PxPerMonthLabel, TradingDaysPerMonth);
+            visibleStart, visibleEnd, InitialPlotWidthGuess, PxPerDayLabel, PxPerMonthLabel, TradingDaysPerMonth,
+            candleSeries: new[] { candles },
+            yAxisRanges: new[]
+            {
+                (mainYAxis, YRangeFn(highs, lows, upper, lower)),
+                (macdYAxis, YRangeFn(dif, dea, macdHist)),
+            });
 
         return new ChartResult
         {
@@ -310,5 +388,51 @@ public static class ChartBuilder
         }
         model.Series.Add(positive);
         model.Series.Add(negative);
+    }
+
+    /// <summary>
+    /// 最高/最低价标注——典型股票APP的K线图都会把当前可见范围里的最高价、最低价直接标在图上
+    /// （一条虚线 + 具体数字），不用自己去找哪根K线最高/最低。范围按初始默认可见的那一段算
+    /// （visibleStartIdx 到 visibleEndIdx），跟其它参考线/压力线一样是画一次不随后续缩放动态
+    /// 重算——用户缩放/平移之后这两条线可能不再是"当前视野"里的最高/最低，这跟压力线等其它
+    /// 固定参考线的处理方式是一致的。
+    /// </summary>
+    internal static void AddHighLowAnnotations(PlotModel model, string xAxisKey, List<Bar> bars, int visibleStartIdx, int visibleEndIdx)
+    {
+        visibleStartIdx = Math.Max(0, visibleStartIdx);
+        visibleEndIdx = Math.Min(bars.Count - 1, visibleEndIdx);
+        if (visibleStartIdx > visibleEndIdx) return;
+
+        int highIdx = visibleStartIdx, lowIdx = visibleStartIdx;
+        for (int t = visibleStartIdx; t <= visibleEndIdx; t++)
+        {
+            if (bars[t].High > bars[highIdx].High) highIdx = t;
+            if (bars[t].Low < bars[lowIdx].Low) lowIdx = t;
+        }
+
+        model.Annotations.Add(new LineAnnotation
+        {
+            Type = LineAnnotationType.Horizontal,
+            XAxisKey = xAxisKey,
+            Y = bars[highIdx].High,
+            MinimumX = visibleStartIdx,
+            MaximumX = highIdx,
+            Color = OxyColors.Gray,
+            LineStyle = LineStyle.Dash,
+            FontSize = 10,
+            Text = bars[highIdx].High.ToString("F2"),
+        });
+        model.Annotations.Add(new LineAnnotation
+        {
+            Type = LineAnnotationType.Horizontal,
+            XAxisKey = xAxisKey,
+            Y = bars[lowIdx].Low,
+            MinimumX = visibleStartIdx,
+            MaximumX = lowIdx,
+            Color = OxyColors.Gray,
+            LineStyle = LineStyle.Dash,
+            FontSize = 10,
+            Text = bars[lowIdx].Low.ToString("F2"),
+        });
     }
 }

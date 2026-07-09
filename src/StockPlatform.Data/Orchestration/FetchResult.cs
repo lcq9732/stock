@@ -2,13 +2,14 @@ namespace StockPlatform.Data.Orchestration;
 
 public class FetchResult
 {
-    public string? ProducedFile { get; set; }   // null if nothing new was fetched
-    public string? OutboxPath { get; set; }
     public List<string> Errors { get; set; } = new();
 }
 
-public class MergeResult
+/// <summary>See <see cref="FetchOrchestrator.GetDataStatus"/>.</summary>
+public class DataStatus
 {
-    public string NewMasterFile { get; set; } = "";
-    public string OutboxPath { get; set; } = "";
+    public DateTime? EarliestDay { get; set; }
+    public DateTime? LatestDay { get; set; }
+    public DateTime? LastFetchAt { get; set; }
+    public string? LastFetchKind { get; set; }
 }

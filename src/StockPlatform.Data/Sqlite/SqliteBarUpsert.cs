@@ -24,9 +24,9 @@ public static class SqliteBarUpsert
         cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT OR REPLACE INTO Bar
-                (code, granularity, period_start, open, close, high, low, volume, amount, pct_chg, turnover)
+                (code, granularity, period_start, open, close, high, low, volume, amount, pct_chg, turnover, fetched_at)
             VALUES
-                ($code, $granularity, $period_start, $open, $close, $high, $low, $volume, $amount, $pct_chg, $turnover);
+                ($code, $granularity, $period_start, $open, $close, $high, $low, $volume, $amount, $pct_chg, $turnover, $fetched_at);
             """;
         var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
         var pGran = cmd.CreateParameter(); pGran.ParameterName = "$granularity"; cmd.Parameters.Add(pGran);
@@ -39,6 +39,7 @@ public static class SqliteBarUpsert
         var pAmount = cmd.CreateParameter(); pAmount.ParameterName = "$amount"; cmd.Parameters.Add(pAmount);
         var pPct = cmd.CreateParameter(); pPct.ParameterName = "$pct_chg"; cmd.Parameters.Add(pPct);
         var pTurnover = cmd.CreateParameter(); pTurnover.ParameterName = "$turnover"; cmd.Parameters.Add(pTurnover);
+        var pFetchedAt = cmd.CreateParameter(); pFetchedAt.ParameterName = "$fetched_at"; cmd.Parameters.Add(pFetchedAt);
 
         foreach (var bar in bars)
         {
@@ -53,6 +54,7 @@ public static class SqliteBarUpsert
             pAmount.Value = bar.Amount;
             pPct.Value = bar.PctChange;
             pTurnover.Value = bar.Turnover;
+            pFetchedAt.Value = bar.FetchedAt.ToString(DateFormat, CultureInfo.InvariantCulture);
             cmd.ExecuteNonQuery();
         }
         tx.Commit();

@@ -36,9 +36,9 @@ public class SqliteBarRepository : IBarRepository
         cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT OR IGNORE INTO Bar
-                (code, granularity, period_start, open, close, high, low, volume, amount, pct_chg, turnover)
+                (code, granularity, period_start, open, close, high, low, volume, amount, pct_chg, turnover, fetched_at)
             VALUES
-                ($code, $granularity, $period_start, $open, $close, $high, $low, $volume, $amount, $pct_chg, $turnover);
+                ($code, $granularity, $period_start, $open, $close, $high, $low, $volume, $amount, $pct_chg, $turnover, $fetched_at);
             """;
         var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
         var pGran = cmd.CreateParameter(); pGran.ParameterName = "$granularity"; cmd.Parameters.Add(pGran);
@@ -51,6 +51,7 @@ public class SqliteBarRepository : IBarRepository
         var pAmount = cmd.CreateParameter(); pAmount.ParameterName = "$amount"; cmd.Parameters.Add(pAmount);
         var pPct = cmd.CreateParameter(); pPct.ParameterName = "$pct_chg"; cmd.Parameters.Add(pPct);
         var pTurnover = cmd.CreateParameter(); pTurnover.ParameterName = "$turnover"; cmd.Parameters.Add(pTurnover);
+        var pFetchedAt = cmd.CreateParameter(); pFetchedAt.ParameterName = "$fetched_at"; cmd.Parameters.Add(pFetchedAt);
 
         foreach (var bar in bars)
         {
@@ -65,6 +66,7 @@ public class SqliteBarRepository : IBarRepository
             pAmount.Value = bar.Amount;
             pPct.Value = bar.PctChange;
             pTurnover.Value = bar.Turnover;
+            pFetchedAt.Value = bar.FetchedAt.ToString(DateFormat, CultureInfo.InvariantCulture);
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
@@ -93,12 +95,23 @@ public class SqliteBarRepository : IBarRepository
         return DateTime.ParseExact((string)result, DateFormat, CultureInfo.InvariantCulture);
     }
 
+    public DateTime? GetOverallEarliestPeriodStart(string granularity)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT MIN(period_start) FROM Bar WHERE granularity = $granularity;";
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        var result = cmd.ExecuteScalar();
+        if (result == null || result is DBNull) return null;
+        return DateTime.ParseExact((string)result, DateFormat, CultureInfo.InvariantCulture);
+    }
+
     public List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT code, granularity, period_start, open, close, high, low, volume, amount, pct_chg, turnover
+            SELECT code, granularity, period_start, open, close, high, low, volume, amount, pct_chg, turnover, fetched_at
             FROM Bar
             WHERE code = $code AND granularity = $granularity
               AND ($start IS NULL OR period_start >= $start)
@@ -127,9 +140,35 @@ public class SqliteBarRepository : IBarRepository
                 Amount = reader.GetDouble(8),
                 PctChange = reader.GetDouble(9),
                 Turnover = reader.GetDouble(10),
+                // 老数据（这个字段2026-07-09之前没有）读出来是DBNull——用MinValue兜底，永远判定为
+                // "未确认最终"，直到这一天被重新抓到一次为止（只影响"今天"这一天的判断，更早的
+                // 历史天数不会因为FetchedAt是MinValue而被误判成需要重新抓——见FetchOrchestrator
+                // 的水位线逻辑，只有period_start等于当前日期时才会去看FetchedAt）。
+                FetchedAt = reader.IsDBNull(11) ? DateTime.MinValue : DateTime.ParseExact(reader.GetString(11), DateFormat, CultureInfo.InvariantCulture),
             });
         }
         return result;
+    }
+
+    /// <summary>最新一行的日期+实际抓取时间，一次查询同时拿到两者（比先GetLatestPeriodStart再
+    /// 单独查一次fetched_at少一次往返）——FetchOrchestrator用它判断"今天"这一天是不是已经收盘后
+    /// 确认过了，不用再发请求。</summary>
+    public (DateTime PeriodStart, DateTime FetchedAt)? GetLatestBarInfo(string code, string granularity)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT period_start, fetched_at FROM Bar
+            WHERE code = $code AND granularity = $granularity
+            ORDER BY period_start DESC LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$code", code);
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        var periodStart = DateTime.ParseExact(reader.GetString(0), DateFormat, CultureInfo.InvariantCulture);
+        var fetchedAt = reader.IsDBNull(1) ? DateTime.MinValue : DateTime.ParseExact(reader.GetString(1), DateFormat, CultureInfo.InvariantCulture);
+        return (periodStart, fetchedAt);
     }
 
     public List<string> GetAllCodes()

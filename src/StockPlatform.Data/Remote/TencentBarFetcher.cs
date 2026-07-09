@@ -173,6 +173,7 @@ public class TencentBarFetcher : IBarDataFetcher
                     // 腾讯这个接口不直接给成交额/换手率；本项目的分析规则不依赖这两个字段
                     Amount = 0,
                     Turnover = 0,
+                    FetchedAt = DateTime.Now,
                 });
             }
         }

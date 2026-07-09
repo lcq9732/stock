@@ -23,12 +23,7 @@ public partial class DetailWindow : Window
         DataContext = new DetailViewModel
         {
             Title = $"{result.Code} {result.Name}（{result.Granularity}）",
-            Criteria = result.Criteria.Select(c => new CriterionDisplay
-            {
-                Icon = c.Satisfied ? "✓" : "✗",
-                Name = c.Name,
-                Basis = c.Basis,
-            }).ToList(),
+            Criteria = result.Criteria.Select(CriterionDisplay.From).ToList(),
             MainPlotModel = _chart.Main,
             MacdPlotModel = _chart.Macd,
             Chart = _chart,
@@ -88,10 +83,11 @@ public partial class DetailWindow : Window
         var hist = _chart.MacdHist[idx];
         string Fmt(double v) => double.IsNaN(v) ? "—" : v.ToString("F2");
 
-        var dateLine = $"日期: {bar.PeriodStart:yyyy-MM-dd}";
+        // 日期只在最上面这个主图表头显示一次，下面MACD副图不重复（跟着同一根十字线走，不需要
+        // 每张图都报一遍日期）。
         MainInfoText.Text =
-            $"{dateLine}\n开:{bar.Open:F2}  高:{bar.High:F2}  低:{bar.Low:F2}  收:{bar.Close:F2}\n涨跌幅:{bar.PctChange:F2}%   BOLL中轨:{Fmt(boll)}";
+            $"日期:{bar.PeriodStart:yyyy-MM-dd}  开:{bar.Open:F2}  高:{bar.High:F2}  低:{bar.Low:F2}  收:{bar.Close:F2}  涨跌幅:{bar.PctChange:F2}%  BOLL中轨:{Fmt(boll)}";
         MacdInfoText.Text =
-            $"{dateLine}\nDIF:{Fmt(dif)}  DEA:{Fmt(dea)}  MACD柱:{Fmt(hist)}";
+            $"DIF:{Fmt(dif)}  DEA:{Fmt(dea)}  MACD柱:{Fmt(hist)}";
     }
 }

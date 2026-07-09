@@ -22,43 +22,133 @@
             </Grid.RowDefinitions>
 
             <Grid Grid.Row="0">
-                <oxy:PlotView x:Name="MainPlot" Model="{Binding MainPlotModel}" />
-                <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="40,4,0,0"
-                        Padding="6,3" Background="#DDFFFFFF" BorderBrush="#DDDDDD" BorderThickness="1" CornerRadius="3" IsHitTestVisible="False">
-                    <TextBlock x:Name="MainInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" />
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="K线 / MA5 / MA10" FontWeight="Bold" FontSize="12" Margin="0,0,14,0" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" x:Name="MainInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="K线" FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center" />
+                            <Rectangle Width="14" Height="3" Fill="Blue" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="MA5" FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center" />
+                            <Rectangle Width="14" Height="3" Fill="Orange" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="MA10" FontSize="11" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
                 </Border>
+                <oxy:PlotView Grid.Row="1" x:Name="MainPlot" Model="{Binding MainPlotModel}" />
             </Grid>
 
             <Grid Grid.Row="1" Margin="0,6,0,0">
-                <oxy:PlotView x:Name="MacdPlot" Model="{Binding MacdPlotModel}" />
-                <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="40,4,0,0"
-                        Padding="6,3" Background="#DDFFFFFF" BorderBrush="#DDDDDD" BorderThickness="1" CornerRadius="3" IsHitTestVisible="False">
-                    <TextBlock x:Name="MacdInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" />
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="MACD" FontWeight="Bold" FontSize="12" Margin="0,0,14,0" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" x:Name="MacdInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Rectangle Width="14" Height="3" Fill="Red" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="MACD柱(正)" FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center" />
+                            <Rectangle Width="14" Height="3" Fill="Green" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="MACD柱(负)" FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center" />
+                            <Rectangle Width="14" Height="3" Fill="Blue" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="DIF（快线）" FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center" />
+                            <Rectangle Width="14" Height="3" Fill="Orange" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="DEA（慢线）" FontSize="11" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
                 </Border>
+                <oxy:PlotView Grid.Row="1" x:Name="MacdPlot" Model="{Binding MacdPlotModel}" />
             </Grid>
 
             <Grid Grid.Row="2" Margin="0,6,0,0">
-                <oxy:PlotView x:Name="KdjPlot" Model="{Binding KdjPlotModel}" />
-                <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="40,4,0,0"
-                        Padding="6,3" Background="#DDFFFFFF" BorderBrush="#DDDDDD" BorderThickness="1" CornerRadius="3" IsHitTestVisible="False">
-                    <TextBlock x:Name="KdjInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" />
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="KDJ" FontWeight="Bold" FontSize="12" Margin="0,0,14,0" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" x:Name="KdjInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Rectangle Width="14" Height="3" Fill="Blue" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="K" FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center" />
+                            <Rectangle Width="14" Height="3" Fill="Orange" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="D" FontSize="11" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
                 </Border>
+                <oxy:PlotView Grid.Row="1" x:Name="KdjPlot" Model="{Binding KdjPlotModel}" />
             </Grid>
 
             <Grid Grid.Row="3" Margin="0,6,0,0">
-                <oxy:PlotView x:Name="RsiPlot" Model="{Binding RsiPlotModel}" />
-                <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="40,4,0,0"
-                        Padding="6,3" Background="#DDFFFFFF" BorderBrush="#DDDDDD" BorderThickness="1" CornerRadius="3" IsHitTestVisible="False">
-                    <TextBlock x:Name="RsiInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" />
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="RSI" FontWeight="Bold" FontSize="12" Margin="0,0,14,0" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" x:Name="RsiInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Rectangle Width="14" Height="3" Fill="Purple" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="RSI" FontSize="11" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
                 </Border>
+                <oxy:PlotView Grid.Row="1" x:Name="RsiPlot" Model="{Binding RsiPlotModel}" />
             </Grid>
 
             <Grid Grid.Row="4" Margin="0,6,0,0">
-                <oxy:PlotView x:Name="VolumePlot" Model="{Binding VolumePlotModel}" />
-                <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="40,4,0,0"
-                        Padding="6,3" Background="#DDFFFFFF" BorderBrush="#DDDDDD" BorderThickness="1" CornerRadius="3" IsHitTestVisible="False">
-                    <TextBlock x:Name="VolumeInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" />
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="成交量" FontWeight="Bold" FontSize="12" Margin="0,0,14,0" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" x:Name="VolumeInfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Rectangle Width="14" Height="3" Fill="Red" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="成交量(涨)" FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center" />
+                            <Rectangle Width="14" Height="3" Fill="Green" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="成交量(跌)" FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center" />
+                            <Rectangle Width="14" Height="3" Fill="Orange" VerticalAlignment="Center" Margin="0,0,4,0" />
+                            <TextBlock Text="5日均量" FontSize="11" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
                 </Border>
+                <oxy:PlotView Grid.Row="1" x:Name="VolumePlot" Model="{Binding VolumePlotModel}" />
             </Grid>
         </Grid>
 

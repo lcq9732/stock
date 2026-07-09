@@ -39,6 +39,10 @@ public static class BarAggregator
                 Amount = bars.Sum(b => b.Amount),
                 Turnover = bars.Sum(b => b.Turnover),
                 PctChange = prevClose is > 0 ? (close - prevClose.Value) / prevClose.Value * 100 : 0,
+                // 周/月线是每次抓取都从头重新聚合、整体覆盖写入的（不参与"收盘后就不再抓"的水位线
+                // 判断，见FetchOrchestrator），这个字段对它们其实是inert的，写DateTime.Now只是为了
+                // 跟Bar模型的其它用法保持一致，不留一个没意义的默认值。
+                FetchedAt = DateTime.Now,
             };
             result.Add(aggregated);
             prevClose = close;

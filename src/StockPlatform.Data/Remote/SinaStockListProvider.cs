@@ -24,6 +24,12 @@ public class SinaStockListProvider : IStockListProvider
     private const int PageSize = 100;
     private const int MaxPages = 200;
 
+    // 没有这个延时的话，真的会被限流——开发这个功能时用bash脚本紧挨着连续请求了约80页，很快就
+    // 收到了HTML反爬拦截页而不是JSON（不是猜测，是实测踩到的坑）。这个类现在不只是"拉取全部"时
+    // 偶尔调一次的股票列表步骤了，SinaListMarketCapFetcher 让它变成每次"拉取全部"/"拉取当天"
+    // 都要完整跑一遍，被连续请求的频率比以前高，延时更有必要。
+    private static readonly TimeSpan DelayBetweenPages = TimeSpan.FromMilliseconds(300);
+
     private readonly HttpClient _http;
 
     static SinaStockListProvider()
@@ -50,6 +56,7 @@ public class SinaStockListProvider : IStockListProvider
             if (pageEntries.Count == 0) break; // ran past the last page
             result.AddRange(pageEntries);
             if (page % 10 == 0) progress?.Report($"正在获取全市场股票列表...（已取 {result.Count} 只）");
+            await Task.Delay(DelayBetweenPages, ct); // 见 DelayBetweenPages 注释——连续不间断请求会被限流
         }
         return result;
     }
@@ -98,8 +105,18 @@ public class SinaStockListProvider : IStockListProvider
         {
             var code = item.GetProperty("code").GetString() ?? "";
             var name = item.GetProperty("name").GetString() ?? "";
-            if (code.Length == 6 && code.All(char.IsDigit))
-                result.Add(new StockListEntry(code, name));
+            if (code.Length != 6 || !code.All(char.IsDigit)) continue;
+
+            // "nmc"（流通市值，单位万元）跟这批股票的行情数据一起免费带出来，不需要单独发请求——
+            // 字段含义在 SinaListMarketCapFetcher 引入前用贵州茅台/000001/300750三只股本结构不同
+            // 的股票跟 TencentMarketCapFetcher 的结果做过交叉校验，见 doc/data-platform-design.md
+            // 3.5节。缺失/非数字/<=0 一律按"没有数据"处理，不写入假的0元市值。
+            double? marketCap = item.TryGetProperty("nmc", out var nmcEl) && nmcEl.ValueKind == JsonValueKind.Number
+                ? nmcEl.GetDouble() * 10_000
+                : null;
+            if (marketCap <= 0) marketCap = null;
+
+            result.Add(new StockListEntry(code, name, marketCap));
         }
         return result;
     }

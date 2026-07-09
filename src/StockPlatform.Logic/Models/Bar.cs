@@ -30,4 +30,10 @@ public class Bar
     public double Amount { get; set; }
     public double PctChange { get; set; }
     public double Turnover { get; set; }
+
+    /// <summary>实际抓取到这一天数据的时间（墙钟时间，不是交易日日期）——2026-07-09新增，用来
+    /// 判断"今天"这一天是不是盘中抓的（可能还会变）还是收盘后抓的（已经是最终数据，以后不用再
+    /// 抓）。历史上早于这天入库的行没有这个值，读出来是 <see cref="DateTime.MinValue"/>（永远
+    /// 判定为"未确认"，直到下次被重新抓到一次），见 FetchOrchestrator.IsConfirmedFinal。</summary>
+    public DateTime FetchedAt { get; set; }
 }
