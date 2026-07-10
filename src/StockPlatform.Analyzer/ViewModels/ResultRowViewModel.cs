@@ -2,7 +2,7 @@ using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Analyzer.ViewModels;
 
-public class ResultRowViewModel
+public class ResultRowViewModel : ISelectableRow
 {
     public string Code { get; init; } = "";
     public string Name { get; init; } = "";
@@ -13,6 +13,11 @@ public class ResultRowViewModel
     public int TotalCount { get; init; }
     public string? Error { get; init; }
     public StockScreenResult Result { get; init; } = new();
+
+    /// <summary>三角收敛的"收敛质量"评分（0~100，越高形态越标准）；其它方法为 null。用于三角收敛
+    /// 结果表的排序和展示，见 TriangleConvergenceTabViewModel / StockScreenResult.SortScore。</summary>
+    public double? SortScore { get; init; }
+    public string ConvergenceQualityText => SortScore.HasValue ? SortScore.Value.ToString("F0") : "";
 
     /// <summary>Bound to the DataGrid's checkbox column — plain mutable property (no
     /// INotifyPropertyChanged) is enough since nothing needs to react live to a check/uncheck,
@@ -29,5 +34,6 @@ public class ResultRowViewModel
         TotalCount = r.Criteria.Count,
         Error = r.Error,
         Result = r,
+        SortScore = r.SortScore,
     };
 }

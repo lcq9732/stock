@@ -12,10 +12,11 @@ namespace StockPlatform.Analyzer.ViewModels;
 /// <summary>
 /// Root view model — holds what's shared across all analysis methods (the local data file's
 /// location/freshness) and exposes each method's own tab view model. See
-/// doc/analysis-app-design.md section 3.2 for why there are four methods
-/// (峰哥法/金叉法/耀哥法/彬哥法——类名仍叫 Foundation/GoldenCross/BottomRebound/MidCapPullback，
-/// 那些名字描述的是算法本身，跟人名无关) and why they don't share analysis state beyond the
-/// underlying data file.
+/// doc/analysis-app-design.md section 3.2 for why there are five methods and why they don't share
+/// analysis state beyond the underlying data file. 界面 Tab 顺序（也就是这里各 Tab 属性希望呈现
+/// 的顺序）：三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 / 金叉法，最后是跨方法的自选股。类名仍叫
+/// TriangleConvergence/Foundation/BottomRebound/MidCapPullback/GoldenCross——描述的是算法本身，
+/// 跟人名/Tab 中文名无关。
 /// </summary>
 public class MainViewModel : INotifyPropertyChanged
 {
@@ -38,6 +39,8 @@ public class MainViewModel : INotifyPropertyChanged
     public BottomReboundTabViewModel BottomReboundTab { get; }
     public MidCapPullbackTabViewModel MidCapPullbackTab { get; }
     public TriangleConvergenceTabViewModel TriangleConvergenceTab { get; }
+    public ShortTermTabViewModel ShortTermTab { get; }
+    public QueryTabViewModel QueryTab { get; }
     public WatchlistTabViewModel WatchlistTab { get; }
 
     private string _dataStatusText = "";
@@ -62,7 +65,9 @@ public class MainViewModel : INotifyPropertyChanged
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);
-        WatchlistTab = new WatchlistTabViewModel(watchlistStore);
+        ShortTermTab = new ShortTermTabViewModel(paths, barRepository, netInflowRepository, fundamentalRepository, watchlistStore);
+        QueryTab = new QueryTabViewModel(paths, barRepository);
+        WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository);
 
         LocalDbPathText = $"本地数据文件：{_paths.TotalDb}（需要手动把 Fetcher 产出的数据库拷贝到这里，用这个文件名）";
 

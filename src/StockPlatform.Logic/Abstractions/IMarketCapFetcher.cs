@@ -7,7 +7,7 @@ namespace StockPlatform.Logic.Abstractions;
 /// StockPlatform.Data.Remote).</summary>
 public interface IMarketCapFetcher
 {
-    Task<List<MarketCapEntry>> GetMarketCapsAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct = default);
+    Task<MarketCapFetchResult> GetMarketCapsAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct = default);
 
     /// <summary>Fires for out-of-band status worth surfacing to the UI — same rationale as
     /// IBarDataFetcher.OnStatus.</summary>

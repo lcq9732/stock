@@ -12,11 +12,10 @@ using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Analyzer.ViewModels;
 
-/// <summary>"彬哥法"（原名中盘起爆法，类名沿用 MidCapPullback）tab — see
-/// doc/analysis-app-design.md section 3.2.4. Fixed to daily bars for most conditions (plus
-/// week/month for the two MACD rules). No user-adjustable parameters — all 10 conditions'
-/// thresholds are fixed per the original spec.</summary>
-public class MidCapPullbackTabViewModel : INotifyPropertyChanged
+/// <summary>"短线法" tab — daily-close short-term entry screen (see ShortTermAnalysisEngine). Fixed
+/// to daily bars. 放量倍数/涨幅上限/流通市值区间 are user-adjustable; 近期涨停是加分项，结果按它
+/// 从高到低排序（涨停多=资金关注多，排前面），不影响是否入选。</summary>
+public class ShortTermTabViewModel : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -29,11 +28,24 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
 
     private readonly AnalyzerPaths _paths;
     private readonly IBarRepository _barRepository;
+    private readonly INetInflowRepository _netInflowRepository;
     private readonly IFundamentalMetricRepository _fundamentalRepository;
     private readonly JsonWatchlistStore _watchlistStore;
 
     public ObservableCollection<string> LogLines { get; } = new();
     public ObservableCollection<ResultRowViewModel> Results { get; } = new();
+
+    private double _volumeSurgeRatio = 1.5;
+    public double VolumeSurgeRatio { get => _volumeSurgeRatio; set => Set(ref _volumeSurgeRatio, value); }
+
+    private double _maxDayGainPct = 7;
+    public double MaxDayGainPct { get => _maxDayGainPct; set => Set(ref _maxDayGainPct, value); }
+
+    private double _minCapYi = 30;
+    public double MinCapYi { get => _minCapYi; set => Set(ref _minCapYi, value); }
+
+    private double _maxCapYi = 300;
+    public double MaxCapYi { get => _maxCapYi; set => Set(ref _maxCapYi, value); }
 
     private bool _isBusy;
     public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
@@ -42,45 +54,41 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
     public string ProgressText { get => _progressText; set => Set(ref _progressText, value); }
 
     public string CriteriaInfoText =>
-        "彬哥法 — 入选条件（10条必须全部满足，固定用日线+周线+月线）：\n\n" +
-        "1. 上市板块不包含科创板\n" +
-        "2. 股票市场类型不包含北交所\n" +
-        "3. 股票简称不包含ST、*ST\n" +
-        "4. 最新交易日流通市值（不含限售股）大于80亿元且小于300亿元\n" +
-        "    数据来源：数据获取程序拉取时会一并写入流通市值（东方财富批量接口）；如果本地数据是" +
-        "更新前拉取的，还没有市值数据，这条会显示\"缺少流通市值数据\"——重新拉取一次即可\n" +
-        "5. 最近15个交易日（含当前交易日）内，涨停次数大于1次（按收盘涨停统计，" +
-        "涨跌停幅度按板块+ST状态区分：主板10%/创业板科创板20%/北交所30%/ST股5%）\n" +
-        "6. 月线MACD采用默认参数(12,26,9)，MACD柱值大于0\n" +
-        "7. 周线MACD采用默认参数(12,26,9)，MACD柱值大于0\n" +
-        "8. 当前交易日开盘价低于MA15\n" +
-        "9. 当前交易日收盘价高于MA15\n" +
-        "10. 前一交易日收盘价低于前一交易日MA15\n\n" +
-        "结果列表只显示10条全部满足的股票；因日/周/月线历史数据不足而完全无法计算的股票会被跳过；" +
-        "缺少流通市值数据时，只是第4条这一条被跳过不参与判断（不算满足也不算不满足，不会跳过整只股票，其余9条正常判断）；两种情况的数量都会在分析完成后的日志里汇总。";
+        $"短线法 — 入选条件（固定用日线；前7条为必须满足，第8条为过滤；近15日涨停是加分项、不作硬性门槛）：\n\n" +
+        "1. 均线多头启动：收盘 > MA5 > MA10，且 MA10 拐头向上\n" +
+        $"2. 放量：当日成交量 ≥ 前5日均量 × {VolumeSurgeRatio:F1}\n" +
+        "3. 突破：收盘价创近20日新高（最高价口径）\n" +
+        "4. MACD动能确认：MACD柱转正且放大，或 DIF 在0轴上方金叉\n" +
+        "5. 主力资金净流入：最新交易日主力净流入 > 0（缺数据则跳过此条）\n" +
+        $"6. 流通市值适中：{MinCapYi:F0}亿 ~ {MaxCapYi:F0}亿（缺数据则跳过此条）\n" +
+        $"7. 不追高：当日涨幅 ≤ {MaxDayGainPct:F1}%\n" +
+        "8. 过滤：排除 ST/*ST、北交所\n\n" +
+        "结果只显示以上条件全部满足的股票，并按\"近15日涨停次数\"从高到低排序（涨停多的排前面——有资金关注、弹性大，但不作硬性入选条件）。\n\n" +
+        "说明：适合 T+1 下的短线/波段——盘后选出\"明天值得关注的启动票\"，不做分时/打板。信号失败率不低，实盘请配止损（如跌破MA5或买入价-5%）。放量倍数/涨幅上限/流通市值区间都可在上方调整。";
 
     public RelayCommand AnalyzeCommand { get; }
     public RelayCommand ShowCriteriaInfoCommand { get; }
     public RelayCommand AddToWatchlistCommand { get; }
     public RelayCommand ExportCommand { get; }
 
-    public MidCapPullbackTabViewModel(
-        AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, JsonWatchlistStore watchlistStore)
+    public ShortTermTabViewModel(AnalyzerPaths paths, IBarRepository barRepository,
+        INetInflowRepository netInflowRepository, IFundamentalMetricRepository fundamentalRepository, JsonWatchlistStore watchlistStore)
     {
         _paths = paths;
         _barRepository = barRepository;
+        _netInflowRepository = netInflowRepository;
         _fundamentalRepository = fundamentalRepository;
         _watchlistStore = watchlistStore;
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
         ShowCriteriaInfoCommand = new RelayCommand(_ =>
-            MessageBox.Show(CriteriaInfoText, "彬哥法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
+            MessageBox.Show(CriteriaInfoText, "短线法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
         AddToWatchlistCommand = new RelayCommand(_ =>
         {
-            var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "彬哥法", Granularity.Day, lookback: null);
+            var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "短线法", Granularity.Day);
             Log(added > 0 ? $"已将 {added} 只股票加入自选" : "没有勾选股票，或勾选的都已经在自选里了");
         });
-        ExportCommand = new RelayCommand(_ => GridExporter.ExportResults("彬哥法", Results));
+        ExportCommand = new RelayCommand(_ => GridExporter.ExportResults("短线法", Results, includeScore: true, scoreHeader: "近15日涨停"));
     }
 
     private void Log(string message) => LogLines.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {message}");
@@ -99,10 +107,12 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
             }
 
             var names = SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
-
-            var engine = new MidCapPullbackAnalysisEngine(_barRepository, _fundamentalRepository);
-            int passedCount = 0, errorCount = 0;
+            var engine = new ShortTermAnalysisEngine(_barRepository, _netInflowRepository, _fundamentalRepository);
+            double ratio = VolumeSurgeRatio, maxGain = MaxDayGainPct, minCap = MinCapYi, maxCap = MaxCapYi;
+            int errorCount = 0;
             var missingDataCounts = new Dictionary<string, int>();
+            var passed = new List<StockScreenResult>();
+
             await Task.Run(() =>
             {
                 for (int i = 0; i < codes.Count; i++)
@@ -110,22 +120,25 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
                     var code = codes[i];
                     ProgressText = $"正在分析 {code} ({i + 1}/{codes.Count})";
                     var name = names.GetValueOrDefault(code, code);
-                    var result = engine.Analyze(code, name);
+                    var result = engine.Analyze(code, name, ratio, maxGain, minCap, maxCap);
 
                     if (result.Error != null) { errorCount++; continue; }
                     foreach (var c in result.Criteria.Where(c => c.DataMissing))
                         missingDataCounts[c.Name] = missingDataCounts.GetValueOrDefault(c.Name) + 1;
-                    if (!result.Passed) continue; // results list only shows candidates that satisfy all 10 rules
+                    if (!result.Passed) continue;
 
-                    passedCount++;
-                    App.Current.Dispatcher.Invoke(() => Results.Add(ResultRowViewModel.From(result)));
+                    passed.Add(result);
                 }
             });
+
+            foreach (var r in passed.OrderByDescending(r => r.SortScore ?? 0))
+                Results.Add(ResultRowViewModel.From(r));
+
             var missingSummary = missingDataCounts.Count > 0
                 ? "；" + string.Join("；", missingDataCounts.Select(kv => $"「{kv.Key}」这条条件因缺数据被跳过（不计入该条件，不代表股票被跳过，其余条件正常判断）：{kv.Value} 只涉及"))
                 : "";
-            Log($"分析完成，共扫描 {codes.Count} 只股票，{passedCount} 只满足全部条件" +
-                (errorCount > 0 ? $"，{errorCount} 只因日/周/月线历史数据不足被跳过" : "") + missingSummary);
+            Log($"分析完成，共扫描 {codes.Count} 只股票，{passed.Count} 只满足全部条件（已按近15日涨停次数从高到低排序）" +
+                (errorCount > 0 ? $"，{errorCount} 只因历史数据不足/次新被跳过" : "") + missingSummary);
         }
         catch (Exception ex)
         {

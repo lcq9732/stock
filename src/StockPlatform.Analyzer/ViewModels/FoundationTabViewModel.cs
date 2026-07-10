@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using StockPlatform.Analyzer.Export;
 using StockPlatform.Analyzer.Watchlist;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
@@ -99,6 +100,7 @@ public class FoundationTabViewModel : INotifyPropertyChanged
     public RelayCommand AnalyzeCommand { get; }
     public RelayCommand ShowCriteriaInfoCommand { get; }
     public RelayCommand AddToWatchlistCommand { get; }
+    public RelayCommand ExportCommand { get; }
 
     public FoundationTabViewModel(AnalyzerPaths paths, IBarRepository barRepository, JsonWatchlistStore watchlistStore)
     {
@@ -117,6 +119,7 @@ public class FoundationTabViewModel : INotifyPropertyChanged
             var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "峰哥法", ResolveGranularity(), Lookback);
             Log(added > 0 ? $"已将 {added} 只股票加入自选" : "没有勾选股票，或勾选的都已经在自选里了");
         });
+        ExportCommand = new RelayCommand(_ => GridExporter.ExportResults("峰哥法", Results));
     }
 
     private void Log(string message) => LogLines.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {message}");

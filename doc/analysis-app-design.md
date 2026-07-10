@@ -11,7 +11,7 @@
 ```
 
 - 分析程序**自己不抓取数据**，只负责：① 读取本地数据库、② 基于本地数据做分析、③ 展示结果和选择依据
-- **状态变更记录（2026-07-07）**：曾经有一个独立的 `StockAnalyzer.UI`（实时盯盘几只自选股的小工具，配套 `StockAnalyzer.Logic`/`StockAnalyzer.Data`）。它原本用来给自选股打分的"7指标"分析逻辑，先被移植成本程序的第二种分析方法（见3.2节"金叉法"），确认功能已完全覆盖之后，`StockAnalyzer.UI`/`StockAnalyzer.Logic`/`StockAnalyzer.Data` 三个项目连同 `StockAnalyzer.sln` 里的引用一起被删除了——不再是"两个程序并存"，本仓库现在只有本程序一个分析入口，通过 Tab 切换"峰哥法"/"耀哥法"/"彬哥法"/"金叉法"四种分析方法，外加一个跨方法的"自选股"Tab（见第5节）
+- **状态变更记录（2026-07-07）**：曾经有一个独立的 `StockAnalyzer.UI`（实时盯盘几只自选股的小工具，配套 `StockAnalyzer.Logic`/`StockAnalyzer.Data`）。它原本用来给自选股打分的"7指标"分析逻辑，先被移植成本程序的第二种分析方法（见3.2节"金叉法"），确认功能已完全覆盖之后，`StockAnalyzer.UI`/`StockAnalyzer.Logic`/`StockAnalyzer.Data` 三个项目连同 `StockAnalyzer.sln` 里的引用一起被删除了——不再是"两个程序并存"，本仓库现在只有本程序一个分析入口，通过 Tab 切换六种分析方法，外加"查询""自选股"两个非分析方法的 Tab（见第5节）。**界面 Tab 顺序（本文档 3.2 各方法小节也按这个顺序编排）**：三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 / 金叉法 / 短线法 / 查询 / 自选股
 
 ## 2.【已变更】数据来源：不做网盘同步，改成手动拷贝本地文件
 
@@ -34,16 +34,30 @@
 
 1. 粒度选择：**时 / 日 / 周 / 月**四选一（单选，不是多选/全跑）
    - 选"**时**"时，进一步需要选择具体的分钟周期（1/5/15/30/60分钟等，与数据平台设计里 Bar 表支持的 `granularity` 对应），**由用户选**，不写死默认值
-2. 参数输入：规则1（及规则2，见3.2）用到的"前N根K线"，输入框设置，**默认60**（峰哥法四段式形态需要足够的窗口才找得到，N太小基本搜不到，见3.2.1节）
+2. 参数输入：规则1（及规则2，见3.2）用到的"前N根K线"，输入框设置，**默认60**（峰哥法四段式形态需要足够的窗口才找得到，N太小基本搜不到，见3.2.2节）
 3. 都选好/填好之后，点击"开始分析"按钮，才真正对本地数据执行计算——不会在粒度或参数还没选定时就自动跑
 
 **每次分析只针对用户选定的这一个粒度**，不会同时对时/日/周/月都跑一遍，所以不存在"多个粒度结果怎么汇总成一个总体结论"的问题。
 
-### 3.2 分析规则（已确定，四种方法，通过 Tab 切换）
+### 3.2 分析规则（已确定，六种方法，通过 Tab 切换）
 
-程序现在提供四种独立的分析方法，用户在界面上用 Tab 切换使用哪一种，彼此互不影响、各自独立扫描/展示结果：
+程序现在提供六种独立的分析方法，用户在界面上用 Tab 切换使用哪一种，彼此互不影响、各自独立扫描/展示结果。下面各小节按**界面 Tab 顺序**编排：三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 / 金叉法 / 短线法。（此外还有两个非分析方法的 Tab：**查询**——按代码/名称搜股票、看 K 线行情详情；**自选股**——见第5节。）
 
-#### 3.2.1 方法一：峰哥法（原名筑基法，类名/代码注释仍用 Foundation，见下方规则细节）
+#### 3.2.1 方法一：三角收敛（类名 TriangleConvergence）
+
+对形态本身建模的一个方法，实现是 `StockPlatform.Logic.Services.TriangleConvergenceAnalysisEngine`（趋势线拟合抽成了 `TriangleConvergenceDetector`，图表和规则共用同一份，不会对不上）。**固定只用日线**。跟其它方法不同，它有三个用户可调参数（在 Tab 上直接输入）：**形态窗口 Lookback**（在最近多少天内找摆动点、拟合趋势线，默认90）、**摆动点窗口 SwingWindow**（前后各多少天都不比它高/低，才算一个摆动高/低点，默认±3）、**R²下限 MinR2**（压力线拟合优度门槛，默认0.45，可输入小数）——这个方法的判定对"多长的窗口、怎样算摆动点、拟合要多严"本身就很敏感，所以做成用户可调，不像其它方法那样基本固定阈值。**3条规则必须全部满足**（AND关系）：
+
+1. **三角收敛形态成立（对称收敛三角形，画法贴合人工连线）**：这条规则的画线方式是照着人工在真实图上怎么画三角形来实现的（参考 000066/000977 两张手绘案例图）——**不是**对窗口内全部摆动点做一次最小二乘。步骤：在最近 Lookback 天内先定位"阶段最高峰"和"阶段最低谷"，然后 **压力线只连"峰之后"逐个走低的摆动高点**（要求向下 斜率<0，且拟合优度 R² ≥ MinR2），**支撑线只连"谷之后"逐个抬高的摆动低点**（要求向上 斜率>0），两条线向右收口、且到今天为止尚未交叉（间距始终为正）。几个关键设计：
+   - **为什么分段锚定**：这类股票通常先一波大涨（低谷→高峰，highs 一路走高），再在高位做三角形整理。如果把峰之前大涨阶段那些走高的高点也拟合进压力线，压力线会被带平甚至带涨，就画不出人眼看到的下降压力线了。所以压力线只取"峰之后"的高点、支撑线只取"谷之后"的低点。
+   - **突破场景的锚点**：如果最高峰太靠近末尾（价格已经突破、峰后凑不够点），压力线改锚在"突破前"最高的摆动高点上，连接那之前的下降高点——这条线正是价格当前正在向上突破的那条（`TryFind` 里的 breakout fallback）。
+   - **R² 只卡压力线**：那条干净下行的压力线是形态的决定性特征；支撑线只是价格下沿的包络，真实行情里常被中途回踩的低点带得拟合很松（R² 可能只有 0.1~0.2），强行要求支撑线也 R² 达标反而会把人一眼能看出的三角形筛掉，所以支撑线只要求"向上"、不卡 R²。
+   - **窗口要够长**：因为要一直回溯到那波大涨起点的低谷，窗口太短就回溯不到真正的低点、支撑线会算成向下，形态不成立。两个案例的低谷距今都在 70~85 个交易日，所以默认 Lookback 给到 90。
+2. **当前价格触及支撑线或突破压力线**：最新收盘价超出压力线当前位置 ≥1.5% 视为突破；贴近支撑线当前位置（偏离 ≤2%）视为触线企稳。二者满足其一即可。
+3. **MACD配合确认**：触支撑线时要求 DIF 上穿 DEA 或 MACD 柱由缩短转为放大（支撑企稳）；破压力线时要求 MACD 柱转正或 DIF 上穿 DEA（突破确认）。
+
+**关于结果数量与排序**：三角收敛是形态匹配，命中的不止一只。改成上面"分段锚定 + 对称三角形（压力向下+支撑向上）+ 未交叉"的画法之后，全市场入选数已经从早期宽口径的几百只降到几十只（默认参数下约 40~50 只），且**按"收敛质量"评分从高到低排序**，用户重点看排在前面的即可：评分（`StockScreenResult.SortScore`，0~100）= 一半看两线间距收窄的程度（收窄越多越好）+ 一半看价格有多少比例的时间被夹在两条线之间（越贴合三角形定义越好），只用于排序不参与是否入选的判定。想要更精可调高 R²下限。结果列表只显示3条全部满足的股票；历史数据不足或摆动点不够（凑不出趋势线）而无法计算的会被跳过，数量在分析完成后的日志里汇总。
+
+#### 3.2.2 方法二：峰哥法（原名筑基法，类名/代码注释仍用 Foundation，见下方规则细节）
 
 应用在用户第3.1节选定的那一个粒度上，**3条规则必须全部满足**（AND关系）：
 
@@ -59,24 +73,6 @@
 3. **MACD 零轴之上**：DIF（快线）和 DEA（慢线）都 > 0
 
 "N 根K线"的含义跟随第3.1节选定的粒度变化——选"日"就是"过去N个交易日"，选"分时"就是"过去N根所选分钟周期的K线"，以此类推。
-
-#### 3.2.2 方法二：金叉法
-
-移植自 StockAnalyzer 的7指标打分逻辑（原 `StockAnalyzer.Logic/Services/StockAnalyzerService.cs`，该项目已删除，见第5节变更记录；现在的实现是 `StockPlatform.Logic.Services.GoldenCrossAnalysisEngine`）。跟峰哥法不同：**固定只用日线**（7条里有"近20日压力位""近10日RSI"这类假设按自然交易日计算的规则，套到周/月/分钟线上语义会变，所以没有像峰哥法那样开放粒度选择），**不需要用户填"前N根K线"**（7条规则内部窗口都是各自写死的常量），判定也不是AND而是**7条里至少满足5条就算通过**：
-
-| # | 名称 | 判定 |
-|---|---|---|
-| 1 | MA5 上穿 MA10 | 昨日 MA5≤MA10，今日 MA5>MA10 |
-| 2 | MA10 开始拐头向上 | 今日MA10>昨日MA10，且昨日MA10≤前日MA10（由平/跌转涨） |
-| 3 | MACD 金叉 | 昨日 DIF≤DEA，今日 DIF>DEA |
-| 4 | KDJ 在20~50区域金叉 | 昨日 K≤D，今日 K>D，且今日K落在[20,50]区间 |
-| 5 | RSI 从30附近向上突破50 | 近10日（不含今日）RSI最低值≤35，且昨日RSI<50、今日RSI≥50 |
-| 6 | 成交量≥5日均量的1.5倍 | 今日成交量 ≥ 昨日5日均量 × 1.5 |
-| 7 | 股价突破最近20日平台或压力位 | 今日收盘 > 前20日（不含今日）最高价 |
-
-MACD/RSI/KDJ/MA 的具体公式见 `StockPlatform.Logic.Services.TechnicalIndicators`（KDJ(9,3,3)、RSI(14) 沿用 Wilder 平滑，跟原 StockAnalyzer.Logic 版本一致）。
-
-**命名说明**：7条里严格意义上的"金叉"只有①③④三条（两条线交叉），②是均线拐头、⑤是RSI突破固定阈值、⑥是量能过滤、⑦是价格突破压力位，并不是每条都是"金叉"。"金叉法"这个名字是沿用用户习惯叫法（照顾①③④这几条最核心的信号），不是严格的技术定义，特此说明。
 
 #### 3.2.3 方法三：耀哥法（原名触底回升法，类名仍用 BottomRebound）
 
@@ -98,7 +94,7 @@ MACD/RSI/KDJ/MA 的具体公式见 `StockPlatform.Logic.Services.TechnicalIndica
 
 #### 3.2.4 方法四：彬哥法（原名中盘起爆法，类名仍用 MidCapPullback）
 
-四种方法里条件最多、涉及数据面最广的一个，实现是 `StockPlatform.Logic.Services.MidCapPullbackAnalysisEngine`。**10条规则必须全部满足**（AND关系），没有用户可调参数：
+六种方法里条件最多、涉及数据面最广的一个，实现是 `StockPlatform.Logic.Services.MidCapPullbackAnalysisEngine`。**10条规则必须全部满足**（AND关系），没有用户可调参数：
 
 1. 上市板块不包含科创板（`MarketClassifier.Classify(code) != ShanghaiStar`，含688和689两种前缀）
 2. 股票市场类型不包含北交所（`MarketClassifier.Classify(code) != Beijing`）
@@ -115,18 +111,54 @@ MACD/RSI/KDJ/MA 的具体公式见 `StockPlatform.Logic.Services.TechnicalIndica
 
 **规则4/5跟规则1/2/3不一样，故意没有做成"数据缺失就跳过整只股票"**（像日线历史数据不足那样归为Error）：如果这样处理，市值数据缺失时会导致每一只股票都被跳过，看不出其余9条规则算得对不对。所以只让第4条自己判定不满足，其余9条照常算、照常展示。
 
+#### 3.2.5 方法五：金叉法
+
+移植自 StockAnalyzer 的7指标打分逻辑（原 `StockAnalyzer.Logic/Services/StockAnalyzerService.cs`，该项目已删除，见第5节变更记录；现在的实现是 `StockPlatform.Logic.Services.GoldenCrossAnalysisEngine`）。跟峰哥法不同：**固定只用日线**（7条里有"近20日压力位""近10日RSI"这类假设按自然交易日计算的规则，套到周/月/分钟线上语义会变，所以没有像峰哥法那样开放粒度选择），**不需要用户填"前N根K线"**（7条规则内部窗口都是各自写死的常量），判定也不是AND而是**7条里至少满足5条就算通过**：
+
+| # | 名称 | 判定 |
+|---|---|---|
+| 1 | MA5 上穿 MA10 | 昨日 MA5≤MA10，今日 MA5>MA10 |
+| 2 | MA10 开始拐头向上 | 今日MA10>昨日MA10，且昨日MA10≤前日MA10（由平/跌转涨） |
+| 3 | MACD 金叉 | 昨日 DIF≤DEA，今日 DIF>DEA |
+| 4 | KDJ 在20~50区域金叉 | 昨日 K≤D，今日 K>D，且今日K落在[20,50]区间 |
+| 5 | RSI 从30附近向上突破50 | 近10日（不含今日）RSI最低值≤35，且昨日RSI<50、今日RSI≥50 |
+| 6 | 成交量≥5日均量的1.5倍 | 今日成交量 ≥ 昨日5日均量 × 1.5 |
+| 7 | 股价突破最近20日平台或压力位 | 今日收盘 > 前20日（不含今日）最高价 |
+
+MACD/RSI/KDJ/MA 的具体公式见 `StockPlatform.Logic.Services.TechnicalIndicators`（KDJ(9,3,3)、RSI(14) 沿用 Wilder 平滑，跟原 StockAnalyzer.Logic 版本一致）。
+
+**命名说明**：7条里严格意义上的"金叉"只有①③④三条（两条线交叉），②是均线拐头、⑤是RSI突破固定阈值、⑥是量能过滤、⑦是价格突破压力位，并不是每条都是"金叉"。"金叉法"这个名字是沿用用户习惯叫法（照顾①③④这几条最核心的信号），不是严格的技术定义，特此说明。
+
+#### 3.2.6 方法六：短线法（类名 ShortTerm）
+
+盘后、日线级别的**短线/波段入场筛选**，实现是 `StockPlatform.Logic.Services.ShortTermAnalysisEngine`。定位是"选出明天值得关注的启动票"，**适配 A股 T+1**——反正买了要过夜，分时/打板那种颗粒度性价比低、要求高，所以刻意不做，只在日线上做。**固定用日线**。前7条必须全部满足（AND，其中主力净流入/流通市值缺数据时按 `DataMissing` 跳过该条、不判整只股票失败，同耀哥法/彬哥法），第8条是过滤：
+
+1. **均线多头启动**：收盘 > MA5 > MA10，且 MA10 拐头向上（今日MA10 > 昨日MA10）
+2. **放量**：当日成交量 ≥ 前5日均量 × 放量倍数（默认1.5，可调）
+3. **突破**：收盘价创近20日新高（最高价口径，跟金叉法条件7同口径）
+4. **MACD动能确认**：MACD柱转正且放大，或 DIF 在0轴上方金叉
+5. **主力资金净流入**：最新交易日主力净流入 > 0
+6. **流通市值适中**：默认 30亿~300亿（区间上下限可调）
+7. **不追高**：当日涨幅 ≤ 上限%（默认7，可调）
+8. **过滤**：排除 ST/*ST、北交所
+
+**近15日涨停次数是加分项，不作硬性入选条件**：只写进 `StockScreenResult.SortScore`，让有资金关注（近期涨停多）的票在结果里排前面（结果按它从高到低排序），不影响是否入选。放量倍数/涨幅上限/流通市值区间做成界面可调。
+
+**条件详情图复用金叉法的详情窗口**（`GoldenCrossDetailWindow`/`GoldenCrossChartBuilder`）——短线法用到的指标（MA5/MA10、前20日最高价突破线、成交量对比5日均量、MACD）正好是那张图已经画的一个子集，且突破线用的是同一套"前20日最高价"口径，图和条件文字对得上，因此没有再单独做一套图表（这是本方法有意的例外，其它方法各自独立见 3.3 节末尾的说明）。
+
 ### 3.3 结果数据形状
 
-四种方法共用同一套结果结构，用 `Criteria` 数量和 `Passed` 的判定方式区分（不需要为每种方法单独定义类型）：
+六种方法共用同一套结果结构，用 `Criteria` 数量和 `Passed` 的判定方式区分（不需要为每种方法单独定义类型）：
 
 ```csharp
 public class StockScreenResult
 {
     public string Code { get; set; }
     public string Name { get; set; }
-    public string Granularity { get; set; }   // 峰哥法跟随用户选择；其余三种固定 "day"
-    public bool Passed { get; set; }          // 峰哥法/耀哥法/彬哥法：全部满足；金叉法：7条里至少5条满足
-    public List<CriterionResult> Criteria { get; set; }   // 峰哥法固定3条；耀哥法固定5条；金叉法固定7条；彬哥法固定10条
+    public string Granularity { get; set; }   // 峰哥法跟随用户选择；其余五种（三角收敛/耀哥法/彬哥法/金叉法/短线法）固定 "day"
+    public bool Passed { get; set; }          // 三角收敛/峰哥法/耀哥法/彬哥法/短线法：全部满足（缺数据条跳过）；金叉法：7条里至少5条满足
+    public List<CriterionResult> Criteria { get; set; }   // 三角收敛固定3条；峰哥法固定3条；耀哥法固定5条；金叉法固定7条；彬哥法固定10条；短线法固定8条
+    public double? SortScore { get; set; }    // 三角收敛=收敛质量(0~100)；短线法=近15日涨停次数；其余方法为 null。结果表按它排序
 }
 
 public class CriterionResult
@@ -138,7 +170,7 @@ public class CriterionResult
 }
 ```
 
-这个形状延续了已删除的 `StockAnalyzer.Logic` 里 `StockAnalysisResult`/`ConditionResult` 的设计思路（代码本身已不在仓库里，见第1节的变更记录），`ResultRowViewModel`（界面层）按 `Criteria.Count(c => c.Satisfied)` 和 `Criteria.Count` 通用计算"满足数"，不关心具体是哪种方法产出的结果，所以四种方法能共用同一套**结果列表**（DataGrid）。但双击后的**详情图表窗口是各自独立的**（`DetailWindow`/`GoldenCrossDetailWindow`/`BottomReboundDetailWindow`/`MidCapPullbackDetailWindow`，分别用 `ChartBuilder`/`GoldenCrossChartBuilder`/`BottomReboundChartBuilder`/`MidCapPullbackChartBuilder` 建图）——四种方法看的指标完全不同（BOLL vs MA5/MA10/KDJ/RSI/成交量 vs MA5/MA10/MA20 vs 日K+MA15+涨停标记/周线MACD/月线MACD三个独立面板），共用一套图表 UI 会导致图上画的指标和判断依据文字对不上（金叉法早期就踩过这个坑，图上用的是峰哥法那套BOLL+MACD，压力线还用错了价格口径），所以图表这块特意没有强行共用，只共用了不涉及具体指标的轴同步/缩放逻辑（`ChartAxisSync`）——彬哥法的三个面板粒度不同（日/周/月），彼此之间甚至不联动缩放，各自独立。
+这个形状延续了已删除的 `StockAnalyzer.Logic` 里 `StockAnalysisResult`/`ConditionResult` 的设计思路（代码本身已不在仓库里，见第1节的变更记录），`ResultRowViewModel`（界面层）按 `Criteria.Count(c => c.Satisfied)` 和 `Criteria.Count` 通用计算"满足数"，不关心具体是哪种方法产出的结果，所以六种方法能共用同一套**结果列表**（DataGrid）。但双击后的**详情图表窗口基本是各自独立的**（`TriangleConvergenceDetailWindow`/`DetailWindow`/`GoldenCrossDetailWindow`/`BottomReboundDetailWindow`/`MidCapPullbackDetailWindow`，分别用 `TriangleConvergenceChartBuilder`/`ChartBuilder`/`GoldenCrossChartBuilder`/`BottomReboundChartBuilder`/`MidCapPullbackChartBuilder` 建图）——各方法看的指标完全不同（三角收敛的压力/支撑趋势线+MACD vs BOLL vs MA5/MA10/KDJ/RSI/成交量 vs MA5/MA10/MA20 vs 日K+MA15+涨停标记/周线MACD/月线MACD三个独立面板），共用一套图表 UI 会导致图上画的指标和判断依据文字对不上（金叉法早期就踩过这个坑，图上用的是峰哥法那套BOLL+MACD，压力线还用错了价格口径），所以图表这块特意没有强行共用，只共用了不涉及具体指标的轴同步/缩放逻辑（`ChartAxisSync`）——彬哥法的三个面板粒度不同（日/周/月），彼此之间甚至不联动缩放，各自独立。**唯一的例外是短线法**：它的指标（MA5/MA10、前20日最高价突破线、成交量对比5日均量、MACD）正好是金叉法那张图已经画的一个子集，且突破线同口径，所以短线法直接复用 `GoldenCrossDetailWindow`——是"指标能对上才复用"，不违背上面这条原则。
 
 ### 3.4 结果展示 + 批量分析进度条
 
@@ -149,7 +181,7 @@ public class CriterionResult
 
 ### 4.1 交互
 
-**状态变更记录（2026-07-08）**：最初是"双击结果列表某一行"触发详情窗口。改成结果表格每行右侧加两个按钮——**"条件详情"**（原来双击打开的那个，展示该股票**为什么**满足/不满足各条规则）和**"行情详情"**（新增，见4.4节，纯行情图，不涉及任何方法的判断依据）。改动原因：双击这个手势不够直观（用户容易只点一下，且双击和"想看两种不同东西"之间没有明确的手势区分），改成两个按钮之后，两种详情各自独立触发，意图更清楚。四个方法的结果表 + 自选股列表，五张表格都是这个模式。
+**状态变更记录（2026-07-08）**：最初是"双击结果列表某一行"触发详情窗口。改成结果表格每行右侧加两个按钮——**"条件详情"**（原来双击打开的那个，展示该股票**为什么**满足/不满足各条规则）和**"行情详情"**（新增，见4.4节，纯行情图，不涉及任何方法的判断依据）。改动原因：双击这个手势不够直观（用户容易只点一下，且双击和"想看两种不同东西"之间没有明确的手势区分），改成两个按钮之后，两种详情各自独立触发，意图更清楚。五个方法的结果表 + 自选股列表，六张表格都是这个模式。
 
 条件详情不是现有 StockAnalyzer 那种纯文字/数值的依据（如"昨日 MA5=8.61 MA10=8.65"），而是**优先用图表表达**，让人一眼看出走势和信号点，文字数值作为图表的辅助/兜底。
 
@@ -211,11 +243,11 @@ public class CriterionResult
 
 ### 5.1 需求背景
 
-用户看好某只从上面四种方法里筛选出来的股票时，需要能"留痕"——记录清楚是哪个方法、依据哪天的数据算出来的，这样过一段时间回来看这只股票走势如何，就能判断这个方法/参数当时判断得准不准，用于后续调整算法。
+用户看好某只从上面六种方法里筛选出来的股票时，需要能"留痕"——记录清楚是哪个方法、依据哪天的数据算出来的，这样过一段时间回来看这只股票走势如何，就能判断这个方法/参数当时判断得准不准，用于后续调整算法。
 
 ### 5.2 交互
 
-- 四个方法各自的结果 DataGrid 都加了一列"选"（`DataGridCheckBoxColumn`，绑定 `IsSelected`），以及一个"加入自选"按钮
+- 五个方法各自的结果 DataGrid 都加了一列"选"（`DataGridCheckBoxColumn`，绑定 `IsSelected`），以及一个"加入自选"按钮
   - **状态变更记录（2026-07-08）**：`DataGridCheckBoxColumn` 默认要点两下才能勾选上（第一下WPF会先用来让单元格获得焦点/选中，只有已经聚焦的单元格才会把点击继续传给里面的复选框）。修的方法是在 `Window.Resources` 里给 `DataGridCell` 挂一个隐式样式，在鼠标按下的Tunneling阶段（`PreviewMouseLeftButtonDown`，比复选框自己的点击处理更早触发）就让单元格提前获得焦点，这样同一次点击的后半段就能直接落到复选框上，一次点击就能选中。隐式样式（不带 `x:Key`）对本窗口所有 DataGrid 的所有单元格自动生效，包括自选股表格。
 - 用户在结果里勾选想跟踪的股票（可多选），点击"加入自选"，勾选的行会被写入自选列表（同一批操作里跟已有记录重复的会被跳过，见5.4节去重规则），操作完成后无论是否真正写入都会把这些行的勾选状态清空（避免下次分析后误以为还处于"已勾选待加入"状态）
 - 新增第5个 Tab"自选股"，展示所有跨方法加入的股票：代码/名称/方法/数据日期/当时价格/满足数/加入时间，配"刷新"和"移除勾选"两个按钮
@@ -234,9 +266,9 @@ public class WatchlistEntry
     public Guid Id { get; set; }              // 用于"移除勾选"定位这条记录——重新反序列化后对象引用不再相等，得靠这个
     public string Code { get; set; }
     public string Name { get; set; }
-    public string Method { get; set; }        // "峰哥法"/"金叉法"/"耀哥法"/"彬哥法"
-    public string Granularity { get; set; }   // 只有峰哥法用户可调，其余三种固定 "day"
-    public int? Lookback { get; set; }        // 只有峰哥法有意义（"前N根K线"）
+    public string Method { get; set; }        // "三角收敛"/"峰哥法"/"耀哥法"/"彬哥法"/"金叉法"
+    public string Granularity { get; set; }   // 只有峰哥法用户可调，其余四种固定 "day"
+    public int? Lookback { get; set; }        // 峰哥法（"前N根K线"）和三角收敛（"形态窗口"）用到；其余方法为 null
     public double? DifThreshold { get; set; } // 只有耀哥法有意义（DIF阈值）
     public DateTime DataDate { get; set; }    // 算出这条结果时用到的最新一根K线日期——不是加入自选的时间
     public double PriceAtPick { get; set; }   // DataDate那天的收盘价
@@ -247,7 +279,7 @@ public class WatchlistEntry
 }
 ```
 
-`DataDate`/`PriceAtPick` 来自 `StockScreenResult` 新增的两个字段（`DataDate`/`LastClose`）——四个分析引擎产出结果时顺带算好，不是watchlist专属逻辑，只是恰好只有watchlist用到。
+`DataDate`/`PriceAtPick` 来自 `StockScreenResult` 新增的两个字段（`DataDate`/`LastClose`）——五个分析引擎产出结果时顺带算好，不是watchlist专属逻辑，只是恰好只有watchlist用到。
 
 ### 5.4 去重规则
 
@@ -263,13 +295,13 @@ public class WatchlistEntry
 
 ## 6. 技术栈与项目结构：legacy StockAnalyzer 已完全退役
 
-**状态变更记录（2026-07-07，第二次）**：3.2.2节"金叉法"上线、确认功能已完整覆盖 `StockAnalyzerService` 的7指标打分逻辑之后，`src/StockAnalyzer.UI`、`src/StockAnalyzer.Logic`、`src/StockAnalyzer.Data` 三个项目连同 `StockAnalyzer.sln` 里对应的 `Project`/`ProjectConfigurationPlatforms` 条目**已被整体删除**（确认过没有任何 `StockPlatform.*` 项目引用它们，也没有遗留的 watchlist/缓存数据）。下面这段是删除前的历史记录，保留是为了说明"金叉法"那份7条规则公式最初是怎么来的：
+**状态变更记录（2026-07-07，第二次）**：3.2.5节"金叉法"上线、确认功能已完整覆盖 `StockAnalyzerService` 的7指标打分逻辑之后，`src/StockAnalyzer.UI`、`src/StockAnalyzer.Logic`、`src/StockAnalyzer.Data` 三个项目连同 `StockAnalyzer.sln` 里对应的 `Project`/`ProjectConfigurationPlatforms` 条目**已被整体删除**（确认过没有任何 `StockPlatform.*` 项目引用它们，也没有遗留的 watchlist/缓存数据）。下面这段是删除前的历史记录，保留是为了说明"金叉法"那份7条规则公式最初是怎么来的：
 
 - 最初设计是"分析程序完全独立，StockAnalyzer 主界面上留一个默认隐藏的入口按钮，以后想启用整个 StockAnalyzer.UI 时再打开"——这个"隐藏入口按钮"方案最终没有实现
-- 后来（第一次变更）改成把 StockAnalyzer 那套7指标打分逻辑（`StockAnalyzerService`）**移植**成本程序的第二种分析方法（3.2.2节"金叉法"），"金叉法"的7条规则公式是从 `StockAnalyzer.Logic/Services/StockAnalyzerService.cs` 复制并改写数据源得到的（原版读实时API+本地JSON缓存的 `KLine`，改成读 `StockPlatform.Data.Sqlite.SqliteBarRepository` 的 `Bar`），KDJ/RSI 两个原来 `StockPlatform.Logic.Services.TechnicalIndicators` 没有的指标，也是从 `StockAnalyzer.Logic` 的同名类里搬过来的（公式不变）
+- 后来（第一次变更）改成把 StockAnalyzer 那套7指标打分逻辑（`StockAnalyzerService`）**移植**成本程序当时的第二种分析方法（现为3.2.5节"金叉法"），"金叉法"的7条规则公式是从 `StockAnalyzer.Logic/Services/StockAnalyzerService.cs` 复制并改写数据源得到的（原版读实时API+本地JSON缓存的 `KLine`，改成读 `StockPlatform.Data.Sqlite.SqliteBarRepository` 的 `Bar`），KDJ/RSI 两个原来 `StockPlatform.Logic.Services.TechnicalIndicators` 没有的指标，也是从 `StockAnalyzer.Logic` 的同名类里搬过来的（公式不变）
 - 移植完成、确认不再需要旧代码之后（第二次变更，也就是本节开头说的），旧的三个项目就被删除了
 
-现在项目结构很简单：`StockPlatform.Logic`/`StockPlatform.Data`（共享库，被 Fetcher 和 Analyzer 两边引用）+ `StockPlatform.Fetcher`（数据获取）+ `StockPlatform.Analyzer`（本文档，含峰哥法/金叉法两种分析方法）。分析程序**只读**打开本地总数据文件做查询分析，不写入——数据库文件本身是用户手动拷贝进来的，分析程序不做任何写操作。
+现在项目结构很简单：`StockPlatform.Logic`/`StockPlatform.Data`（共享库，被 Fetcher 和 Analyzer 两边引用）+ `StockPlatform.Fetcher`（数据获取）+ `StockPlatform.Analyzer`（本文档，含三角收敛/峰哥法/耀哥法/彬哥法/金叉法/短线法六种分析方法，外加查询/自选股两个 Tab）。分析程序**只读**打开本地总数据文件做查询分析，不写入——数据库文件本身是用户手动拷贝进来的，分析程序不做任何写操作。
 
 ## 7. 待确认事项
 

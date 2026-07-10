@@ -7,12 +7,76 @@ namespace StockPlatform.Analyzer;
 
 public partial class MainWindow : Window
 {
+    // 用WinForms的NotifyIcon（WPF自己没有托盘图标控件）——故意不加 using System.Windows.Forms;，
+    // 全部用全名引用，跟Fetcher那边同样的做法一致，避免跟已有的 System.Windows.MessageBox 等
+    // 同名类型产生歧义。
+    private System.Windows.Forms.NotifyIcon? _trayIcon;
+
     public MainWindow()
     {
         InitializeComponent();
         // Setting WindowState=Maximized here (or even in XAML) doesn't reliably stick — WPF
         // needs a completed layout pass first. Deferring to Loaded is the standard workaround.
         Loaded += (_, _) => WindowState = WindowState.Maximized;
+        Closed += OnClosed;
+        StateChanged += OnStateChanged;
+    }
+
+    private void OnClosed(object? sender, EventArgs e)
+    {
+        // 真正关闭时才释放托盘图标——留着不释放会在系统托盘留下一个点不动的幽灵图标，直到
+        // 资源管理器重启才会消失。
+        _trayIcon?.Dispose();
+        _trayIcon = null;
+    }
+
+    /// <summary>
+    /// 最小化到系统托盘（跟Fetcher那边同样的做法，见 StockPlatform.Fetcher/MainWindow.xaml.cs）——
+    /// 最小化后窗口从任务栏消失、缩到托盘里；关闭程序走正常的 Close()，不受这个影响。
+    /// </summary>
+    private void OnStateChanged(object? sender, EventArgs e)
+    {
+        if (WindowState != WindowState.Minimized) return;
+
+        Hide();
+        ShowInTaskbar = false;
+
+        if (_trayIcon == null)
+        {
+            // Assembly.Location 在单文件发布里永远是空字符串，不能当兜底——这个项目就是单文件
+            // 发布（见 csproj 的 PublishSingleFile），用 AppContext.BaseDirectory 拼出.exe路径。
+            var exePath = Environment.ProcessPath
+                ?? System.IO.Path.Combine(AppContext.BaseDirectory, "StockPlatform.Analyzer.exe");
+            var icon = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
+            var menu = new System.Windows.Forms.ContextMenuStrip();
+            menu.Items.Add("显示主窗口", null, (_, _) => RestoreFromTray());
+            menu.Items.Add("退出程序", null, (_, _) => Close());
+
+            _trayIcon = new System.Windows.Forms.NotifyIcon
+            {
+                Icon = icon,
+                Text = "A股批量分析程序",
+                Visible = true,
+                ContextMenuStrip = menu,
+            };
+            _trayIcon.MouseClick += (_, args) =>
+            {
+                if (args.Button == System.Windows.Forms.MouseButtons.Left) RestoreFromTray();
+            };
+        }
+        else
+        {
+            _trayIcon.Visible = true;
+        }
+    }
+
+    private void RestoreFromTray()
+    {
+        ShowInTaskbar = true;
+        Show();
+        WindowState = WindowState.Maximized;
+        Activate();
+        if (_trayIcon != null) _trayIcon.Visible = false;
     }
 
     // SelectionChanged bubbles up from ANY Selector inside a tab's content too (e.g. the 峰哥法
@@ -34,6 +98,29 @@ public partial class MainWindow : Window
     {
         if (sender is DataGridCell { IsFocused: false, IsEditing: false } cell)
             cell.Focus();
+    }
+
+    // 点"选"列表头的复选框 = 对整列全选/全不选。IsSelected 是普通可变属性、没有变更通知（见
+    // ISelectableRow / ResultRowViewModel 的注释），批量改完必须 Items.Refresh() 让每行的勾选框
+    // 重画。六个表（五个方法结果表 + 自选股表）共用这一个处理器，靠往上找到所在的 DataGrid 来
+    // 区分是哪一个。注意：这个表头复选框只是"一键全选/全不选"的开关，不会随用户手动逐行勾选而
+    // 自动反映"是否已全选"（IsSelected 没有通知，做联动得不偿失，这里刻意从简）。
+    private void SelectAllHeader_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox cb) return;
+        var grid = FindVisualAncestor<DataGrid>(cb);
+        if (grid == null) return;
+        bool check = cb.IsChecked == true;
+        foreach (var item in grid.Items)
+            if (item is ISelectableRow row) row.IsSelected = check;
+        grid.Items.Refresh();
+    }
+
+    private static T? FindVisualAncestor<T>(DependencyObject start) where T : DependencyObject
+    {
+        for (DependencyObject? d = start; d != null; d = System.Windows.Media.VisualTreeHelper.GetParent(d))
+            if (d is T match) return match;
+        return null;
     }
 
     private void FoundationCriteriaButton_Click(object sender, RoutedEventArgs e)
@@ -95,6 +182,17 @@ public partial class MainWindow : Window
         new TriangleConvergenceDetailWindow(row.Result, bars, vm.TriangleConvergenceTab.Lookback, vm.TriangleConvergenceTab.SwingWindow) { Owner = this }.ShowDialog();
     }
 
+    // 短线法的"条件详情"复用金叉法的详情窗口（GoldenCrossDetailWindow）——短线法用到的指标
+    // （MA5/MA10、前20日最高价突破线、成交量对比5日均量、MACD）正好是那张图已经画的一个子集，
+    // 且突破线用的是同一套"前20日最高价"口径，图和条件文字对得上（见 ShortTermAnalysisEngine 注释）。
+    private void ShortTermCriteriaButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
+        if (!TryGetBars(vm, row, out var bars)) return;
+        new GoldenCrossDetailWindow(row.Result, bars) { Owner = this }.ShowDialog();
+    }
+
     private void WatchlistCriteriaButton_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not MainViewModel vm) return;
@@ -130,6 +228,7 @@ public partial class MainWindow : Window
                     break;
                 }
                 case "金叉法":
+                case "短线法": // 短线法复用金叉法的详情图，理由见 ShortTermCriteriaButton_Click
                 {
                     var bars = vm.BarRepository.Query(entry.Code, Granularity.Day);
                     if (bars.Count == 0) throw new InvalidOperationException("没有找到该股票的K线数据。");
@@ -184,6 +283,13 @@ public partial class MainWindow : Window
     private void WatchlistQuoteDetailButton_Click(object sender, RoutedEventArgs e)
     {
         if (((FrameworkElement)sender).DataContext is WatchlistRowViewModel row)
+            OpenQuoteDetail(row.Code, row.Name);
+    }
+
+    // 查询Tab的"K线详情"——跟"行情详情"是同一个纯行情窗口（QuoteDetailWindow），只是入口在查询结果里。
+    private void QueryQuoteDetailButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is QueryRowViewModel row)
             OpenQuoteDetail(row.Code, row.Name);
     }
 

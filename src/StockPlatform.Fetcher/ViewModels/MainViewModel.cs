@@ -143,9 +143,11 @@ public class MainViewModel : INotifyPropertyChanged
         _heartbeat.Tick += (_, _) =>
         {
             var elapsed = DateTime.Now - _runStartedAt;
-            ElapsedText = elapsed.TotalMinutes >= 1
-                ? $"已运行 {(int)elapsed.TotalMinutes} 分 {elapsed.Seconds} 秒"
-                : $"已运行 {elapsed.Seconds} 秒";
+            ElapsedText = elapsed.TotalHours >= 1
+                ? $"已运行 {(int)elapsed.TotalHours} 小时 {elapsed.Minutes} 分 {elapsed.Seconds} 秒"
+                : elapsed.TotalMinutes >= 1
+                    ? $"已运行 {(int)elapsed.TotalMinutes} 分 {elapsed.Seconds} 秒"
+                    : $"已运行 {elapsed.Seconds} 秒";
         };
         _heartbeat.Start();
     }

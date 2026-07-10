@@ -13,6 +13,12 @@ namespace StockPlatform.Data.Remote;
 /// Verified against EastMoney for a real dividend event (贵州茅台 2026-06-25) — the two
 /// vendors produce identical front-adjusted numbers for this case (see doc/data-platform-design.md).
 /// Only day granularity is supported directly; week/month come from local aggregation.
+///
+/// Uses the <c>newfqkline</c> endpoint (2026-07-10, was <c>fqkline</c>) — same host/qfq/640-cap/
+/// paging, but each row also carries 换手率(%) and 成交额(万元), so Bar.Turnover/Bar.Amount are now
+/// populated (previously left at 0). Cross-checked 成交额 against EastMoney's native kline amount
+/// field for 贵州茅台 (403521.69万元 ≈ EastMoney的4035216946元, 精确到万元) before switching.
+/// Volume stays in 手 (unchanged), same as the old endpoint.
 /// </summary>
 public class TencentBarFetcher : IBarDataFetcher
 {
@@ -113,7 +119,10 @@ public class TencentBarFetcher : IBarDataFetcher
     private async Task<(string Name, List<Bar> Bars)> FetchPageAsync(string code, DateTime pageEnd, CancellationToken ct)
     {
         var symbol = ToSymbol(code);
-        var url = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get" +
+        // newfqkline（而不是老的 fqkline）——同一个host、同样的qfq前复权、同样的640条上限和分页
+        // 方式，但每行在 volume 之后多带了 换手率 和 成交额 两个字段（见下方解析），老的 fqkline
+        // 只到 volume 为止。2026-07-10 为了补上 成交额/换手率 改用这个接口。
+        var url = "http://web.ifzq.gtimg.cn/appstock/app/newfqkline/get" +
                   $"?param={symbol},day,,{pageEnd:yyyy-MM-dd},{PageHardCap},qfq";
 
         HttpResponseMessage resp;
@@ -153,12 +162,26 @@ public class TencentBarFetcher : IBarDataFetcher
         {
             foreach (var row in rows.EnumerateArray())
             {
+                var len = row.GetArrayLength();
                 var date = DateTime.ParseExact(row[0].GetString()!, "yyyy-MM-dd", CultureInfo.InvariantCulture);
                 var open = double.Parse(row[1].GetString()!, CultureInfo.InvariantCulture);
                 var close = double.Parse(row[2].GetString()!, CultureInfo.InvariantCulture);
                 var high = double.Parse(row[3].GetString()!, CultureInfo.InvariantCulture);
                 var low = double.Parse(row[4].GetString()!, CultureInfo.InvariantCulture);
-                var volume = row.GetArrayLength() > 5 ? double.Parse(row[5].GetString()!, CultureInfo.InvariantCulture) : 0;
+                var volume = len > 5 ? double.Parse(row[5].GetString()!, CultureInfo.InvariantCulture) : 0;
+
+                // newfqkline 每行结构：[0]日期 [1]开 [2]收 [3]高 [4]低 [5]成交量(手) [6]{}(占位对象，忽略)
+                // [7]换手率(%) [8]成交额(万元) [9]""。都做长度+类型保护，缺字段就按0（这样万一接口
+                // 退回老的只到[5]的格式、或者某行字段不全，也不会抛异常）。换手率原样存百分数（10.43
+                // 表示10.43%，跟 QuoteDetailWindow 的"{Turnover:F2}%"显示一致）；成交额从万元换成元
+                // 存（跟 EastMoneyBarFetcher 存元、以及 FormatLargeNumber 按亿/万显示的约定一致）。
+                double turnover = 0, amountYuan = 0;
+                if (len > 7 && row[7].ValueKind == JsonValueKind.String &&
+                    double.TryParse(row[7].GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var to))
+                    turnover = to;
+                if (len > 8 && row[8].ValueKind == JsonValueKind.String &&
+                    double.TryParse(row[8].GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var amtWan))
+                    amountYuan = amtWan * 1e4; // 万元 → 元
 
                 bars.Add(new Bar
                 {
@@ -170,9 +193,8 @@ public class TencentBarFetcher : IBarDataFetcher
                     High = high,
                     Low = low,
                     Volume = volume,
-                    // 腾讯这个接口不直接给成交额/换手率；本项目的分析规则不依赖这两个字段
-                    Amount = 0,
-                    Turnover = 0,
+                    Amount = amountYuan,
+                    Turnover = turnover,
                     FetchedAt = DateTime.Now,
                 });
             }

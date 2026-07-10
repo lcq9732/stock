@@ -34,13 +34,20 @@ public class SinaListMarketCapFetcher : IMarketCapFetcher
         _listProvider = listProvider ?? new SinaStockListProvider();
     }
 
-    public async Task<List<MarketCapEntry>> GetMarketCapsAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct = default)
+    public async Task<MarketCapFetchResult> GetMarketCapsAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct = default)
     {
         var wanted = codes.ToHashSet();
         var allStocks = await _listProvider.GetAllStocksAsync(progress, ct);
-        return allStocks
+        var entries = allStocks
             .Where(s => wanted.Contains(s.Code) && s.CirculatingMarketCap is > 0)
             .Select(s => new MarketCapEntry(s.Code, s.CirculatingMarketCap!.Value))
             .ToList();
+        // 扫描本来就会看到全市场所有代码，不只是 wanted 里那些——把 wanted 之外的也顺带交给调用方，
+        // 让它能发现本地股票表里还没有的新股（见 MarketCapFetchResult 的类注释），不需要额外请求。
+        var newlyDiscovered = allStocks
+            .Where(s => !wanted.Contains(s.Code))
+            .Select(s => (s.Code, s.Name))
+            .ToList();
+        return new MarketCapFetchResult(entries, newlyDiscovered);
     }
 }

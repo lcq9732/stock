@@ -68,7 +68,7 @@ public class TencentMarketCapFetcher : IMarketCapFetcher
 
     /// <summary>Same per-stock independent-failure shape as EastMoneyMarketCapFetcher — one code's
     /// failure is skipped, not fatal to the batch.</summary>
-    public async Task<List<MarketCapEntry>> GetMarketCapsAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct = default)
+    public async Task<MarketCapFetchResult> GetMarketCapsAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct = default)
     {
         var result = new ConcurrentBag<MarketCapEntry>();
         var completed = 0;
@@ -95,7 +95,9 @@ public class TencentMarketCapFetcher : IMarketCapFetcher
             }
         });
         await Task.WhenAll(tasks);
-        return result.ToList();
+        // 逐只查询——只看得到被问到的这些代码，没有"顺带发现新股"这回事，NewlyDiscoveredCodes
+        // 永远是空的（见 MarketCapFetchResult 的类注释）。
+        return new MarketCapFetchResult(result.ToList(), new List<(string, string)>());
     }
 
     private async Task<MarketCapEntry?> FetchOneAsync(string code, CancellationToken ct)

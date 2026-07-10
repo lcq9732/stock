@@ -92,10 +92,31 @@
                     </Grid.ColumnDefinitions>
                     <ComboBox Grid.Column="0" x:Name="Sub1IndicatorCombo" Width="90" Margin="0,0,14,0" VerticalAlignment="Center"
                               SelectionChanged="SubIndicatorCombo_SelectionChanged">
+                        <!-- 顺序必须跟 QuoteSubIndicator 枚举严格一致（按 SelectedIndex 强转），改动两处要同步 -->
                         <ComboBoxItem Content="成交量" />
                         <ComboBoxItem Content="MACD" />
                         <ComboBoxItem Content="KDJ" />
                         <ComboBoxItem Content="RSI" />
+                        <ComboBoxItem Content="成交额" />
+                        <ComboBoxItem Content="换手率" />
+                        <ComboBoxItem Content="BOLL" />
+                        <ComboBoxItem Content="EMA" />
+                        <ComboBoxItem Content="SAR" />
+                        <ComboBoxItem Content="DMI" />
+                        <ComboBoxItem Content="BIAS" />
+                        <ComboBoxItem Content="CCI" />
+                        <ComboBoxItem Content="WR" />
+                        <ComboBoxItem Content="MTM" />
+                        <ComboBoxItem Content="ROC" />
+                        <ComboBoxItem Content="TRIX" />
+                        <ComboBoxItem Content="DMA" />
+                        <ComboBoxItem Content="OBV" />
+                        <ComboBoxItem Content="VR" />
+                        <ComboBoxItem Content="MFI" />
+                        <ComboBoxItem Content="EMV" />
+                        <ComboBoxItem Content="PSY" />
+                        <ComboBoxItem Content="ARBR" />
+                        <ComboBoxItem Content="ASI" />
                     </ComboBox>
                     <TextBlock Grid.Column="1" x:Name="Sub1InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
                     <StackPanel Grid.Column="2" x:Name="Sub1LegendPanel" Orientation="Horizontal" VerticalAlignment="Center" />
@@ -118,10 +139,31 @@
                     </Grid.ColumnDefinitions>
                     <ComboBox Grid.Column="0" x:Name="Sub2IndicatorCombo" Width="90" Margin="0,0,14,0" VerticalAlignment="Center"
                               SelectionChanged="SubIndicatorCombo_SelectionChanged">
+                        <!-- 顺序必须跟 QuoteSubIndicator 枚举严格一致（按 SelectedIndex 强转），改动两处要同步 -->
                         <ComboBoxItem Content="成交量" />
                         <ComboBoxItem Content="MACD" />
                         <ComboBoxItem Content="KDJ" />
                         <ComboBoxItem Content="RSI" />
+                        <ComboBoxItem Content="成交额" />
+                        <ComboBoxItem Content="换手率" />
+                        <ComboBoxItem Content="BOLL" />
+                        <ComboBoxItem Content="EMA" />
+                        <ComboBoxItem Content="SAR" />
+                        <ComboBoxItem Content="DMI" />
+                        <ComboBoxItem Content="BIAS" />
+                        <ComboBoxItem Content="CCI" />
+                        <ComboBoxItem Content="WR" />
+                        <ComboBoxItem Content="MTM" />
+                        <ComboBoxItem Content="ROC" />
+                        <ComboBoxItem Content="TRIX" />
+                        <ComboBoxItem Content="DMA" />
+                        <ComboBoxItem Content="OBV" />
+                        <ComboBoxItem Content="VR" />
+                        <ComboBoxItem Content="MFI" />
+                        <ComboBoxItem Content="EMV" />
+                        <ComboBoxItem Content="PSY" />
+                        <ComboBoxItem Content="ARBR" />
+                        <ComboBoxItem Content="ASI" />
                     </ComboBox>
                     <TextBlock Grid.Column="1" x:Name="Sub2InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
                     <StackPanel Grid.Column="2" x:Name="Sub2LegendPanel" Orientation="Horizontal" VerticalAlignment="Center" />

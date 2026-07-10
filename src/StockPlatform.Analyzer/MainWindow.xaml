@@ -42,6 +42,76 @@
              cross-method 自选股 tab — each tab has its own controls/results/log, switching tabs
              doesn't affect the others. -->
         <TabControl Grid.Row="2" SelectionChanged="TabControl_SelectionChanged">
+            <TabItem Header="三角收敛">
+                <Grid DataContext="{Binding TriangleConvergenceTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="130" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <TextBlock Text="固定使用日线" VerticalAlignment="Center" Foreground="Gray" />
+                        <TextBlock Text="形态窗口(天)：" VerticalAlignment="Center" Margin="16,0,0,0"
+                                   ToolTip="在最近N天内寻找摆动高/低点并拟合两条趋势线" />
+                        <TextBox Text="{Binding Lookback, UpdateSourceTrigger=PropertyChanged}" Width="50" Margin="4,0" />
+
+                        <TextBlock Text="摆动点窗口(±天)：" VerticalAlignment="Center" Margin="12,0,0,0"
+                                   ToolTip="前后各N天都不比它高/低，才算一个摆动高点/低点" />
+                        <TextBox Text="{Binding SwingWindow, UpdateSourceTrigger=PropertyChanged}" Width="50" Margin="4,0" />
+
+                        <TextBlock Text="R²下限：" VerticalAlignment="Center" Margin="12,0,0,0"
+                                   ToolTip="压力线/支撑线拟合优度(R²)都要达到这个下限才算形态成立；调低会放宽判定，可能多选出一些拟合不太整齐的股票。可输入小数，如0.45" />
+                        <TextBox Text="{Binding MinR2, UpdateSourceTrigger=LostFocus}" Width="50" Margin="4,0" />
+
+                        <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
+                        <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
+                                Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
+                        <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
+                                ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
+                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="把当前结果列表导出成 Excel(.xlsx)" />
+                        <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
+                    </StackPanel>
+
+                    <!-- Results — only stocks that satisfy all 3 criteria are ever added here (see
+                         TriangleConvergenceTabViewModel.RunAnalyzeAsync). -->
+                    <DataGrid x:Name="TriangleConvergenceGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5"
+                              ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;条件详情&quot;/&quot;行情详情&quot;查看对应图表">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
+                                <!-- 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
+                                <DataGridCheckBoxColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridCheckBoxColumn.Header>
+                            </DataGridCheckBoxColumn>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
+                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
+                            <DataGridTextColumn Header="收敛质量" Binding="{Binding ConvergenceQualityText}" Width="80" IsReadOnly="True"
+                                                SortMemberPath="SortScore" />
+                            <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
+                            <DataGridTemplateColumn Header="操作" Width="160">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button Content="条件详情" Width="70" Margin="2,1" Click="TriangleConvergenceCriteriaButton_Click" />
+                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
+                        <ListBox ItemsSource="{Binding LogLines}" FontFamily="Consolas" FontSize="12" />
+                    </GroupBox>
+                </Grid>
+            </TabItem>
+
             <TabItem Header="峰哥法">
                 <Grid DataContext="{Binding FoundationTab}" Margin="0,10,0,0">
                     <Grid.RowDefinitions>
@@ -64,6 +134,8 @@
                                 Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
                         <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
                                 ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
+                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="把当前结果列表导出成 Excel(.xlsx)" />
                         <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
                     </StackPanel>
 
@@ -74,7 +146,12 @@
                               AlternatingRowBackground="#F5F5F5"
                               ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;条件详情&quot;/&quot;行情详情&quot;查看对应图表">
                         <DataGrid.Columns>
-                            <DataGridCheckBoxColumn Header="选" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" />
+                            <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
+                                <!-- 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
+                                <DataGridCheckBoxColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridCheckBoxColumn.Header>
+                            </DataGridCheckBoxColumn>
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
@@ -117,6 +194,8 @@
                                 Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
                         <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
                                 ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
+                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="把当前结果列表导出成 Excel(.xlsx)" />
                         <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
                     </StackPanel>
 
@@ -127,7 +206,12 @@
                               AlternatingRowBackground="#F5F5F5"
                               ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;条件详情&quot;/&quot;行情详情&quot;查看对应图表">
                         <DataGrid.Columns>
-                            <DataGridCheckBoxColumn Header="选" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" />
+                            <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
+                                <!-- 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
+                                <DataGridCheckBoxColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridCheckBoxColumn.Header>
+                            </DataGridCheckBoxColumn>
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
@@ -166,6 +250,8 @@
                                 Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
                         <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
                                 ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
+                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="把当前结果列表导出成 Excel(.xlsx)" />
                         <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
                     </StackPanel>
 
@@ -176,7 +262,12 @@
                               AlternatingRowBackground="#F5F5F5"
                               ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;条件详情&quot;/&quot;行情详情&quot;查看对应图表">
                         <DataGrid.Columns>
-                            <DataGridCheckBoxColumn Header="选" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" />
+                            <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
+                                <!-- 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
+                                <DataGridCheckBoxColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridCheckBoxColumn.Header>
+                            </DataGridCheckBoxColumn>
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
@@ -186,63 +277,6 @@
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="MidCapPullbackCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </DataGridTemplateColumn.CellTemplate>
-                            </DataGridTemplateColumn>
-                        </DataGrid.Columns>
-                    </DataGrid>
-
-                    <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
-                        <ListBox ItemsSource="{Binding LogLines}" FontFamily="Consolas" FontSize="12" />
-                    </GroupBox>
-                </Grid>
-            </TabItem>
-
-            <TabItem Header="三角收敛">
-                <Grid DataContext="{Binding TriangleConvergenceTab}" Margin="0,10,0,0">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                        <RowDefinition Height="130" />
-                    </Grid.RowDefinitions>
-
-                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-                        <TextBlock Text="固定使用日线" VerticalAlignment="Center" Foreground="Gray" />
-                        <TextBlock Text="形态窗口(天)：" VerticalAlignment="Center" Margin="16,0,0,0"
-                                   ToolTip="在最近N天内寻找摆动高/低点并拟合两条趋势线" />
-                        <TextBox Text="{Binding Lookback, UpdateSourceTrigger=PropertyChanged}" Width="50" Margin="4,0" />
-
-                        <TextBlock Text="摆动点窗口(±天)：" VerticalAlignment="Center" Margin="12,0,0,0"
-                                   ToolTip="前后各N天都不比它高/低，才算一个摆动高点/低点" />
-                        <TextBox Text="{Binding SwingWindow, UpdateSourceTrigger=PropertyChanged}" Width="50" Margin="4,0" />
-
-                        <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
-                        <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
-                                Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
-                        <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
-                                ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
-                        <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
-                    </StackPanel>
-
-                    <!-- Results — only stocks that satisfy all 3 criteria are ever added here (see
-                         TriangleConvergenceTabViewModel.RunAnalyzeAsync). -->
-                    <DataGrid x:Name="TriangleConvergenceGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
-                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
-                              AlternatingRowBackground="#F5F5F5"
-                              ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;条件详情&quot;/&quot;行情详情&quot;查看对应图表">
-                        <DataGrid.Columns>
-                            <DataGridCheckBoxColumn Header="选" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" />
-                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
-                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
-                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
-                            <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
-                                <DataGridTemplateColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <StackPanel Orientation="Horizontal">
-                                            <Button Content="条件详情" Width="70" Margin="2,1" Click="TriangleConvergenceCriteriaButton_Click" />
                                             <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
                                         </StackPanel>
                                     </DataTemplate>
@@ -272,6 +306,8 @@
                                 Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
                         <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
                                 ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
+                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="把当前结果列表导出成 Excel(.xlsx)" />
                         <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
                     </StackPanel>
 
@@ -282,7 +318,12 @@
                               AlternatingRowBackground="#F5F5F5"
                               ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;条件详情&quot;/&quot;行情详情&quot;查看对应图表">
                         <DataGrid.Columns>
-                            <DataGridCheckBoxColumn Header="选" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" />
+                            <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
+                                <!-- 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
+                                <DataGridCheckBoxColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridCheckBoxColumn.Header>
+                            </DataGridCheckBoxColumn>
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
@@ -307,6 +348,115 @@
                 </Grid>
             </TabItem>
 
+            <TabItem Header="短线法">
+                <Grid DataContext="{Binding ShortTermTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="130" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <TextBlock Text="固定使用日线" VerticalAlignment="Center" Foreground="Gray" />
+                        <TextBlock Text="放量倍数：" VerticalAlignment="Center" Margin="16,0,0,0"
+                                   ToolTip="当日成交量 ≥ 前5日均量 × 此倍数（默认1.5）" />
+                        <TextBox Text="{Binding VolumeSurgeRatio, UpdateSourceTrigger=LostFocus}" Width="45" Margin="4,0" />
+
+                        <TextBlock Text="涨幅上限(%)：" VerticalAlignment="Center" Margin="12,0,0,0"
+                                   ToolTip="当日涨幅超过这个值就算追高、不选（默认7）" />
+                        <TextBox Text="{Binding MaxDayGainPct, UpdateSourceTrigger=LostFocus}" Width="45" Margin="4,0" />
+
+                        <TextBlock Text="流通市值(亿)：" VerticalAlignment="Center" Margin="12,0,0,0"
+                                   ToolTip="只选流通市值落在此区间的股票（默认30~300亿）" />
+                        <TextBox Text="{Binding MinCapYi, UpdateSourceTrigger=LostFocus}" Width="45" Margin="4,0" />
+                        <TextBlock Text="~" VerticalAlignment="Center" />
+                        <TextBox Text="{Binding MaxCapYi, UpdateSourceTrigger=LostFocus}" Width="45" Margin="4,0" />
+
+                        <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
+                        <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
+                                Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
+                        <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
+                                ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
+                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="把当前结果列表导出成 Excel(.xlsx)" />
+                        <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
+                    </StackPanel>
+
+                    <DataGrid x:Name="ShortTermGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5"
+                              ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;条件详情&quot;/&quot;行情详情&quot;查看对应图表">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
+                                <DataGridCheckBoxColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridCheckBoxColumn.Header>
+                            </DataGridCheckBoxColumn>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
+                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
+                            <DataGridTextColumn Header="近15日涨停" Binding="{Binding ConvergenceQualityText}" Width="90" IsReadOnly="True"
+                                                SortMemberPath="SortScore" />
+                            <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
+                            <DataGridTemplateColumn Header="操作" Width="160">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button Content="条件详情" Width="70" Margin="2,1" Click="ShortTermCriteriaButton_Click" />
+                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
+                        <ListBox ItemsSource="{Binding LogLines}" FontFamily="Consolas" FontSize="12" />
+                    </GroupBox>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="查询">
+                <Grid DataContext="{Binding QueryTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <TextBlock Text="股票代码或名称：" VerticalAlignment="Center" />
+                        <TextBox Width="200" Margin="4,0" VerticalContentAlignment="Center"
+                                 Text="{Binding QueryText, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="支持部分匹配，如输入 000066 或 长城，回车或点查询">
+                            <TextBox.InputBindings>
+                                <KeyBinding Key="Return" Command="{Binding SearchCommand}" />
+                            </TextBox.InputBindings>
+                        </TextBox>
+                        <Button Content="查询" Command="{Binding SearchCommand}" Width="90" Margin="8,0,0,0" />
+                        <TextBlock Text="{Binding StatusText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
+                    </StackPanel>
+
+                    <DataGrid x:Name="QueryGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="True"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5"
+                              ToolTip="点&quot;K线详情&quot;查看该股票的行情K线图">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="90" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="160" />
+                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="140" />
+                            <DataGridTemplateColumn Header="操作" Width="120">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <Button Content="K线详情" Width="90" Margin="2,1" Click="QueryQuoteDetailButton_Click" />
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+
             <TabItem Header="自选股">
                 <Grid DataContext="{Binding WatchlistTab}" Margin="0,10,0,0">
                     <Grid.RowDefinitions>
@@ -315,9 +465,11 @@
                     </Grid.RowDefinitions>
 
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-                        <TextBlock Text="从上面4个方法的结果里勾选后点&quot;加入自选&quot;加进来的股票，记录了当时用的方法/数据日期/价格/判断依据，方便以后回来看效果" VerticalAlignment="Center" Foreground="Gray" TextWrapping="Wrap" MaxWidth="500" />
+                        <TextBlock Text="从上面5个方法的结果里勾选后点&quot;加入自选&quot;加进来的股票，记录了当时用的方法/数据日期/价格/判断依据，方便以后回来看效果" VerticalAlignment="Center" Foreground="Gray" TextWrapping="Wrap" MaxWidth="500" />
                         <Button Content="刷新" Command="{Binding RefreshCommand}" Width="80" Margin="16,0,0,0" />
                         <Button Content="移除勾选" Command="{Binding RemoveSelectedCommand}" Width="80" Margin="8,0,0,0" />
+                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="把自选股列表导出成 Excel(.xlsx)" />
                     </StackPanel>
 
                     <DataGrid x:Name="WatchlistGrid" Grid.Row="1" ItemsSource="{Binding Entries}" AutoGenerateColumns="False" IsReadOnly="False"
@@ -325,14 +477,26 @@
                               AlternatingRowBackground="#F5F5F5"
                               ToolTip="点&quot;条件详情&quot;查看加入时的判断依据（用最新数据重新画图），点&quot;行情详情&quot;查看当前行情">
                         <DataGrid.Columns>
-                            <DataGridCheckBoxColumn Header="选" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" />
+                            <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
+                                <!-- 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
+                                <DataGridCheckBoxColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridCheckBoxColumn.Header>
+                            </DataGridCheckBoxColumn>
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="方法" Binding="{Binding Method}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="数据日期" Binding="{Binding DataDate}" Width="90" IsReadOnly="True" />
                             <DataGridTextColumn Header="当时价格" Binding="{Binding PriceAtPick, StringFormat=F2}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="最新收盘" Binding="{Binding LatestCloseText}" Width="130" IsReadOnly="True" />
+                            <DataGridTextColumn Header="选中后涨跌幅" Binding="{Binding ChangeText}" Width="100" IsReadOnly="True">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Foreground" Value="{Binding ChangeColor}" />
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
                             <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedText}" Width="70" IsReadOnly="True" />
-                            <DataGridTextColumn Header="加入时间" Binding="{Binding AddedAt}" Width="130" IsReadOnly="True" />
                             <DataGridTemplateColumn Header="操作" Width="160">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>

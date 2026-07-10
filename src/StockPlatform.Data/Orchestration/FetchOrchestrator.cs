@@ -62,6 +62,12 @@ public class FetchOrchestrator
     // 覆盖"耀哥法"新规则要看的最近3天再留足缓冲，不需要跟K线的lookbackYears一样长。
     private const int NetInflowInitialLookbackDays = 60;
 
+    // "拉取当天"/"重新拉取失败股票"里，遇到本地完全没有K线历史的股票（尤其是"拉取当天"扫市值时
+    // 顺带发现的新股）时的回看年数——这两个入口没有像"拉取全部"那样的用户可调回看框，用这个固定
+    // 值兜底，跟"拉取全部"的默认值保持一致。数据源只会返回上市日之后的数据，请求这么长的窗口对
+    // 新股实际只会拿到"上市→当天"的完整历史，不会有多余。
+    private const int DefaultLookbackYears = 3;
+
     // 15:00只是常规连续竞价的收盘时间，15:00~15:30还有盘后定价交易（大宗/固定价格成交），这段
     // 时间抓到的数据不算真正确定——用16:00才能确保盘后定价交易也结束了，判断"某一天的数据是不是
     // 已经收盘后抓到、以后不会再变了"更安全（2026-07-09新增，2026-07-09从15点改成16点，见
@@ -76,6 +82,14 @@ public class FetchOrchestrator
     /// 隔了几天才想起来要补，只要抓取时间点晚于当天16点就成立，不需要额外判断具体是哪一天。</summary>
     private static bool IsConfirmedFinal(DateTime fetchedAt, DateTime tradingDay) =>
         fetchedAt >= tradingDay.Date.AddHours(MarketCloseHour);
+
+    /// <summary>"mm\:ss"格式的TimeSpan在超过1小时后会把小时部分直接丢掉（比如1小时5分12秒会被
+    /// 打印成"05:12"，看起来像是时间变短了/重置了，而不是继续在涨）——全市场扫描现在经常跑到
+    /// 一小时以上，这个格式化统一换成超过1小时时带上小时数。</summary>
+    private static string FormatElapsed(TimeSpan elapsed) =>
+        elapsed.TotalHours >= 1
+            ? $"{(int)elapsed.TotalHours}:{elapsed.Minutes:D2}:{elapsed.Seconds:D2}"
+            : $"{elapsed.Minutes:D2}:{elapsed.Seconds:D2}";
 
     public FetchOrchestrator(
         FetchPaths paths,
@@ -111,6 +125,8 @@ public class FetchOrchestrator
         // when the run ends — otherwise a later run would get duplicate deliveries.
         void ForwardStatus(string msg) => progress?.Report(msg);
         source.Fetcher.OnStatus += ForwardStatus;
+        _marketCapFetcher.OnStatus += ForwardStatus;
+        _netInflowFetcher.OnStatus += ForwardStatus;
         try
         {
             return await RunFetchAllInternalAsync(source, lookbackYears, announcementKeywords, progress, ct);
@@ -118,6 +134,8 @@ public class FetchOrchestrator
         finally
         {
             source.Fetcher.OnStatus -= ForwardStatus;
+            _marketCapFetcher.OnStatus -= ForwardStatus;
+            _netInflowFetcher.OnStatus -= ForwardStatus;
         }
     }
 
@@ -128,6 +146,8 @@ public class FetchOrchestrator
     {
         void ForwardStatus(string msg) => progress?.Report(msg);
         source.Fetcher.OnStatus += ForwardStatus;
+        _marketCapFetcher.OnStatus += ForwardStatus;
+        _netInflowFetcher.OnStatus += ForwardStatus;
         try
         {
             return await RunFetchDayInternalAsync(source, date, announcementKeywords, progress, ct);
@@ -135,6 +155,8 @@ public class FetchOrchestrator
         finally
         {
             source.Fetcher.OnStatus -= ForwardStatus;
+            _marketCapFetcher.OnStatus -= ForwardStatus;
+            _netInflowFetcher.OnStatus -= ForwardStatus;
         }
     }
 
@@ -149,7 +171,7 @@ public class FetchOrchestrator
         var sw = Stopwatch.StartNew();
         progress?.Report("正在获取全市场股票列表...");
         var stocks = await source.StockListProvider.GetAllStocksAsync(progress, ct);
-        progress?.Report($"共 {stocks.Count} 只股票，数据源：{source.Name}，开始抓取（已用时 {sw.Elapsed:mm\\:ss}）");
+        progress?.Report($"共 {stocks.Count} 只股票，数据源：{source.Name}，开始抓取（已用时 {FormatElapsed(sw.Elapsed)}）");
         SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, stocks.Select(s => (s.Code, s.Name)));
 
         await FetchMarketCapAsync(stocks.Select(s => s.Code).ToList(), progress, ct);
@@ -205,7 +227,13 @@ public class FetchOrchestrator
         var sw = Stopwatch.StartNew();
         progress?.Report($"按天抓取 {date:yyyy-MM-dd}，共 {stocks.Count} 只股票（使用本地已有列表，不重新扫描全市场），数据源：{source.Name}");
 
-        await FetchMarketCapAsync(stocks.Select(s => s.Code).ToList(), progress, ct);
+        // 流通市值本来就要扫一遍全市场列表，顺带发现的新股（本地列表里还没有的代码）在这里并入
+        // 本轮的 stocks——这样"拉取当天"也能当天就把新股纳入K线/资金净流入抓取，不用非得先专门跑
+        // 一次"拉取全部"才会发现它（2026-07-10新增，见 FetchMarketCapAsync 的类注释）。
+        var newCodes = await FetchMarketCapAsync(stocks.Select(s => s.Code).ToList(), progress, ct);
+        if (newCodes.Count > 0)
+            stocks = stocks.Concat(newCodes).ToList();
+
         await FetchNetInflowAsync(stocks.Select(s => s.Code).ToList(), day, exactDayOnly: true, progress, ct);
         await FetchAnnouncementsAsync(announcementKeywords, date, date, progress, ct);
 
@@ -222,8 +250,21 @@ public class FetchOrchestrator
             DateTime start;
             lock (_dbLock)
             {
-                var existing = currentRepo.Query(stock.Code, Granularity.Day, day, day).FirstOrDefault();
-                start = (existing != null && IsConfirmedFinal(existing.FetchedAt, day)) ? day.AddDays(1) : day;
+                var latest = currentRepo.GetLatestBarInfo(stock.Code, Granularity.Day);
+                if (latest == null)
+                {
+                    // 本地完全没有这只股票的K线（多半是刚才扫市值顺带发现的新股）——不只抓 day 这
+                    // 一天，而是抓一个较长的回看窗口（跟"拉取全部"首次抓一只新股一致）。数据源本来
+                    // 也只会返回上市日之后的数据，请求长窗口实际只会拿到"上市→day"的完整历史，不会
+                    // 有多余，这样无论隔了几天才发现它，都能一次抓齐它到目前为止的全部K线，不会只
+                    // 剩孤零零一天（2026-07-10新增）。
+                    start = day.AddYears(-DefaultLookbackYears);
+                }
+                else
+                {
+                    var existing = currentRepo.Query(stock.Code, Granularity.Day, day, day).FirstOrDefault();
+                    start = (existing != null && IsConfirmedFinal(existing.FetchedAt, day)) ? day.AddDays(1) : day;
+                }
             }
             return ProcessOneStockAsync(stock.Code, source, start, day, currentRepo, errors, failedCodes, stats, progress, stocks.Count, () => Interlocked.Increment(ref completed), sw, ct);
         });
@@ -247,6 +288,8 @@ public class FetchOrchestrator
     {
         void ForwardStatus(string msg) => progress?.Report(msg);
         source.Fetcher.OnStatus += ForwardStatus;
+        _marketCapFetcher.OnStatus += ForwardStatus;
+        _netInflowFetcher.OnStatus += ForwardStatus;
         try
         {
             return await RunRetryFailedInternalAsync(source, progress, ct);
@@ -254,6 +297,8 @@ public class FetchOrchestrator
         finally
         {
             source.Fetcher.OnStatus -= ForwardStatus;
+            _marketCapFetcher.OnStatus -= ForwardStatus;
+            _netInflowFetcher.OnStatus -= ForwardStatus;
         }
     }
 
@@ -340,7 +385,13 @@ public class FetchOrchestrator
         // which is what makes 拉取全部/拉取当天 safe to re-run without re-downloading everything.
         // See FetchStats.Summarize(), reported once at the end of the run, for visible proof of
         // how many stocks this run actually skipped vs fetched vs failed.
-        if (start.Date > end.Date) { stats.Skip(); reportCompleted(); return; }
+        if (start.Date > end.Date) { stats.Skip(); ReportCompareProgress(reportCompleted(), totalCount, progress, sw); return; }
+
+        // 日志只在真的要发请求时才写这一行（2026-07-10按用户要求改的——之前是按"处理满5只"汇总
+        // 报一次，一行里经常混着"跳过的"和"真的发了请求的"，看不出具体是哪只被更新了）。这一行
+        // 不节流、每次真发请求都打印一次——网络请求本身受限速器节流（并发+间隔），节奏已经够慢，
+        // 不会刷屏。
+        progress?.Report($"正在抓取 {code}");
 
         List<Bar>? newDayBars = null;
         try
@@ -357,7 +408,7 @@ public class FetchOrchestrator
             errors.Add($"{code}: [{source.Name}] {ex.Message}");
             failedCodes.Add(code);
             stats.Fail();
-            reportCompleted();
+            ReportCompareProgress(reportCompleted(), totalCount, progress, sw);
             return;
         }
 
@@ -390,13 +441,18 @@ public class FetchOrchestrator
             stats.FetchedButEmpty();
         }
 
-        var done = reportCompleted();
-        // Reported often (every 5, not 50) so the log keeps moving and it's clear the run is
-        // still alive rather than stuck — a single stock can legitimately take up to ~48s under
-        // the rate limiter's retry/circuit-breaker (see RateLimiter), so long gaps are expected,
-        // not a hang.
+        ReportCompareProgress(reportCompleted(), totalCount, progress, sw);
+    }
+
+    /// <summary>"正在对比数据"这一条只是给用户看整体进度用的粗粒度心跳（跳过的/真的发了请求的
+    /// 都算在内），跟"正在抓取 {code}"那条不是一回事——那条才是"这只股票确实发了网络请求"的
+    /// 精确记录，见 ProcessOneStockAsync。报告间隔沿用之前的"每5只报一次"（不是每50），这样日志
+    /// 能持续往前走、看得出运行中还活着——单只股票在限速器的重试/熔断下最长可能要~48秒（见
+    /// RateLimiter），中间隔久一点是正常的，不是卡住。</summary>
+    private static void ReportCompareProgress(int done, int totalCount, IProgress<string>? progress, Stopwatch sw)
+    {
         if (done % 5 == 0 || done == totalCount)
-            progress?.Report($"正在抓取 ({done}/{totalCount})，已用时 {sw.Elapsed:mm\\:ss}");
+            progress?.Report($"正在对比数据 ({done}/{totalCount})，已用时 {FormatElapsed(sw.Elapsed)}");
     }
 
     /// <summary>
@@ -416,16 +472,24 @@ public class FetchOrchestrator
     /// "这一轮扫描失败了"——扫描失败时把本轮请求的 <paramref name="codes"/> 全部记进
     /// <see cref="Manifest.FailedMarketCapCodes"/>；扫描成功时把这些代码全部移出（某只股票本来
     /// 就没有市值数据不算失败）。见 Manifest.FailedMarketCapCodes 的类注释。
+    ///
+    /// 新股发现（2026-07-10新增）：<see cref="SinaListMarketCapFetcher"/>本来就要扫一遍全市场
+    /// 列表，天然会看到<paramref name="codes"/>里没有的代码（本地股票表还不知道的新股/新上市）——
+    /// 顺手把这些也写进本地股票表（见 <see cref="MarketCapFetchResult.NewlyDiscoveredCodes"/>），
+    /// 不需要额外的网络请求。返回值供调用方（尤其是"拉取当天"）把这些新股也纳入本轮的K线/资金
+    /// 净流入抓取——不过"拉取当天"性质上只抓一天，新股不会像"拉取全部"那样自动回补历史，仍然需要
+    /// 跑一次"拉取全部"才能补齐历史（这个方法只保证新股"从现在起不再被漏掉"）。
     /// </summary>
-    private async Task FetchMarketCapAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct)
+    private async Task<List<(string Code, string Name)>> FetchMarketCapAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct)
     {
         List<string> failedThisRun;
+        var newlyDiscovered = new List<(string Code, string Name)>();
         try
         {
             progress?.Report($"正在获取流通市值（共 {codes.Count} 只股票，逐只查询，会比较慢）...");
-            var entries = await _marketCapFetcher.GetMarketCapsAsync(codes, progress, ct);
+            var result = await _marketCapFetcher.GetMarketCapsAsync(codes, progress, ct);
             var fetchedAt = DateTime.Now;
-            var metrics = entries.Select(e => new FundamentalMetric
+            var metrics = result.Entries.Select(e => new FundamentalMetric
             {
                 Code = e.Code,
                 MetricKey = MetricKeys.CirculatingMarketCap,
@@ -435,7 +499,15 @@ public class FetchOrchestrator
                 FetchedAt = fetchedAt,
             });
             _fundamentalRepository.Upsert(metrics);
-            progress?.Report($"流通市值写入完成，共 {entries.Count} 条");
+            progress?.Report($"流通市值写入完成，共 {result.Entries.Count} 条");
+
+            if (result.NewlyDiscoveredCodes.Count > 0)
+            {
+                SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, result.NewlyDiscoveredCodes);
+                newlyDiscovered = result.NewlyDiscoveredCodes;
+                progress?.Report($"发现本地股票表里没有的新股票 {newlyDiscovered.Count} 只，已加入本地列表");
+            }
+
             failedThisRun = new List<string>(); // 整轮扫描成功——不管每只股票是否真的有市值数据，都不算失败
         }
         catch (OperationCanceledException)
@@ -454,6 +526,8 @@ public class FetchOrchestrator
             manifest.FailedMarketCapCodes = ComputeUpdatedFailedCodes(manifest.FailedMarketCapCodes, codes, failedThisRun);
             _manifestStore.Save(manifest);
         }
+
+        return newlyDiscovered;
     }
 
     /// <summary>

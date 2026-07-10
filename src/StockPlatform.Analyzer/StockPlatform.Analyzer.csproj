@@ -5,6 +5,7 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>StockPlatform.Analyzer</AssemblyName>
     <RootNamespace>StockPlatform.Analyzer</RootNamespace>
@@ -18,6 +19,16 @@
 
   <ItemGroup>
     <PackageReference Include="OxyPlot.Wpf" Version="2.1.2" />
+  </ItemGroup>
+
+  <!-- UseWindowsForms=true (for the tray-icon NotifyIcon, see MainWindow.xaml.cs) makes the SDK's
+       ImplicitUsings add a project-wide "global using System.Windows.Forms;" — that collides with
+       WPF types of the same name used everywhere else in this WPF app (MessageBox, Button,
+       MouseEventArgs, Brushes, Color, ...). Remove just that one implicit using; the tray-icon code
+       fully-qualifies every System.Windows.Forms.* type it needs anyway, so nothing else changes. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
   </ItemGroup>
 
   <ItemGroup>

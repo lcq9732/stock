@@ -52,4 +52,11 @@ public class StockScreenResult
     /// tracking whether the pick actually performed well.</summary>
     public DateTime? DataDate { get; set; }
     public double? LastClose { get; set; }
+
+    /// <summary>Optional 0–100 quality/ranking score for methods where "passed" is a fuzzy match and
+    /// candidates should be ranked rather than treated as equally good. Only 三角收敛
+    /// (TriangleConvergenceAnalysisEngine) sets it today — its "收敛质量" (how tightly the two
+    /// trendlines narrow + how well price stays between them); null for the other methods, whose
+    /// results are all equally "passed all rules". The tab sorts its results grid by this desc.</summary>
+    public double? SortScore { get; set; }
 }
