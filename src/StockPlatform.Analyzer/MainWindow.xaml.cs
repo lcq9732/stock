@@ -182,6 +182,16 @@ public partial class MainWindow : Window
         new TriangleConvergenceDetailWindow(row.Result, bars, vm.TriangleConvergenceTab.Lookback, vm.TriangleConvergenceTab.SwingWindow) { Owner = this }.ShowDialog();
     }
 
+    private void RisingLowsCriteriaButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
+        // 手工验证模式下图表数据也截到分析用的截止日期，否则图上画的锚点（用全量数据重新定位）
+        // 会和当时的判定结果对不上
+        if (!TryGetBars(vm, row, out var bars, vm.RisingLowsTab.AppliedCutoffDate)) return;
+        new RisingLowsDetailWindow(row.Result, bars) { Owner = this }.ShowDialog();
+    }
+
     // 短线法的"条件详情"复用金叉法的详情窗口（GoldenCrossDetailWindow）——短线法用到的指标
     // （MA5/MA10、前20日最高价突破线、成交量对比5日均量、MACD）正好是那张图已经画的一个子集，
     // 且突破线用的是同一套"前20日最高价"口径，图和条件文字对得上（见 ShortTermAnalysisEngine 注释）。
@@ -261,6 +271,13 @@ public partial class MainWindow : Window
                     new TriangleConvergenceDetailWindow(result, bars, entry.Lookback ?? 60, vm.TriangleConvergenceTab.SwingWindow) { Owner = this }.ShowDialog();
                     break;
                 }
+                case "阶梯低点法":
+                {
+                    var bars = vm.BarRepository.Query(entry.Code, Granularity.Day);
+                    if (bars.Count == 0) throw new InvalidOperationException("没有找到该股票的K线数据。");
+                    new RisingLowsDetailWindow(result, bars) { Owner = this }.ShowDialog();
+                    break;
+                }
                 default:
                     MessageBox.Show(this, $"未知方法：{entry.Method}", "无法显示详情", MessageBoxButton.OK, MessageBoxImage.Warning);
                     break;
@@ -293,6 +310,13 @@ public partial class MainWindow : Window
             OpenQuoteDetail(row.Code, row.Name);
     }
 
+    // 板块热度Tab里成分股的"K线详情"——同一个纯行情窗口。
+    private void BoardMemberQuoteDetailButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is BoardMemberRowViewModel row)
+            OpenQuoteDetail(row.Code, row.Name);
+    }
+
     private void OpenQuoteDetail(string code, string name)
     {
         if (DataContext is not MainViewModel vm) return;
@@ -306,7 +330,9 @@ public partial class MainWindow : Window
         new QuoteDetailWindow(code, name, vm.BarRepository) { Owner = this }.ShowDialog();
     }
 
-    private bool TryGetBars(MainViewModel vm, ResultRowViewModel row, out List<Bar> bars)
+    /// <param name="cutoffDate">非空时把K线截到这一天(含)——阶梯低点法的"按历史截止日期验证"
+    /// 模式用，保证详情图和当时的判定用同一批数据。</param>
+    private bool TryGetBars(MainViewModel vm, ResultRowViewModel row, out List<Bar> bars, DateTime? cutoffDate = null)
     {
         bars = null!;
         if (row.Error != null)
@@ -315,7 +341,8 @@ public partial class MainWindow : Window
             return false;
         }
 
-        bars = vm.BarRepository.Query(row.Code, row.Result.Granularity);
+        bars = vm.BarRepository.Query(row.Code, row.Result.Granularity,
+            end: cutoffDate?.Date.AddDays(1).AddTicks(-1));
         if (bars.Count == 0)
         {
             MessageBox.Show(this, "没有找到该股票的K线数据。", "无法显示详情", MessageBoxButton.OK, MessageBoxImage.Information);

@@ -59,6 +59,24 @@ public static class SqliteSchema
                 fetched_at TEXT,
                 PRIMARY KEY (code, title, publish_date)
             );
+
+            CREATE TABLE IF NOT EXISTS Board (
+                board_code TEXT PRIMARY KEY,
+                board_type INTEGER NOT NULL,   -- 0=概念/题材, 1=行业
+                name TEXT,
+                member_count INTEGER,
+                change_pct REAL,
+                amount REAL,
+                leader_code TEXT,
+                leader_name TEXT,
+                as_of TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS BoardMember (
+                board_code TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                PRIMARY KEY (board_code, stock_code)
+            );
             """;
         cmd.ExecuteNonQuery();
 

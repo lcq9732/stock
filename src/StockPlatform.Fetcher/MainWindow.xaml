@@ -44,6 +44,9 @@
             <Button Content="{Binding FailedCodeCount, StringFormat='重新拉取失败股票（{0}）'}"
                     Command="{Binding RetryFailedCommand}" Width="150" Margin="12,0,4,0"
                     ToolTip="只重新抓取上次记录的失败项——K线、流通市值、资金净流入各自独立记录失败，这里会分别重试（不重新扫描全市场股票列表，不重复跑公告）。市值本身是整轮扫描，重试不会比正常跑一次更快，但能正确清零失败记录；K线和资金净流入是逐只精确重试。可以反复点击——重试之后如果还有失败的，数字不会清零，可以继续点" />
+
+            <Button Content="拉取板块" Command="{Binding FetchBoardsCommand}" Width="90" Margin="12,0,4,0"
+                    ToolTip="抓取概念/题材板块 + 行业板块的最新行情（涨跌幅/成交额/领涨股）及各板块成分股，整体覆盖写入本地库，供分析程序的\板块热度\页使用。数据来自新浪，是当下快照（盘中实时/收盘后为当日）。跟K线抓取相互独立，可单独点。" />
         </StackPanel>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">

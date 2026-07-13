@@ -3,7 +3,10 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:oxy="http://oxyplot.org/wpf"
         Title="股票行情" Height="900" Width="1200" MinWidth="800" MinHeight="500"
-        WindowStartupLocation="CenterOwner" WindowState="Maximized">
+        WindowStartupLocation="CenterOwner" WindowState="Maximized"
+        Background="Black">
+    <!-- 深色主题（仿通达信/常见券商软件）：黑底 + 浅色文字。故意不用 TextBlock 全局隐式样式——
+         那会把指标下拉框（浅底）里的文字也染成浅色导致看不清，所以在需要的文字上逐个显式设浅色。 -->
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -17,7 +20,7 @@
         <!-- 典型股票APP的抬头：代码/名称 + 最新价 + 涨跌幅（红涨绿跌）——固定按日线算，跟下面
              图表显示的K线粒度无关（这是"现在的实际价格"，不是"图表这一根的价格"）。 -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
-            <TextBlock x:Name="TitleText" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" />
+            <TextBlock x:Name="TitleText" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Foreground="#EEEEEE" />
             <TextBlock x:Name="LatestCloseText" FontSize="18" FontWeight="Bold" Margin="16,0,0,0" VerticalAlignment="Center" />
             <TextBlock x:Name="ChangeText" FontSize="14" Margin="8,0,0,0" VerticalAlignment="Center" />
         </StackPanel>
@@ -26,19 +29,19 @@
              不硬凑）。见典型股票APP行情页的那两行统计，桌面端够宽，合并成一行。 -->
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
             <TextBlock Text="开:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="OpenText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock x:Name="OpenText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
             <TextBlock Text="最高:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="HighText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock x:Name="HighText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
             <TextBlock Text="最低:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="LowText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock x:Name="LowText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
             <TextBlock Text="昨收:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="PrevCloseText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock x:Name="PrevCloseText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
             <TextBlock Text="量:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="VolumeText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock x:Name="VolumeText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
             <TextBlock Text="额:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="AmountText" Margin="2,0,16,0" VerticalAlignment="Center" />
+            <TextBlock x:Name="AmountText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
             <TextBlock Text="换手:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="TurnoverText" Margin="2,0,0,0" VerticalAlignment="Center" />
+            <TextBlock x:Name="TurnoverText" Margin="2,0,0,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
         </StackPanel>
 
         <!-- K线粒度切换——分时/五日需要实时分时数据，这套系统目前只抓日线（周/月线是本地聚合），
@@ -62,14 +65,14 @@
                  + 一行带涨跌箭头的MA当前值（默认显示最新一根K线，鼠标悬浮到某一天会跟着变成那天的
                  OHLC+MA，见 QuoteDetailWindow.xaml.cs UpdateMainInfo）。颜色直接标在文字上，不需要
                  单独的图例色块了。 -->
-            <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+            <Border Grid.Row="0" Padding="6,3" Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="K线" FontWeight="Bold" FontSize="12" Margin="0,0,14,0" VerticalAlignment="Center" />
-                    <TextBlock Grid.Column="1" x:Name="MainInfoText" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Grid.Column="0" Text="K线" FontWeight="Bold" FontSize="12" Margin="0,0,14,0" VerticalAlignment="Center" Foreground="#EEEEEE" />
+                    <TextBlock Grid.Column="1" x:Name="MainInfoText" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Foreground="#DDDDDD" />
                 </Grid>
             </Border>
             <oxy:PlotView Grid.Row="1" x:Name="MainPlot" Model="{Binding MainPlotModel}" />
@@ -83,7 +86,7 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+            <Border Grid.Row="0" Padding="6,3" Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -118,7 +121,7 @@
                         <ComboBoxItem Content="ARBR" />
                         <ComboBoxItem Content="ASI" />
                     </ComboBox>
-                    <TextBlock Grid.Column="1" x:Name="Sub1InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" x:Name="Sub1InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" Foreground="#DDDDDD" />
                     <StackPanel Grid.Column="2" x:Name="Sub1LegendPanel" Orientation="Horizontal" VerticalAlignment="Center" />
                 </Grid>
             </Border>
@@ -130,7 +133,7 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <Border Grid.Row="0" Padding="6,3" Background="#F5F5F5" BorderBrush="#DDDDDD" BorderThickness="0,0,0,1">
+            <Border Grid.Row="0" Padding="6,3" Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -165,7 +168,7 @@
                         <ComboBoxItem Content="ARBR" />
                         <ComboBoxItem Content="ASI" />
                     </ComboBox>
-                    <TextBlock Grid.Column="1" x:Name="Sub2InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" x:Name="Sub2InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" Foreground="#DDDDDD" />
                     <StackPanel Grid.Column="2" x:Name="Sub2LegendPanel" Orientation="Horizontal" VerticalAlignment="Center" />
                 </Grid>
             </Border>

@@ -95,6 +95,18 @@ public class SqliteBarRepository : IBarRepository
         return DateTime.ParseExact((string)result, DateFormat, CultureInfo.InvariantCulture);
     }
 
+    public DateTime? GetOverallLatestPeriodStartOnOrBefore(string granularity, DateTime cutoff)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT MAX(period_start) FROM Bar WHERE granularity = $granularity AND period_start <= $cutoff;";
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        cmd.Parameters.AddWithValue("$cutoff", cutoff.ToString(DateFormat, CultureInfo.InvariantCulture));
+        var result = cmd.ExecuteScalar();
+        if (result == null || result is DBNull) return null;
+        return DateTime.ParseExact((string)result, DateFormat, CultureInfo.InvariantCulture);
+    }
+
     public DateTime? GetOverallEarliestPeriodStart(string granularity)
     {
         using var conn = Open();

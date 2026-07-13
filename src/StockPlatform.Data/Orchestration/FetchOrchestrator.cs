@@ -51,6 +51,8 @@ public class FetchOrchestrator
     private readonly IMarketCapFetcher _marketCapFetcher;
     private readonly INetInflowFetcher _netInflowFetcher;
     private readonly AnnouncementFetchOrchestrator _announcementOrchestrator;
+    private readonly IBoardFetcher _boardFetcher;
+    private readonly IBoardRepository _boardRepository;
     private readonly object _dbLock = new();
 
     // 拉取全部对同一批关键词、同一天窗口重复扫描是安全的（OrderWinAnnouncement 主键去重），所以
@@ -97,7 +99,9 @@ public class FetchOrchestrator
         IFundamentalMetricRepository fundamentalRepository,
         IMarketCapFetcher marketCapFetcher,
         INetInflowFetcher netInflowFetcher,
-        AnnouncementFetchOrchestrator announcementOrchestrator)
+        AnnouncementFetchOrchestrator announcementOrchestrator,
+        IBoardFetcher boardFetcher,
+        IBoardRepository boardRepository)
     {
         _paths = paths;
         _manifestStore = manifestStore;
@@ -105,6 +109,56 @@ public class FetchOrchestrator
         _marketCapFetcher = marketCapFetcher;
         _netInflowFetcher = netInflowFetcher;
         _announcementOrchestrator = announcementOrchestrator;
+        _boardFetcher = boardFetcher;
+        _boardRepository = boardRepository;
+    }
+
+    /// <summary>
+    /// 抓取板块数据（概念/题材 + 行业）及各板块成分股，整体覆盖写入本地库（见 IBoardRepository）。
+    /// 独立于 K线/市值/资金流的抓取——是一个单独的按钮触发（"拉取板块"），因为板块热点是"当下快照"、
+    /// 跟历史K线的增量抓取不是一回事，也不想让它拖慢主抓取。
+    /// </summary>
+    public async Task<FetchResult> RunFetchBoardsAsync(IProgress<string>? progress, CancellationToken ct = default)
+    {
+        var errors = new List<string>();
+        void Forward(string s) => progress?.Report(s);
+        _boardFetcher.OnStatus += Forward;
+        try
+        {
+            _boardRepository.EnsureSchema();
+            var all = new List<Board>();
+            foreach (var (type, label) in new[] { (BoardType.Concept, "概念/题材"), (BoardType.Industry, "行业") })
+            {
+                ct.ThrowIfCancellationRequested();
+                progress?.Report($"抓取{label}板块列表...");
+                var list = await _boardFetcher.FetchBoardListAsync(type, ct);
+                progress?.Report($"{label}板块 {list.Count} 个，开始抓取成分股...");
+                for (int i = 0; i < list.Count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    try
+                    {
+                        list[i].MemberCodes = await _boardFetcher.FetchMembersAsync(list[i].BoardCode, ct);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        errors.Add($"{label}板块「{list[i].Name}」成分股抓取失败：{ex.Message}");
+                    }
+                    if ((i + 1) % 20 == 0 || i + 1 == list.Count)
+                        progress?.Report($"{label}板块成分股：{i + 1}/{list.Count}");
+                }
+                all.AddRange(list);
+            }
+
+            _boardRepository.ReplaceAll(all);
+            progress?.Report($"板块数据抓取完成：共 {all.Count} 个板块，已写入本地库。");
+        }
+        finally
+        {
+            _boardFetcher.OnStatus -= Forward;
+        }
+        return new FetchResult { Errors = errors };
     }
 
     /// <summary>

@@ -39,8 +39,10 @@ public class MainViewModel : INotifyPropertyChanged
     public BottomReboundTabViewModel BottomReboundTab { get; }
     public MidCapPullbackTabViewModel MidCapPullbackTab { get; }
     public TriangleConvergenceTabViewModel TriangleConvergenceTab { get; }
+    public RisingLowsTabViewModel RisingLowsTab { get; }
     public ShortTermTabViewModel ShortTermTab { get; }
     public QueryTabViewModel QueryTab { get; }
+    public BoardTabViewModel BoardTab { get; }
     public WatchlistTabViewModel WatchlistTab { get; }
 
     private string _dataStatusText = "";
@@ -54,7 +56,7 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand RefreshCommand { get; }
     public RelayCommand OpenDataFolderCommand { get; }
 
-    public MainViewModel(AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, INetInflowRepository netInflowRepository)
+    public MainViewModel(AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, INetInflowRepository netInflowRepository, IBoardRepository boardRepository)
     {
         _paths = paths;
         _barRepository = barRepository;
@@ -65,8 +67,10 @@ public class MainViewModel : INotifyPropertyChanged
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);
+        RisingLowsTab = new RisingLowsTabViewModel(paths, barRepository, watchlistStore);
         ShortTermTab = new ShortTermTabViewModel(paths, barRepository, netInflowRepository, fundamentalRepository, watchlistStore);
         QueryTab = new QueryTabViewModel(paths, barRepository);
+        BoardTab = new BoardTabViewModel(boardRepository, barRepository, paths);
         WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository);
 
         LocalDbPathText = $"本地数据文件：{_paths.TotalDb}（需要手动把 Fetcher 产出的数据库拷贝到这里，用这个文件名）";

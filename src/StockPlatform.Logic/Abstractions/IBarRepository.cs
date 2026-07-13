@@ -16,6 +16,9 @@ public interface IBarRepository
     /// <see cref="GetOverallLatestPeriodStart"/> so the Fetcher UI can show "本地数据覆盖范围：X 至 Y"
     /// (see doc/data-platform-design.md).</summary>
     DateTime? GetOverallEarliestPeriodStart(string granularity);
+    /// <summary>某个时点(含)之前的最新 period_start——给"按历史截止日期验证"用（见
+    /// CutoffBarRepository）：用户输入的截止日可能是周末/节假日，需要据此定位真正的最后交易日。</summary>
+    DateTime? GetOverallLatestPeriodStartOnOrBefore(string granularity, DateTime cutoff);
     List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null);
     List<string> GetAllCodes();
 }

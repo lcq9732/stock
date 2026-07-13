@@ -5,6 +5,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using OxyPlot;
+using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using StockPlatform.Analyzer.ViewModels;
 using StockPlatform.Logic.Abstractions;
@@ -59,7 +60,8 @@ public partial class QuoteDetailWindow : Window
         var prevClose = dayBars.Count > 1 ? dayBars[^2].Close : last.Close;
         var change = last.Close - prevClose;
         var changePct = prevClose == 0 ? 0 : change / prevClose * 100;
-        var color = change >= 0 ? Brushes.Red : Brushes.Green; // 国内看盘习惯：涨红跌绿
+        // 深色主题：涨红跌青（跟通达信一致，青色在黑底上比深绿更清楚）。
+        var color = change >= 0 ? Brushes.Red : new SolidColorBrush(Color.FromRgb(0, 210, 210));
         LatestCloseText.Text = last.Close.ToString("F2");
         LatestCloseText.Foreground = color;
         ChangeText.Text = $"{(change >= 0 ? "+" : "")}{change:F2} ({(change >= 0 ? "+" : "")}{changePct:F2}%)";
@@ -168,6 +170,7 @@ public partial class QuoteDetailWindow : Window
             {
                 Text = label,
                 FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(0xDD, 0xDD, 0xDD)), // 深色表头上的浅色图例文字
                 VerticalAlignment = System.Windows.VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, i == items.Length - 1 ? 0 : 10, 0),
             });
@@ -193,7 +196,7 @@ public partial class QuoteDetailWindow : Window
         return Math.Clamp((int)Math.Round(rawIndex), 0, _chart.Bars.Count - 1);
     }
 
-    /// <summary>主图表头那一行——日期+OHLC（黑色）+ MA5/10/20/30当前值，每条MA用自己线的颜色，
+    /// <summary>主图表头那一行——日期+OHLC + MA5/10/20/60当前值，每条MA用自己线的颜色，
     /// 后面跟涨跌箭头（比前一根K线的MA值高就↑涨红，低就↓跌绿）。默认（RebuildChart刚构建完）
     /// 传最新一根K线的下标，鼠标悬浮时传悬浮那根的下标——同一个函数，不用区分调用来源。</summary>
     private void UpdateMainInfo(int idx)
@@ -218,7 +221,7 @@ public partial class QuoteDetailWindow : Window
         AddMaRun("MA5", _chart.Ma5, QuoteChartBuilder.Ma5Color);
         AddMaRun("MA10", _chart.Ma10, QuoteChartBuilder.Ma10Color);
         AddMaRun("MA20", _chart.Ma20, QuoteChartBuilder.Ma20Color);
-        AddMaRun("MA30", _chart.Ma30, QuoteChartBuilder.Ma30Color);
+        AddMaRun("MA60", _chart.Ma60, QuoteChartBuilder.Ma60Color);
     }
 
     private void OnMainMouseMove(object sender, MouseEventArgs e)
@@ -226,25 +229,38 @@ public partial class QuoteDetailWindow : Window
         if (sender is not OxyPlot.Wpf.PlotView plotView) return;
         var idx = IndexUnderMouse(plotView, _chart.MainDateAxis, e);
         if (idx == null) return;
-        MoveCrosshairAndUpdateInfo(idx.Value);
+        double price = _chart.MainYAxis.InverseTransform(e.GetPosition(plotView).Y);
+        MoveCrosshairAndUpdateInfo(idx.Value, _chart.MainHairY, price);
     }
 
-    // 副图1/2共用这一个处理函数（跟主图分开是因为它们各自的横轴实例不同，需要先认出是哪个
-    // PlotView 才能拿对应的轴）——十字线和信息文字联动更新，效果上跟主图触发时是一样的。
+    // 副图1/2共用这一个处理函数（跟主图分开是因为它们各自的横/纵轴实例不同，需要先认出是哪个
+    // PlotView 才能拿对应的轴）——十字线（横竖两条）和信息文字联动更新。
     private void OnSubMouseMove(object sender, MouseEventArgs e)
     {
         if (sender is not OxyPlot.Wpf.PlotView plotView) return;
-        var axis = ReferenceEquals(plotView, Sub1Plot) ? _chart.Sub1DateAxis : _chart.Sub2DateAxis;
-        var idx = IndexUnderMouse(plotView, axis, e);
+        bool isSub1 = ReferenceEquals(plotView, Sub1Plot);
+        var dateAxis = isSub1 ? _chart.Sub1DateAxis : _chart.Sub2DateAxis;
+        var yAxis = isSub1 ? _chart.Sub1YAxis : _chart.Sub2YAxis;
+        var hairY = isSub1 ? _chart.Sub1HairY : _chart.Sub2HairY;
+        var idx = IndexUnderMouse(plotView, dateAxis, e);
         if (idx == null) return;
-        MoveCrosshairAndUpdateInfo(idx.Value);
+        double value = yAxis.InverseTransform(e.GetPosition(plotView).Y);
+        MoveCrosshairAndUpdateInfo(idx.Value, hairY, value);
     }
 
-    private void MoveCrosshairAndUpdateInfo(int idx)
+    /// <summary>竖线(时间)三个面板一起动；横线(价格/数值)只画在鼠标当前所在的那个面板上
+    /// （<paramref name="activeHairY"/>），其它两个面板的横线清空——跟通用软件的十字光标一致。</summary>
+    private void MoveCrosshairAndUpdateInfo(int idx, LineAnnotation activeHairY, double activeValue)
     {
         _chart.MainCrosshair.X = idx;
         _chart.Sub1Crosshair.X = idx;
         _chart.Sub2Crosshair.X = idx;
+
+        _chart.MainHairY.Y = QuoteChartBuilder.QuoteChartHiddenY;
+        _chart.Sub1HairY.Y = QuoteChartBuilder.QuoteChartHiddenY;
+        _chart.Sub2HairY.Y = QuoteChartBuilder.QuoteChartHiddenY;
+        activeHairY.Y = activeValue;
+
         _chart.Main.InvalidatePlot(false);
         _chart.Sub1.InvalidatePlot(false);
         _chart.Sub2.InvalidatePlot(false);

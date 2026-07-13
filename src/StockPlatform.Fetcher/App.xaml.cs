@@ -69,7 +69,13 @@ public partial class App : Application
         var announcementRepository = new SqliteAnnouncementRepository(paths.CurrentDb);
         var announcementOrchestrator = new AnnouncementFetchOrchestrator(announcementSearchProvider, announcementDetailFetcher, announcementRepository);
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator);
+        // 板块（概念/题材 + 行业）数据走新浪，独立限流；单独的"拉取板块"按钮触发（见
+        // FetchOrchestrator.RunFetchBoardsAsync），不掺进主抓取流程。
+        var boardFetcher = new SinaBoardFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        var boardRepository = new SqliteBoardRepository(paths.CurrentDb);
+        boardRepository.EnsureSchema();
+
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository);
 
         var viewModel = new MainViewModel(paths, orchestrator, sources);
         var window = new MainWindow { DataContext = viewModel };

@@ -121,13 +121,14 @@
                     </Grid.RowDefinitions>
 
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-                        <TextBlock Text="分析粒度：" VerticalAlignment="Center" />
-                        <ComboBox ItemsSource="{Binding TopLevelGranularities}" SelectedItem="{Binding SelectedTopLevel}" Width="80" Margin="4,0" />
-                        <ComboBox ItemsSource="{Binding MinutePeriods}" SelectedItem="{Binding SelectedMinutePeriod}" Width="80" Margin="4,0"
-                                  Visibility="{Binding IsMinuteGranularity, Converter={StaticResource BoolToVisibilityConverter}}" />
-
-                        <TextBlock Text="前N根K线：" VerticalAlignment="Center" Margin="16,0,0,0" />
+                        <TextBlock Text="固定使用日线" VerticalAlignment="Center" Foreground="Gray" />
+                        <TextBlock Text="涨停回看N天(1~15)：" VerticalAlignment="Center" Margin="16,0,0,0"
+                                   ToolTip="最近多少个交易日内出现过涨停就算符合第一步" />
                         <TextBox Text="{Binding Lookback, UpdateSourceTrigger=PropertyChanged}" Width="50" Margin="4,0" />
+
+                        <TextBlock Text="放量倍数k：" VerticalAlignment="Center" Margin="12,0,0,0"
+                                   ToolTip="涨停后平均量相对涨停前5日均量的倍数下限，默认1.5，可输入小数" />
+                        <TextBox Text="{Binding VolumeMultiple, UpdateSourceTrigger=LostFocus}" Width="50" Margin="4,0" />
 
                         <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
                         <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
@@ -348,6 +349,67 @@
                 </Grid>
             </TabItem>
 
+            <TabItem Header="阶梯低点法">
+                <Grid DataContext="{Binding RisingLowsTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="130" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="0,0,0,10">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="固定使用日线，9条规则须全部满足；另有市场宽度/热度出手条件（详见 ℹ）" VerticalAlignment="Center" Foreground="Gray" />
+                            <TextBlock Text="截止日期：" VerticalAlignment="Center" Margin="16,0,0,0"
+                                       ToolTip="手工验证用：填 年-月-日（如 2026-07-08、2026-7-1 都行）则按那天收盘往前计算，市场环境和条件详情图也截到同一天；留空=用最新数据" />
+                            <TextBox Text="{Binding CutoffDateText, UpdateSourceTrigger=LostFocus}" Width="85" VerticalAlignment="Center"
+                                     ToolTip="年-月-日，月/日可不补零（2026-7-1），留空=最新数据" />
+                            <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
+                            <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
+                                    Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
+                            <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
+                                    ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
+                            <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                    ToolTip="把当前结果列表导出成 Excel(.xlsx)" />
+                            <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding MarketEnvText}" Margin="0,6,0,0" Foreground="#084298" FontWeight="SemiBold"
+                                   ToolTip="宽度=全市场收盘站上自身MA20的股票占比；热度=当日全市场成交量×收盘价 ÷ 前20个交易日均值。两条都满足才符合回测的出手条件" />
+                    </StackPanel>
+
+                    <DataGrid x:Name="RisingLowsGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5"
+                              ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;条件详情&quot;/&quot;行情详情&quot;查看对应图表">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
+                                <DataGridCheckBoxColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridCheckBoxColumn.Header>
+                            </DataGridCheckBoxColumn>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
+                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
+                            <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
+                            <DataGridTemplateColumn Header="操作" Width="160">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button Content="条件详情" Width="70" Margin="2,1" Click="RisingLowsCriteriaButton_Click" />
+                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
+                        <ListBox ItemsSource="{Binding LogLines}" FontFamily="Consolas" FontSize="12" />
+                    </GroupBox>
+                </Grid>
+            </TabItem>
+
             <TabItem Header="短线法">
                 <Grid DataContext="{Binding ShortTermTab}" Margin="0,10,0,0">
                     <Grid.RowDefinitions>
@@ -414,6 +476,88 @@
                     <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
                         <ListBox ItemsSource="{Binding LogLines}" FontFamily="Consolas" FontSize="12" />
                     </GroupBox>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="板块热度">
+                <Grid DataContext="{Binding BoardTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <RadioButton Content="概念/题材" GroupName="BoardType" IsChecked="{Binding ShowConcept}" VerticalAlignment="Center" />
+                        <RadioButton Content="行业" GroupName="BoardType" IsChecked="{Binding ShowIndustry}" VerticalAlignment="Center" Margin="12,0,0,0" />
+                        <TextBlock Text="查询板块：" VerticalAlignment="Center" Margin="16,0,0,0" />
+                        <TextBox Width="150" Margin="2,0" VerticalContentAlignment="Center"
+                                 Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="按板块名或领涨股名筛选，边打边筛" />
+                        <Button Content="刷新" Command="{Binding RefreshCommand}" Width="70" Margin="12,0,0,0"
+                                ToolTip="重新拷贝了数据库后点这个，重新读取本地板块数据" />
+                        <TextBlock Text="{Binding StatusText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
+                    </StackPanel>
+
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1.3*" />
+                            <ColumnDefinition Width="5" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- 左：板块榜（按涨跌幅降序，点某行右侧列出成分股） -->
+                        <DataGrid Grid.Column="0" x:Name="BoardGrid" ItemsSource="{Binding Boards}" SelectedItem="{Binding SelectedBoard}"
+                                  AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
+                                  GridLinesVisibility="Horizontal" HeadersVisibility="Column" AlternatingRowBackground="#F5F5F5"
+                                  SelectionMode="Single" ToolTip="点某个板块，右侧列出它的成分股">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="板块" Binding="{Binding Name}" Width="*" />
+                                <DataGridTextColumn Header="涨跌幅" Binding="{Binding ChangePctText}" Width="80" SortMemberPath="ChangePct">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="{Binding ChangeColor}" />
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="成分股" Binding="{Binding MemberCount}" Width="60" />
+                                <DataGridTextColumn Header="成交额(亿)" Binding="{Binding AmountYi, StringFormat=F1}" Width="90" />
+                                <DataGridTextColumn Header="领涨股" Binding="{Binding LeaderName}" Width="100" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#DDDDDD" />
+
+                        <!-- 右：选中板块的成分股 -->
+                        <Grid Grid.Column="2">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="{Binding MembersHeader}" FontWeight="Bold" Margin="0,0,0,4" />
+                            <DataGrid Grid.Row="1" x:Name="BoardMemberGrid" ItemsSource="{Binding Members}"
+                                      AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
+                                      GridLinesVisibility="Horizontal" HeadersVisibility="Column" AlternatingRowBackground="#F5F5F5">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" />
+                                    <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" />
+                                    <DataGridTextColumn Header="涨跌幅" Binding="{Binding ChangePctText}" Width="90" SortMemberPath="ChangePct">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="{Binding ChangeColor}" />
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTemplateColumn Header="操作" Width="110">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Button Content="K线详情" Width="80" Margin="2,1" Click="BoardMemberQuoteDetailButton_Click" />
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Grid>
                 </Grid>
             </TabItem>
 
