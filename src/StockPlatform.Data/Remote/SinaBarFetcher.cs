@@ -23,10 +23,11 @@ namespace StockPlatform.Data.Remote;
 /// no beg/end range parameters (only "give me the most recent N rows"), the requested [start,end]
 /// window is estimated into a datalen count and then applied client-side after parsing.
 ///
-/// Known gaps — same class of limitation TencentBarFetcher already documents and this codebase
-/// already accepts (see that class's remarks): the endpoint doesn't return 成交额/换手率, so
-/// Amount/Turnover are left at 0 (cosmetic only — grep-confirmed 2026-07-08 that no screening rule
-/// anywhere reads Bar.Amount/Bar.Turnover, only display code and week/month sum-aggregation do).
+/// Known gaps: the endpoint doesn't return 成交额/换手率, so Amount/Turnover are left at 0.
+/// （这条限制的分量在2026-07-13变了：TencentBarFetcher 已改用 newfqkline 补上这两个字段，
+/// 回测/大盘热度指标开始依赖 Bar.Amount——所以新浪现在只适合当腾讯的回退兜底，它补进来的行
+/// 会缺成交额，事后可以用 Fetcher 的"回填成交额/换手率"按钮从腾讯补齐，见
+/// FetchOrchestrator.RunBackfillAmountTurnoverAsync。）
 /// PctChange is computed locally from consecutive closes, same technique as TencentBarFetcher.
 ///
 /// **Unverified as of 2026-07-08**: whether this endpoint returns front-adjusted (前复权) prices
@@ -99,7 +100,10 @@ public class SinaBarFetcher : IBarDataFetcher
         var spanDays = Math.Max(0, (endDate - startDate).TotalDays);
         var datalen = Math.Clamp((int)Math.Ceiling(spanDays * 0.75) + 20, MinDatalen, MaxDatalen);
 
-        var symbol = MarketClassifier.TencentSymbolPrefix(code) + code; // 新浪跟腾讯共用sh/sz/bj前缀
+        // 新浪跟腾讯共用sh/sz/bj前缀；大盘指数（"sh000001"这种已带前缀的完整符号，见
+        // MarketIndexCatalog）原样使用——这个接口对指数同样有效（作为Tencent回退链的兜底），
+        // 但跟个股一样不返回成交额/换手率，指数行情的量能字段还是以腾讯为准。
+        var symbol = MarketIndexCatalog.IsPrefixedSymbol(code) ? code.Trim() : MarketClassifier.TencentSymbolPrefix(code) + code;
         var url = "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData" +
                   $"?symbol={symbol}&scale=240&ma=no&datalen={datalen}";
 
@@ -141,8 +145,8 @@ public class SinaBarFetcher : IBarDataFetcher
                 High = double.Parse(row.GetProperty("high").GetString()!, CultureInfo.InvariantCulture),
                 Low = double.Parse(row.GetProperty("low").GetString()!, CultureInfo.InvariantCulture),
                 Volume = double.Parse(row.GetProperty("volume").GetString()!, CultureInfo.InvariantCulture),
-                // 新浪这个接口不直接给成交额/换手率；本项目的分析规则不依赖这两个字段（跟
-                // TencentBarFetcher同样的已知限制，见类注释）。
+                // 新浪这个接口不直接给成交额/换手率，只能留0——这样的行事后可以用"回填成交额/
+                // 换手率"从腾讯补齐（回填只挑amount=0的行，见类注释）。
                 Amount = 0,
                 Turnover = 0,
                 FetchedAt = DateTime.Now,

@@ -20,5 +20,8 @@ public interface IBarRepository
     /// CutoffBarRepository）：用户输入的截止日可能是周末/节假日，需要据此定位真正的最后交易日。</summary>
     DateTime? GetOverallLatestPeriodStartOnOrBefore(string granularity, DateTime cutoff);
     List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null);
+    /// <summary>Bar表里所有"个股"代码（6位纯数字）——Analyzer各选股Tab的扫描全集。大盘指数
+    /// （带前缀的8位符号如"sh000001"，见 MarketIndexCatalog）故意排除在外：指数K线只是给大盘
+    /// 环境过滤/回测用的参照数据，不参与选股。</summary>
     List<string> GetAllCodes();
 }

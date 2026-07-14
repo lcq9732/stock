@@ -237,6 +237,9 @@ public class FetchOrchestrator
         var errors = new ConcurrentBag<string>();
         var failedCodes = new ConcurrentBag<string>();
         var stats = new FetchStats();
+
+        await FetchIndexBarsAsync(source, today, lookbackYears, currentRepo, errors, failedCodes, stats, progress, sw, ct);
+
         int completed = 0;
         var tasks = stocks.Select(stock =>
         {
@@ -261,7 +264,8 @@ public class FetchOrchestrator
         await Task.WhenAll(tasks);
 
         progress?.Report($"本轮汇总：{stats.Summarize()}");
-        return FinishFetchRun(errors, "拉取全部", stocks.Select(s => s.Code).ToList(), failedCodes);
+        var attempted = stocks.Select(s => s.Code).Concat(MarketIndexCatalog.All.Select(i => i.Symbol)).ToList();
+        return FinishFetchRun(errors, "拉取全部", attempted, failedCodes);
     }
 
     private async Task<FetchResult> RunFetchDayInternalAsync(
@@ -294,6 +298,12 @@ public class FetchOrchestrator
         var errors = new ConcurrentBag<string>();
         var failedCodes = new ConcurrentBag<string>();
         var stats = new FetchStats();
+
+        // 指数走的是水位线增量（不是"只抓这一天"）——指数总共就几个，增量补齐的代价可以忽略，
+        // 而且这样第一次升级到带指数的版本时，跑一次"拉取当天"就能自动把指数近几年的历史一次
+        // 补齐（跟扫市值时顺带发现的新股用长回看窗口是同一个道理）。
+        await FetchIndexBarsAsync(source, day, DefaultLookbackYears, currentRepo, errors, failedCodes, stats, progress, sw, ct);
+
         int completed = 0;
         var tasks = stocks.Select(stock =>
         {
@@ -325,7 +335,8 @@ public class FetchOrchestrator
         await Task.WhenAll(tasks);
 
         progress?.Report($"本轮汇总：{stats.Summarize()}");
-        return FinishFetchRun(errors, "拉取当天", stocks.Select(s => s.Code).ToList(), failedCodes);
+        var attempted = stocks.Select(s => s.Code).Concat(MarketIndexCatalog.All.Select(i => i.Symbol)).ToList();
+        return FinishFetchRun(errors, "拉取当天", attempted, failedCodes);
     }
 
     /// <summary>
@@ -417,6 +428,147 @@ public class FetchOrchestrator
 
         progress?.Report($"本轮汇总：{stats.Summarize()}");
         return FinishFetchRun(errors, "重新拉取失败股票", failedCodesList, failedCodes);
+    }
+
+    /// <summary>
+    /// 回填成交额/换手率（2026-07-13新增）——一次性修复历史数据：2026-07-10 TencentBarFetcher
+    /// 改用 newfqkline 接口之前入库的日线，amount/turnover 全是0，而日线是 INSERT OR IGNORE +
+    /// 每股水位线只往前抓新日期，正常抓取永远不会回头补这些旧行。这个模式按代码找出还有
+    /// amount=0 日线的区间，重新抓那一段，然后只 UPDATE amount/turnover 两列（不动OHLC——重抓
+    /// 的前复权价可能因为其间的分红除权跟当年入库的基准不一致，见
+    /// SqliteBarRepository.UpdateDayAmountTurnover），最后重算该代码的周/月线聚合。
+    ///
+    /// 幂等、可中断重跑：已补上的行不再匹配 amount=0，下次运行自然跳过；失败/没抓到的代码留在
+    /// 缺失名单里，再点一次就是精确重试（所以不占用 Manifest 的失败名单）。整轮工作量与一次
+    /// 全量回补相当（每只股票1~2个分页请求），预计1小时上下。数据源建议用Tencent（链内新浪
+    /// 回退拿不到成交额的行会被跳过留给下次）；选"Sina"跑这个没有意义，开头会给出警告。
+    /// </summary>
+    public async Task<FetchResult> RunBackfillAmountTurnoverAsync(
+        NamedBarSource source, IProgress<string>? progress, CancellationToken ct = default)
+    {
+        void ForwardStatus(string msg) => progress?.Report(msg);
+        source.Fetcher.OnStatus += ForwardStatus;
+        try
+        {
+            return await RunBackfillAmountTurnoverInternalAsync(source, progress, ct);
+        }
+        finally
+        {
+            source.Fetcher.OnStatus -= ForwardStatus;
+        }
+    }
+
+    private async Task<FetchResult> RunBackfillAmountTurnoverInternalAsync(
+        NamedBarSource source, IProgress<string>? progress, CancellationToken ct)
+    {
+        if (!File.Exists(_paths.CurrentDb))
+            throw new InvalidOperationException("本地还没有任何数据，无需回填，请先执行一次\"拉取全部\"");
+
+        var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
+        currentRepo.EnsureSchema();
+
+        progress?.Report("正在统计本地日线里成交额缺失（amount=0）的代码和区间...");
+        List<(string Code, DateTime Min, DateTime Max, int Count)> targets;
+        lock (_dbLock)
+        {
+            targets = currentRepo.GetDayCodesWithMissingAmount();
+        }
+        if (targets.Count == 0)
+        {
+            progress?.Report("本地日线的成交额都已经有值，不需要回填");
+            return new FetchResult();
+        }
+
+        var sw = Stopwatch.StartNew();
+        progress?.Report($"共 {targets.Count} 只代码、{targets.Sum(t => (long)t.Count)} 行日线缺成交额，开始回填，数据源：{source.Name}");
+        if (source.Name == "Sina")
+            progress?.Report("警告：新浪的K线接口不返回成交额/换手率，用它回填不会有任何效果——请切换到 Tencent 再运行");
+
+        var errors = new ConcurrentBag<string>();
+        long updatedRows = 0;
+        int failed = 0, completed = 0;
+        var tasks = targets.Select(async t =>
+        {
+            ct.ThrowIfCancellationRequested();
+            List<Bar> bars;
+            try
+            {
+                (_, bars) = await source.Fetcher.FetchAsync(t.Code, Granularity.Day, t.Min, t.Max, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw; // 用户点了"停止"
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"{t.Code}: [{source.Name}] {ex.Message}");
+                Interlocked.Increment(ref failed);
+                ReportBackfillProgress(Interlocked.Increment(ref completed), targets.Count, progress, sw);
+                return;
+            }
+
+            lock (_dbLock)
+            {
+                var updated = currentRepo.UpdateDayAmountTurnover(bars);
+                if (updated > 0)
+                {
+                    Interlocked.Add(ref updatedRows, updated);
+                    // 周/月线的 amount/turnover 是日线的求和（见 BarAggregator），日线补上后
+                    // 要整体重算覆盖，跟正常抓取后的聚合是同一段逻辑。
+                    var allDayBars = currentRepo.Query(t.Code, Granularity.Day);
+                    SqliteBarUpsert.Upsert(_paths.CurrentDb, BarAggregator.ToWeekly(allDayBars));
+                    SqliteBarUpsert.Upsert(_paths.CurrentDb, BarAggregator.ToMonthly(allDayBars));
+                }
+            }
+            ReportBackfillProgress(Interlocked.Increment(ref completed), targets.Count, progress, sw);
+        });
+        await Task.WhenAll(tasks);
+
+        progress?.Report($"回填汇总：处理 {targets.Count} 只代码，实际补上 {updatedRows} 行日线的成交额/换手率，失败 {failed} 只" +
+                         (failed > 0 ? "（失败的不影响已完成的部分，再点一次\"回填\"只会重试还缺的）" : ""));
+
+        var result = new FetchResult();
+        result.Errors.AddRange(errors);
+        return result;
+    }
+
+    private static void ReportBackfillProgress(int done, int totalCount, IProgress<string>? progress, Stopwatch sw)
+    {
+        if (done % 20 == 0 || done == totalCount)
+            progress?.Report($"回填进度 ({done}/{totalCount})，已用时 {FormatElapsed(sw.Elapsed)}");
+    }
+
+    /// <summary>
+    /// 大盘指数日K（2026-07-13新增，见 <see cref="MarketIndexCatalog"/>）——"拉取全部"和"拉取
+    /// 当天"都会先跑这一步，给分析/回测提供大盘环境数据（指数MA20、两市成交额热度）。指数在
+    /// Bar 表里用带前缀的8位符号（"sh000001"）存，水位线/收盘后确认/失败重试逻辑与个股完全一致
+    /// （失败进 Manifest.FailedCodes，"重新拉取失败股票"会连指数一起重试——ProcessOneStockAsync
+    /// 及各抓取器对带前缀符号原生支持）。总共就几个指数，串行跑完也只多花几秒。
+    /// </summary>
+    private async Task FetchIndexBarsAsync(
+        NamedBarSource source, DateTime end, int lookbackYears, SqliteBarRepository currentRepo,
+        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, FetchStats stats,
+        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
+    {
+        progress?.Report($"正在抓取大盘指数K线（{MarketIndexCatalog.All.Count} 个：{string.Join("、", MarketIndexCatalog.All.Select(i => i.Name))}）...");
+        int completed = 0;
+        foreach (var (symbol, _) in MarketIndexCatalog.All)
+        {
+            // 跟"拉取全部"的个股水位线同一套规则：没抓过的从回看窗口起点开始（数据源只会返回
+            // 指数实际存在的日期），抓过的从上次的下一天继续，"今天"要看是否已收盘后确认。
+            DateTime start;
+            lock (_dbLock)
+            {
+                var info = currentRepo.GetLatestBarInfo(symbol, Granularity.Day);
+                if (info == null)
+                    start = end.AddYears(-lookbackYears);
+                else if (info.Value.PeriodStart.Date < end.Date)
+                    start = info.Value.PeriodStart.AddDays(1);
+                else
+                    start = IsConfirmedFinal(info.Value.FetchedAt, end) ? end.AddDays(1) : end;
+            }
+            await ProcessOneStockAsync(symbol, source, start, end, currentRepo, errors, failedCodes, stats, progress, MarketIndexCatalog.All.Count, () => Interlocked.Increment(ref completed), sw, ct);
+        }
     }
 
     /// <summary>
