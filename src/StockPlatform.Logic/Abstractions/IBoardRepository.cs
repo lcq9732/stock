@@ -17,6 +17,10 @@ public interface IBoardRepository
     /// <summary>读某个板块的成分股代码。</summary>
     List<string> QueryMembers(string boardCode);
 
+    /// <summary>反查：股票代码 → 它所属的概念/题材板块名称列表（只含 Concept 类型）。一次 JOIN 查询
+    /// 建好整张映射，供自选股等需要"这只票在哪些概念板块里"的地方一次性取用，避免逐板块查询。</summary>
+    Dictionary<string, List<string>> GetConceptBoardsByStock();
+
     /// <summary>本地板块快照的抓取时刻（没有数据时为 null），用于界面显示"数据截至"。</summary>
     DateTime? GetLatestAsOf();
 }

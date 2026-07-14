@@ -11,14 +11,20 @@ public class WatchlistRowViewModel : ISelectableRow
 {
     public WatchlistEntry Entry { get; }
 
-    public WatchlistRowViewModel(WatchlistEntry entry, IBarRepository barRepository)
+    public WatchlistRowViewModel(WatchlistEntry entry, IBarRepository barRepository, string conceptBoards)
     {
         Entry = entry;
+        Board = conceptBoards;
         ComputeTracking(barRepository);
     }
 
     public string Code => Entry.Code;
     public string Name => Entry.Name;
+    /// <summary>该股所属的概念/题材板块（来自"板块热度"抓取的数据，一只票可能属于多个，用顿号连接）；
+    /// 没有板块数据或不属于任何概念板块时显示"—"。由 WatchlistTabViewModel 一次性反查后传入。</summary>
+    public string Board { get; }
+    /// <summary>申万行业（跟其它结果表"板块"列同一个口径，来自本地静态映射，见 IndustryClassifier）。</summary>
+    public string Industry => IndustryClassifier.GetIndustry(Entry.Code);
     public string Method => Entry.Method;
     public string DataDate => Entry.DataDate.ToString("yyyy-MM-dd");
     public double PriceAtPick => Entry.PriceAtPick;
@@ -60,6 +66,7 @@ public class WatchlistTabViewModel
 {
     private readonly JsonWatchlistStore _store;
     private readonly IBarRepository _barRepository;
+    private readonly IBoardRepository _boardRepository;
 
     public ObservableCollection<WatchlistRowViewModel> Entries { get; } = new();
 
@@ -67,10 +74,11 @@ public class WatchlistTabViewModel
     public RelayCommand RemoveSelectedCommand { get; }
     public RelayCommand ExportCommand { get; }
 
-    public WatchlistTabViewModel(JsonWatchlistStore store, IBarRepository barRepository)
+    public WatchlistTabViewModel(JsonWatchlistStore store, IBarRepository barRepository, IBoardRepository boardRepository)
     {
         _store = store;
         _barRepository = barRepository;
+        _boardRepository = boardRepository;
         RefreshCommand = new RelayCommand(_ => Reload());
         RemoveSelectedCommand = new RelayCommand(_ => RemoveSelected());
         ExportCommand = new RelayCommand(_ => GridExporter.ExportWatchlist(Entries));
@@ -84,8 +92,15 @@ public class WatchlistTabViewModel
     public void Reload()
     {
         Entries.Clear();
+        // 一次性反查"股票→所属概念板块"，每行直接取（没有板块数据时 map 为空，各行显示"—"）。
+        var conceptMap = _boardRepository.GetConceptBoardsByStock();
         foreach (var e in _store.Load().OrderByDescending(e => e.AddedAt))
-            Entries.Add(new WatchlistRowViewModel(e, _barRepository));
+        {
+            var boards = conceptMap.TryGetValue(e.Code, out var list) && list.Count > 0
+                ? string.Join("、", list)
+                : "—";
+            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards));
+        }
     }
 
     private void RemoveSelected()

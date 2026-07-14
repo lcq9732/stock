@@ -361,9 +361,9 @@
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="固定使用日线，9条规则须全部满足；另有市场宽度/热度出手条件（详见 ℹ）" VerticalAlignment="Center" Foreground="Gray" />
                             <TextBlock Text="截止日期：" VerticalAlignment="Center" Margin="16,0,0,0"
-                                       ToolTip="手工验证用：填 年-月-日（如 2026-07-08、2026-7-1 都行）则按那天收盘往前计算，市场环境和条件详情图也截到同一天；留空=用最新数据" />
+                                       ToolTip="默认今天=用最新数据。手工验证时改成历史日期（如 2026-07-08、2026-7-1 都行），则按那天收盘往前计算，市场环境和条件详情图也截到同一天" />
                             <TextBox Text="{Binding CutoffDateText, UpdateSourceTrigger=LostFocus}" Width="85" VerticalAlignment="Center"
-                                     ToolTip="年-月-日，月/日可不补零（2026-7-1），留空=最新数据" />
+                                     ToolTip="年-月-日，月/日可不补零（2026-7-1）。默认今天=最新数据，填历史日期=按那天收盘验证" />
                             <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
                             <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
                                     Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
@@ -629,6 +629,8 @@
                             </DataGridCheckBoxColumn>
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
+                            <DataGridTextColumn Header="板块(概念)" Binding="{Binding Board}" Width="200" IsReadOnly="True" />
+                            <DataGridTextColumn Header="行业" Binding="{Binding Industry}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="方法" Binding="{Binding Method}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="数据日期" Binding="{Binding DataDate}" Width="90" IsReadOnly="True" />
                             <DataGridTextColumn Header="当时价格" Binding="{Binding PriceAtPick, StringFormat=F2}" Width="80" IsReadOnly="True" />

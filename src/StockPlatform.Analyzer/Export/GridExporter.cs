@@ -51,10 +51,10 @@ public static class GridExporter
             return;
         }
 
-        var headers = new List<string> { "代码", "名称", "方法", "数据日期", "当时价格", "最新收盘", "选中后涨跌幅", "满足数", "加入时间" };
+        var headers = new List<string> { "代码", "名称", "板块", "行业", "方法", "数据日期", "当时价格", "最新收盘", "选中后涨跌幅", "满足数", "加入时间" };
         var data = rows.Select(r => (IReadOnlyList<string>)new List<string>
         {
-            r.Code, r.Name, r.Method, r.DataDate, r.PriceAtPick.ToString("F2"),
+            r.Code, r.Name, r.Board, r.Industry, r.Method, r.DataDate, r.PriceAtPick.ToString("F2"),
             r.LatestCloseText, r.ChangeText, r.SatisfiedText, r.AddedAt,
         }).ToList();
 

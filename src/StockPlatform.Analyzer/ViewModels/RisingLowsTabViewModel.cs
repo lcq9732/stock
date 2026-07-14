@@ -43,9 +43,9 @@ public class RisingLowsTabViewModel : INotifyPropertyChanged
     /// <summary>最近一次分析算出的市场宽度/热度摘要（出手条件），显示在结果表上方。</summary>
     public string MarketEnvText { get => _marketEnvText; set => Set(ref _marketEnvText, value); }
 
-    private string _cutoffDateText = "";
-    /// <summary>手工验证用的截止日期（yyyy-MM-dd，留空=用最新数据）：整个分析按"那天收盘往前"
-    /// 计算，等价于回测的截断口径。</summary>
+    private string _cutoffDateText = DateTime.Today.ToString("yyyy-MM-dd");
+    /// <summary>手工验证用的截止日期（默认今天；留空也=用最新数据）：填历史日期时整个分析按
+    /// "那天收盘往前"计算，等价于回测的截断口径；今天或未来的日期等同最新数据、不进验证模式。</summary>
     public string CutoffDateText { get => _cutoffDateText; set => Set(ref _cutoffDateText, value); }
 
     /// <summary>最近一次分析实际用的截止日期（null=最新数据）——"条件详情"按钮据此把图表数据
@@ -123,8 +123,12 @@ public class RisingLowsTabViewModel : INotifyPropertyChanged
                     Log($"截止日期格式不对：\"{CutoffDateText}\"，请用 年-月-日（如 2026-07-08、2026-7-1 都行），留空表示用最新数据");
                     return;
                 }
-                cutoff = parsed;
-                Log($"手工验证模式：按 {cutoff:yyyy-MM-dd} 收盘往前计算（结果和条件详情图都截止到这一天）");
+                // 今天(默认值)或未来的日期 = 用最新数据，不必截断、也不算验证模式
+                if (parsed.Date < DateTime.Today)
+                {
+                    cutoff = parsed;
+                    Log($"手工验证模式：按 {cutoff:yyyy-MM-dd} 收盘往前计算（结果和条件详情图都截止到这一天）");
+                }
             }
             AppliedCutoffDate = cutoff;
             IBarRepository repo = cutoff.HasValue ? new CutoffBarRepository(_barRepository, cutoff.Value) : _barRepository;

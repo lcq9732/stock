@@ -135,6 +135,29 @@ public class SqliteBoardRepository : IBoardRepository
         return result;
     }
 
+    public Dictionary<string, List<string>> GetConceptBoardsByStock()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT bm.stock_code, b.name
+            FROM BoardMember bm
+            JOIN Board b ON bm.board_code = b.board_code
+            WHERE b.board_type = 0;
+            """;
+        var map = new Dictionary<string, List<string>>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var code = reader.GetString(0);
+            var name = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            if (name.Length == 0) continue;
+            if (!map.TryGetValue(code, out var list)) { list = new List<string>(); map[code] = list; }
+            list.Add(name);
+        }
+        return map;
+    }
+
     public DateTime? GetLatestAsOf()
     {
         using var conn = Open();

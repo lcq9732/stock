@@ -71,7 +71,7 @@ public class MainViewModel : INotifyPropertyChanged
         ShortTermTab = new ShortTermTabViewModel(paths, barRepository, netInflowRepository, fundamentalRepository, watchlistStore);
         QueryTab = new QueryTabViewModel(paths, barRepository);
         BoardTab = new BoardTabViewModel(boardRepository, barRepository, paths);
-        WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository);
+        WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository, boardRepository);
 
         LocalDbPathText = $"本地数据文件：{_paths.TotalDb}（需要手动把 Fetcher 产出的数据库拷贝到这里，用这个文件名）";
 
