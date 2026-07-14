@@ -23,7 +23,22 @@
 - **分析程序**：独立的程序，只读查询用户手动拷贝过去的数据库文件（约定文件名 `total.sqlite`）做分析。
 - 两者之间**只通过 SQLite 文件的表结构**耦合，互不依赖对方的代码。
 
-**状态变更记录（2026-07-09）**：最初设计（见第6节）是"本地生成 master/daily 文件 → 手动上传网盘 → 分析程序从网盘拉取合并"，用来支持没有服务器时的多机共享。实际开发下来，分析程序从来没有读取过 master/daily 文件或 manifest.json，一直都是直接读一份手动拷贝来的数据库文件；`SqliteMerger`（合并算法）在代码里也一直没有被调用过。第6节描述的整套方案被确认为**从未真正投入使用的历史设计**，相关代码（`RunMergeAsync`/`SqliteMerger`/`FileNaming`/Fetcher界面的"合并"按钮及 `Manifest` 里的 `CurrentMaster`/`PreviousMaster`/`DailyFiles` 字段）已删除。第6节整节保留仅作为设计过程记录，不代表现状——现状就是上面这张图：Fetcher 产出 `current.sqlite`，用户手动拷贝一份给 Analyzer 读取（文件名约定为 `total.sqlite`），没有网盘环节。
+**状态变更记录（2026-07-09）**：最初设计（见第6节）是"本地生成 master/daily 文件 → 手动上传网盘 → 分析程序从网盘拉取合并"，用来支持没有服务器时的多机共享。实际开发下来，分析程序从来没有读取过 master/daily 文件或 manifest.json，一直都是直接读一份手动拷贝来的数据库文件；`SqliteMerger`（合并算法）在代码里也一直没有被调用过。第6节描述的整套方案被确认为**从未真正投入使用的历史设计**，相关代码（`RunMergeAsync`/`SqliteMerger`/`FileNaming`/Fetcher界面的"合并"按钮及 `Manifest` 里的 `CurrentMaster`/`PreviousMaster`/`DailyFiles` 字段）已删除。第6节整节保留仅作为设计过程记录，不代表现状。
+
+**状态变更记录（2026-07-14）：改用 GitHub Releases 分发数据库**。为了把程序发给其他人用、又不用每次手动拷贝几百MB的库，新增了一套基于 **GitHub Releases** 的分发机制（取代"手动拷贝"这一步；手动拷贝仍可用作兜底）：
+
+```
+Fetcher ──压缩上传──▶ GitHub Releases(tag=data, 公开仓库) ──匿名下载+合并──▶ Analyzer
+          baseline-YYYYMMDD.zip(全量) + daily-YYYYMMDD.zip(每日增量)        total.sqlite
+```
+
+- **为什么用 Releases 而不是提交进 git**：`current.sqlite` 解压后约856MB，远超 git 单文件100MB上限；而 release 资产单个可达2GB、下载不计流量、公开仓库匿名即可下。见 `GitHubReleaseClient`（Owner/Repo/Tag 常量在里面）。
+- **资产命名**：全量 `baseline-YYYYMMDD.zip`（内含 `current.sqlite`），每日增量 `daily-YYYYMMDD.zip`（内含只有当天数据的小 sqlite，见 `DailyIncrementExporter`：当天日线 + 覆盖当天的周/月线 + 当天 NetInflow/流通市值/公告 + 全部 StockMeta）。
+- **Fetcher 端（上传）**：界面加"上传全量基线"/"上传当天增量"两个按钮（`GitHubUploadService`）。需要一个对本仓库有 Contents 写权限的 PAT，放在 `data/local/github_token.txt`（一行、不进 git）；只有发布端需要 token。全量偶尔重传一次，增量每天抓完传一次。
+- **Analyzer 端（下载）**：顶栏"从GitHub更新数据"按钮（`DataSyncService`）。本地没有库→下最新 `baseline` 解压成 `total.sqlite`；之后→只下比本地新的 `daily` 增量、用**重新引入的 `SqliteMerger`**（ATTACH + INSERT OR REPLACE）并进本地库。**本地"数据到哪天"直接用库里最新日线日期推断，不另存状态文件**；发布了更新的全量基线（baseline 日期 > 本地）时会重下全量（等于重基线），其余时候只下增量、省流量。用户端下载公开 release 不需要 token。
+- 注意 `SqliteMerger` 在此重新引入（2026-07-09 曾随废弃的网盘方案删除），但这次是真的被 Analyzer 调用的，数据来源是 release 资产而非网盘。
+
+本节开头那张"手动拷贝"的图仍然成立（作为不联网时的兜底路径）；有网络时推荐走上面这套 GitHub Releases 流程。
 
 ## 3. 数据范围与数据分级
 

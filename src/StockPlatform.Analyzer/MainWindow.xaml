@@ -36,6 +36,9 @@
             <TextBlock Text="{Binding DataStatusText}" VerticalAlignment="Center" FontWeight="Bold" />
             <Button Content="刷新" Command="{Binding RefreshCommand}" Width="80" Margin="12,0,0,0"
                     ToolTip="重新拷贝了数据库文件之后点这个，不用重启程序" />
+            <Button Content="从GitHub更新数据" Command="{Binding SyncCommand}" Width="130" Margin="8,0,0,0"
+                    ToolTip="首次下载全量数据库，之后只下载并合并每日增量（数据放在 GitHub Releases，公开下载无需登录）" />
+            <TextBlock Text="{Binding SyncStatusText}" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="#084298" TextTrimming="CharacterEllipsis" MaxWidth="520" />
         </StackPanel>
 
         <!-- Four independent analysis methods (doc/analysis-app-design.md section 3.2) plus a

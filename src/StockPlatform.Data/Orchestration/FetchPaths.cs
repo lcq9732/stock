@@ -12,6 +12,10 @@ public class FetchPaths
     /// 什么，不需要依赖还开着的界面窗口。</summary>
     public string LogFilePath => Path.Combine(BaseDir, "local", "fetch.log");
 
+    /// <summary>上传数据到 GitHub Releases 用的 PAT token 文件（一行纯文本，放本地、不进 git）——
+    /// 只有发布端(自己)需要；用户端分析程序下载公开 release 不需要 token（见 GitHubReleaseClient）。</summary>
+    public string GitHubTokenPath => Path.Combine(BaseDir, "local", "github_token.txt");
+
     public FetchPaths(string? baseDir = null)
     {
         BaseDir = baseDir ?? Path.Combine(AppContext.BaseDirectory, "data");

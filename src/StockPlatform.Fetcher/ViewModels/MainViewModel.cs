@@ -43,6 +43,7 @@ public class MainViewModel : INotifyPropertyChanged
     private DispatcherTimer? _heartbeat;
     private DateTime _runStartedAt;
     private readonly StreamWriter? _logFileWriter;
+    private readonly FetchPaths _paths;
 
     /// <summary>失败股票的重试名单里还有多少只（见 FetchOrchestrator.GetFailedCodeCount）——
     /// 只在这个数字大于0时"重新拉取失败股票"按钮才可点。</summary>
@@ -79,10 +80,13 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand RetryFailedCommand { get; }
     public RelayCommand FetchBoardsCommand { get; }
     public RelayCommand BackfillAmountTurnoverCommand { get; }
+    public RelayCommand UploadBaselineCommand { get; }
+    public RelayCommand UploadDailyCommand { get; }
 
     public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources)
     {
         _orchestrator = orchestrator;
+        _paths = paths;
         AvailableSources = availableSources;
         // Default to Tencent, not the first entry — EastMoney gets network-limited/blocked much
         // faster on some machines (see doc/data-platform-design.md), Tencent+新浪 has proven
@@ -107,9 +111,52 @@ public class MainViewModel : INotifyPropertyChanged
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && FailedCodeCount > 0);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
         BackfillAmountTurnoverCommand = new RelayCommand(async _ => await RunBackfillAmountTurnoverAsync(), _ => !IsBusy);
+        UploadBaselineCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: true), _ => !IsBusy);
+        UploadDailyCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: false), _ => !IsBusy);
 
         RefreshDataStatus();
         RefreshFailedCodeCount();
+    }
+
+    /// <summary>把数据上传到 GitHub Releases（见 GitHubUploadService）——baseline=true 传全量基线
+    /// （偶尔一次），false 传当天增量（每天）。上传日期用本地库最新的那一天。token 缺失时给出明确
+    /// 提示，不弹异常。</summary>
+    private async Task RunUploadAsync(bool baseline)
+    {
+        var svc = new GitHubUploadService(_paths);
+        var token = svc.ReadToken();
+        if (token == null)
+        {
+            Log($"没有配置 GitHub token，无法上传。请在 {_paths.GitHubTokenPath} 里放一行 PAT（需要对本仓库有 Contents 写权限），再点上传。");
+            return;
+        }
+        var latest = _orchestrator.GetDataStatus().LatestDay;
+        if (latest == null)
+        {
+            Log("本地还没有数据，无法上传。");
+            return;
+        }
+
+        IsBusy = true;
+        StartHeartbeat();
+        _cts = new CancellationTokenSource();
+        try
+        {
+            var progress = new Progress<string>(Log);
+            if (baseline)
+                await svc.UploadBaselineAsync(token, latest.Value, progress, _cts.Token);
+            else
+                await svc.UploadDailyAsync(token, latest.Value, progress, _cts.Token);
+        }
+        catch (OperationCanceledException) { Log("已停止（用户手动取消）"); }
+        catch (Exception ex) { Log($"上传失败：{ex.Message}"); }
+        finally
+        {
+            StopHeartbeat();
+            _cts?.Dispose();
+            _cts = null;
+            IsBusy = false;
+        }
     }
 
     private List<string> ParseAnnouncementKeywords() =>

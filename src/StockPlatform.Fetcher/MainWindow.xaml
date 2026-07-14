@@ -68,6 +68,11 @@
 
             <Button Content="回填成交额/换手率" Command="{Binding BackfillAmountTurnoverCommand}" Width="130" Margin="16,0,4,0"
                     ToolTip="一次性修复历史数据：2026-07-10之前入库的日线成交额/换手率都是0（当时腾讯接口不带这两个字段），正常抓取只往前抓新日期、永远不会回头补旧行。点击后按代码找出还缺成交额的日线区间重新抓取，只更新成交额/换手率两列（不动价格），并重算周/月线。工作量与一次全量回补相当（约1小时），可随时点\停止\，再点会接着补还缺的，不会重来。请用 Tencent 数据源（新浪接口不返回成交额）" />
+
+            <Button Content="上传全量基线" Command="{Binding UploadBaselineCommand}" Width="100" Margin="16,0,4,0"
+                    ToolTip="把整个 current.sqlite 压缩上传到 GitHub Releases（baseline-日期.zip），供用户端分析程序首次下载。偶尔重传一次即可（比如数据攒了很多天、增量太多时）。需要在 data/local/github_token.txt 里放一行有本仓库写权限的 PAT。上传日期用本地库最新那天。" />
+            <Button Content="上传当天增量" Command="{Binding UploadDailyCommand}" Width="100" Margin="4,0"
+                    ToolTip="只把本地库最新一天的数据导出成小增量包（daily-日期.zip）上传到 GitHub Releases，通常每天抓完点一次。用户端分析程序会自动下载并合并这些增量，不用每次重下整个库。同样需要 github_token.txt。" />
         </StackPanel>
 
         <!-- Log -->

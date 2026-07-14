@@ -55,6 +55,14 @@ public class MainViewModel : INotifyPropertyChanged
 
     public RelayCommand RefreshCommand { get; }
     public RelayCommand OpenDataFolderCommand { get; }
+    public RelayCommand SyncCommand { get; }
+
+    private bool _isSyncing;
+    public bool IsSyncing { get => _isSyncing; private set => Set(ref _isSyncing, value); }
+
+    private string _syncStatusText = "";
+    /// <summary>"从GitHub更新数据"的进度/结果单行提示（会被下载百分比等不断覆盖）。</summary>
+    public string SyncStatusText { get => _syncStatusText; set => Set(ref _syncStatusText, value); }
 
     public MainViewModel(AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, INetInflowRepository netInflowRepository, IBoardRepository boardRepository)
     {
@@ -81,8 +89,29 @@ public class MainViewModel : INotifyPropertyChanged
             Directory.CreateDirectory(_paths.LocalDir);
             Process.Start(new ProcessStartInfo(_paths.LocalDir) { UseShellExecute = true });
         });
+        SyncCommand = new RelayCommand(async _ => await RunSyncAsync(), _ => !IsSyncing);
 
         RefreshDataStatus();
+    }
+
+    private async Task RunSyncAsync()
+    {
+        IsSyncing = true;
+        try
+        {
+            var svc = new DataSyncService(_paths);
+            var progress = new Progress<string>(s => SyncStatusText = s);
+            await svc.UpdateAsync(progress);
+            RefreshDataStatus();
+        }
+        catch (Exception ex)
+        {
+            SyncStatusText = $"更新失败：{ex.Message}";
+        }
+        finally
+        {
+            IsSyncing = false;
+        }
     }
 
     private void RefreshDataStatus()
