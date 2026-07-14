@@ -77,6 +77,7 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand FetchDayCommand { get; }
     public RelayCommand StopCommand { get; }
     public RelayCommand RetryFailedCommand { get; }
+    public RelayCommand BackfillAmountTurnoverCommand { get; }
 
     public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources)
     {
@@ -103,6 +104,7 @@ public class MainViewModel : INotifyPropertyChanged
         FetchDayCommand = new RelayCommand(async _ => await RunFetchDayAsync(), _ => !IsBusy);
         StopCommand = new RelayCommand(_ => _cts?.Cancel(), _ => IsBusy);
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && FailedCodeCount > 0);
+        BackfillAmountTurnoverCommand = new RelayCommand(async _ => await RunBackfillAmountTurnoverAsync(), _ => !IsBusy);
 
         RefreshDataStatus();
         RefreshFailedCodeCount();
@@ -237,6 +239,40 @@ public class MainViewModel : INotifyPropertyChanged
             // once we're here the run is definitively over and nothing will continue on its own.
             // Without this, a wall of per-stock error lines right before the run ends can read as
             // "still going wrong" rather than "already stopped" (see doc/data-platform-design.md).
+            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
+        }
+    }
+
+    /// <summary>一次性修复历史数据的回填（见 FetchOrchestrator.RunBackfillAmountTurnoverAsync）
+    /// ——2026-07-10之前入库的日线成交额/换手率全是0，正常抓取（增量水位线+INSERT OR IGNORE）
+    /// 永远不会回头补这些旧行，只能靠这个按钮。幂等，可随时停止后再点、只会继续补还缺的。</summary>
+    private async Task RunBackfillAmountTurnoverAsync()
+    {
+        IsBusy = true;
+        StartHeartbeat();
+        _cts = new CancellationTokenSource();
+        try
+        {
+            var progress = new Progress<string>(Log);
+            var result = await _orchestrator.RunBackfillAmountTurnoverAsync(SelectedSource, progress, _cts.Token);
+            foreach (var err in result.Errors) Log($"错误：{err}");
+        }
+        catch (OperationCanceledException)
+        {
+            Log("已停止（用户手动取消）");
+        }
+        catch (Exception ex)
+        {
+            Log($"回填成交额/换手率时出错：{ex.Message}");
+        }
+        finally
+        {
+            StopHeartbeat();
+            _cts?.Dispose();
+            _cts = null;
+            RefreshDataStatus();
+            RefreshFailedCodeCount();
+            IsBusy = false;
             Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
         }
     }

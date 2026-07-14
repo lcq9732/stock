@@ -44,6 +44,11 @@ public class EastMoneyBarFetcher : IBarDataFetcher
     public static string ToSecId(string code)
     {
         code = code.Trim();
+        // 大盘指数（"sh000001"这种带前缀的完整符号，见 MarketIndexCatalog）——东方财富的指数
+        // secid 按交易所映射：沪市指数 "1.000001"，深市指数 "0.399001"。
+        if (MarketIndexCatalog.IsPrefixedSymbol(code))
+            return (code.StartsWith("sh") ? "1." : "0.") + code[2..];
+
         if (code.Length != 6 || !code.All(char.IsDigit))
             throw new ArgumentException($"'{code}' 不是合法的6位A股代码");
         if (MarketClassifier.Classify(code) == MarketBoard.Unknown)

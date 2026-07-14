@@ -62,6 +62,9 @@
             <TextBox Text="{Binding AnnouncementKeywordsText, UpdateSourceTrigger=PropertyChanged}" Width="160" Margin="4,0"
                      IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBoolConverter}}"
                      ToolTip="逗号分隔的多个关键词，例如：中标,签订合同。清空则不抓公告。拉取全部/拉取当天时会自动按这里的关键词搜索（巨潮资讯网全文检索+东方财富公告正文提取金额），不需要单独点击" />
+
+            <Button Content="回填成交额/换手率" Command="{Binding BackfillAmountTurnoverCommand}" Width="130" Margin="16,0,4,0"
+                    ToolTip="一次性修复历史数据：2026-07-10之前入库的日线成交额/换手率都是0（当时腾讯接口不带这两个字段），正常抓取只往前抓新日期、永远不会回头补旧行。点击后按代码找出还缺成交额的日线区间重新抓取，只更新成交额/换手率两列（不动价格），并重算周/月线。工作量与一次全量回补相当（约1小时），可随时点\停止\，再点会接着补还缺的，不会重来。请用 Tencent 数据源（新浪接口不返回成交额）" />
         </StackPanel>
 
         <!-- Log -->

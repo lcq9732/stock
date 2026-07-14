@@ -50,6 +50,10 @@ public class TencentBarFetcher : IBarDataFetcher
     public static string ToSymbol(string code)
     {
         code = code.Trim();
+        // 大盘指数（"sh000001"这种带前缀的完整符号）原样使用——腾讯接口本来就吃这种符号，
+        // 指数返回节点是 "day" 而不是 "qfqday"（下方解析两者都认），见 MarketIndexCatalog。
+        if (MarketIndexCatalog.IsPrefixedSymbol(code)) return code;
+
         if (code.Length != 6 || !code.All(char.IsDigit))
             throw new ArgumentException($"'{code}' 不是合法的6位A股代码");
 

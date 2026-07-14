@@ -175,10 +175,74 @@ public class SqliteBarRepository : IBarRepository
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT DISTINCT code FROM Bar ORDER BY code;";
+        // 只返回6位纯数字的个股代码——大盘指数用带前缀的8位符号存（"sh000001"，见
+        // MarketIndexCatalog），必须挡在这里：这个方法是Analyzer各选股Tab的扫描全集，
+        // 指数混进去会被当成个股跑筛选规则、出现在选股结果里。
+        cmd.CommandText = "SELECT DISTINCT code FROM Bar WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]' ORDER BY code;";
         var result = new List<string>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read()) result.Add(reader.GetString(0));
         return result;
+    }
+
+    /// <summary>日线里还有成交额缺失（amount=0）的代码及其缺失区间——"回填成交额/换手率"
+    /// （见 FetchOrchestrator.RunBackfillAmountTurnoverAsync）用它决定每个代码要重抓哪段日期。
+    /// 判定只看 amount：turnover 跟着同一次UPDATE顺带补，某些标的（如B股）接口天生不给换手率，
+    /// 如果把 turnover=0 也算"缺失"，这些行会永远补不满、每次回填都白白重抓一遍。2026-07-10
+    /// 之前入库的历史行两个字段都是0（老 fqkline 接口不带这两个字段），是回填的主要目标。</summary>
+    public List<(string Code, DateTime Min, DateTime Max, int Count)> GetDayCodesWithMissingAmount()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT code, MIN(period_start), MAX(period_start), COUNT(*)
+            FROM Bar WHERE granularity = 'day' AND amount = 0
+            GROUP BY code ORDER BY code;
+            """;
+        var result = new List<(string, DateTime, DateTime, int)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result.Add((
+                reader.GetString(0),
+                DateTime.ParseExact(reader.GetString(1), DateFormat, CultureInfo.InvariantCulture),
+                DateTime.ParseExact(reader.GetString(2), DateFormat, CultureInfo.InvariantCulture),
+                reader.GetInt32(3)));
+        }
+        return result;
+    }
+
+    /// <summary>只回填日线行的成交额/换手率两列，其余列一律不动——历史行的OHLC是当年抓取时的
+    /// 前复权基准，现在重抓同一天的前复权价可能因为其间的分红除权而整体平移过，覆盖会造成同一只
+    /// 股票序列里新旧复权基准混杂；而成交额/换手率是不受复权影响的原始事实，单独更新是安全的。
+    /// 只更新 amount=0 的行（回填语义——已经有值的行不碰），抓回来仍是0的行直接跳过不发UPDATE。
+    /// 返回实际更新的行数。</summary>
+    public int UpdateDayAmountTurnover(IEnumerable<Bar> bars)
+    {
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            UPDATE Bar SET amount = $amount, turnover = $turnover
+            WHERE code = $code AND granularity = 'day' AND period_start = $period_start AND amount = 0;
+            """;
+        var pAmount = cmd.CreateParameter(); pAmount.ParameterName = "$amount"; cmd.Parameters.Add(pAmount);
+        var pTurnover = cmd.CreateParameter(); pTurnover.ParameterName = "$turnover"; cmd.Parameters.Add(pTurnover);
+        var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
+        var pStart = cmd.CreateParameter(); pStart.ParameterName = "$period_start"; cmd.Parameters.Add(pStart);
+
+        int updated = 0;
+        foreach (var bar in bars)
+        {
+            if (bar.Amount == 0) continue; // 数据源没给成交额（比如新浪），写0没意义，留给下次回填
+            pAmount.Value = bar.Amount;
+            pTurnover.Value = bar.Turnover;
+            pCode.Value = bar.Code;
+            pStart.Value = bar.PeriodStart.ToString(DateFormat, CultureInfo.InvariantCulture);
+            updated += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return updated;
     }
 }
