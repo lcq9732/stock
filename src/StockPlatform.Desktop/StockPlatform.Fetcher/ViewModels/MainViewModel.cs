@@ -79,6 +79,8 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand StopCommand { get; }
     public RelayCommand RetryFailedCommand { get; }
     public RelayCommand FetchBoardsCommand { get; }
+    public RelayCommand FetchEtfCommand { get; }
+    public RelayCommand SynthesizeBoardIndexCommand { get; }
     public RelayCommand BackfillAmountTurnoverCommand { get; }
     public RelayCommand UploadBaselineCommand { get; }
     public RelayCommand UploadDailyCommand { get; }
@@ -110,6 +112,8 @@ public class MainViewModel : INotifyPropertyChanged
         StopCommand = new RelayCommand(_ => _cts?.Cancel(), _ => IsBusy);
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && FailedCodeCount > 0);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
+        FetchEtfCommand = new RelayCommand(async _ => await RunFetchEtfAsync(), _ => !IsBusy);
+        SynthesizeBoardIndexCommand = new RelayCommand(async _ => await RunSynthesizeBoardIndexAsync(), _ => !IsBusy);
         BackfillAmountTurnoverCommand = new RelayCommand(async _ => await RunBackfillAmountTurnoverAsync(), _ => !IsBusy);
         UploadBaselineCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: true), _ => !IsBusy);
         UploadDailyCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: false), _ => !IsBusy);
@@ -318,6 +322,64 @@ public class MainViewModel : INotifyPropertyChanged
             _cts = null;
             IsBusy = false;
             Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
+        }
+    }
+
+    /// <summary>拉取全市场 ETF 日K（见 FetchOrchestrator.RunFetchEtfAsync）——独立按钮，跟"拉取板块"
+    /// 一样单独触发，不掺进主抓取。回看年数复用"拉取全部"那个输入框。</summary>
+    private async Task RunFetchEtfAsync()
+    {
+        if (!int.TryParse(LookbackYearsText.Trim(), out var lookbackYears) || lookbackYears <= 0)
+        {
+            Log($"回看年数不对：\"{LookbackYearsText}\"，请填一个正整数（例如 3）");
+            return;
+        }
+
+        IsBusy = true;
+        StartHeartbeat();
+        _cts = new CancellationTokenSource();
+        try
+        {
+            var progress = new Progress<string>(Log);
+            var result = await _orchestrator.RunFetchEtfAsync(SelectedSource, lookbackYears, progress, _cts.Token);
+            foreach (var err in result.Errors) Log($"错误：{err}");
+        }
+        catch (OperationCanceledException) { Log("已停止（用户手动取消）"); }
+        catch (Exception ex) { Log($"拉取 ETF 失败：{ex.Message}"); }
+        finally
+        {
+            StopHeartbeat();
+            _cts?.Dispose();
+            _cts = null;
+            RefreshDataStatus();
+            IsBusy = false;
+            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
+        }
+    }
+
+    /// <summary>本地合成板块指数日K（见 FetchOrchestrator.RunSynthesizeBoardIndexAsync）——不联网，
+    /// 用已有成分股+个股K线算。前置：先"拉取板块"(成分股)和"拉取全部"(个股K线)。</summary>
+    private async Task RunSynthesizeBoardIndexAsync()
+    {
+        IsBusy = true;
+        StartHeartbeat();
+        _cts = new CancellationTokenSource();
+        try
+        {
+            var progress = new Progress<string>(Log);
+            var result = await _orchestrator.RunSynthesizeBoardIndexAsync(progress, _cts.Token);
+            foreach (var err in result.Errors) Log($"错误：{err}");
+        }
+        catch (OperationCanceledException) { Log("已停止（用户手动取消）"); }
+        catch (Exception ex) { Log($"合成板块指数失败：{ex.Message}"); }
+        finally
+        {
+            StopHeartbeat();
+            _cts?.Dispose();
+            _cts = null;
+            RefreshDataStatus();
+            IsBusy = false;
+            Log("===== 本轮已结束，不会自动继续，需要再次操作请重新点击按钮 =====");
         }
     }
 

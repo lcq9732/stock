@@ -53,6 +53,7 @@ public class FetchOrchestrator
     private readonly AnnouncementFetchOrchestrator _announcementOrchestrator;
     private readonly IBoardFetcher _boardFetcher;
     private readonly IBoardRepository _boardRepository;
+    private readonly IStockListProvider? _etfListProvider;
     private readonly object _dbLock = new();
 
     // 拉取全部对同一批关键词、同一天窗口重复扫描是安全的（OrderWinAnnouncement 主键去重），所以
@@ -101,7 +102,8 @@ public class FetchOrchestrator
         INetInflowFetcher netInflowFetcher,
         AnnouncementFetchOrchestrator announcementOrchestrator,
         IBoardFetcher boardFetcher,
-        IBoardRepository boardRepository)
+        IBoardRepository boardRepository,
+        IStockListProvider? etfListProvider = null)
     {
         _paths = paths;
         _manifestStore = manifestStore;
@@ -111,6 +113,7 @@ public class FetchOrchestrator
         _announcementOrchestrator = announcementOrchestrator;
         _boardFetcher = boardFetcher;
         _boardRepository = boardRepository;
+        _etfListProvider = etfListProvider;
     }
 
     /// <summary>
@@ -159,6 +162,114 @@ public class FetchOrchestrator
             _boardFetcher.OnStatus -= Forward;
         }
         return new FetchResult { Errors = errors };
+    }
+
+    /// <summary>
+    /// 抓取全市场 ETF 的日K（2026-07-15新增）——独立的"拉取ETF"按钮触发，不掺进主抓取流程（上千只
+    /// ETF不该拖慢每次"拉取全部"）。ETF 列表走新浪 <see cref="SinaEtfListProvider"/>（东财在用户环境
+    /// 不可用），代码是带前缀的8位符号（"sh510300"），日K复用所选数据源的 BarFetcher（原生支持带
+    /// 前缀符号）。存进 Bar 表后，因带前缀不是6位纯数字，天然被 GetAllCodes 挡在选股全集外，不会混进
+    /// 个股筛选。失败只汇总提示、不写进个股失败名单（保持"重新拉取失败股票"只管个股）。
+    /// </summary>
+    public async Task<FetchResult> RunFetchEtfAsync(
+        NamedBarSource source, int lookbackYears, IProgress<string>? progress, CancellationToken ct = default)
+    {
+        if (_etfListProvider == null)
+            return new FetchResult { Errors = new List<string> { "未配置 ETF 列表数据源，无法拉取 ETF。" } };
+
+        void ForwardStatus(string msg) => progress?.Report(msg);
+        source.Fetcher.OnStatus += ForwardStatus;
+        try
+        {
+            var today = DateTime.Today;
+            var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
+            currentRepo.EnsureSchema();
+
+            var sw = Stopwatch.StartNew();
+            progress?.Report("正在获取全市场ETF列表...");
+            var etfs = await _etfListProvider.GetAllStocksAsync(progress, ct);
+            if (etfs.Count == 0)
+                return new FetchResult { Errors = new List<string> { "ETF 列表为空（接口可能不可达或被限流），未抓取。" } };
+            progress?.Report($"共 {etfs.Count} 只 ETF，数据源：{source.Name}，开始抓取日K（已用时 {FormatElapsed(sw.Elapsed)}）");
+
+            var errors = new ConcurrentBag<string>();
+            var failedCodes = new ConcurrentBag<string>();
+            var stats = new FetchStats();
+            int completed = 0;
+            var tasks = etfs.Select(etf =>
+            {
+                // 跟"拉取全部"个股一样的逐标的水位线：没抓过从回看窗口起点，抓过从上次+1，"今天"看是否收盘确认。
+                DateTime start;
+                lock (_dbLock)
+                {
+                    var info = currentRepo.GetLatestBarInfo(etf.Code, Granularity.Day);
+                    if (info == null)
+                        start = today.AddYears(-lookbackYears);
+                    else if (info.Value.PeriodStart.Date < today.Date)
+                        start = info.Value.PeriodStart.AddDays(1);
+                    else
+                        start = IsConfirmedFinal(info.Value.FetchedAt, today) ? today.AddDays(1) : today;
+                }
+                return ProcessOneStockAsync(etf.Code, source, start, today, currentRepo, errors, failedCodes, stats, progress, etfs.Count, () => Interlocked.Increment(ref completed), sw, ct);
+            });
+            await Task.WhenAll(tasks);
+
+            progress?.Report($"ETF 抓取汇总：{stats.Summarize()}");
+            if (!failedCodes.IsEmpty)
+                progress?.Report($"有 {failedCodes.Count} 只 ETF 抓取失败，可稍后再点一次\"拉取ETF\"重试（只会补还缺的）。");
+            return new FetchResult { Errors = errors.ToList() };
+        }
+        finally
+        {
+            source.Fetcher.OnStatus -= ForwardStatus;
+        }
+    }
+
+    /// <summary>
+    /// 本地合成板块指数日K（2026-07-15新增）——独立的"合成板块指数"按钮触发，**不联网**：用本地已有的
+    /// 成分股(BoardMember)+个股日K，按等权累乘出每个板块的指数日K（见 <see cref="BoardIndexSynthesizer"/>），
+    /// 存进 Bar 表、code 用板块代码(gn_xxx/new_xxx)。每次全量重算（先删该板块旧bar再写），因为成分股
+    /// 和个股数据会变。前置：先点过"拉取板块"(有成分股)和"拉取全部"(有个股K线)。
+    /// </summary>
+    public Task<FetchResult> RunSynthesizeBoardIndexAsync(IProgress<string>? progress, CancellationToken ct = default)
+    {
+        return Task.Run(() =>
+        {
+            var errors = new List<string>();
+            var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
+            currentRepo.EnsureSchema();
+
+            var boards = _boardRepository.QueryBoards();
+            if (boards.Count == 0)
+                return new FetchResult { Errors = new List<string> { "本地没有板块数据，请先点\"拉取板块\"。" } };
+
+            var asOf = DateTime.Now;
+            int done = 0, withBars = 0, totalBars = 0;
+            foreach (var board in boards)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    var members = _boardRepository.QueryMembers(board.BoardCode);
+                    var bars = BoardIndexSynthesizer.Synthesize(board.BoardCode, members, currentRepo, asOf);
+                    lock (_dbLock)
+                    {
+                        currentRepo.DeleteByCode(board.BoardCode, Granularity.Day);
+                        if (bars.Count > 0) currentRepo.InsertOrIgnore(bars);
+                    }
+                    if (bars.Count > 0) { withBars++; totalBars += bars.Count; }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    errors.Add($"板块「{board.Name}」({board.BoardCode}) 合成失败：{ex.Message}");
+                }
+                if (++done % 20 == 0 || done == boards.Count)
+                    progress?.Report($"合成板块指数：{done}/{boards.Count}（已生成 {withBars} 个板块、{totalBars} 根日K）");
+            }
+            progress?.Report($"板块指数合成完成：{boards.Count} 个板块，其中 {withBars} 个成分股数据足够、已写入 {totalBars} 根日K（code=板块代码，不进个股选股）。");
+            return new FetchResult { Errors = errors };
+        }, ct);
     }
 
     /// <summary>

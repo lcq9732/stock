@@ -70,6 +70,19 @@ public class SqliteBarRepository : IBarRepository
         tx.Commit();
     }
 
+    /// <summary>删掉某个 code 在某粒度下的全部bar——本地合成板块指数(BoardIndexSynthesizer)重算前
+    /// 先清旧值再写新值用（成分股/数据会变，不能用 INSERT OR IGNORE 累积）。个股/指数抓取不用它
+    /// （那些走水位线增量）。</summary>
+    public int DeleteByCode(string code, string granularity)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM Bar WHERE code = $code AND granularity = $granularity;";
+        cmd.Parameters.AddWithValue("$code", code);
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        return cmd.ExecuteNonQuery();
+    }
+
     public DateTime? GetLatestPeriodStart(string code, string granularity)
     {
         using var conn = Open();

@@ -75,7 +75,11 @@ public partial class App : Application
         var boardRepository = new SqliteBoardRepository(paths.CurrentDb);
         boardRepository.EnsureSchema();
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository);
+        // ETF 列表走新浪的 ETF 节点（node=etf_hq_fund），跟股票列表同一个接口不同 node；东财在用户
+        // 环境不可用，所以固定用新浪（ETF 日K本身仍走上面所选数据源的 BarFetcher）。见 SinaEtfListProvider。
+        var etfListProvider = new SinaEtfListProvider();
+
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, etfListProvider);
 
         var viewModel = new MainViewModel(paths, orchestrator, sources);
         var window = new MainWindow { DataContext = viewModel };

@@ -47,6 +47,12 @@
 
             <Button Content="拉取板块" Command="{Binding FetchBoardsCommand}" Width="90" Margin="12,0,4,0"
                     ToolTip="抓取概念/题材板块 + 行业板块的最新行情（涨跌幅/成交额/领涨股）及各板块成分股，整体覆盖写入本地库，供分析程序的\板块热度\页使用。数据来自新浪，是当下快照（盘中实时/收盘后为当日）。跟K线抓取相互独立，可单独点。" />
+
+            <Button Content="拉取ETF" Command="{Binding FetchEtfCommand}" Width="90" Margin="12,0,4,0"
+                    ToolTip="抓取全市场 ETF 的日K（列表走新浪，日K走上面所选数据源）。上千只、耗时较长，所以独立触发、不掺进\拉取全部\。回看年数用左边那个输入框。ETF 用带前缀符号(sh510300)存，不会混进个股选股。" />
+
+            <Button Content="合成板块指数" Command="{Binding SynthesizeBoardIndexCommand}" Width="110" Margin="4,0,4,0"
+                    ToolTip="本地用成分股合成板块指数日K（不联网）。板块指数官方K线只有东财/同花顺、你环境连不上，所以按等权用已有成分股+个股K线自己算。前置：先点过\拉取板块\(成分股)和\拉取全部\(个股K线)。每次全量重算。" />
         </StackPanel>
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
