@@ -20,8 +20,8 @@ $publishDir = Join-Path $repoRoot "publish"
 $scratchRoot = Join-Path $env:TEMP ("stockpublish_" + [Guid]::NewGuid().ToString("N"))
 
 $projects = @(
-    @{ Name = "StockPlatform.Analyzer"; Csproj = Join-Path $repoRoot "src\StockPlatform.Analyzer\StockPlatform.Analyzer.csproj" },
-    @{ Name = "StockPlatform.Fetcher";  Csproj = Join-Path $repoRoot "src\StockPlatform.Fetcher\StockPlatform.Fetcher.csproj" }
+    @{ Name = "StockPlatform.Analyzer"; Csproj = Join-Path $repoRoot "src\StockPlatform.Desktop\StockPlatform.Analyzer\StockPlatform.Analyzer.csproj" },
+    @{ Name = "StockPlatform.Fetcher";  Csproj = Join-Path $repoRoot "src\StockPlatform.Desktop\StockPlatform.Fetcher\StockPlatform.Fetcher.csproj" }
 )
 
 Write-Host "发布目录：$publishDir"

@@ -36,9 +36,9 @@ public class SqliteBarRepository : IBarRepository
         cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT OR IGNORE INTO Bar
-                (code, granularity, period_start, open, close, high, low, volume, amount, pct_chg, turnover, fetched_at)
+                (code, granularity, period_start, open, close, high, low, volume, amount, turnover, fetched_at)
             VALUES
-                ($code, $granularity, $period_start, $open, $close, $high, $low, $volume, $amount, $pct_chg, $turnover, $fetched_at);
+                ($code, $granularity, $period_start, $open, $close, $high, $low, $volume, $amount, $turnover, $fetched_at);
             """;
         var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
         var pGran = cmd.CreateParameter(); pGran.ParameterName = "$granularity"; cmd.Parameters.Add(pGran);
@@ -49,7 +49,6 @@ public class SqliteBarRepository : IBarRepository
         var pLow = cmd.CreateParameter(); pLow.ParameterName = "$low"; cmd.Parameters.Add(pLow);
         var pVolume = cmd.CreateParameter(); pVolume.ParameterName = "$volume"; cmd.Parameters.Add(pVolume);
         var pAmount = cmd.CreateParameter(); pAmount.ParameterName = "$amount"; cmd.Parameters.Add(pAmount);
-        var pPct = cmd.CreateParameter(); pPct.ParameterName = "$pct_chg"; cmd.Parameters.Add(pPct);
         var pTurnover = cmd.CreateParameter(); pTurnover.ParameterName = "$turnover"; cmd.Parameters.Add(pTurnover);
         var pFetchedAt = cmd.CreateParameter(); pFetchedAt.ParameterName = "$fetched_at"; cmd.Parameters.Add(pFetchedAt);
 
@@ -64,7 +63,6 @@ public class SqliteBarRepository : IBarRepository
             pLow.Value = bar.Low;
             pVolume.Value = bar.Volume;
             pAmount.Value = bar.Amount;
-            pPct.Value = bar.PctChange;
             pTurnover.Value = bar.Turnover;
             pFetchedAt.Value = bar.FetchedAt.ToString(DateFormat, CultureInfo.InvariantCulture);
             cmd.ExecuteNonQuery();
@@ -123,7 +121,7 @@ public class SqliteBarRepository : IBarRepository
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT code, granularity, period_start, open, close, high, low, volume, amount, pct_chg, turnover, fetched_at
+            SELECT code, granularity, period_start, open, close, high, low, volume, amount, turnover, fetched_at
             FROM Bar
             WHERE code = $code AND granularity = $granularity
               AND ($start IS NULL OR period_start >= $start)
@@ -150,13 +148,12 @@ public class SqliteBarRepository : IBarRepository
                 Low = reader.GetDouble(6),
                 Volume = reader.GetDouble(7),
                 Amount = reader.GetDouble(8),
-                PctChange = reader.GetDouble(9),
-                Turnover = reader.GetDouble(10),
+                Turnover = reader.GetDouble(9),
                 // 老数据（这个字段2026-07-09之前没有）读出来是DBNull——用MinValue兜底，永远判定为
                 // "未确认最终"，直到这一天被重新抓到一次为止（只影响"今天"这一天的判断，更早的
                 // 历史天数不会因为FetchedAt是MinValue而被误判成需要重新抓——见FetchOrchestrator
                 // 的水位线逻辑，只有period_start等于当前日期时才会去看FetchedAt）。
-                FetchedAt = reader.IsDBNull(11) ? DateTime.MinValue : DateTime.ParseExact(reader.GetString(11), DateFormat, CultureInfo.InvariantCulture),
+                FetchedAt = reader.IsDBNull(10) ? DateTime.MinValue : DateTime.ParseExact(reader.GetString(10), DateFormat, CultureInfo.InvariantCulture),
             });
         }
         return result;

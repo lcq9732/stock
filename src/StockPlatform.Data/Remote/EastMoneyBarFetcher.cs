@@ -136,7 +136,7 @@ public class EastMoneyBarFetcher : IBarDataFetcher
                     Low = double.Parse(parts[4], CultureInfo.InvariantCulture),
                     Volume = double.Parse(parts[5], CultureInfo.InvariantCulture),
                     Amount = double.Parse(parts[6], CultureInfo.InvariantCulture),
-                    PctChange = double.Parse(parts[8], CultureInfo.InvariantCulture),
+                    // 涨跌幅(parts[8])不再存储，消费端用收盘价现算（见 2026-07-14 变更记录）。
                     Turnover = parts.Length > 10 ? double.Parse(parts[10], CultureInfo.InvariantCulture) : 0,
                     FetchedAt = DateTime.Now,
                 });

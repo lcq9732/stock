@@ -19,7 +19,15 @@ public static class DailyIncrementExporter
     {
         if (File.Exists(outSqlitePath)) File.Delete(outSqlitePath);
 
-        // 先建好空的目标增量库(schema 与主库一致)。
+        // 先确保源库(current.sqlite)已迁移到最新表结构（删掉废弃的 pct_chg 列）——否则下面
+        // "INSERT ... SELECT * FROM src.Bar" 的列数会跟新建的增量表对不上（见 2026-07-14 变更记录）。
+        using (var srcMig = new SqliteConnection($"Data Source={currentDbPath}"))
+        {
+            srcMig.Open();
+            SqliteSchema.EnsureSchema(srcMig);
+        }
+
+        // 再建好空的目标增量库(schema 与主库一致)。
         using (var init = new SqliteConnection($"Data Source={outSqlitePath}"))
         {
             init.Open();

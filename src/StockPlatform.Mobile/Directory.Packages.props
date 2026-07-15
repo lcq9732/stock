@@ -1,0 +1,23 @@
+<Project>
+    <PropertyGroup>
+        <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    </PropertyGroup>
+    <ItemGroup>
+        <!-- Avalonia 11.3.x —— 支持 .NET 8/9（本机只有 .NET 9 SDK + .NET 9 android workload），
+             不用模板默认的 12.x（那需要 .NET 10）。所有 Avalonia 包版本保持一致。 -->
+        <PackageVersion Include="Avalonia" Version="11.3.0" />
+        <PackageVersion Include="Avalonia.Themes.Fluent" Version="11.3.0" />
+        <PackageVersion Include="Avalonia.Fonts.Inter" Version="11.3.0" />
+        <PackageVersion Include="Avalonia.Desktop" Version="11.3.0" />
+        <PackageVersion Include="Avalonia.iOS" Version="11.3.0" />
+        <PackageVersion Include="Avalonia.Android" Version="11.3.0" />
+        <PackageVersion Include="Avalonia.Diagnostics" Version="11.3.0" />
+        <PackageVersion Include="Avalonia.Headless" Version="11.3.0" />
+        <PackageVersion Include="Avalonia.Skia" Version="11.3.0" />
+
+        <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+        <PackageVersion Include="Xamarin.AndroidX.Core.SplashScreen" Version="1.0.1.15" />
+        <!-- K线图：OxyPlot 的 Avalonia 版（2.1.0 支持 Avalonia 11）。 -->
+        <PackageVersion Include="OxyPlot.Avalonia" Version="2.1.0" />
+    </ItemGroup>
+</Project>

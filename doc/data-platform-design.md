@@ -206,7 +206,8 @@ CREATE TABLE Bar (
     granularity TEXT NOT NULL,   -- 'day' / 'week' / 'month' / 'min1' / 'min5' / 'min15' / 'min30' / 'min60' / ...
     period_start TEXT NOT NULL,  -- ISO日期或日期时间，视granularity而定
     open REAL, close REAL, high REAL, low REAL,
-    volume REAL, amount REAL, pct_chg REAL, turnover REAL,
+    volume REAL, amount REAL, turnover REAL,   -- 2026-07-14 起去掉了 pct_chg 列：涨跌幅是收盘价的
+                                               -- 派生值，改成消费端用相邻收盘价现算，不再存储（见3.9末）
     fetched_at TEXT,             -- 抓取墙钟时间，判断当天数据是否已收盘确认（2026-07-09新增，见3.9）
     PRIMARY KEY (code, granularity, period_start)
 );
@@ -486,7 +487,7 @@ GET https://pan.baidu.com/share/list?uk={share_uk}&shareid={shareid}&order=time&
 | `period_start` | 周期起始日期 | ✅ | |
 | `open`/`close`/`high`/`low` | 开/收/高/低 | ✅ | 前复权(qfq) |
 | `volume` | 成交量 | ✅ | **腾讯口径是"手"，新浪口径是"股"**（差100倍），是历史遗留的两源单位不一致，未统一 |
-| `pct_chg` | 涨跌幅(%) | ✅ | 本地用相邻收盘价算出来的，不是接口直接给的；未收盘的当天可能暂时为0 |
+| 涨跌幅(%) | —（不存储） | 🚫 | 2026-07-14 起不再存 `pct_chg` 列——它是收盘价的派生值，改成需要处用相邻收盘价现算（存储会有"每条写入路径都得同步更新"的负担，之前该列长期为0正是这个坑）。抓取器/聚合都不再写它，老库的该列会被 EnsureSchema 自动删除 |
 | `amount` | 成交额(元) | ✅（仅腾讯，2026-07-10起） | 腾讯 `newfqkline` 接口带；成交额精确到万元（跟东方财富原生字段核对一致）。**新浪源填不出→0** |
 | `turnover` | 换手率(%) | ✅（仅腾讯，2026-07-10起） | 同上，腾讯 `newfqkline` 带。**新浪源填不出→0** |
 | `fetched_at` | 抓取墙钟时间 | ✅ | 判断当天数据是否已收盘确认用（见3.9） |

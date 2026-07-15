@@ -28,7 +28,7 @@ namespace StockPlatform.Data.Remote;
 /// 回测/大盘热度指标开始依赖 Bar.Amount——所以新浪现在只适合当腾讯的回退兜底，它补进来的行
 /// 会缺成交额，事后可以用 Fetcher 的"回填成交额/换手率"按钮从腾讯补齐，见
 /// FetchOrchestrator.RunBackfillAmountTurnoverAsync。）
-/// PctChange is computed locally from consecutive closes, same technique as TencentBarFetcher.
+/// 涨跌幅不再存储（2026-07-14起改成消费端用相邻收盘价现算），本抓取器不再计算它。
 ///
 /// **Unverified as of 2026-07-08**: whether this endpoint returns front-adjusted (前复权) prices
 /// like EastMoney (fqt=1) / Tencent (qfq) do, or raw/unadjusted prices. This codebase previously
@@ -130,6 +130,8 @@ public class SinaBarFetcher : IBarDataFetcher
         if (doc.RootElement.ValueKind != JsonValueKind.Array)
             throw new InvalidOperationException($"未获取到 {code} 的数据，请检查代码是否正确");
 
+        // 涨跌幅不再存储（改成消费端用收盘价现算，见 doc/data-platform-design.md 2026-07-14 变更记录），
+        // 直接按窗口过滤即可。
         var bars = new List<Bar>();
         foreach (var row in doc.RootElement.EnumerateArray())
         {
@@ -153,13 +155,6 @@ public class SinaBarFetcher : IBarDataFetcher
             });
         }
         bars = bars.OrderBy(b => b.PeriodStart).ToList();
-
-        double? prevClose = null;
-        foreach (var b in bars)
-        {
-            b.PctChange = prevClose is > 0 ? (b.Close - prevClose.Value) / prevClose.Value * 100 : 0;
-            prevClose = b.Close;
-        }
 
         // 这个接口不直接返回股票名称——不要紧，FetchOrchestrator.ProcessOneStockAsync拿到返回值
         // 后本来就丢弃了Name（股票名称另外从StockListProvider.GetAllStocksAsync走StockMeta表）。

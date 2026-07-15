@@ -14,7 +14,7 @@ public static class SqliteSchema
                 granularity TEXT NOT NULL,
                 period_start TEXT NOT NULL,
                 open REAL, close REAL, high REAL, low REAL,
-                volume REAL, amount REAL, pct_chg REAL, turnover REAL,
+                volume REAL, amount REAL, turnover REAL,
                 fetched_at TEXT,
                 PRIMARY KEY (code, granularity, period_start)
             );
@@ -85,6 +85,24 @@ public static class SqliteSchema
         // 存在（EnsureSchema要保持幂等可重复调用，且ALTER TABLE ADD COLUMN对已有同名列会直接报错）。
         AddColumnIfMissing(conn, "Bar", "fetched_at", "TEXT");
         AddColumnIfMissing(conn, "NetInflow", "fetched_at", "TEXT");
+
+        // 2026-07-14 起不再存储涨跌幅——它是收盘价的派生值，全部改成读取时现算（存一份反而多一层
+        // "每条写入路径都得同步更新"的负担，之前 pct_chg 常年为0正是这个坑，见 doc §9.5 的原则）。
+        // 老库里已有的 pct_chg 列在这里删掉，保持"代码里没有、库里也没有"一致；DROP COLUMN 会重写
+        // 整张表，856MB 的库首次执行需要几十秒，之后列已不在、此调用变成空操作。
+        DropColumnIfExists(conn, "Bar", "pct_chg");
+    }
+
+    private static void DropColumnIfExists(SqliteConnection conn, string table, string column)
+    {
+        using var checkCmd = conn.CreateCommand();
+        checkCmd.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = $column;";
+        checkCmd.Parameters.AddWithValue("$column", column);
+        if (Convert.ToInt64(checkCmd.ExecuteScalar()) == 0) return;
+
+        using var alterCmd = conn.CreateCommand();
+        alterCmd.CommandText = $"ALTER TABLE {table} DROP COLUMN {column};";
+        alterCmd.ExecuteNonQuery();
     }
 
     private static void AddColumnIfMissing(SqliteConnection conn, string table, string column, string columnType)

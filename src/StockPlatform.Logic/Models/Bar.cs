@@ -28,7 +28,8 @@ public class Bar
     public double Low { get; set; }
     public double Volume { get; set; }
     public double Amount { get; set; }
-    public double PctChange { get; set; }
+    // 涨跌幅不再作为字段存储/传递——它是收盘价的派生值，一律在需要处用相邻收盘价现算
+    // （见 doc §9.5 / doc/data-platform-design.md 2026-07-14 变更记录）。
     public double Turnover { get; set; }
 
     /// <summary>实际抓取到这一天数据的时间（墙钟时间，不是交易日日期）——2026-07-09新增，用来

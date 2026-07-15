@@ -1,0 +1,11 @@
+﻿<Solution>
+  <Project Path="StockPlatform.Mobile.Android/StockPlatform.Mobile.Android.csproj">
+    <Deploy />
+  </Project>
+  <Project Path="StockPlatform.Mobile.Browser/StockPlatform.Mobile.Browser.csproj" />
+  <Project Path="StockPlatform.Mobile.Desktop/StockPlatform.Mobile.Desktop.csproj" />
+  <Project Path="StockPlatform.Mobile.iOS/StockPlatform.Mobile.iOS.csproj">
+    <Deploy />
+  </Project>
+  <Project Path="StockPlatform.Mobile/StockPlatform.Mobile.csproj" />
+</Solution>

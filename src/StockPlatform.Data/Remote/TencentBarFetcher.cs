@@ -103,19 +103,12 @@ public class TencentBarFetcher : IBarDataFetcher
             await Task.Delay(200, ct); // be polite between pages of the same stock, independent of the outer per-stock rate limit
         }
 
+        // 涨跌幅不再存储（改成消费端用收盘价现算，见 doc/data-platform-design.md 2026-07-14 变更记录），
+        // 这里只按窗口返回即可，不再算 pct。
         var result = merged.Values
             .Where(b => b.PeriodStart >= startDate && b.PeriodStart <= endDate)
             .OrderBy(b => b.PeriodStart)
             .ToList();
-
-        // Per-page pct_chg is wrong at page boundaries (each page's "previous close" resets) —
-        // recompute once over the final merged, sorted series.
-        double? prevClose = null;
-        foreach (var b in result)
-        {
-            b.PctChange = prevClose is > 0 ? (b.Close - prevClose.Value) / prevClose.Value * 100 : 0;
-            prevClose = b.Close;
-        }
 
         return (name ?? code, result);
     }

@@ -50,27 +50,49 @@ public class GitHubReleaseClient
     /// <summary>列出数据 release 上的全部资产；release 还不存在(404)时返回空列表。</summary>
     public async Task<IReadOnlyList<Asset>> ListAssetsAsync(CancellationToken ct = default)
     {
-        using var resp = await _http.SendAsync(Req(HttpMethod.Get, $"https://api.github.com/repos/{Owner}/{Repo}/releases/tags/{Tag}"), ct);
-        if (resp.StatusCode == HttpStatusCode.NotFound) return Array.Empty<Asset>();
-        resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(body);
-        var list = new List<Asset>();
-        if (doc.RootElement.TryGetProperty("assets", out var assets))
-            foreach (var a in assets.EnumerateArray())
-                list.Add(new Asset(
-                    a.GetProperty("id").GetInt64(),
-                    a.GetProperty("name").GetString() ?? "",
-                    a.GetProperty("browser_download_url").GetString() ?? "",
-                    a.TryGetProperty("size", out var sz) ? sz.GetInt64() : 0));
-        return list;
+        HttpResponseMessage resp;
+        try
+        {
+            resp = await _http.SendAsync(Req(HttpMethod.Get, $"https://api.github.com/repos/{Owner}/{Repo}/releases/tags/{Tag}"), ct);
+        }
+        catch (Exception ex) when ((ex is HttpRequestException or TaskCanceledException) && !ct.IsCancellationRequested)
+        {
+            // 不把底层异常(可能带 api.github.com 主机名)透出给用户，统一成中性文案，避免暴露数据来源。
+            throw new InvalidOperationException("连接服务器失败，请检查网络后重试。");
+        }
+        using (resp)
+        {
+            if (resp.StatusCode == HttpStatusCode.NotFound) return Array.Empty<Asset>();
+            if (!resp.IsSuccessStatusCode) throw new InvalidOperationException("从服务器读取数据失败，请稍后重试。");
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(body);
+            var list = new List<Asset>();
+            if (doc.RootElement.TryGetProperty("assets", out var assets))
+                foreach (var a in assets.EnumerateArray())
+                    list.Add(new Asset(
+                        a.GetProperty("id").GetInt64(),
+                        a.GetProperty("name").GetString() ?? "",
+                        a.GetProperty("browser_download_url").GetString() ?? "",
+                        a.TryGetProperty("size", out var sz) ? sz.GetInt64() : 0));
+            return list;
+        }
     }
 
     /// <summary>把一个资产流式下载到本地文件，progress 报告 0~1 的完成比例。</summary>
     public async Task DownloadAsync(Asset asset, string destPath, IProgress<double>? progress, CancellationToken ct = default)
     {
-        using var resp = await _http.SendAsync(Req(HttpMethod.Get, asset.DownloadUrl), HttpCompletionOption.ResponseHeadersRead, ct);
-        resp.EnsureSuccessStatusCode();
+        HttpResponseMessage resp;
+        try
+        {
+            resp = await _http.SendAsync(Req(HttpMethod.Get, asset.DownloadUrl), HttpCompletionOption.ResponseHeadersRead, ct);
+            resp.EnsureSuccessStatusCode();
+        }
+        catch (Exception ex) when ((ex is HttpRequestException or TaskCanceledException) && !ct.IsCancellationRequested)
+        {
+            // 同 ListAssetsAsync：不透出可能含下载主机名的底层异常。
+            throw new InvalidOperationException("从服务器下载数据失败，请检查网络后重试。");
+        }
+        using var _ = resp;
         long total = resp.Content.Headers.ContentLength ?? asset.Size;
         await using var input = await resp.Content.ReadAsStreamAsync(ct);
         Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
@@ -117,11 +139,7 @@ public class GitHubReleaseClient
         RequireToken();
         // 同名先删（GitHub 不允许重名资产）
         foreach (var a in await ListAssetsAsync(ct))
-            if (a.Name == assetName)
-            {
-                using var del = await _http.SendAsync(Req(HttpMethod.Delete, $"https://api.github.com/repos/{Owner}/{Repo}/releases/assets/{a.Id}"), ct);
-                del.EnsureSuccessStatusCode();
-            }
+            if (a.Name == assetName) await DeleteAssetAsync(a.Id, ct);
 
         var url = $"https://uploads.github.com/repos/{Owner}/{Repo}/releases/{releaseId}/assets?name={Uri.EscapeDataString(assetName)}";
         var req = Req(HttpMethod.Post, url);
@@ -134,6 +152,14 @@ public class GitHubReleaseClient
         using var resp = await _http.SendAsync(req, ct);
         resp.EnsureSuccessStatusCode();
         progress?.Report(1);
+    }
+
+    /// <summary>删除一个 release 资产。需要 token。</summary>
+    public async Task DeleteAssetAsync(long assetId, CancellationToken ct = default)
+    {
+        RequireToken();
+        using var del = await _http.SendAsync(Req(HttpMethod.Delete, $"https://api.github.com/repos/{Owner}/{Repo}/releases/assets/{assetId}"), ct);
+        del.EnsureSuccessStatusCode();
     }
 
     private void RequireToken()

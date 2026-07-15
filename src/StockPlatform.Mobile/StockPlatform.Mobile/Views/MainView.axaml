@@ -1,0 +1,168 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:StockPlatform.Mobile.ViewModels"
+             xmlns:ctrl="using:StockPlatform.Mobile.Controls"
+             mc:Ignorable="d" d:DesignWidth="400" d:DesignHeight="760"
+             x:Class="StockPlatform.Mobile.Views.MainView"
+             x:Name="Root"
+             x:DataType="vm:MainViewModel"
+             x:CompileBindings="False">
+    <Design.DataContext>
+        <vm:MainViewModel />
+    </Design.DataContext>
+
+    <Grid>
+        <!-- 列表页 -->
+        <TabControl IsVisible="{Binding !ShowChart}">
+
+            <!-- 选股 -->
+            <TabItem Header="选股">
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto,*" Margin="10">
+                    <TextBlock Grid.Row="0" Text="{Binding DbStatus}" TextWrapping="Wrap" Margin="0,0,0,6" />
+                    <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+                        <Button Content="从服务端更新数据" Command="{Binding UpdateCommand}" IsEnabled="{Binding !IsUpdating}" />
+                        <TextBlock Text="{Binding UpdateStatus}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Margin="0,0,0,6">
+                        <TextBlock Text="方法：" VerticalAlignment="Center" />
+                        <ComboBox ItemsSource="{Binding Methods}" SelectedItem="{Binding SelectedMethod}" Width="150" />
+                        <Button Content="分析" Command="{Binding RunScreenCommand}" IsEnabled="{Binding !IsBusy}" />
+                        <TextBlock Text="{Binding ScreenSummary}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <!-- 当前方法的可调参数（跟桌面版一致），无参数时这行为空。 -->
+                    <ItemsControl Grid.Row="3" ItemsSource="{Binding CurrentParams}" Margin="0,0,0,8">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,0,12,4">
+                                    <TextBlock Text="{Binding Label}" VerticalAlignment="Center" />
+                                    <NumericUpDown Value="{Binding Value}" Minimum="{Binding Min}" Maximum="{Binding Max}"
+                                                   Increment="{Binding Increment}" Width="130" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <ListBox Grid.Row="4" ItemsSource="{Binding ScreenResults}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="90,*,Auto,Auto" Height="44">
+                                    <TextBlock Grid.Column="0" Text="{Binding Code}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="2" Text="{Binding Metric}" Foreground="#E0A000" VerticalAlignment="Center" Margin="0,0,10,0" />
+                                    <Button Grid.Column="3" Content="K线" VerticalAlignment="Center"
+                                            Command="{Binding #Root.DataContext.OpenChartCommand}" CommandParameter="{Binding}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </TabItem>
+
+            <!-- 板块热度 -->
+            <TabItem Header="板块">
+                <Grid RowDefinitions="Auto,Auto,2*,Auto,3*" Margin="10">
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="0,0,0,6">
+                        <RadioButton Content="概念/题材" GroupName="bt" IsChecked="{Binding ShowConcept}" />
+                        <RadioButton Content="行业" GroupName="bt" IsChecked="{Binding !ShowConcept}" />
+                        <Button Content="加载" Command="{Binding LoadBoardsCommand}" />
+                    </StackPanel>
+                    <TextBlock Grid.Row="1" Text="{Binding BoardSummary}" Foreground="Gray" TextWrapping="Wrap" Margin="0,0,0,4" />
+
+                    <ListBox Grid.Row="2" ItemsSource="{Binding Boards}" SelectedItem="{Binding SelectedBoard}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="*,Auto,Auto" Height="40">
+                                    <TextBlock Grid.Column="0" Text="{Binding Name}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding ChangeText}" VerticalAlignment="Center" Margin="0,0,10,0" />
+                                    <TextBlock Grid.Column="2" Text="{Binding MemberCount, StringFormat='{}{0}只'}" Foreground="Gray" VerticalAlignment="Center" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <TextBlock Grid.Row="3" Text="{Binding BoardMembersHeader}" FontWeight="Bold" Margin="0,6,0,4" />
+                    <ListBox Grid.Row="4" ItemsSource="{Binding BoardMembers}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="90,*,Auto,Auto" Height="42">
+                                    <TextBlock Grid.Column="0" Text="{Binding Code}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="2" Text="{Binding ChangeText}" VerticalAlignment="Center" Margin="0,0,10,0" />
+                                    <Button Grid.Column="3" Content="K线" VerticalAlignment="Center"
+                                            Command="{Binding #Root.DataContext.OpenChartCommand}" CommandParameter="{Binding}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </TabItem>
+
+            <!-- 查询 -->
+            <TabItem Header="查询">
+                <Grid RowDefinitions="Auto,*" Margin="10">
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+                        <TextBox Text="{Binding QueryText}" Watermark="代码或名称" Width="180" />
+                        <Button Content="查询" Command="{Binding SearchCommand}" />
+                        <TextBlock Text="{Binding QuerySummary}" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <ListBox Grid.Row="1" ItemsSource="{Binding QueryResults}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="90,*,Auto" Height="44">
+                                    <TextBlock Grid.Column="0" Text="{Binding Code}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" VerticalAlignment="Center" />
+                                    <Button Grid.Column="2" Content="K线" VerticalAlignment="Center"
+                                            Command="{Binding #Root.DataContext.OpenChartCommand}" CommandParameter="{Binding}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </TabItem>
+
+            <!-- 自选股 -->
+            <TabItem Header="自选">
+                <Grid RowDefinitions="Auto,*" Margin="10">
+                    <TextBlock Grid.Row="0" Text="{Binding WatchSummary}" Foreground="Gray" Margin="0,0,0,6" />
+                    <ListBox Grid.Row="1" ItemsSource="{Binding Watchlist}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="80,*,Auto,Auto,Auto" Height="48">
+                                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Code}" />
+                                        <TextBlock Text="{Binding DataDate}" FontSize="10" Foreground="Gray" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="1" Text="{Binding Name}" VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="2" Text="{Binding Change}" VerticalAlignment="Center" Margin="0,0,10,0" Foreground="#E0A000" />
+                                    <Button Grid.Column="3" Content="K线" VerticalAlignment="Center" Margin="0,0,4,0"
+                                            Command="{Binding #Root.DataContext.OpenChartCommand}" CommandParameter="{Binding}" />
+                                    <Button Grid.Column="4" Content="移除" VerticalAlignment="Center"
+                                            Command="{Binding #Root.DataContext.RemoveWatchCommand}" CommandParameter="{Binding}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <!-- K线页 -->
+        <Grid IsVisible="{Binding ShowChart}" RowDefinitions="Auto,*" Background="Black">
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="8">
+                <Button Content="← 返回" Command="{Binding CloseChartCommand}" />
+                <Button Content="加自选" Command="{Binding AddToWatchlistCommand}" />
+                <TextBlock Text="{Binding ChartTitle}" FontWeight="Bold" FontSize="16" Foreground="#EEEEEE" VerticalAlignment="Center" />
+            </StackPanel>
+            <ctrl:CandleChart Grid.Row="1" Bars="{Binding ChartBars}" />
+        </Grid>
+    </Grid>
+</UserControl>
