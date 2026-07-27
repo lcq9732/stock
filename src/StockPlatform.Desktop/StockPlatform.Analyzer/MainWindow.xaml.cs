@@ -317,6 +317,14 @@ public partial class MainWindow : Window
             OpenQuoteDetail(row.Code, row.Name);
     }
 
+    // 板块热度Tab里板块自身的"板块K线"——看本地合成的板块指数（code=板块代码 gn_xxx/new_xxx，
+    // 见 BoardIndexSynthesizer）。没合成过/没拷数据库时会提示没有日线数据。
+    private void BoardIndexQuoteDetailButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is BoardRowViewModel row)
+            OpenQuoteDetail(row.BoardCode, row.Name);
+    }
+
     private void OpenQuoteDetail(string code, string name)
     {
         if (DataContext is not MainViewModel vm) return;
@@ -324,7 +332,7 @@ public partial class MainWindow : Window
         // 至少有数据，避免打开一个完全空白、什么都显示不出来的窗口。
         if (vm.BarRepository.Query(code, Granularity.Day).Count == 0)
         {
-            MessageBox.Show(this, "没有找到该股票的日线数据。", "无法显示行情", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(this, "没有找到该标的的日线数据。\n（若是板块指数，请先在 Fetcher 里\"合成板块指数\"并把数据库拷贝过来）", "无法显示行情", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         new QuoteDetailWindow(code, name, vm.BarRepository) { Owner = this }.ShowDialog();

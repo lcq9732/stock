@@ -124,9 +124,7 @@ public class RateLimiter
             // behind the "正在抓取 (X/总数)" stock-progress counter whenever some stocks are
             // skipped for already being up to date (see FetchOrchestrator.FetchStats). Without
             // this distinction the two numbers look inconsistent side by side in the log.
-            OnStatus?.Invoke(
-                $"已发出 {count} 次网络请求，主动休息 {_restDuration.TotalSeconds:0} 秒" +
-                "（预防性降速，防止触发反爬限流，不是卡死；这个计数只算真正发出的网络请求，跳过的股票不算在内，所以会比抓取进度数字小）");
+            OnStatus?.Invoke($"已发出 {count} 次网络请求，主动休息 {_restDuration.TotalSeconds:0} 秒");
         }
     }
 

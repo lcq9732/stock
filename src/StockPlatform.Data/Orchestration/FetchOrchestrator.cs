@@ -54,6 +54,15 @@ public class FetchOrchestrator
     private readonly IBoardFetcher _boardFetcher;
     private readonly IBoardRepository _boardRepository;
     private readonly IStockListProvider? _etfListProvider;
+    private readonly IIndexConsProvider _indexConsProvider;
+    private readonly IIndexWeightProvider _indexWeightProvider;
+    private readonly ILhbProvider _lhbProvider;
+    private readonly IIndexConsRepository _indexRepository;
+    private readonly ILhbRepository _lhbRepository;
+    private readonly IShareholderProvider _shareholderProvider;
+    private readonly IShareholderRepository _shareholderRepository;
+    private readonly IMarginProvider _marginProvider;
+    private readonly IMarginRepository _marginRepository;
     private readonly object _dbLock = new();
 
     // 拉取全部对同一批关键词、同一天窗口重复扫描是安全的（OrderWinAnnouncement 主键去重），所以
@@ -103,6 +112,15 @@ public class FetchOrchestrator
         AnnouncementFetchOrchestrator announcementOrchestrator,
         IBoardFetcher boardFetcher,
         IBoardRepository boardRepository,
+        IIndexConsProvider indexConsProvider,
+        IIndexWeightProvider indexWeightProvider,
+        ILhbProvider lhbProvider,
+        IIndexConsRepository indexRepository,
+        ILhbRepository lhbRepository,
+        IShareholderProvider shareholderProvider,
+        IShareholderRepository shareholderRepository,
+        IMarginProvider marginProvider,
+        IMarginRepository marginRepository,
         IStockListProvider? etfListProvider = null)
     {
         _paths = paths;
@@ -113,6 +131,15 @@ public class FetchOrchestrator
         _announcementOrchestrator = announcementOrchestrator;
         _boardFetcher = boardFetcher;
         _boardRepository = boardRepository;
+        _indexConsProvider = indexConsProvider;
+        _indexWeightProvider = indexWeightProvider;
+        _lhbProvider = lhbProvider;
+        _indexRepository = indexRepository;
+        _lhbRepository = lhbRepository;
+        _shareholderProvider = shareholderProvider;
+        _shareholderRepository = shareholderRepository;
+        _marginProvider = marginProvider;
+        _marginRepository = marginRepository;
         _etfListProvider = etfListProvider;
     }
 
@@ -123,7 +150,7 @@ public class FetchOrchestrator
     /// </summary>
     public async Task<FetchResult> RunFetchBoardsAsync(IProgress<string>? progress, CancellationToken ct = default)
     {
-        var errors = new List<string>();
+        var errors = new ConcurrentBag<string>();
         void Forward(string s) => progress?.Report(s);
         _boardFetcher.OnStatus += Forward;
         try
@@ -156,12 +183,18 @@ public class FetchOrchestrator
 
             _boardRepository.ReplaceAll(all);
             progress?.Report($"板块数据抓取完成：共 {all.Count} 个板块，已写入本地库。");
+
+            // 拉完板块紧接着合成板块指数（不联网，用本地已有个股K线按新成分重算）——2026-07-16 合并为
+            // 一步，不再需要单独点"合成板块指数"。日常的重算仍并在"拉取全部/当天"末尾。
+            var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
+            currentRepo.EnsureSchema();
+            SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
         }
         finally
         {
             _boardFetcher.OnStatus -= Forward;
         }
-        return new FetchResult { Errors = errors };
+        return new FetchResult { Errors = errors.ToList() };
     }
 
     /// <summary>
@@ -185,6 +218,8 @@ public class FetchOrchestrator
         catch (Exception ex) { errors.Add($"获取ETF列表失败（跳过ETF）：{ex.Message}"); return new List<string>(); }
         if (etfs.Count == 0) { progress?.Report("ETF列表为空（接口可能不可达/被限流），本轮跳过ETF。"); return new List<string>(); }
         progress?.Report($"共 {etfs.Count} 只 ETF，开始抓取日K（已用时 {FormatElapsed(sw.Elapsed)}）...");
+        // ETF 名称写进 StockMeta（type=etf）——让"查询"页能搜到 ETF（不影响个股选股）。
+        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, etfs.Select(e => (e.Code, e.Name)), SqliteStockMetaUpsert.TypeEtf);
 
         int completed = 0;
         var tasks = etfs.Select(etf =>
@@ -224,6 +259,7 @@ public class FetchOrchestrator
             return;
         }
         var asOf = DateTime.Now;
+        var synthesizedMeta = new List<(string Code, string Name)>();
         int done = 0, withBars = 0, totalBars = 0;
         foreach (var board in boards)
         {
@@ -237,33 +273,17 @@ public class FetchOrchestrator
                     currentRepo.DeleteByCode(board.BoardCode, Granularity.Day);
                     if (bars.Count > 0) currentRepo.InsertOrIgnore(bars);
                 }
-                if (bars.Count > 0) { withBars++; totalBars += bars.Count; }
+                if (bars.Count > 0) { withBars++; totalBars += bars.Count; synthesizedMeta.Add((board.BoardCode, board.Name)); }
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { errors.Add($"板块「{board.Name}」({board.BoardCode}) 合成失败：{ex.Message}"); }
             if (++done % 40 == 0 || done == boards.Count)
                 progress?.Report($"合成板块指数：{done}/{boards.Count}（已生成 {withBars} 个板块、{totalBars} 根日K）");
         }
+        // 有指数K的板块名称写进 StockMeta（type=board）——让"查询"页能搜到板块、看行情（不影响个股选股）。
+        if (synthesizedMeta.Count > 0)
+            SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, synthesizedMeta, SqliteStockMetaUpsert.TypeBoard);
         progress?.Report($"板块指数合成完成：{boards.Count} 个板块，其中 {withBars} 个成分股数据足够、已写入 {totalBars} 根日K（code=板块代码，不进个股选股）。");
-    }
-
-    /// <summary>
-    /// "合成板块指数"按钮（2026-07-15）——本地重算全部板块指数，**不联网、不抓个股**。主要用于：点过
-    /// "拉取板块"更新了成分股之后，用已有个股K线按新成分重算一次（日常的重算已并进"拉取全部/当天"末尾）。
-    /// 前置：先点过"拉取板块"(成分股)和至少一次"拉取全部/当天"(个股K线)。见 <see cref="SynthesizeBoardIndexCore"/>。
-    /// </summary>
-    public Task<FetchResult> RunSynthesizeBoardIndexAsync(IProgress<string>? progress, CancellationToken ct = default)
-    {
-        return Task.Run(() =>
-        {
-            var errors = new ConcurrentBag<string>();
-            var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
-            currentRepo.EnsureSchema();
-            if (_boardRepository.QueryBoards().Count == 0)
-                return new FetchResult { Errors = new List<string> { "本地没有板块数据，请先点\"拉取板块\"。" } };
-            SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
-            return new FetchResult { Errors = errors.ToList() };
-        }, ct);
     }
 
     /// <summary>
@@ -286,6 +306,8 @@ public class FetchOrchestrator
         source.Fetcher.OnStatus += ForwardStatus;
         _marketCapFetcher.OnStatus += ForwardStatus;
         _netInflowFetcher.OnStatus += ForwardStatus;
+        _lhbProvider.OnStatus += ForwardStatus;      // 龙虎榜每日数据已并入主流程
+        _marginProvider.OnStatus += ForwardStatus;   // 融资余额每日数据已并入主流程
         try
         {
             return await RunFetchAllInternalAsync(source, lookbackYears, announcementKeywords, progress, ct);
@@ -295,6 +317,8 @@ public class FetchOrchestrator
             source.Fetcher.OnStatus -= ForwardStatus;
             _marketCapFetcher.OnStatus -= ForwardStatus;
             _netInflowFetcher.OnStatus -= ForwardStatus;
+            _lhbProvider.OnStatus -= ForwardStatus;
+            _marginProvider.OnStatus -= ForwardStatus;
         }
     }
 
@@ -307,6 +331,8 @@ public class FetchOrchestrator
         source.Fetcher.OnStatus += ForwardStatus;
         _marketCapFetcher.OnStatus += ForwardStatus;
         _netInflowFetcher.OnStatus += ForwardStatus;
+        _lhbProvider.OnStatus += ForwardStatus;
+        _marginProvider.OnStatus += ForwardStatus;
         try
         {
             return await RunFetchDayInternalAsync(source, date, announcementKeywords, progress, ct);
@@ -316,6 +342,8 @@ public class FetchOrchestrator
             source.Fetcher.OnStatus -= ForwardStatus;
             _marketCapFetcher.OnStatus -= ForwardStatus;
             _netInflowFetcher.OnStatus -= ForwardStatus;
+            _lhbProvider.OnStatus -= ForwardStatus;
+            _marginProvider.OnStatus -= ForwardStatus;
         }
     }
 
@@ -372,6 +400,11 @@ public class FetchOrchestrator
         var etfCodes = await FetchEtfBarsAsync(source, today, lookbackYears, currentRepo, errors, failedCodes, stats, progress, sw, ct);
         SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
 
+        // 每日数据（融资余额/龙虎榜）并入主流程当天抓取——非致命，失败只记 error 不影响 K线；历史用各自
+        // 的"回补"按钮补齐（见 RunFetchMarginAsync / RunFetchLhbAsync）。
+        await FetchMarginOneDayAsync(today, errors, progress, ct);
+        await FetchLhbOneDayAsync(today, errors, progress, ct);
+
         progress?.Report($"本轮汇总：{stats.Summarize()}");
         var attempted = stocks.Select(s => s.Code)
             .Concat(MarketIndexCatalog.All.Select(i => i.Symbol))
@@ -394,7 +427,7 @@ public class FetchOrchestrator
 
         var day = date.ToDateTime(TimeOnly.MinValue);
         var sw = Stopwatch.StartNew();
-        progress?.Report($"按天抓取 {date:yyyy-MM-dd}，共 {stocks.Count} 只股票（使用本地已有列表，不重新扫描全市场），数据源：{source.Name}");
+        progress?.Report($"按天抓取 {date:yyyy-MM-dd}，共 {stocks.Count} 只股票（K线用本地已有列表、不为K线重新扫全市场；流通市值步骤仍会扫一遍全市场、顺带发现新股），数据源：{source.Name}");
 
         // 流通市值本来就要扫一遍全市场列表，顺带发现的新股（本地列表里还没有的代码）在这里并入
         // 本轮的 stocks——这样"拉取当天"也能当天就把新股纳入K线/资金净流入抓取，不用非得先专门跑
@@ -450,6 +483,10 @@ public class FetchOrchestrator
         var etfCodes = await FetchEtfBarsAsync(source, day, DefaultLookbackYears, currentRepo, errors, failedCodes, stats, progress, sw, ct);
         SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
 
+        // 每日数据（融资余额/龙虎榜）并入"拉取当天"——抓的是本次指定的那一天。
+        await FetchMarginOneDayAsync(day, errors, progress, ct);
+        await FetchLhbOneDayAsync(day, errors, progress, ct);
+
         progress?.Report($"本轮汇总：{stats.Summarize()}");
         var attempted = stocks.Select(s => s.Code)
             .Concat(MarketIndexCatalog.All.Select(i => i.Symbol))
@@ -495,8 +532,12 @@ public class FetchOrchestrator
         var failedCodesList = manifest.FailedCodes;
         var failedMarketCapCodes = manifest.FailedMarketCapCodes;
         var failedNetInflowCodes = manifest.FailedNetInflowCodes;
+        var failedIndexConsCodes = manifest.FailedIndexConsCodes;
+        var failedIndexWeightCodes = manifest.FailedIndexWeightCodes;
+        var failedShareholderCodes = manifest.FailedShareholderCodes;
 
-        if (failedCodesList.Count == 0 && failedMarketCapCodes.Count == 0 && failedNetInflowCodes.Count == 0)
+        if (failedCodesList.Count == 0 && failedMarketCapCodes.Count == 0 && failedNetInflowCodes.Count == 0
+            && failedIndexConsCodes.Count == 0 && failedIndexWeightCodes.Count == 0 && failedShareholderCodes.Count == 0)
         {
             progress?.Report("目前没有记录到抓取失败的股票，不需要重试");
             return new FetchResult();
@@ -507,6 +548,15 @@ public class FetchOrchestrator
 
         if (failedNetInflowCodes.Count > 0)
             await FetchNetInflowAsync(failedNetInflowCodes, DateTime.Today, exactDayOnly: false, progress, ct);
+
+        // 指数成分/权重的失败重试（2026-07-16新增）——跟市值/资金流一样，在K线重试之前处理，
+        // 各自用自己的失败名单精确重试，可反复点击直到清零（见 RetryIndexAsync）。
+        if (failedIndexConsCodes.Count > 0 || failedIndexWeightCodes.Count > 0)
+            await RetryIndexAsync(failedIndexConsCodes, failedIndexWeightCodes, progress, ct);
+
+        // 股东数据的失败重试（2026-07-16新增）——逐只精确重试，见 RetryShareholderAsync。
+        if (failedShareholderCodes.Count > 0)
+            await RetryShareholderAsync(failedShareholderCodes, progress, ct);
 
         if (failedCodesList.Count == 0)
         {
@@ -669,6 +719,8 @@ public class FetchOrchestrator
         IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
     {
         progress?.Report($"正在抓取大盘指数K线（{MarketIndexCatalog.All.Count} 个：{string.Join("、", MarketIndexCatalog.All.Select(i => i.Name))}）...");
+        // 指数名称写进 StockMeta（type=index）——让"查询"页能按名称/代码搜到指数（不影响个股选股，选股扫的是6位纯数字）。
+        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, MarketIndexCatalog.All.Select(i => (i.Symbol, i.Name)), SqliteStockMetaUpsert.TypeIndex);
         int completed = 0;
         foreach (var (symbol, _) in MarketIndexCatalog.All)
         {
@@ -810,7 +862,7 @@ public class FetchOrchestrator
         var newlyDiscovered = new List<(string Code, string Name)>();
         try
         {
-            progress?.Report($"正在获取流通市值（共 {codes.Count} 只股票，逐只查询，会比较慢）...");
+            progress?.Report("正在扫描全市场股票列表以刷新流通市值（顺带发现新股），会比较慢...");
             var result = await _marketCapFetcher.GetMarketCapsAsync(codes, progress, ct);
             var fetchedAt = DateTime.Now;
             var metrics = result.Entries.Select(e => new FundamentalMetric
@@ -1029,7 +1081,9 @@ public class FetchOrchestrator
     public int GetFailedCodeCount()
     {
         var manifest = _manifestStore.Load();
-        return manifest.FailedCodes.Count + manifest.FailedMarketCapCodes.Count + manifest.FailedNetInflowCodes.Count;
+        return manifest.FailedCodes.Count + manifest.FailedMarketCapCodes.Count + manifest.FailedNetInflowCodes.Count
+             + manifest.FailedIndexConsCodes.Count + manifest.FailedIndexWeightCodes.Count
+             + manifest.FailedShareholderCodes.Count;
     }
 
     /// <summary>
@@ -1047,6 +1101,534 @@ public class FetchOrchestrator
         return stillFailed.OrderBy(c => c).ToList();
     }
 
+    /// <summary>
+    /// "拉取指数成分/权重"（2026-07-16新增）——遍历内置指数全集(<see cref="IndexCatalog"/>，732个)：先向
+    /// 新浪拉每个指数的成分名单(IndexCons)，再向中证官网拉成分权重(IndexWeight，只有中证系有、非中证系
+    /// 404 跳过)，最后按 ETF 名称匹配指数生成 EtfIndexMap（供"股票→指数→ETF"反查）。成分/权重各自逐指数
+    /// 记录失败(<see cref="Manifest.FailedIndexConsCodes"/>/<see cref="Manifest.FailedIndexWeightCodes"/>)，
+    /// 可用"重新拉取失败股票"重试。独立按钮，不掺进主抓取流程（成分是季度级慢变数据，不必跟每天K线跑）。
+    /// </summary>
+    public async Task<FetchResult> RunFetchIndexConsAsync(IProgress<string>? progress, CancellationToken ct = default)
+    {
+        void Forward(string s) => progress?.Report(s);
+        _indexConsProvider.OnStatus += Forward;
+        _indexWeightProvider.OnStatus += Forward;
+        try
+        {
+            return await RunFetchIndexConsInternalAsync(progress, ct);
+        }
+        finally
+        {
+            _indexConsProvider.OnStatus -= Forward;
+            _indexWeightProvider.OnStatus -= Forward;
+        }
+    }
+
+    private async Task<FetchResult> RunFetchIndexConsInternalAsync(IProgress<string>? progress, CancellationToken ct)
+    {
+        _indexRepository.EnsureSchema();
+        var indexes = IndexCatalog.All;
+        if (indexes.Count == 0)
+            return new FetchResult { Errors = new List<string> { "内置指数清单为空（IndexCatalog.csv 未打包？），无法拉取指数成分" } };
+
+        var errors = new List<string>();
+        var consFailed = new List<string>();
+        var weightFailed = new List<string>();
+        var attempted = indexes.Select(i => i.Code).ToList();
+        var now = DateTime.Now;
+        int consOk = 0, consEmpty = 0, weightOk = 0, weightNone = 0, done = 0;
+
+        var sw = Stopwatch.StartNew();
+        progress?.Report($"开始拉取指数成分/权重，共 {indexes.Count} 个指数（成分走新浪、权重走中证，逐个抓，较慢）...");
+        foreach (var (code, _) in indexes)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                var members = await _indexConsProvider.GetConsAsync(code, ct);
+                if (members.Count > 0) { lock (_dbLock) _indexRepository.ReplaceCons(code, members, now); consOk++; }
+                else consEmpty++;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { errors.Add($"指数 {code} 成分抓取失败：{ex.Message}"); consFailed.Add(code); }
+
+            try
+            {
+                var weights = await _indexWeightProvider.GetWeightsAsync(code, ct);
+                if (weights.Count > 0) { lock (_dbLock) _indexRepository.ReplaceWeights(code, weights); weightOk++; }
+                else weightNone++;   // 非中证系指数没有权重文件（404），不算失败
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { errors.Add($"指数 {code} 权重抓取失败：{ex.Message}"); weightFailed.Add(code); }
+
+            if (++done % 20 == 0 || done == indexes.Count)
+                progress?.Report($"指数成分/权重 {done}/{indexes.Count}（成分成功 {consOk}、权重成功 {weightOk}，已用时 {FormatElapsed(sw.Elapsed)}）");
+        }
+
+        // ETF→指数 名称匹配（尽力）——生成 EtfIndexMap，供"股票→指数→ETF"反查。
+        var map = BuildEtfIndexMap(progress);
+        lock (_dbLock) _indexRepository.ReplaceEtfIndexMap(map);
+
+        lock (_dbLock)
+        {
+            var manifest = _manifestStore.Load();
+            manifest.FailedIndexConsCodes = ComputeUpdatedFailedCodes(manifest.FailedIndexConsCodes, attempted, consFailed);
+            manifest.FailedIndexWeightCodes = ComputeUpdatedFailedCodes(manifest.FailedIndexWeightCodes, attempted, weightFailed);
+            _manifestStore.Save(manifest);
+        }
+
+        progress?.Report($"指数成分/权重完成：成分 {consOk} 个指数有数据、{consEmpty} 个无成分；权重 {weightOk} 个指数(中证系)、{weightNone} 个无权重文件；" +
+                         $"成分失败 {consFailed.Count}、权重失败 {weightFailed.Count}" +
+                         ((consFailed.Count > 0 || weightFailed.Count > 0) ? "（失败的可点\"重新拉取失败股票\"重试）" : ""));
+        return new FetchResult { Errors = errors };
+    }
+
+    /// <summary>ETF→指数 名称匹配（尽力）——ETF 名称几乎都含指数名（"沪深300ETF华泰"→沪深300），用它在
+    /// 指数清单里找。exact=名称完全等于某指数名，contains=互相包含，都找不到=unmatched（未匹配的绝大多数
+    /// 是债券/货币/黄金ETF，本就没有A股成分）。长指数名优先，避免"中证500"被"中证50"抢先命中。</summary>
+    private List<(string EtfCode, string? IndexCode, string MatchType)> BuildEtfIndexMap(IProgress<string>? progress)
+    {
+        var etfs = SqliteStockMetaUpsert.GetAllInstruments(_paths.CurrentDb)
+            .Where(x => x.Type == SqliteStockMetaUpsert.TypeEtf).ToList();
+        var idx = IndexCatalog.All.OrderByDescending(i => i.Name.Length).ToList();
+
+        var result = new List<(string, string?, string)>();
+        int matched = 0;
+        foreach (var e in etfs)
+        {
+            var core = e.Name.Split("ETF")[0].Trim();   // "ETF"之前的部分作为指数名候选
+            string? found = null;
+            string matchType = "unmatched";
+            if (core.Length >= 2)
+            {
+                var exact = idx.FirstOrDefault(i => i.Name == core);
+                if (exact.Code != null) { found = exact.Code; matchType = "exact"; }
+                else
+                {
+                    var contains = idx.FirstOrDefault(i => i.Name.Length >= 2 && (core.Contains(i.Name) || i.Name.Contains(core)));
+                    if (contains.Code != null) { found = contains.Code; matchType = "contains"; }
+                }
+            }
+            if (found != null) matched++;
+            result.Add((e.Code, found, matchType));
+        }
+        progress?.Report($"ETF→指数名称匹配：{etfs.Count} 只 ETF，匹配到 {matched}、未匹配 {etfs.Count - matched}" +
+                         "（未匹配多为债券/货币/黄金ETF，本就无A股成分）");
+        return result;
+    }
+
+    /// <summary>"重新拉取失败股票"里针对指数成分/权重失败名单的重试（2026-07-16新增）——逐指数精确重试，
+    /// 更新各自失败名单，可反复点击直到清零。错误通过 progress 报告（跟市值/资金流的重试一致）。</summary>
+    private async Task RetryIndexAsync(IReadOnlyList<string> consCodes, IReadOnlyList<string> weightCodes,
+        IProgress<string>? progress, CancellationToken ct)
+    {
+        _indexRepository.EnsureSchema();
+        void Forward(string s) => progress?.Report(s);
+        _indexConsProvider.OnStatus += Forward;
+        _indexWeightProvider.OnStatus += Forward;
+
+        var consFailed = new List<string>();
+        var weightFailed = new List<string>();
+        var now = DateTime.Now;
+        try
+        {
+            if (consCodes.Count > 0)
+            {
+                progress?.Report($"重试指数成分失败 {consCodes.Count} 个...");
+                foreach (var code in consCodes)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var members = await _indexConsProvider.GetConsAsync(code, ct);
+                        if (members.Count > 0) { lock (_dbLock) _indexRepository.ReplaceCons(code, members, now); }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex) { progress?.Report($"指数 {code} 成分重试仍失败：{ex.Message}"); consFailed.Add(code); }
+                }
+            }
+
+            if (weightCodes.Count > 0)
+            {
+                progress?.Report($"重试指数权重失败 {weightCodes.Count} 个...");
+                foreach (var code in weightCodes)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var weights = await _indexWeightProvider.GetWeightsAsync(code, ct);
+                        if (weights.Count > 0) { lock (_dbLock) _indexRepository.ReplaceWeights(code, weights); }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex) { progress?.Report($"指数 {code} 权重重试仍失败：{ex.Message}"); weightFailed.Add(code); }
+                }
+            }
+        }
+        finally
+        {
+            _indexConsProvider.OnStatus -= Forward;
+            _indexWeightProvider.OnStatus -= Forward;
+        }
+
+        lock (_dbLock)
+        {
+            var manifest = _manifestStore.Load();
+            manifest.FailedIndexConsCodes = ComputeUpdatedFailedCodes(manifest.FailedIndexConsCodes, consCodes, consFailed);
+            manifest.FailedIndexWeightCodes = ComputeUpdatedFailedCodes(manifest.FailedIndexWeightCodes, weightCodes, weightFailed);
+            _manifestStore.Save(manifest);
+        }
+    }
+
+    /// <summary>
+    /// "拉取龙虎榜"（2026-07-16新增）——新浪龙虎榜按交易日抓取(Lhb 表, INSERT OR IGNORE 累积)。
+    /// <paramref name="from"/>/<paramref name="to"/> 都为 null=只抓今天；给区间则逐交易日回补（跳过
+    /// 周末，节假日靠返回空自然跳过）。龙虎榜失败不进 Manifest 名单，失败的日期在日志报出，重新指定
+    /// 日期区间再点即可。
+    /// </summary>
+    public async Task<FetchResult> RunFetchLhbAsync(DateOnly? from, DateOnly? to, IProgress<string>? progress, CancellationToken ct = default)
+    {
+        void Forward(string s) => progress?.Report(s);
+        _lhbProvider.OnStatus += Forward;
+        try
+        {
+            return await RunFetchLhbInternalAsync(from, to, progress, ct);
+        }
+        finally
+        {
+            _lhbProvider.OnStatus -= Forward;
+        }
+    }
+
+    private async Task<FetchResult> RunFetchLhbInternalAsync(DateOnly? from, DateOnly? to, IProgress<string>? progress, CancellationToken ct)
+    {
+        _lhbRepository.EnsureSchema();
+        var start = from ?? DateOnly.FromDateTime(DateTime.Today);
+        var end = to ?? start;
+        if (end < start) (start, end) = (end, start);
+
+        var errors = new List<string>();
+        var sw = Stopwatch.StartNew();
+        int tradingDays = 0, rowsTotal = 0, failDays = 0;
+        progress?.Report($"开始拉取龙虎榜 {start:yyyy-MM-dd} ~ {end:yyyy-MM-dd}（新浪，按交易日）...");
+        for (var d = start; d <= end; d = d.AddDays(1))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;   // 周末必非交易日，跳过
+            try
+            {
+                var rows = await _lhbProvider.GetDailyAsync(d, ct);
+                if (rows.Count > 0) { lock (_dbLock) _lhbRepository.InsertOrIgnore(rows); rowsTotal += rows.Count; }
+                tradingDays++;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { errors.Add($"龙虎榜 {d:yyyy-MM-dd} 抓取失败：{ex.Message}"); failDays++; }
+            progress?.Report($"龙虎榜 {d:yyyy-MM-dd}：累计写入 {rowsTotal} 条（已用时 {FormatElapsed(sw.Elapsed)}）" + (failDays > 0 ? $"，失败 {failDays} 天" : ""));
+        }
+        progress?.Report($"龙虎榜完成：处理 {tradingDays} 天、写入 {rowsTotal} 条、失败 {failDays} 天" +
+                         (failDays > 0 ? "（失败的日期重新指定区间再点一次即可）" : ""));
+        return new FetchResult { Errors = errors };
+    }
+
+    /// <summary>
+    /// "拉取股东数据"（2026-07-16新增）——逐只个股从新浪股本股东页抓取：股东户数(ShareholderCount) +
+    /// 十大股东/十大流通股东(TopShareholder)。用本地已有个股列表(需先"拉取全部"一次)，全市场逐只、量大
+    /// 较慢。逐只记录失败(<see cref="Manifest.FailedShareholderCodes"/>)，可用"重新拉取失败股票"重试。
+    /// 独立按钮，不掺进主流程（股东数据季度级慢变，不必每天跑）。
+    /// </summary>
+    public async Task<FetchResult> RunFetchShareholderAsync(IProgress<string>? progress, CancellationToken ct = default)
+    {
+        void Forward(string s) => progress?.Report(s);
+        _shareholderProvider.OnStatus += Forward;
+        try
+        {
+            return await RunFetchShareholderInternalAsync(progress, ct);
+        }
+        finally
+        {
+            _shareholderProvider.OnStatus -= Forward;
+        }
+    }
+
+    private async Task<FetchResult> RunFetchShareholderInternalAsync(IProgress<string>? progress, CancellationToken ct)
+    {
+        if (!File.Exists(_paths.CurrentDb))
+            throw new InvalidOperationException("本地还没有任何数据，无法拉取股东数据，请先执行一次\"拉取全部\"");
+        _shareholderRepository.EnsureSchema();
+        var stocks = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb);
+        if (stocks.Count == 0)
+            throw new InvalidOperationException("本地股票列表为空，无法拉取股东数据，请先执行一次\"拉取全部\"");
+
+        var errors = new ConcurrentBag<string>();
+        var failed = new ConcurrentBag<string>();
+        var attempted = stocks.Select(s => s.Code).ToList();
+        var sw = Stopwatch.StartNew();
+        int completed = 0, withData = 0;
+        progress?.Report($"开始拉取股东数据（户数+十大股东+十大流通股东），共 {stocks.Count} 只，逐只抓、较慢...");
+
+        var tasks = stocks.Select(async stock =>
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var data = await _shareholderProvider.GetAsync(stock.Code, ct);
+                if (data.Counts.Count > 0 || data.TopHolders.Count > 0)
+                {
+                    lock (_dbLock) _shareholderRepository.ReplaceByCode(stock.Code, data);
+                    Interlocked.Increment(ref withData);
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { errors.Add($"{stock.Code}: {ex.Message}"); failed.Add(stock.Code); }
+
+            int done = Interlocked.Increment(ref completed);
+            if (done % 50 == 0 || done == stocks.Count)
+                progress?.Report($"股东数据 {done}/{stocks.Count}（有数据 {withData}、失败 {failed.Count}，已用时 {FormatElapsed(sw.Elapsed)}）");
+        });
+        await Task.WhenAll(tasks);
+
+        lock (_dbLock)
+        {
+            var manifest = _manifestStore.Load();
+            manifest.FailedShareholderCodes = ComputeUpdatedFailedCodes(manifest.FailedShareholderCodes, attempted, failed.ToList());
+            _manifestStore.Save(manifest);
+        }
+
+        progress?.Report($"股东数据完成：{withData} 只有数据、失败 {failed.Count} 只" +
+                         (failed.Count > 0 ? "（可点\"重新拉取失败股票\"重试）" : ""));
+        var result = new FetchResult();
+        result.Errors.AddRange(errors);
+        return result;
+    }
+
+    /// <summary>"重新拉取失败股票"里针对股东数据失败名单的重试（2026-07-16新增）——逐只精确重试，更新
+    /// 失败名单，可反复点击直到清零。错误通过 progress 报告。</summary>
+    private async Task RetryShareholderAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct)
+    {
+        _shareholderRepository.EnsureSchema();
+        void Forward(string s) => progress?.Report(s);
+        _shareholderProvider.OnStatus += Forward;
+
+        var failed = new ConcurrentBag<string>();
+        var sw = Stopwatch.StartNew();
+        int completed = 0;
+        progress?.Report($"重试股东数据失败 {codes.Count} 只...");
+        try
+        {
+            var tasks = codes.Select(async code =>
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    var data = await _shareholderProvider.GetAsync(code, ct);
+                    if (data.Counts.Count > 0 || data.TopHolders.Count > 0)
+                        lock (_dbLock) _shareholderRepository.ReplaceByCode(code, data);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { progress?.Report($"{code} 股东数据重试仍失败：{ex.Message}"); failed.Add(code); }
+
+                int done = Interlocked.Increment(ref completed);
+                if (done % 50 == 0 || done == codes.Count)
+                    progress?.Report($"股东数据重试 {done}/{codes.Count}（已用时 {FormatElapsed(sw.Elapsed)}）");
+            });
+            await Task.WhenAll(tasks);
+        }
+        finally
+        {
+            _shareholderProvider.OnStatus -= Forward;
+        }
+
+        lock (_dbLock)
+        {
+            var manifest = _manifestStore.Load();
+            manifest.FailedShareholderCodes = ComputeUpdatedFailedCodes(manifest.FailedShareholderCodes, codes, failed.ToList());
+            _manifestStore.Save(manifest);
+        }
+    }
+
+    /// <summary>抓某一天的融资余额并写库（非致命：失败只记 error，不影响主流程其他步骤）——供"拉取全部/
+    /// 当天"并入调用。历史用"回补融资余额"补齐。</summary>
+    private async Task FetchMarginOneDayAsync(DateTime day, ConcurrentBag<string> errors, IProgress<string>? progress, CancellationToken ct)
+    {
+        try
+        {
+            _marginRepository.EnsureSchema();
+            var d = DateOnly.FromDateTime(day);
+            var rows = await _marginProvider.GetDetailAsync(d, ct);
+            if (rows.Count > 0)
+            {
+                lock (_dbLock) _marginRepository.InsertOrIgnore(rows);
+                progress?.Report($"融资余额 {d:yyyy-MM-dd}：{rows.Count} 条已写入");
+            }
+            else progress?.Report($"融资余额 {d:yyyy-MM-dd}：无数据（可能非交易日）");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { errors.Add($"融资余额 {day:yyyy-MM-dd}：{ex.Message}"); }
+    }
+
+    /// <summary>抓某一天的龙虎榜并写库（非致命）——供"拉取全部/当天"并入调用。历史用"回补龙虎榜"补齐。</summary>
+    private async Task FetchLhbOneDayAsync(DateTime day, ConcurrentBag<string> errors, IProgress<string>? progress, CancellationToken ct)
+    {
+        try
+        {
+            _lhbRepository.EnsureSchema();
+            var d = DateOnly.FromDateTime(day);
+            var rows = await _lhbProvider.GetDailyAsync(d, ct);
+            if (rows.Count > 0)
+            {
+                lock (_dbLock) _lhbRepository.InsertOrIgnore(rows);
+                progress?.Report($"龙虎榜 {d:yyyy-MM-dd}：{rows.Count} 条已写入");
+            }
+            else progress?.Report($"龙虎榜 {d:yyyy-MM-dd}：无数据（可能非交易日）");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { errors.Add($"龙虎榜 {day:yyyy-MM-dd}：{ex.Message}"); }
+    }
+
+    /// <summary>"回补融资余额"（2026-07-16新增）——按交易日区间回补历史（首次或补漏）。日常当天数据已并入
+    /// "拉取全部/当天"，这个按钮用于第一次把历史补齐或补某段缺的日子。from/to 都为 null=今天；失败不进
+    /// Manifest，重新指定区间再点即可。</summary>
+    public async Task<FetchResult> RunFetchMarginAsync(DateOnly? from, DateOnly? to, IProgress<string>? progress, CancellationToken ct = default)
+    {
+        void Forward(string s) => progress?.Report(s);
+        _marginProvider.OnStatus += Forward;
+        try
+        {
+            _marginRepository.EnsureSchema();
+            var start = from ?? DateOnly.FromDateTime(DateTime.Today);
+            var end = to ?? start;
+            if (end < start) (start, end) = (end, start);
+
+            var errors = new ConcurrentBag<string>();
+            var sw = Stopwatch.StartNew();
+            int days = 0, total = 0, fail = 0;
+            progress?.Report($"开始回补融资余额 {start:yyyy-MM-dd} ~ {end:yyyy-MM-dd}（交易所官方，按交易日）...");
+            for (var d = start; d <= end; d = d.AddDays(1))
+            {
+                ct.ThrowIfCancellationRequested();
+                if (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
+                try
+                {
+                    var rows = await _marginProvider.GetDetailAsync(d, ct);
+                    if (rows.Count > 0) { lock (_dbLock) _marginRepository.InsertOrIgnore(rows); total += rows.Count; }
+                    days++;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { errors.Add($"融资余额 {d:yyyy-MM-dd}：{ex.Message}"); fail++; }
+                progress?.Report($"融资余额 {d:yyyy-MM-dd}：累计写入 {total} 条（已用时 {FormatElapsed(sw.Elapsed)}）" + (fail > 0 ? $"，失败 {fail} 天" : ""));
+            }
+            progress?.Report($"融资余额回补完成：处理 {days} 天、写入 {total} 条、失败 {fail} 天" +
+                             (fail > 0 ? "（失败的日期重新指定区间再点一次即可）" : ""));
+            var result = new FetchResult();
+            result.Errors.AddRange(errors);
+            return result;
+        }
+        finally
+        {
+            _marginProvider.OnStatus -= Forward;
+        }
+    }
+
+    /// <summary>
+    /// "一键补齐每日历史"（2026-07-16新增）——把**每日数据**（融资余额、龙虎榜）的历史一次性补齐：范围从
+    /// 本地 K线(Bar)最早那天到今天，逐交易日抓，**本地已有的交易日跳过、不重复请求**。一次性用途：开发中
+    /// 新加了每日数据、之前没抓的，点一次补上历史；之后每天靠"拉取全部/当天"增量。以后再加每日数据也并进来。
+    /// </summary>
+    public async Task<FetchResult> RunBackfillDailyHistoryAsync(IProgress<string>? progress, CancellationToken ct = default)
+    {
+        void Forward(string s) => progress?.Report(s);
+        _marginProvider.OnStatus += Forward;
+        _lhbProvider.OnStatus += Forward;
+        try
+        {
+            if (!File.Exists(_paths.CurrentDb))
+                throw new InvalidOperationException("本地还没有任何数据，请先执行一次\"拉取全部\"（要用K线的最早日期作为补齐起点）");
+            var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
+            currentRepo.EnsureSchema();
+            _marginRepository.EnsureSchema();
+            _lhbRepository.EnsureSchema();
+
+            var earliest = currentRepo.GetOverallEarliestPeriodStart(Granularity.Day);
+            if (earliest == null)
+                throw new InvalidOperationException("本地还没有K线数据，无法确定补齐起点，请先执行一次\"拉取全部\"");
+            var start = DateOnly.FromDateTime(earliest.Value);
+            var end = DateOnly.FromDateTime(DateTime.Today);
+
+            var errors = new ConcurrentBag<string>();
+            var sw = Stopwatch.StartNew();
+
+            var marginHave = _marginRepository.GetTradeDates();
+            await BackfillDailyAsync("融资余额", start, end, marginHave, async d =>
+            {
+                var rows = await _marginProvider.GetDetailAsync(d, ct);
+                if (rows.Count > 0) { lock (_dbLock) { _marginRepository.InsertOrIgnore(rows); } }
+                return rows.Count;
+            }, errors, progress, sw, ct);
+
+            var lhbHave = _lhbRepository.GetTradeDates();
+            await BackfillDailyAsync("龙虎榜", start, end, lhbHave, async d =>
+            {
+                var rows = await _lhbProvider.GetDailyAsync(d, ct);
+                if (rows.Count > 0) { lock (_dbLock) { _lhbRepository.InsertOrIgnore(rows); } }
+                return rows.Count;
+            }, errors, progress, sw, ct);
+
+            progress?.Report("融资余额、龙虎榜历史补齐完毕。");
+            var result = new FetchResult();
+            result.Errors.AddRange(errors);
+            return result;
+        }
+        finally
+        {
+            _marginProvider.OnStatus -= Forward;
+            _lhbProvider.OnStatus -= Forward;
+        }
+    }
+
+    /// <summary>逐交易日补齐一类每日数据：跳过周末和本地已有的日子，只抓缺的。<paramref name="fetchOne"/>
+    /// 负责抓某天并写库、返回写入条数；异常记进 errors（非致命，继续下一天）。</summary>
+    private static async Task BackfillDailyAsync(string label, DateOnly start, DateOnly end, HashSet<DateOnly> have,
+        Func<DateOnly, Task<int>> fetchOne, ConcurrentBag<string> errors, IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
+    {
+        progress?.Report($"开始补齐{label}历史：{start:yyyy-MM-dd} ~ {end:yyyy-MM-dd}（跳过周末和本地已有的日子）...");
+        int done = 0, wrote = 0, skipped = 0, fail = 0;
+        for (var d = start; d <= end; d = d.AddDays(1))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
+            if (have.Contains(d)) { skipped++; continue; }
+            try { wrote += await fetchOne(d); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { errors.Add($"{label} {d:yyyy-MM-dd}：{ex.Message}"); fail++; }
+            if (++done % 20 == 0)
+                progress?.Report($"{label} 补齐中：已抓 {done} 天、写入 {wrote} 条、失败 {fail}（跳过已有 {skipped} 天，已用时 {FormatElapsed(sw.Elapsed)}）");
+        }
+        progress?.Report($"{label}补齐完成：新抓 {done} 个交易日、写入 {wrote} 条、跳过已有 {skipped} 天、失败 {fail} 天" +
+                         (fail > 0 ? "（失败的可再点一次一键补齐、只会补还缺的）" : ""));
+    }
+
+    /// <summary>
+    /// "一键拉取定期数据"（2026-07-16新增）——把**不是每天更新**的数据一次点完：依次跑 指数成分/权重 →
+    /// 股东数据（各自全量刷新）。前一个整体失败不阻断后一个（分别 try/catch）；单项内部的逐指数/逐股失败
+    /// 仍进各自失败名单、可用"重新拉取失败股票"重试。⚠️ 较慢，可能数小时，季度点一次即可。板块不在这里
+    /// （它更新频率高、独立"拉取板块"按钮）。
+    /// </summary>
+    public async Task<FetchResult> RunFetchPeriodicAsync(IProgress<string>? progress, CancellationToken ct = default)
+    {
+        var errors = new List<string>();
+        progress?.Report("依次执行：指数成分/权重 → 股东数据（较慢，可能数小时）");
+
+        try { errors.AddRange((await RunFetchIndexConsAsync(progress, ct)).Errors); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { errors.Add($"指数成分/权重整体失败：{ex.Message}"); }
+
+        try { errors.AddRange((await RunFetchShareholderAsync(progress, ct)).Errors); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { errors.Add($"股东数据整体失败：{ex.Message}"); }
+
+        progress?.Report("指数成分/权重、股东数据全部处理完毕。");
+        return new FetchResult { Errors = errors };
+    }
 }
 
 /// <summary>

@@ -16,6 +16,9 @@ public class QueryRowViewModel
     public string Code { get; init; } = "";
     public string Name { get; init; } = "";
     public string Board { get; init; } = "";
+    /// <summary>标的类型显示：个股/大盘指数/ETF/板块——2026-07-15 起查询页也能搜到指数/ETF/板块，
+    /// 用这列区分（分析仍只跑个股）。</summary>
+    public string Type { get; init; } = "";
 }
 
 /// <summary>"查询" tab — type a code or name, list the matching stocks, and open any of them in the
@@ -65,18 +68,19 @@ public class QueryTabViewModel : INotifyPropertyChanged
             return;
         }
 
-        // 每次查询都重新读一遍本地股票清单——StockMeta 只有几千行，读一次很快，也能反映用户中途
-        // 替换过的数据文件。StockMeta 为空（老数据文件没写过名称）时退回到 Bar 表里的代码清单。
-        List<(string Code, string Name)> universe;
+        // 每次查询都重新读一遍本地标的清单——StockMeta 只有几千行，读一次很快，也能反映用户中途替换
+        // 过的数据文件。2026-07-15 起用 GetAllInstruments（含个股+指数+ETF+板块）。StockMeta 为空（老数据
+        // 文件没写过名称）时退回到 Bar 表里的6位个股代码清单。
+        List<(string Code, string Name, string Type)> universe;
         try
         {
-            universe = SqliteStockMetaUpsert.GetAll(_paths.TotalDb);
+            universe = SqliteStockMetaUpsert.GetAllInstruments(_paths.TotalDb);
             if (universe.Count == 0)
-                universe = _barRepository.GetAllCodes().Select(c => (c, c)).ToList();
+                universe = _barRepository.GetAllCodes().Select(c => (c, c, SqliteStockMetaUpsert.TypeStock)).ToList();
         }
         catch (Exception ex)
         {
-            StatusText = $"读取本地股票清单失败：{ex.Message}";
+            StatusText = $"读取本地标的清单失败：{ex.Message}";
             return;
         }
 
@@ -94,13 +98,23 @@ public class QueryTabViewModel : INotifyPropertyChanged
             {
                 Code = s.Code,
                 Name = string.IsNullOrEmpty(s.Name) ? s.Code : s.Name,
-                Board = IndustryClassifier.GetIndustry(s.Code),
+                // 行业分类只对个股有意义（按6位代码段判定）；指数/ETF/板块留空
+                Board = s.Type == SqliteStockMetaUpsert.TypeStock ? IndustryClassifier.GetIndustry(s.Code) : "",
+                Type = TypeDisplay(s.Type),
             });
 
         StatusText = matches.Count == 0
-            ? $"没有找到匹配\"{q}\"的股票"
+            ? $"没有找到匹配\"{q}\"的标的"
             : matches.Count > MaxResults
-                ? $"匹配到 {matches.Count} 只，只显示前 {MaxResults} 只，请输入更精确的代码或名称"
-                : $"匹配到 {matches.Count} 只";
+                ? $"匹配到 {matches.Count} 个，只显示前 {MaxResults} 个，请输入更精确的代码或名称"
+                : $"匹配到 {matches.Count} 个";
     }
+
+    private static string TypeDisplay(string type) => type switch
+    {
+        SqliteStockMetaUpsert.TypeIndex => "大盘指数",
+        SqliteStockMetaUpsert.TypeEtf => "ETF",
+        SqliteStockMetaUpsert.TypeBoard => "板块",
+        _ => "个股",
+    };
 }

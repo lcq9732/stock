@@ -21,8 +21,12 @@ public partial class App : Application
         netInflowRepository.EnsureSchema();
         var boardRepository = new SqliteBoardRepository(paths.TotalDb);
         boardRepository.EnsureSchema();
+        var shareholderRepository = new SqliteShareholderRepository(paths.TotalDb);
+        shareholderRepository.EnsureSchema();
+        var marginRepository = new SqliteMarginRepository(paths.TotalDb);
+        marginRepository.EnsureSchema();
 
-        var viewModel = new MainViewModel(paths, barRepository, fundamentalRepository, netInflowRepository, boardRepository);
+        var viewModel = new MainViewModel(paths, barRepository, fundamentalRepository, netInflowRepository, boardRepository, shareholderRepository, marginRepository);
         var window = new MainWindow { DataContext = viewModel };
         window.Show();
     }

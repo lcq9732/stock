@@ -74,15 +74,23 @@ public class MainViewModel : INotifyPropertyChanged
     private string _announcementKeywordsText = "中标,签订合同";
     public string AnnouncementKeywordsText { get => _announcementKeywordsText; set => Set(ref _announcementKeywordsText, value); }
 
+    /// <summary>"定时拉取"的触发时间（HH:mm，默认 18:00）——点定时按钮后等到这个时间再开始，用于收盘确认后
+    /// (建议18点以后：K线已收盘确认、融资/龙虎已公布)无人值守自动取当天最终数据；点击时已过该时间则立即执行。</summary>
+    private string _scheduleTimeText = "18:00";
+    public string ScheduleTimeText { get => _scheduleTimeText; set => Set(ref _scheduleTimeText, value); }
+
     public RelayCommand FetchCommand { get; }
     public RelayCommand FetchDayCommand { get; }
     public RelayCommand StopCommand { get; }
     public RelayCommand RetryFailedCommand { get; }
     public RelayCommand FetchBoardsCommand { get; }
-    public RelayCommand SynthesizeBoardIndexCommand { get; }
     public RelayCommand BackfillAmountTurnoverCommand { get; }
     public RelayCommand UploadBaselineCommand { get; }
     public RelayCommand UploadDailyCommand { get; }
+    public RelayCommand BackfillDailyCommand { get; }
+    public RelayCommand FetchPeriodicCommand { get; }
+    public RelayCommand ScheduledFetchAllCommand { get; }
+    public RelayCommand ScheduledFetchDayCommand { get; }
 
     public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources)
     {
@@ -111,10 +119,13 @@ public class MainViewModel : INotifyPropertyChanged
         StopCommand = new RelayCommand(_ => _cts?.Cancel(), _ => IsBusy);
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && FailedCodeCount > 0);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
-        SynthesizeBoardIndexCommand = new RelayCommand(async _ => await RunSynthesizeBoardIndexAsync(), _ => !IsBusy);
         BackfillAmountTurnoverCommand = new RelayCommand(async _ => await RunBackfillAmountTurnoverAsync(), _ => !IsBusy);
         UploadBaselineCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: true), _ => !IsBusy);
         UploadDailyCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: false), _ => !IsBusy);
+        BackfillDailyCommand = new RelayCommand(async _ => await RunBackfillDailyHistoryAsync(), _ => !IsBusy);
+        FetchPeriodicCommand = new RelayCommand(async _ => await RunFetchPeriodicAsync(), _ => !IsBusy);
+        ScheduledFetchAllCommand = new RelayCommand(async _ => await RunScheduledFetchAllAsync(), _ => !IsBusy);
+        ScheduledFetchDayCommand = new RelayCommand(async _ => await RunScheduledFetchDayAsync(), _ => !IsBusy);
 
         RefreshDataStatus();
         RefreshFailedCodeCount();
@@ -125,6 +136,7 @@ public class MainViewModel : INotifyPropertyChanged
     /// 提示，不弹异常。</summary>
     private async Task RunUploadAsync(bool baseline)
     {
+        var name = baseline ? "上传全量基线" : "上传当天增量";
         var svc = new GitHubUploadService(_paths);
         var token = svc.ReadToken();
         if (token == null)
@@ -142,6 +154,7 @@ public class MainViewModel : INotifyPropertyChanged
         IsBusy = true;
         StartHeartbeat();
         _cts = new CancellationTokenSource();
+        Log($"===== 【{name}】开始 =====");
         try
         {
             var progress = new Progress<string>(Log);
@@ -150,14 +163,15 @@ public class MainViewModel : INotifyPropertyChanged
             else
                 await svc.UploadDailyAsync(token, latest.Value, progress, _cts.Token);
         }
-        catch (OperationCanceledException) { Log("已停止（用户手动取消）"); }
-        catch (Exception ex) { Log($"上传失败：{ex.Message}"); }
+        catch (OperationCanceledException) { Log($"【{name}】已停止（用户手动取消）"); }
+        catch (Exception ex) { Log($"【{name}】失败：{ex.Message}"); }
         finally
         {
             StopHeartbeat();
             _cts?.Dispose();
             _cts = null;
             IsBusy = false;
+            Log($"===== 【{name}】结束，不会自动继续，需要再次操作请重新点击按钮 =====");
         }
     }
 
@@ -212,52 +226,115 @@ public class MainViewModel : INotifyPropertyChanged
         ElapsedText = "";
     }
 
-    private async Task RunFetchAsync()
+    /// <summary>所有"点按钮跑一个操作"的统一外壳——置忙/心跳、**开始与结束都打印带功能名的醒目标记**、
+    /// 取消与异常处理、收尾刷新。<paramref name="name"/> 是功能名（如"拉取全部"）；action 返回的
+    /// FetchResult 里的错误逐条记日志。这样每个功能开始/结束在日志里都能一眼看出是哪个。</summary>
+    private async Task RunOperationAsync(string name, Func<IProgress<string>, CancellationToken, Task<FetchResult>> action)
+    {
+        IsBusy = true;
+        StartHeartbeat();
+        _cts = new CancellationTokenSource();
+        Log($"===== 【{name}】开始 =====");
+        try
+        {
+            var progress = new Progress<string>(Log);
+            var result = await action(progress, _cts.Token);
+            foreach (var err in result.Errors) Log($"错误：{err}");
+        }
+        catch (OperationCanceledException)
+        {
+            Log($"【{name}】已停止（用户手动取消）");
+        }
+        catch (Exception ex)
+        {
+            Log($"【{name}】失败：{ex.Message}");
+        }
+        finally
+        {
+            StopHeartbeat();
+            _cts?.Dispose();
+            _cts = null;
+            RefreshDataStatus();
+            RefreshFailedCodeCount();
+            IsBusy = false;
+            Log($"===== 【{name}】结束，不会自动继续，需要再次操作请重新点击按钮 =====");
+        }
+    }
+
+    private Task RunFetchAsync()
+    {
+        if (!int.TryParse(LookbackYearsText.Trim(), out var lookbackYears) || lookbackYears <= 0)
+        {
+            Log($"回看年数不对：\"{LookbackYearsText}\"，请填一个正整数（例如 3）");
+            return Task.CompletedTask;
+        }
+        return RunOperationAsync("拉取全部",
+            (progress, ct) => _orchestrator.RunFetchAsync(SelectedSource, lookbackYears, ParseAnnouncementKeywords(), progress, ct));
+    }
+
+    private Task RunFetchDayAsync()
+    {
+        if (!DateOnly.TryParseExact(FetchDayText.Trim(), "yyyy-MM-dd", out var date))
+        {
+            Log($"日期格式不对：\"{FetchDayText}\"，请用 yyyy-MM-dd 格式（例如 2026-07-06）");
+            return Task.CompletedTask;
+        }
+        return RunOperationAsync("拉取当天",
+            (progress, ct) => _orchestrator.RunFetchDayAsync(SelectedSource, date, ParseAnnouncementKeywords(), progress, ct));
+    }
+
+    private Task RunFetchBoardsAsync() =>
+        RunOperationAsync("拉取板块", (progress, ct) => _orchestrator.RunFetchBoardsAsync(progress, ct));
+
+    /// <summary>一次性修复历史数据的回填（见 FetchOrchestrator.RunBackfillAmountTurnoverAsync）——界面已
+    /// 移除按钮(全库成交额已补齐)，方法保留以备将来复用。幂等，可随时停止后再点、只会继续补还缺的。</summary>
+    private Task RunBackfillAmountTurnoverAsync() =>
+        RunOperationAsync("回填成交额/换手率", (progress, ct) => _orchestrator.RunBackfillAmountTurnoverAsync(SelectedSource, progress, ct));
+
+    private Task RunRetryFailedAsync() =>
+        RunOperationAsync("重新拉取失败股票", (progress, ct) => _orchestrator.RunRetryFailedAsync(SelectedSource, progress, ct));
+
+    /// <summary>一键补齐每日历史（见 FetchOrchestrator.RunBackfillDailyHistoryAsync）——把融资余额、
+    /// 龙虎榜的历史从 K线最早日补到今天、跳过本地已有的交易日。一次性用途，之后靠"拉取全部/当天"增量。</summary>
+    private Task RunBackfillDailyHistoryAsync() =>
+        RunOperationAsync("一键补齐每日历史", (progress, ct) => _orchestrator.RunBackfillDailyHistoryAsync(progress, ct));
+
+    /// <summary>一键拉取定期数据（见 FetchOrchestrator.RunFetchPeriodicAsync）——依次跑指数成分/权重、
+    /// 股东数据（较慢）。</summary>
+    private Task RunFetchPeriodicAsync() =>
+        RunOperationAsync("一键拉取定期数据", (progress, ct) => _orchestrator.RunFetchPeriodicAsync(progress, ct));
+
+    /// <summary>定时拉取全部：点后等到"触发时间"再跑"拉取全部"（已过则立即）。参数在点击时先校验。</summary>
+    private async Task RunScheduledFetchAllAsync()
     {
         if (!int.TryParse(LookbackYearsText.Trim(), out var lookbackYears) || lookbackYears <= 0)
         {
             Log($"回看年数不对：\"{LookbackYearsText}\"，请填一个正整数（例如 3）");
             return;
         }
-
-        IsBusy = true;
-        StartHeartbeat();
-        _cts = new CancellationTokenSource();
-        try
-        {
-            var progress = new Progress<string>(Log);
-            var result = await _orchestrator.RunFetchAsync(SelectedSource, lookbackYears, ParseAnnouncementKeywords(), progress, _cts.Token);
-            foreach (var err in result.Errors) Log($"错误：{err}");
-        }
-        catch (OperationCanceledException)
-        {
-            Log("已停止（用户手动取消）");
-        }
-        catch (Exception ex)
-        {
-            Log($"抓取失败：{ex.Message}");
-        }
-        finally
-        {
-            StopHeartbeat();
-            _cts?.Dispose();
-            _cts = null;
-            RefreshDataStatus();
-            RefreshFailedCodeCount();
-            IsBusy = false;
-            // Unconditional, unmistakable end-of-run marker — regardless of success/error/cancel,
-            // once we're here the run is definitively over and nothing will continue on its own.
-            // Without this, a wall of per-stock error lines right before the run ends can read as
-            // "still going wrong" rather than "already stopped" (see doc/data-platform-design.md).
-            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
-        }
+        await RunScheduledAsync("拉取全部",
+            (progress, ct) => _orchestrator.RunFetchAsync(SelectedSource, lookbackYears, ParseAnnouncementKeywords(), progress, ct));
     }
 
-    private async Task RunFetchDayAsync()
+    /// <summary>定时拉取当天：点后等到"触发时间"再跑"拉取当天"（已过则立即）。日期用"日期"框（默认今天）。</summary>
+    private async Task RunScheduledFetchDayAsync()
     {
         if (!DateOnly.TryParseExact(FetchDayText.Trim(), "yyyy-MM-dd", out var date))
         {
             Log($"日期格式不对：\"{FetchDayText}\"，请用 yyyy-MM-dd 格式（例如 2026-07-06）");
+            return;
+        }
+        await RunScheduledAsync("拉取当天",
+            (progress, ct) => _orchestrator.RunFetchDayAsync(SelectedSource, date, ParseAnnouncementKeywords(), progress, ct));
+    }
+
+    /// <summary>定时执行：点后等到 <see cref="ScheduleTimeText"/>(HH:mm) 再跑 action；点击时已过该时间则立即
+    /// 跑。等待期间可点"停止"取消（等待和抓取共用同一个 CancellationToken）。</summary>
+    private async Task RunScheduledAsync(string label, Func<IProgress<string>, CancellationToken, Task<FetchResult>> action)
+    {
+        if (!TimeOnly.TryParseExact(ScheduleTimeText.Trim(), "HH:mm", out var t))
+        {
+            Log($"触发时间格式不对：\"{ScheduleTimeText}\"，请用 HH:mm 格式（例如 18:00）");
             return;
         }
 
@@ -266,17 +343,29 @@ public class MainViewModel : INotifyPropertyChanged
         _cts = new CancellationTokenSource();
         try
         {
+            var target = DateTime.Today.Add(t.ToTimeSpan());
+            if (target > DateTime.Now)
+            {
+                var wait = target - DateTime.Now;
+                Log($"已排定：等到 {target:HH:mm} 再开始【{label}】（还有约 {wait.TotalMinutes:F0} 分钟；等待期间可随时点\"停止\"取消）");
+                await Task.Delay(wait, _cts.Token);
+            }
+            else
+            {
+                Log($"当前已过 {ScheduleTimeText}，立即开始【{label}】");
+            }
+            Log($"到点，开始【{label}】...");
             var progress = new Progress<string>(Log);
-            var result = await _orchestrator.RunFetchDayAsync(SelectedSource, date, ParseAnnouncementKeywords(), progress, _cts.Token);
+            var result = await action(progress, _cts.Token);
             foreach (var err in result.Errors) Log($"错误：{err}");
         }
         catch (OperationCanceledException)
         {
-            Log("已停止（用户手动取消）");
+            Log($"【{label}】已停止（用户手动取消）");
         }
         catch (Exception ex)
         {
-            Log($"按天抓取失败：{ex.Message}");
+            Log($"定时【{label}】失败：{ex.Message}");
         }
         finally
         {
@@ -286,132 +375,7 @@ public class MainViewModel : INotifyPropertyChanged
             RefreshDataStatus();
             RefreshFailedCodeCount();
             IsBusy = false;
-            // Unconditional, unmistakable end-of-run marker — regardless of success/error/cancel,
-            // once we're here the run is definitively over and nothing will continue on its own.
-            // Without this, a wall of per-stock error lines right before the run ends can read as
-            // "still going wrong" rather than "already stopped" (see doc/data-platform-design.md).
-            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
-        }
-    }
-
-    private async Task RunFetchBoardsAsync()
-    {
-        IsBusy = true;
-        StartHeartbeat();
-        _cts = new CancellationTokenSource();
-        try
-        {
-            var progress = new Progress<string>(Log);
-            var result = await _orchestrator.RunFetchBoardsAsync(progress, _cts.Token);
-            foreach (var err in result.Errors) Log($"错误：{err}");
-        }
-        catch (OperationCanceledException)
-        {
-            Log("已停止（用户手动取消）");
-        }
-        catch (Exception ex)
-        {
-            Log($"抓取板块数据失败：{ex.Message}");
-        }
-        finally
-        {
-            StopHeartbeat();
-            _cts?.Dispose();
-            _cts = null;
-            IsBusy = false;
-            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
-        }
-    }
-
-    /// <summary>本地合成板块指数日K（见 FetchOrchestrator.RunSynthesizeBoardIndexAsync）——不联网，
-    /// 用已有成分股+个股K线算。日常合成已并进"拉取全部/当天"末尾；此按钮用于"拉取板块"更新成分股后
-    /// 单独重算。前置：先"拉取板块"(成分股)和至少一次"拉取全部/当天"(个股K线)。</summary>
-    private async Task RunSynthesizeBoardIndexAsync()
-    {
-        IsBusy = true;
-        StartHeartbeat();
-        _cts = new CancellationTokenSource();
-        try
-        {
-            var progress = new Progress<string>(Log);
-            var result = await _orchestrator.RunSynthesizeBoardIndexAsync(progress, _cts.Token);
-            foreach (var err in result.Errors) Log($"错误：{err}");
-        }
-        catch (OperationCanceledException) { Log("已停止（用户手动取消）"); }
-        catch (Exception ex) { Log($"合成板块指数失败：{ex.Message}"); }
-        finally
-        {
-            StopHeartbeat();
-            _cts?.Dispose();
-            _cts = null;
-            RefreshDataStatus();
-            IsBusy = false;
-            Log("===== 本轮已结束，不会自动继续，需要再次操作请重新点击按钮 =====");
-        }
-    }
-
-    /// <summary>一次性修复历史数据的回填（见 FetchOrchestrator.RunBackfillAmountTurnoverAsync）
-    /// ——2026-07-10之前入库的日线成交额/换手率全是0，正常抓取（增量水位线+INSERT OR IGNORE）
-    /// 永远不会回头补这些旧行，只能靠这个按钮。幂等，可随时停止后再点、只会继续补还缺的。</summary>
-    private async Task RunBackfillAmountTurnoverAsync()
-    {
-        IsBusy = true;
-        StartHeartbeat();
-        _cts = new CancellationTokenSource();
-        try
-        {
-            var progress = new Progress<string>(Log);
-            var result = await _orchestrator.RunBackfillAmountTurnoverAsync(SelectedSource, progress, _cts.Token);
-            foreach (var err in result.Errors) Log($"错误：{err}");
-        }
-        catch (OperationCanceledException)
-        {
-            Log("已停止（用户手动取消）");
-        }
-        catch (Exception ex)
-        {
-            Log($"回填成交额/换手率时出错：{ex.Message}");
-        }
-        finally
-        {
-            StopHeartbeat();
-            _cts?.Dispose();
-            _cts = null;
-            RefreshDataStatus();
-            RefreshFailedCodeCount();
-            IsBusy = false;
-            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
-        }
-    }
-
-    private async Task RunRetryFailedAsync()
-    {
-        IsBusy = true;
-        StartHeartbeat();
-        _cts = new CancellationTokenSource();
-        try
-        {
-            var progress = new Progress<string>(Log);
-            var result = await _orchestrator.RunRetryFailedAsync(SelectedSource, progress, _cts.Token);
-            foreach (var err in result.Errors) Log($"错误：{err}");
-        }
-        catch (OperationCanceledException)
-        {
-            Log("已停止（用户手动取消）");
-        }
-        catch (Exception ex)
-        {
-            Log($"重新拉取失败股票时出错：{ex.Message}");
-        }
-        finally
-        {
-            StopHeartbeat();
-            _cts?.Dispose();
-            _cts = null;
-            RefreshDataStatus();
-            RefreshFailedCodeCount();
-            IsBusy = false;
-            Log("===== 本轮已结束，不会自动继续，需要再次抓取请重新点击按钮 =====");
+            Log($"===== 【{label}】结束，不会自动继续，需要再次操作请重新点击按钮 =====");
         }
     }
 }

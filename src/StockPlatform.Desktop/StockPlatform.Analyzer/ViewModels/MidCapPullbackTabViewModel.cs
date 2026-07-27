@@ -30,6 +30,8 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
     private readonly AnalyzerPaths _paths;
     private readonly IBarRepository _barRepository;
     private readonly IFundamentalMetricRepository _fundamentalRepository;
+    private readonly IShareholderRepository _shareholderRepository;
+    private readonly IMarginRepository _marginRepository;
     private readonly JsonWatchlistStore _watchlistStore;
 
     public ObservableCollection<string> LogLines { get; } = new();
@@ -42,22 +44,20 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
     public string ProgressText { get => _progressText; set => Set(ref _progressText, value); }
 
     public string CriteriaInfoText =>
-        "彬哥法 — 入选条件（10条必须全部满足，固定用日线+周线+月线）：\n\n" +
+        "彬哥法 — 入选条件（12条必须全部满足，固定用日线+周线+月线）：\n\n" +
         "1. 上市板块不包含科创板\n" +
         "2. 股票市场类型不包含北交所\n" +
         "3. 股票简称不包含ST、*ST\n" +
         "4. 最新交易日流通市值（不含限售股）大于80亿元且小于300亿元\n" +
-        "    数据来源：数据获取程序拉取时会一并写入流通市值（东方财富批量接口）；如果本地数据是" +
-        "更新前拉取的，还没有市值数据，这条会显示\"缺少流通市值数据\"——重新拉取一次即可\n" +
         "5. 最近15个交易日（含当前交易日）内，涨停次数大于1次（按收盘涨停统计，" +
         "涨跌停幅度按板块+ST状态区分：主板10%/创业板科创板20%/北交所30%/ST股5%）\n" +
         "6. 月线MACD采用默认参数(12,26,9)，MACD柱值大于0\n" +
         "7. 周线MACD采用默认参数(12,26,9)，MACD柱值大于0\n" +
         "8. 当前交易日开盘价低于MA15\n" +
         "9. 当前交易日收盘价高于MA15\n" +
-        "10. 前一交易日收盘价低于前一交易日MA15\n\n" +
-        "结果列表只显示10条全部满足的股票；因日/周/月线历史数据不足而完全无法计算的股票会被跳过；" +
-        "缺少流通市值数据时，只是第4条这一条被跳过不参与判断（不算满足也不算不满足，不会跳过整只股票，其余9条正常判断）；两种情况的数量都会在分析完成后的日志里汇总。";
+        "10. 前一交易日收盘价低于前一交易日MA15\n" +
+        "11. 最新报告期股东户数环比上一报告期下降（筹码集中方向）；\"是否接近近两年最低户数\"只作参考、不作硬性门槛\n" +
+        "12. 最新交易日融资余额较上一交易日增长（资金加杠杆流入方向）";
 
     public RelayCommand AnalyzeCommand { get; }
     public RelayCommand ShowCriteriaInfoCommand { get; }
@@ -65,11 +65,13 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
     public RelayCommand ExportCommand { get; }
 
     public MidCapPullbackTabViewModel(
-        AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, JsonWatchlistStore watchlistStore)
+        AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, IShareholderRepository shareholderRepository, IMarginRepository marginRepository, JsonWatchlistStore watchlistStore)
     {
         _paths = paths;
         _barRepository = barRepository;
         _fundamentalRepository = fundamentalRepository;
+        _shareholderRepository = shareholderRepository;
+        _marginRepository = marginRepository;
         _watchlistStore = watchlistStore;
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
@@ -100,7 +102,7 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
 
             var names = SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
 
-            var engine = new MidCapPullbackAnalysisEngine(_barRepository, _fundamentalRepository);
+            var engine = new MidCapPullbackAnalysisEngine(_barRepository, _fundamentalRepository, _shareholderRepository, _marginRepository);
             int passedCount = 0, errorCount = 0;
             var missingDataCounts = new Dictionary<string, int>();
             await Task.Run(() =>

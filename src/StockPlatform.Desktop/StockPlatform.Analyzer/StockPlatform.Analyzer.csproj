@@ -9,6 +9,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>StockPlatform.Analyzer</AssemblyName>
     <RootNamespace>StockPlatform.Analyzer</RootNamespace>
+    <!-- exe 图标（绿色柱状图）——任务栏/窗口标题/资源管理器都用它；托盘 NotifyIcon 也是靠
+         ExtractAssociatedIcon(exe) 取的，所以设了这个托盘图标自动变成同一个，无需改代码。 -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <LangVersion>latest</LangVersion>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>

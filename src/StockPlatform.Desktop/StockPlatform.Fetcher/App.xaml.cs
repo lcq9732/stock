@@ -79,7 +79,31 @@ public partial class App : Application
         // 环境不可用，所以固定用新浪（ETF 日K本身仍走上面所选数据源的 BarFetcher）。见 SinaEtfListProvider。
         var etfListProvider = new SinaEtfListProvider();
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, etfListProvider);
+        // 指数成分名单(新浪 vII_NewestComponent)、成分权重(中证 closeweight.xls)、龙虎榜(新浪)——各自
+        // 独立限流，独立按钮触发（见 FetchOrchestrator RunFetchIndexConsAsync / RunFetchLhbAsync），不掺
+        // 进主抓取流程。中证权重源偏不稳、失败进 Manifest 可用"重新拉取失败股票"重试。三张表(IndexCons/
+        // IndexWeight/Lhb/EtfIndexMap)都写进同一个 current.sqlite。
+        var indexConsProvider = new SinaIndexConsProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        var indexWeightProvider = new CsindexWeightProvider(new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        var lhbProvider = new SinaLhbProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        var indexRepository = new SqliteIndexRepository(paths.CurrentDb);
+        indexRepository.EnsureSchema();
+        var lhbRepository = new SqliteLhbRepository(paths.CurrentDb);
+        lhbRepository.EnsureSchema();
+
+        // 股东数据(股东户数+十大股东+十大流通股东)——新浪股本股东页,逐只抓,独立按钮。写 ShareholderCount/
+        // TopShareholder 两张表。逐只失败进 Manifest 可重试。
+        var shareholderProvider = new SinaShareholderProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        var shareholderRepository = new SqliteShareholderRepository(paths.CurrentDb);
+        shareholderRepository.EnsureSchema();
+
+        // 融资余额(融资融券明细)——交易所官方源(上交所JSON+深交所xlsx)。每日数据,已并入"拉取全部/当天",
+        // 另有"回补融资余额"按钮补历史。写 MarginDetail 表。
+        var marginProvider = new ExchangeMarginProvider(new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        var marginRepository = new SqliteMarginRepository(paths.CurrentDb);
+        marginRepository.EnsureSchema();
+
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider);
 
         var viewModel = new MainViewModel(paths, orchestrator, sources);
         var window = new MainWindow { DataContext = viewModel };

@@ -86,7 +86,7 @@
 
 #### 3.2.4 方法四：彬哥法（原名中盘起爆法，类名仍用 MidCapPullback）
 
-七种方法里条件最多、涉及数据面最广的一个，实现是 `StockPlatform.Logic.Services.MidCapPullbackAnalysisEngine`。**10条规则必须全部满足**（AND关系），没有用户可调参数：
+七种方法里条件最多、涉及数据面最广的一个，实现是 `StockPlatform.Logic.Services.MidCapPullbackAnalysisEngine`。**12条规则必须全部满足**（AND关系，2026-07-17 从10条增到12条，见规则11、12），没有用户可调参数：
 
 1. 上市板块不包含科创板（`MarketClassifier.Classify(code) != ShanghaiStar`，含688和689两种前缀）
 2. 股票市场类型不包含北交所（`MarketClassifier.Classify(code) != Beijing`）
@@ -98,10 +98,14 @@
 8. 当前交易日开盘价低于MA15
 9. 当前交易日收盘价高于MA15
 10. 前一交易日收盘价低于前一交易日MA15
+11. **最新报告期股东户数环比上一报告期下降**（2026-07-17 新增，用户要求）——筹码集中的方向。读 `IShareholderRepository.GetCountSeries`（按报告期升序），硬条件=`series[^1].HolderNum < series[^2].HolderNum`。用户还提"最好接近近两年最低户数"——按"最好=软"处理：**只在依据文字里显示"距近2年最低高X%"供参考，不作硬门槛**。
+12. **最新交易日融资余额较上一交易日增长**（2026-07-17 新增，用户要求）——资金加杠杆流入的方向。读 `IMarginRepository.GetBalanceSeries`（`MarginDetail` 表，按交易日升序），硬条件=`series[^1].MarginBalance > series[^2].MarginBalance`。融资融券每日数据来自交易所官方（上交所+深交所，见 doc/data-platform-design.md），日常已并入"拉取全部/当天"、历史用"回补融资余额"补。
 
 **关于第4条流通市值**：`FundamentalMetric` 表（`Code, MetricKey, AsOfDate, Value, Source, FetchedAt` 的通用key-value结构）早就建好了，一开始没有任何数据获取程序往里写过东西。新增了 `MetricKeys.CirculatingMarketCap`（流通市值，单位固定是"元"）这个 key，**数据获取程序现在会在每次"拉取全部"/"拉取当天"时，逐只股票查询并写入**（`FetchOrchestrator.FetchMarketCapAsync`），不受用户选的K线数据源（EastMoney/Tencent）影响。数据源默认是腾讯的实时行情接口（`TencentMarketCapFetcher`，见 doc/data-platform-design.md 3.5节）——东方财富的等价实现（`EastMoneyMarketCapFetcher`）也保留在代码里但默认没有被使用，原因跟"耀哥法"资金净流入那条一样：东方财富在用户实际使用环境里基本连不上。`MidCapPullbackAnalysisEngine` 按"读到就判断范围，读不到就显示缺数据"的方式消费——如果本地数据库是升级前拉取的（还没有市值数据），第4条会显示"缺少流通市值数据"直到重新拉取一次；重新拉取之后就能正常判定了。
 
 **规则4/5跟规则1/2/3不一样，故意没有做成"数据缺失就跳过整只股票"**（像日线历史数据不足那样归为Error）：如果这样处理，市值数据缺失时会导致每一只股票都被跳过，看不出其余9条规则算得对不对。所以只让第4条自己判定不满足，其余9条照常算、照常展示。
+
+**关于第11/12条（股东户数、融资余额）**（2026-07-17）：这两条依赖的数据都是**需单独触发/回补**的——股东数据走"拉取股东数据"（季度级，`ShareholderCount` 表），融资余额走交易所官方接口（`MarginDetail` 表，日常并入"拉取全部/当天"、历史用"回补融资余额"）。很多时候本地还没有，所以缺数据（序列<2点）时标 `DataMissing=true`——走 `AllSatisfiedIgnoringMissingData` 被跳过、不拖垮其余条，数据同步到分析程序后自动生效。这跟第4条市值"缺数据判负"略有不同：市值缺失是"升级前旧库"临时状态，而这两类是可选/慢变数据、缺失是常态，用 DataMissing 跳过更合适。**注意同步**：`DailyIncrementExporter` 目前只带核心表（Bar/NetInflow/FundamentalMetric/公告/StockMeta），**MarginDetail/ShareholderCount 等新表不在每日增量里**，要靠"全量基线"才能同步到分析程序（若要让它们走每日增量，需扩 DailyIncrementExporter）。
 
 #### 3.2.5 方法五：金叉法
 
@@ -189,7 +193,7 @@ public class StockScreenResult
     public string Name { get; set; }
     public string Granularity { get; set; }   // 峰哥法跟随用户选择；其余五种（三角收敛/耀哥法/彬哥法/金叉法/短线法）固定 "day"
     public bool Passed { get; set; }          // 三角收敛/峰哥法/耀哥法/彬哥法/短线法：全部满足（缺数据条跳过）；金叉法：7条里至少5条满足
-    public List<CriterionResult> Criteria { get; set; }   // 三角收敛固定3条；峰哥法固定3条；耀哥法固定5条；金叉法固定7条；彬哥法固定10条；短线法固定8条
+    public List<CriterionResult> Criteria { get; set; }   // 三角收敛固定3条；峰哥法固定3条；耀哥法固定5条；金叉法固定7条；彬哥法固定12条；短线法固定8条
     public double? SortScore { get; set; }    // 三角收敛=收敛质量(0~100)；短线法=近15日涨停次数；其余方法为 null。结果表按它排序
 }
 

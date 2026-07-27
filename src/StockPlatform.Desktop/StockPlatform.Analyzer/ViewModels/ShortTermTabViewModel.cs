@@ -59,8 +59,8 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
         $"2. 放量：当日成交量 ≥ 前5日均量 × {VolumeSurgeRatio:F1}\n" +
         "3. 突破：收盘价创近20日新高（最高价口径）\n" +
         "4. MACD动能确认：MACD柱转正且放大，或 DIF 在0轴上方金叉\n" +
-        "5. 主力资金净流入：最新交易日主力净流入 > 0（缺数据则跳过此条）\n" +
-        $"6. 流通市值适中：{MinCapYi:F0}亿 ~ {MaxCapYi:F0}亿（缺数据则跳过此条）\n" +
+        "5. 主力资金净流入：最新交易日主力净流入 > 0\n" +
+        $"6. 流通市值适中：{MinCapYi:F0}亿 ~ {MaxCapYi:F0}亿\n" +
         $"7. 不追高：当日涨幅 ≤ {MaxDayGainPct:F1}%\n" +
         "8. 过滤：排除 ST/*ST、北交所\n\n" +
         "结果只显示以上条件全部满足的股票，并按\"近15日涨停次数\"从高到低排序（涨停多的排前面——有资金关注、弹性大，但不作硬性入选条件）。\n\n" +

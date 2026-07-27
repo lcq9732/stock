@@ -34,4 +34,18 @@ public class Manifest
     /// 单独查的，跟FailedCodes（K线）同样的按股票精确追踪逻辑，"重新拉取失败股票"点击时只会
     /// 针对名单里这些代码重新查，不用等一轮全市场扫描。</summary>
     public List<string> FailedNetInflowCodes { get; set; } = new();
+
+    /// <summary>指数成分权重（中证指数官网 closeweight.xls）抓取失败、还没补上的指数代码
+    /// （2026-07-16新增）——中证源不稳、失败率较高，逐指数精确记录，"重新拉取失败股票"会一并重试。
+    /// 注意非中证系指数本来就没有权重文件，不算失败、不会被记进来（见 CsindexWeightProvider）。</summary>
+    public List<string> FailedIndexWeightCodes { get; set; } = new();
+
+    /// <summary>指数成分名单（新浪指数成分接口）抓取失败、还没补上的指数代码（2026-07-16新增）——
+    /// 逐指数精确记录，跟权重共用"重新拉取失败股票"重试。新浪对某些老指数本来就无成分数据，返回空
+    /// 不算失败；只有请求本身失败（网络/限流）才记进来。</summary>
+    public List<string> FailedIndexConsCodes { get; set; } = new();
+
+    /// <summary>股东数据（新浪股本股东页：户数+十大股东+十大流通股东）抓取失败、还没补上的股票代码
+    /// （2026-07-16新增）——逐只精确记录，共用"重新拉取失败股票"重试。全市场逐只抓、量大易有零星失败。</summary>
+    public List<string> FailedShareholderCodes { get; set; } = new();
 }

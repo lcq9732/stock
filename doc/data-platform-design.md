@@ -213,6 +213,18 @@ Fetcher ──压缩上传──▶ GitHub Releases(tag=data, 公开仓库) ─�
 - **怎么存**：`Bar` 表，`code` 用**板块代码**（`gn_xxx`/`new_xxx`）——既非6位纯数字也非带前缀8位符号，`GetAllCodes()` 天然不当它是个股。每次**全量重算**（先 `DeleteByCode` 删旧再写），因为成分股/个股数据会变，不能用 INSERT OR IGNORE 累积。
 - **实测**（2026-07-15，本地 224 个板块）：223 个成分股数据足够、可合成，共约 16.2 万根日K，OHLC 全部合法。
 
+### 3.14 标的元数据统一到 StockMeta + 可查询（2026-07-15）
+
+**需求**：大盘指数/板块指数/ETF 要跟个股一样有名称、能在"查询"页搜到、看行情；但**选股分析暂时仍只跑个股**（以后可能扩展到分析这些）。
+
+- **StockMeta 加 `type` 列**：`stock`/`index`/`etf`/`board`（老库行为 NULL，一律按 `stock`）。抓取/合成时把名称+类型写进去：指数=`MarketIndexCatalog` 名称、ETF=新浪列表返回的名称、板块=`Board.Name`（只写有合成出指数K的板块）。
+- **关键区分**（`SqliteStockMetaUpsert`）：
+  - `GetAll()` **只返回个股**（`type='stock' OR type IS NULL`）——"拉取当天"的抓取个股清单、各选股页补名称都用它，绝不能混入非个股（否则会把 ETF/指数当个股抓、把板块代码 gn_ 抓失败）。
+  - `GetAllInstruments()` 返回**全部**（含 type），仅"查询"页用。
+  - 各选股页的扫描全集仍是 `SqliteBarRepository.GetAllCodes()`（只认6位纯数字=个股），所以分析天然只跑个股，加不加非个股进 StockMeta 都不影响。
+- **查询页**：搜索范围从"只个股"扩成 `GetAllInstruments()`，结果表加"类型"列（个股/大盘指数/ETF/板块）；点"K线详情"对指数/ETF/板块同样能看（`QuoteDetailWindow` 按 code 查 Bar，各类型的K线都存在各自 code 下）。
+- **数据流**：`type` 列随全量基线/每日增量的 `StockMeta` 整表同步到分析程序（`DailyIncrementExporter` 本来就是 `SELECT * FROM StockMeta` 整表带）。所以要让查询页出现这些，得先跑一次带本改动的 Fetcher（"拉取全部"会顺带写好指数/ETF 名称、"合成板块指数"写板块名称）再上传。
+
 ## 4. 数据库表结构设计
 
 设计原则：**用"维度值"代替"写死字段"**，保证后续加新的数据类型/周期时不需要改表结构、不需要数据库迁移。

@@ -9,4 +9,9 @@
     <DebugType>none</DebugType>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- 指数全集清单（IndexCatalog 读取），随程序打包，不运行时依赖聚宽网页 -->
+    <EmbeddedResource Include="Services\IndexCatalog.csv" />
+  </ItemGroup>
+
 </Project>

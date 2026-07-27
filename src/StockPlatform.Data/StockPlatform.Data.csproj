@@ -12,6 +12,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.8" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <!-- 解析中证指数官网的 closeweight.xls（真 OLE2/BIFF）——读取需注册 CodePages（上面已引用） -->
+    <PackageReference Include="ExcelDataReader" Version="3.7.0" />
   </ItemGroup>
 
   <ItemGroup>

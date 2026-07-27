@@ -64,7 +64,7 @@ public class MainViewModel : INotifyPropertyChanged
     /// <summary>"从GitHub更新数据"的进度/结果单行提示（会被下载百分比等不断覆盖）。</summary>
     public string SyncStatusText { get => _syncStatusText; set => Set(ref _syncStatusText, value); }
 
-    public MainViewModel(AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, INetInflowRepository netInflowRepository, IBoardRepository boardRepository)
+    public MainViewModel(AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, INetInflowRepository netInflowRepository, IBoardRepository boardRepository, IShareholderRepository shareholderRepository, IMarginRepository marginRepository)
     {
         _paths = paths;
         _barRepository = barRepository;
@@ -73,7 +73,7 @@ public class MainViewModel : INotifyPropertyChanged
         FoundationTab = new FoundationTabViewModel(paths, barRepository, watchlistStore);
         GoldenCrossTab = new GoldenCrossTabViewModel(paths, barRepository, watchlistStore);
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
-        MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, watchlistStore);
+        MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, shareholderRepository, marginRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);
         RisingLowsTab = new RisingLowsTabViewModel(paths, barRepository, watchlistStore);
         ShortTermTab = new ShortTermTabViewModel(paths, barRepository, netInflowRepository, fundamentalRepository, watchlistStore);
