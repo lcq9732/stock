@@ -14,7 +14,8 @@ namespace StockPlatform.Analyzer.ViewModels;
 /// location/freshness) and exposes each method's own tab view model. See
 /// doc/analysis-app-design.md section 3.2 for why there are five methods and why they don't share
 /// analysis state beyond the underlying data file. 界面 Tab 顺序（也就是这里各 Tab 属性希望呈现
-/// 的顺序）：三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 / 金叉法，最后是跨方法的自选股。类名仍叫
+/// 的顺序）：每日晨检（早上第一眼看的仪表盘，放最前）/ 三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 /
+/// 金叉法，最后是跨方法的自选股。类名仍叫
 /// TriangleConvergence/Foundation/BottomRebound/MidCapPullback/GoldenCross——描述的是算法本身，
 /// 跟人名/Tab 中文名无关。
 /// </summary>
@@ -34,6 +35,7 @@ public class MainViewModel : INotifyPropertyChanged
 
     public IBarRepository BarRepository => _barRepository;
 
+    public MorningCheckTabViewModel MorningCheckTab { get; }
     public FoundationTabViewModel FoundationTab { get; }
     public GoldenCrossTabViewModel GoldenCrossTab { get; }
     public BottomReboundTabViewModel BottomReboundTab { get; }
@@ -70,6 +72,7 @@ public class MainViewModel : INotifyPropertyChanged
         _barRepository = barRepository;
 
         var watchlistStore = new JsonWatchlistStore(paths.WatchlistPath);
+        MorningCheckTab = new MorningCheckTabViewModel(barRepository, shareholderRepository, watchlistStore);
         FoundationTab = new FoundationTabViewModel(paths, barRepository, watchlistStore);
         GoldenCrossTab = new GoldenCrossTabViewModel(paths, barRepository, watchlistStore);
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
@@ -77,7 +80,7 @@ public class MainViewModel : INotifyPropertyChanged
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);
         RisingLowsTab = new RisingLowsTabViewModel(paths, barRepository, watchlistStore);
         ShortTermTab = new ShortTermTabViewModel(paths, barRepository, netInflowRepository, fundamentalRepository, watchlistStore);
-        QueryTab = new QueryTabViewModel(paths, barRepository);
+        QueryTab = new QueryTabViewModel(paths, barRepository, watchlistStore);
         BoardTab = new BoardTabViewModel(boardRepository, barRepository, paths);
         WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository, boardRepository);
 

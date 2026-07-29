@@ -11,7 +11,7 @@ namespace StockPlatform.Analyzer.ViewModels;
 /// <summary>One matched stock in the 查询 tab — just enough to show a row and open its K线详情
 /// (行情详情 / QuoteDetailWindow). Not tied to any analysis method, so it doesn't reuse
 /// ResultRowViewModel (which carries 满足数/收敛质量 etc.).</summary>
-public class QueryRowViewModel
+public class QueryRowViewModel : ISelectableRow
 {
     public string Code { get; init; } = "";
     public string Name { get; init; } = "";
@@ -19,6 +19,12 @@ public class QueryRowViewModel
     /// <summary>标的类型显示：个股/大盘指数/ETF/板块——2026-07-15 起查询页也能搜到指数/ETF/板块，
     /// 用这列区分（分析仍只跑个股）。</summary>
     public string Type { get; init; } = "";
+    /// <summary>StockMeta 里的原始 type 值——"加入自选"只对个股放行（指数/ETF/板块没有股东户数
+    /// 等跟踪数据、也不是"选股"语义），用它判断而不是拿显示文本反推。</summary>
+    public string TypeRaw { get; init; } = "";
+    /// <summary>Plain mutable, same reasoning as ResultRowViewModel.IsSelected — only read when
+    /// "加入自选" is clicked.</summary>
+    public bool IsSelected { get; set; }
 }
 
 /// <summary>"查询" tab — type a code or name, list the matching stocks, and open any of them in the
@@ -40,6 +46,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
 
     private readonly AnalyzerPaths _paths;
     private readonly IBarRepository _barRepository;
+    private readonly Watchlist.JsonWatchlistStore _watchlistStore;
 
     public ObservableCollection<QueryRowViewModel> Results { get; } = new();
 
@@ -50,12 +57,60 @@ public class QueryTabViewModel : INotifyPropertyChanged
     public string StatusText { get => _statusText; set => Set(ref _statusText, value); }
 
     public RelayCommand SearchCommand { get; }
+    public RelayCommand AddToWatchlistCommand { get; }
 
-    public QueryTabViewModel(AnalyzerPaths paths, IBarRepository barRepository)
+    public QueryTabViewModel(AnalyzerPaths paths, IBarRepository barRepository, Watchlist.JsonWatchlistStore watchlistStore)
     {
         _paths = paths;
         _barRepository = barRepository;
+        _watchlistStore = watchlistStore;
         SearchCommand = new RelayCommand(_ => Search());
+        AddToWatchlistCommand = new RelayCommand(_ => AddSelectedToWatchlist());
+    }
+
+    /// <summary>查询Tab的"加入自选"——跟各选股方法的 WatchlistAdder 语义一致（按 Code+Method+DataDate
+    /// 去重），但没有分析条件可存：Method 固定"查询"，DataDate/PriceAtPick 用该股最新一根日线，
+    /// Criteria 为空。只放行个股；指数/ETF/板块没有股东户数等跟踪数据、也不是"选股"，直接跳过并提示。
+    /// 加入后自动进入"自选股"跟踪与"每日晨检"体检。</summary>
+    private void AddSelectedToWatchlist()
+    {
+        var selected = Results.Where(r => r.IsSelected).ToList();
+        if (selected.Count == 0)
+        {
+            StatusText = "先勾选要加入自选的行";
+            return;
+        }
+
+        int skippedType = 0, skippedNoBar = 0;
+        var entries = new List<Watchlist.WatchlistEntry>();
+        foreach (var r in selected)
+        {
+            if (r.TypeRaw != SqliteStockMetaUpsert.TypeStock) { skippedType++; continue; }
+            var bars = _barRepository.Query(r.Code, Granularity.Day);
+            if (bars.Count == 0) { skippedNoBar++; continue; }
+            var last = bars[^1];
+            entries.Add(new Watchlist.WatchlistEntry
+            {
+                Code = r.Code,
+                Name = r.Name,
+                Method = "查询",
+                Granularity = Granularity.Day,
+                DataDate = last.PeriodStart,
+                PriceAtPick = last.Close,
+                AddedAt = DateTime.Now,
+                SatisfiedCount = 0,
+                TotalCount = 0,
+            });
+        }
+
+        int added = _watchlistStore.Add(entries);
+        foreach (var r in selected) r.IsSelected = false;
+
+        var parts = new List<string> { added > 0 ? $"已加入自选 {added} 只" : "勾选的个股都已经在自选里了" };
+        if (skippedType > 0) parts.Add($"跳过 {skippedType} 个非个股（指数/ETF/板块不支持自选跟踪）");
+        if (skippedNoBar > 0) parts.Add($"跳过 {skippedNoBar} 个无K线数据的");
+        if (entries.Count > 0 && added < entries.Count) parts.Add($"{entries.Count - added} 只已在自选中未重复加入");
+        StatusText = string.Join("；", parts);
     }
 
     private void Search()
@@ -101,6 +156,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
                 // 行业分类只对个股有意义（按6位代码段判定）；指数/ETF/板块留空
                 Board = s.Type == SqliteStockMetaUpsert.TypeStock ? IndustryClassifier.GetIndustry(s.Code) : "",
                 Type = TypeDisplay(s.Type),
+                TypeRaw = s.Type,
             });
 
         StatusText = matches.Count == 0

@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.Windows.Media;
 using StockPlatform.Analyzer.Export;
 using StockPlatform.Analyzer.Watchlist;
@@ -7,14 +9,21 @@ using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Analyzer.ViewModels;
 
-public class WatchlistRowViewModel : ISelectableRow
+public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
 {
-    public WatchlistEntry Entry { get; }
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void Raise([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
-    public WatchlistRowViewModel(WatchlistEntry entry, IBarRepository barRepository, string conceptBoards)
+    public WatchlistEntry Entry { get; }
+    private readonly JsonWatchlistStore _store;
+    private double? _latestClose;
+
+    public WatchlistRowViewModel(WatchlistEntry entry, IBarRepository barRepository, string conceptBoards, JsonWatchlistStore store)
     {
         Entry = entry;
         Board = conceptBoards;
+        _store = store;
         ComputeTracking(barRepository);
     }
 
@@ -46,10 +55,129 @@ public class WatchlistRowViewModel : ISelectableRow
         if (bars.Count == 0 || Entry.PriceAtPick <= 0) return;
 
         var latest = bars[^1];
+        _latestClose = latest.Close;
         LatestCloseText = $"{latest.Close:F2}（{latest.PeriodStart:yyyy-MM-dd}）";
         var pct = (latest.Close - Entry.PriceAtPick) / Entry.PriceAtPick * 100;
         ChangeText = $"{(pct >= 0 ? "+" : "")}{pct:F2}%";
         ChangeColor = pct >= 0 ? Brushes.Red : Brushes.Green; // 国内看盘习惯：涨红跌绿
+    }
+
+    // ── 手动持仓信息（买入日期/买入价/股数，2026-07-29新增）——单元格里直接编辑，提交时解析并
+    //    立即持久化；解析不了的输入丢弃（Raise让界面回显旧值）。三个都空=观察中、没买。 ──
+
+    public string BuyDateText
+    {
+        get => Entry.BuyDate?.ToString("yyyy-MM-dd") ?? "";
+        set
+        {
+            var t = (value ?? "").Trim();
+            if (t.Length == 0) Entry.BuyDate = null;
+            else if (DateTime.TryParse(t, out var d)) Entry.BuyDate = d.Date;
+            PersistTradeInfo();
+        }
+    }
+
+    public string BuyPriceText
+    {
+        get => Entry.BuyPrice?.ToString("F2") ?? "";
+        set
+        {
+            var t = (value ?? "").Trim();
+            if (t.Length == 0) Entry.BuyPrice = null;
+            else if (double.TryParse(t, out var p) && p > 0) Entry.BuyPrice = p;
+            PersistTradeInfo();
+        }
+    }
+
+    public string SharesText
+    {
+        get => Entry.Shares?.ToString() ?? "";
+        set
+        {
+            var t = (value ?? "").Trim();
+            if (t.Length == 0) Entry.Shares = null;
+            else if (int.TryParse(t, out var n) && n > 0) Entry.Shares = n;
+            PersistTradeInfo();
+        }
+    }
+
+    public string SellDateText
+    {
+        get => Entry.SellDate?.ToString("yyyy-MM-dd") ?? "";
+        set
+        {
+            var t = (value ?? "").Trim();
+            if (t.Length == 0) Entry.SellDate = null;
+            else if (DateTime.TryParse(t, out var d)) Entry.SellDate = d.Date;
+            PersistTradeInfo();
+        }
+    }
+
+    public string SellPriceText
+    {
+        get => Entry.SellPrice?.ToString("F2") ?? "";
+        set
+        {
+            var t = (value ?? "").Trim();
+            if (t.Length == 0) Entry.SellPrice = null;
+            else if (double.TryParse(t, out var p) && p > 0) Entry.SellPrice = p;
+            PersistTradeInfo();
+        }
+    }
+
+    private void PersistTradeInfo()
+    {
+        _store.UpdateTradeInfo(Entry.Id, Entry.BuyDate, Entry.BuyPrice, Entry.Shares, Entry.SellDate, Entry.SellPrice);
+        Raise(nameof(BuyDateText));
+        Raise(nameof(BuyPriceText));
+        Raise(nameof(SharesText));
+        Raise(nameof(SellDateText));
+        Raise(nameof(SellPriceText));
+        Raise(nameof(HoldingText));
+        Raise(nameof(HoldingColor));
+    }
+
+    /// <summary>持仓盈亏——三种状态：没填买入价=观察中；填了买入价没填卖出价=持仓（较买入价的浮动
+    /// 盈亏，有股数带金额）；买入卖出都填了=已平仓（按卖出价算最终已实现盈亏，留痕复盘）。</summary>
+    public string HoldingText
+    {
+        get
+        {
+            if (Entry.BuyPrice is not (> 0)) return "观察中";
+
+            if (Entry.SellPrice is > 0)
+            {
+                var spct = (Entry.SellPrice.Value - Entry.BuyPrice.Value) / Entry.BuyPrice.Value * 100;
+                if (Entry.Shares is > 0)
+                {
+                    var spnl = (Entry.SellPrice.Value - Entry.BuyPrice.Value) * Entry.Shares.Value;
+                    return $"已平仓 {(spnl >= 0 ? "+" : "")}{spnl:N0}元（{(spct >= 0 ? "+" : "")}{spct:F2}%）";
+                }
+                return $"已平仓 {(spct >= 0 ? "+" : "")}{spct:F2}%";
+            }
+
+            if (_latestClose is not (> 0)) return "无最新价";
+            var pct = (_latestClose.Value - Entry.BuyPrice.Value) / Entry.BuyPrice.Value * 100;
+            var text = $"{(pct >= 0 ? "+" : "")}{pct:F2}%";
+            if (Entry.Shares is > 0)
+            {
+                var pnl = (_latestClose.Value - Entry.BuyPrice.Value) * Entry.Shares.Value;
+                text += $"（{(pnl >= 0 ? "+" : "")}{pnl:N0}元）";
+            }
+            return text;
+        }
+    }
+
+    public Brush HoldingColor
+    {
+        get
+        {
+            if (Entry.BuyPrice is not (> 0)) return Brushes.Gray;
+            if (Entry.SellPrice is > 0)
+                return Entry.SellPrice >= Entry.BuyPrice ? Brushes.Red : Brushes.Green;
+            if (_latestClose is not (> 0)) return Brushes.Gray;
+            return _latestClose >= Entry.BuyPrice ? Brushes.Red : Brushes.Green;
+        }
     }
 
     /// <summary>Plain mutable property, same reasoning as ResultRowViewModel.IsSelected — only
@@ -99,7 +227,7 @@ public class WatchlistTabViewModel
             var boards = conceptMap.TryGetValue(e.Code, out var list) && list.Count > 0
                 ? string.Join("、", list)
                 : "—";
-            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards));
+            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store));
         }
     }
 

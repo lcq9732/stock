@@ -87,6 +87,8 @@ public partial class MainWindow : Window
         if (DataContext is not MainViewModel vm) return;
         if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "自选股" })
             vm.WatchlistTab.Reload(); // picks up anything added from another tab this session
+        if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "每日晨检" })
+            vm.MorningCheckTab.Reload(); // 同上——本Session新加的自选/刚更新完的数据，切过来就是最新体检结果
     }
 
     // WPF's DataGridCheckBoxColumn needs two clicks by default (the first click only focuses/
@@ -278,6 +280,12 @@ public partial class MainWindow : Window
                     new RisingLowsDetailWindow(result, bars) { Owner = this }.ShowDialog();
                     break;
                 }
+                case "查询":
+                    // 查询Tab手工加入的自选没有分析条件快照，"条件详情"没有内容可展示——直接打开
+                    // 纯行情图（跟"行情详情"同一个窗口），比弹"未知方法"警告更符合预期。
+                    OpenQuoteDetail(entry.Code, entry.Name);
+                    break;
+
                 default:
                     MessageBox.Show(this, $"未知方法：{entry.Method}", "无法显示详情", MessageBoxButton.OK, MessageBoxImage.Warning);
                     break;

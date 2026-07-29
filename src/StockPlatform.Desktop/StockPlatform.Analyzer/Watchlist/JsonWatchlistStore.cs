@@ -58,6 +58,25 @@ public class JsonWatchlistStore
         }
     }
 
+    /// <summary>更新某条自选的手动交易信息（买入日期/买入价/股数/卖出日期/卖出价，自选股Tab里直接
+    /// 编辑）——按 Id 定位、只改这五个字段后整体保存。加载-修改-保存都在锁内完成，跟 Add/Remove
+    /// 一样保持单写者语义。</summary>
+    public void UpdateTradeInfo(Guid id, DateTime? buyDate, double? buyPrice, int? shares, DateTime? sellDate, double? sellPrice)
+    {
+        lock (_fileLock)
+        {
+            var all = LoadUnlocked();
+            var entry = all.FirstOrDefault(e => e.Id == id);
+            if (entry == null) return;
+            entry.BuyDate = buyDate;
+            entry.BuyPrice = buyPrice;
+            entry.Shares = shares;
+            entry.SellDate = sellDate;
+            entry.SellPrice = sellPrice;
+            Save(all);
+        }
+    }
+
     public void Remove(IEnumerable<Guid> ids)
     {
         lock (_fileLock)

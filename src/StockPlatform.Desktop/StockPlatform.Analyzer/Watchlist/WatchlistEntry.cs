@@ -61,6 +61,26 @@ public class WatchlistEntry
 
     public DateTime AddedAt { get; set; }
 
+    /// <summary>手动录入的实际买入日期（2026-07-29新增，在自选股Tab里直接编辑）。跟
+    /// <see cref="BuyPrice"/>/<see cref="Shares"/>一起构成"持仓"信息：三个都没填=还没买、只是
+    /// 观察中；填了=真实持仓，每日晨检的止损/止盈纪律按买入价/买入日（而非自选价）计算。
+    /// 老 JSON 里没有这些字段，反序列化自然为 null，向后兼容。</summary>
+    public DateTime? BuyDate { get; set; }
+
+    /// <summary>手动录入的实际买入价——见 <see cref="BuyDate"/>。</summary>
+    public double? BuyPrice { get; set; }
+
+    /// <summary>手动录入的买入股数——见 <see cref="BuyDate"/>；有它才能算持仓盈亏金额。</summary>
+    public int? Shares { get; set; }
+
+    /// <summary>手动录入的卖出日期（2026-07-29新增）——填了买入价又填了卖出价=这笔交易已平仓：
+    /// 自选股Tab显示最终已实现盈亏，晨检不再对它执行持仓纪律（状态标"已平仓"、回到观察语义），
+    /// 交易记录留痕供事后复盘（前向记录纪律：把每笔信号和结果攒下来）。</summary>
+    public DateTime? SellDate { get; set; }
+
+    /// <summary>手动录入的卖出价——见 <see cref="SellDate"/>。</summary>
+    public double? SellPrice { get; set; }
+
     public int SatisfiedCount { get; set; }
     public int TotalCount { get; set; }
 
