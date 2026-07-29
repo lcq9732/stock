@@ -74,6 +74,17 @@
             <Button Content="一键补齐每日历史" Command="{Binding BackfillDailyCommand}" Width="130" Margin="4,0"
                     ToolTip="一次性：把每日数据(融资余额、龙虎榜)的历史从K线最早那天补到今天,逐交易日、跳过本地已有的日子。用途是开发中新加了每日数据、之前没抓的补上历史;之后每天靠\拉取全部/当天\增量,用一次就不用了。前置:先\拉取全部\一次(用K线最早日作补齐起点)。" />
 
+            <!-- 按年份往回补历史（2026-07-29新增）——跟左边"一键补齐每日历史"同类：一次性回补操作，
+                 不看第1/2行的输入（除了公告关键词），所以放在这一行而不是K线那行。 -->
+            <TextBlock Text="年份：" Margin="20,0,0,0" VerticalAlignment="Center"
+                       ToolTip="要往回补哪一个自然年的历史数据（4位年份，如 2024）。只作用于右边的\拉取该年数据\" />
+            <TextBox Text="{Binding FetchYearText, UpdateSourceTrigger=PropertyChanged}" Width="52" Margin="4,0"
+                     VerticalContentAlignment="Center"
+                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBoolConverter}}"
+                     ToolTip="4位年份，默认去年。A股最早1990年，不能填晚于今年" />
+            <Button Content="拉取该年数据" Command="{Binding FetchYearCommand}" Width="100" Margin="4,0"
+                    ToolTip="把左边年份那一整年里【能取到历史】的数据一次补齐：个股/大盘指数/ETF日K(并自动重算周线月线)、资金净流入、融资余额、龙虎榜、中标公告(用第1行的关键词)，最后按新数据重新合成板块指数。&#10;&#10;【只补缺的】每只标的先看本地最早的日K日期：已早于该年年初就整只跳过、不发请求；落在该年内就只补\年初→最早日前一天\这段缺口；更晚(或本地没有)就抓一整年。融资/龙虎逐交易日抓、跳过本地已有的日子。可反复点、可随时\停止\，不会重复下载。&#10;&#10;【跳过】流通市值、板块行情与成分、指数成分与权重——这些接口只提供\当下快照\、没有往年的历史值，硬抓只会把今天的值当成那年的；股东户数/十大股东每次抓取本来就返回该股全部历史，跑一次\一键拉取定期数据\即已包含往年。&#10;&#10;【与\首次回看\的区别】回看年数只影响\本地从没抓过的标的\，调大它不会让已有标的的历史往前延长；要补更早的年份就用这个按钮，一年一年往回点(如先2024再2023)。&#10;&#10;⚠️ 新抓的往年K线用当前的前复权基准，与很久以前入库的较新K线可能存在复权基准差异。" />
+
             <Button Content="上传全量基线" Command="{Binding UploadBaselineCommand}" Width="100" Margin="24,0,4,0"
                     ToolTip="把整个 current.sqlite 压缩上传到 GitHub Releases（baseline-日期.zip），供用户端分析程序首次下载。偶尔重传一次即可（比如数据攒了很多天、增量太多时）。需要在 data/local/github_token.txt 里放一行有本仓库写权限的 PAT。上传日期用本地库最新那天。" />
             <Button Content="上传当天增量" Command="{Binding UploadDailyCommand}" Width="100" Margin="4,0"

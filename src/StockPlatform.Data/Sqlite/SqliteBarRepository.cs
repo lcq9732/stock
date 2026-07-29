@@ -129,6 +129,29 @@ public class SqliteBarRepository : IBarRepository
         return DateTime.ParseExact((string)result, DateFormat, CultureInfo.InvariantCulture);
     }
 
+    /// <summary>每个代码本地最早的 period_start（一次查询返回全部代码，2026-07-29新增）——给"拉取指定
+    /// 年份"（<see cref="Orchestration.FetchOrchestrator.RunFetchYearAsync"/>）决定每只标的在那一年里要
+    /// 补哪一段：最早日已经在目标年之前=那年本地已有（增量抓取保证历史是连续的），直接跳过不发请求；
+    /// 最早日落在目标年内=只补"年初→最早日前一天"这段缺口；最早日在目标年之后=整年都缺、抓一整年。
+    /// 故意不做成逐个代码查（全市场5000+只，逐个查会有5000+次往返），而是一次 GROUP BY 全拿回来。
+    /// 只加在具体实现上、没进 <see cref="Logic.Abstractions.IBarRepository"/> 接口——这是抓取端专用的
+    /// 批量查询，Analyzer 侧的 CutoffBarRepository 等实现不需要跟着实现它。</summary>
+    public Dictionary<string, DateTime> GetEarliestPeriodStartByCode(string granularity)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, MIN(period_start) FROM Bar WHERE granularity = $granularity GROUP BY code;";
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        var result = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(1)) continue;
+            result[reader.GetString(0)] = DateTime.ParseExact(reader.GetString(1), DateFormat, CultureInfo.InvariantCulture);
+        }
+        return result;
+    }
+
     public List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null)
     {
         using var conn = Open();

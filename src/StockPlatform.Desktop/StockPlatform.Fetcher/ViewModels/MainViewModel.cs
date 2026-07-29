@@ -67,6 +67,13 @@ public class MainViewModel : INotifyPropertyChanged
     private string _lookbackYearsText = "3";
     public string LookbackYearsText { get => _lookbackYearsText; set => Set(ref _lookbackYearsText, value); }
 
+    /// <summary>"拉取指定年份"要补的自然年（2026-07-29新增）——往回逐年补历史用，见
+    /// FetchOrchestrator.RunFetchYearAsync。默认填去年（最常见的用法是把去年补齐）；跟"首次回看"
+    /// 是两件事：回看年数只影响"从没抓过的标的"，调大它也不会让已有标的的历史往前延长，要补更早的
+    /// 年份就得用这个按钮。点击时解析，编辑中途的非法值不会禁用按钮。</summary>
+    private string _fetchYearText = (DateTime.Today.Year - 1).ToString();
+    public string FetchYearText { get => _fetchYearText; set => Set(ref _fetchYearText, value); }
+
     /// <summary>Comma-separated keywords for the 中标/订单公告 keyword sweep — see
     /// AnnouncementFetchOrchestrator. Defaults to the two most common order-win announcement
     /// phrasings. Used automatically by both "拉取全部" and "拉取当天" now (see
@@ -81,6 +88,7 @@ public class MainViewModel : INotifyPropertyChanged
 
     public RelayCommand FetchCommand { get; }
     public RelayCommand FetchDayCommand { get; }
+    public RelayCommand FetchYearCommand { get; }
     public RelayCommand StopCommand { get; }
     public RelayCommand RetryFailedCommand { get; }
     public RelayCommand FetchBoardsCommand { get; }
@@ -116,6 +124,7 @@ public class MainViewModel : INotifyPropertyChanged
 
         FetchCommand = new RelayCommand(async _ => await RunFetchAsync(), _ => !IsBusy);
         FetchDayCommand = new RelayCommand(async _ => await RunFetchDayAsync(), _ => !IsBusy);
+        FetchYearCommand = new RelayCommand(async _ => await RunFetchYearAsync(), _ => !IsBusy);
         StopCommand = new RelayCommand(_ => _cts?.Cancel(), _ => IsBusy);
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && FailedCodeCount > 0);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
@@ -281,6 +290,20 @@ public class MainViewModel : INotifyPropertyChanged
         }
         return RunOperationAsync("拉取当天",
             (progress, ct) => _orchestrator.RunFetchDayAsync(SelectedSource, date, ParseAnnouncementKeywords(), progress, ct));
+    }
+
+    /// <summary>"拉取指定年份"（见 FetchOrchestrator.RunFetchYearAsync）——把某个自然年里能取到历史的
+    /// 各类数据一次补齐（K线/资金净流入/融资余额/龙虎榜/公告），只补本地还缺的部分，可反复点、可随时停。
+    /// 年份的合法范围由编排层校验（A股最早1990年、不能晚于今年），这里只做"是不是4位整数"的输入校验。</summary>
+    private Task RunFetchYearAsync()
+    {
+        if (!int.TryParse(FetchYearText.Trim(), out var year))
+        {
+            Log($"年份格式不对：\"{FetchYearText}\"，请填4位年份（例如 {DateTime.Today.Year - 1}）");
+            return Task.CompletedTask;
+        }
+        return RunOperationAsync($"拉取{year}年数据",
+            (progress, ct) => _orchestrator.RunFetchYearAsync(SelectedSource, year, ParseAnnouncementKeywords(), progress, ct));
     }
 
     private Task RunFetchBoardsAsync() =>

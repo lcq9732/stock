@@ -42,6 +42,10 @@ namespace StockPlatform.Data.Orchestration;
 /// - <see cref="RunRetryFailedAsync"/> ("重新拉取失败股票"): retries whatever's recorded in the
 ///   three failed-code lists on <see cref="Manifest"/>, without re-scanning the market list or
 ///   re-running announcements.
+/// - <see cref="RunFetchYearAsync"/> ("拉取指定年份", 2026-07-29新增): 往回补某一个自然年的历史——
+///   把该年里"能取到历史的"各类数据一次取齐（K线/资金净流入/融资余额/龙虎榜/公告），逐标的、逐交易日
+///   只补本地还缺的部分。快照型数据（流通市值、板块行情与成分、指数成分与权重）天生只有"当下"、
+///   没有历史可取，会明确跳过并在日志里说明原因，见该方法注释。
 /// </summary>
 public class FetchOrchestrator
 {
@@ -79,6 +83,9 @@ public class FetchOrchestrator
     // 值兜底，跟"拉取全部"的默认值保持一致。数据源只会返回上市日之后的数据，请求这么长的窗口对
     // 新股实际只会拿到"上市→当天"的完整历史，不会有多余。
     private const int DefaultLookbackYears = 3;
+
+    /// <summary>"拉取指定年份"允许的最早年份——A股1990年底开市，再早没有任何数据可抓。</summary>
+    private const int FirstAShareYear = 1990;
 
     // 15:00只是常规连续竞价的收盘时间，15:00~15:30还有盘后定价交易（大宗/固定价格成交），这段
     // 时间抓到的数据不算真正确定——用16:00才能确保盘后定价交易也结束了，判断"某一天的数据是不是
@@ -492,6 +499,280 @@ public class FetchOrchestrator
             .Concat(MarketIndexCatalog.All.Select(i => i.Symbol))
             .Concat(etfCodes).ToList();
         return FinishFetchRun(errors, "拉取当天", attempted, failedCodes);
+    }
+
+    /// <summary>
+    /// "拉取指定年份"（2026-07-29新增）——往回补**某一个自然年**的历史数据，把该年里"接口确实能给出历史值"
+    /// 的各类数据一次取齐。用途：日常"拉取全部"只按"首次回看N年"建立历史（默认3年），想把更早的年份补上时
+    /// 逐年点这个按钮即可，不必把回看年数调大后重跑全量（那样已有股票的水位线不会回退、补不到更早的历史）。
+    ///
+    /// 本轮会抓（有历史可取）：
+    /// - 个股/大盘指数/ETF 的**日K**，并顺带重算受影响标的的**周线/月线**（<see cref="ProcessOneStockAsync"/>
+    ///   本来就会按该代码的全量日线重算周月线）；
+    /// - **资金净流入**（新浪接口每次返回该股全历史、客户端按窗口裁剪；东财接口支持 beg/end，两者都能取往年）；
+    /// - **融资余额**、**龙虎榜**（都是按交易日的官方/新浪日榜，逐日抓、本地已有的交易日跳过）；
+    /// - **中标/订单公告**（巨潮全文检索支持历史区间；关键词沿用界面上填的那个，清空则不抓）。
+    ///
+    /// 本轮**故意跳过**（不是漏了，是取不到或没必要）：
+    /// - **流通市值**：接口只给"当下"的市值快照（见 <see cref="SinaListMarketCapFetcher"/>），没有"某年某日的
+    ///   市值"这种历史查询，硬抓只会把今天的值错误地当成那年的值；
+    /// - **板块行情/成分股**、**指数成分/权重**：同样是当下快照（成分股会调整，历史成分接口不提供）；
+    /// - **股东户数/十大股东**：每次抓取本来就返回该股**全部历史**并整体覆盖（见
+    ///   <see cref="IShareholderRepository.ReplaceByCode"/>），跑一次"一键拉取定期数据"就已经包含往年，
+    ///   按年份重复跑没有意义。
+    ///
+    /// 增量语义（跟"拉取全部"一样安全、可反复点、可随时停）：每只标的先看本地**最早**的日K日期——
+    /// 已经早于目标年年初就整只跳过（增量抓取保证本地历史是连续的，那年已经有了）；落在目标年之内就只补
+    /// "年初 → 最早日前一天"这段缺口；晚于目标年年末就抓一整年。逐日数据（融资/龙虎）跳过本地已有的交易日。
+    /// 末尾按新补的日K重新合成一次板块指数（本地计算、不联网），让板块指数历史跟着一起变长。
+    ///
+    /// ⚠️ 复权基准：新抓的往年日K用的是**当前**的前复权基准，而库里很早抓入的较新K线是当时的基准，两者在
+    /// 期间有分红除权的股票上可能不在同一基准上（这是本项目一直存在的取舍，见 <see cref="SqliteBarRepository.
+    /// UpdateDayAmountTurnover"/> 的注释与 doc/data-platform-design.md），运行时会在日志里提示一次。
+    /// </summary>
+    public async Task<FetchResult> RunFetchYearAsync(
+        NamedBarSource source, int year, IReadOnlyList<string> announcementKeywords,
+        IProgress<string>? progress, CancellationToken ct = default)
+    {
+        void ForwardStatus(string msg) => progress?.Report(msg);
+        source.Fetcher.OnStatus += ForwardStatus;
+        _netInflowFetcher.OnStatus += ForwardStatus;
+        _lhbProvider.OnStatus += ForwardStatus;
+        _marginProvider.OnStatus += ForwardStatus;
+        try
+        {
+            return await RunFetchYearInternalAsync(source, year, announcementKeywords, progress, ct);
+        }
+        finally
+        {
+            source.Fetcher.OnStatus -= ForwardStatus;
+            _netInflowFetcher.OnStatus -= ForwardStatus;
+            _lhbProvider.OnStatus -= ForwardStatus;
+            _marginProvider.OnStatus -= ForwardStatus;
+        }
+    }
+
+    private async Task<FetchResult> RunFetchYearInternalAsync(
+        NamedBarSource source, int year, IReadOnlyList<string> announcementKeywords,
+        IProgress<string>? progress, CancellationToken ct)
+    {
+        var today = DateTime.Today;
+        if (year < FirstAShareYear || year > today.Year)
+            throw new InvalidOperationException($"年份 {year} 超出可抓范围（A股最早 {FirstAShareYear} 年，且不能晚于今年 {today.Year}）");
+
+        var yearStart = new DateTime(year, 1, 1);
+        // 目标年就是今年时只补到今天为止——之后的日期还没发生，请求它们只会拿回空数据。
+        var yearEnd = year == today.Year ? today : new DateTime(year, 12, 31);
+
+        var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
+        currentRepo.EnsureSchema();
+
+        var sw = Stopwatch.StartNew();
+        progress?.Report($"目标区间：{yearStart:yyyy-MM-dd} ~ {yearEnd:yyyy-MM-dd}，数据源：{source.Name}");
+        progress?.Report("本轮会抓：个股/指数/ETF日K(并重算周月线)、资金净流入、融资余额、龙虎榜、中标公告——都只补本地还缺的部分。");
+        progress?.Report("本轮跳过：流通市值/板块行情与成分/指数成分与权重（接口只有\"当下快照\"、没有往年历史，硬抓会把今天的值当成那年的值）；" +
+                         "股东户数/十大股东（每次抓取本来就返回全部历史，跑\"一键拉取定期数据\"即已包含往年）。");
+        progress?.Report("提示：新抓的往年K线用当前的前复权基准，与很久以前入库的较新K线可能存在复权基准差异（本项目一直如此）。");
+
+        // 标的全集：优先用数据源的全市场列表（这样"上市较早、但本地从没抓过"的股票也能补到），
+        // 取不到就退回本地已有列表；两者取并集，避免只用一个来源而漏标的。
+        var codeNames = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            var marketList = await source.StockListProvider.GetAllStocksAsync(progress, ct);
+            foreach (var s in marketList) codeNames[s.Code] = s.Name;
+            if (marketList.Count > 0)
+                SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, marketList.Select(s => (s.Code, s.Name)));
+            progress?.Report($"全市场股票列表：{marketList.Count} 只");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            progress?.Report($"获取全市场股票列表失败（改用本地已有列表继续）：{ex.Message}");
+        }
+        foreach (var (code, name) in SqliteStockMetaUpsert.GetAll(_paths.CurrentDb))
+            codeNames.TryAdd(code, name);
+        var stockCodes = codeNames.Keys.OrderBy(c => c, StringComparer.Ordinal).ToList();
+        if (stockCodes.Count == 0)
+            throw new InvalidOperationException("既取不到全市场股票列表、本地也没有股票列表，无法按年份补历史，请先执行一次\"拉取全部\"");
+        progress?.Report($"待处理标的：{stockCodes.Count} 只个股（另含 {MarketIndexCatalog.All.Count} 个大盘指数与全市场ETF）");
+
+        var errors = new ConcurrentBag<string>();
+        var failedCodes = new ConcurrentBag<string>();
+        var stats = new FetchStats();
+
+        // 一次查出所有代码的本地最早日K日期（5000+只逐个查会有5000+次往返，这里一次 GROUP BY 拿回）。
+        var earliestByCode = currentRepo.GetEarliestPeriodStartByCode(Granularity.Day);
+
+        // ── 大盘指数日K ──
+        progress?.Report($"开始补 {year} 年大盘指数日K...");
+        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, MarketIndexCatalog.All.Select(i => (i.Symbol, i.Name)), SqliteStockMetaUpsert.TypeIndex);
+        int idxDone = 0;
+        foreach (var (symbol, _) in MarketIndexCatalog.All)
+        {
+            var (s, e) = YearGapFor(symbol, earliestByCode, yearStart, yearEnd);
+            await ProcessOneStockAsync(symbol, source, s, e, currentRepo, errors, failedCodes, stats, progress,
+                MarketIndexCatalog.All.Count, () => Interlocked.Increment(ref idxDone), sw, ct);
+        }
+
+        // ── 个股日K（并发受数据源限速器节流，跟"拉取全部"同一套）──
+        progress?.Report($"开始补 {year} 年个股日K（本地最早日已早于 {year} 年的标的会整只跳过、不发请求）...");
+        int completed = 0;
+        await Task.WhenAll(stockCodes.Select(code =>
+        {
+            var (s, e) = YearGapFor(code, earliestByCode, yearStart, yearEnd);
+            return ProcessOneStockAsync(code, source, s, e, currentRepo, errors, failedCodes, stats, progress,
+                stockCodes.Count, () => Interlocked.Increment(ref completed), sw, ct);
+        }));
+        progress?.Report($"{year} 年K线部分汇总：{stats.Summarize()}");
+
+        // ── ETF 日K ──
+        var etfCodes = await FetchEtfBarsForYearAsync(source, yearStart, yearEnd, earliestByCode, currentRepo, errors, failedCodes, stats, progress, sw, ct);
+
+        // ── 资金净流入（按年份区间，只补本地缺的那一段）──
+        await FetchNetInflowRangeAsync(stockCodes, yearStart, yearEnd, progress, ct);
+
+        // ── 中标/订单公告（关键词沿用界面设置；清空则跳过）──
+        if (announcementKeywords.Count == 0)
+            progress?.Report("（公告关键词为空，跳过中标/订单公告）");
+        else
+            await FetchAnnouncementsAsync(announcementKeywords, DateOnly.FromDateTime(yearStart), DateOnly.FromDateTime(yearEnd), progress, ct);
+
+        // ── 融资余额 / 龙虎榜：逐交易日，跳过本地已有的日子（复用"一键补齐每日历史"的逐日补齐器）──
+        _marginRepository.EnsureSchema();
+        _lhbRepository.EnsureSchema();
+        var marginHave = _marginRepository.GetTradeDates();
+        await BackfillDailyAsync($"{year}年融资余额", DateOnly.FromDateTime(yearStart), DateOnly.FromDateTime(yearEnd), marginHave, async d =>
+        {
+            var rows = await _marginProvider.GetDetailAsync(d, ct);
+            if (rows.Count > 0) { lock (_dbLock) { _marginRepository.InsertOrIgnore(rows); } }
+            return rows.Count;
+        }, errors, progress, sw, ct);
+
+        var lhbHave = _lhbRepository.GetTradeDates();
+        await BackfillDailyAsync($"{year}年龙虎榜", DateOnly.FromDateTime(yearStart), DateOnly.FromDateTime(yearEnd), lhbHave, async d =>
+        {
+            var rows = await _lhbProvider.GetDailyAsync(d, ct);
+            if (rows.Count > 0) { lock (_dbLock) { _lhbRepository.InsertOrIgnore(rows); } }
+            return rows.Count;
+        }, errors, progress, sw, ct);
+
+        // ── 板块指数按新补齐的个股日K重新合成（本地计算、不联网）——让板块指数历史跟着一起变长 ──
+        SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
+
+        progress?.Report($"{year} 年补齐完毕，总用时 {FormatElapsed(sw.Elapsed)}。");
+        var attempted = stockCodes
+            .Concat(MarketIndexCatalog.All.Select(i => i.Symbol))
+            .Concat(etfCodes).ToList();
+        return FinishFetchRun(errors, $"拉取{year}年", attempted, failedCodes);
+    }
+
+    /// <summary>
+    /// 按年份补历史时，算出某个标的在目标年里真正需要请求的 [start, end]——本地最早日已早于年初就返回
+    /// 一个空区间（start &gt; end，<see cref="ProcessOneStockAsync"/> 会直接记 Skip、不发请求）；最早日
+    /// 落在目标年内就只补"年初 → 最早日前一天"；最早日在年末之后（或本地没有该标的）就抓一整年。
+    /// 依赖"本地历史是连续的"这一前提——增量抓取永远是从水位线往后连续推进的，所以只需要看最早日一个点。
+    /// </summary>
+    private static (DateTime Start, DateTime End) YearGapFor(
+        string code, Dictionary<string, DateTime> earliestByCode, DateTime yearStart, DateTime yearEnd)
+    {
+        if (!earliestByCode.TryGetValue(code, out var earliest)) return (yearStart, yearEnd);
+        if (earliest.Date <= yearStart.Date) return (yearEnd.AddDays(1), yearEnd);   // 空区间=跳过
+        if (earliest.Date <= yearEnd.Date) return (yearStart, earliest.AddDays(-1)); // 只补前面的缺口
+        return (yearStart, yearEnd);
+    }
+
+    /// <summary>按年份补 ETF 日K——ETF列表仍要联网取一次（本地 StockMeta 里的 type=etf 也可以，但列表接口
+    /// 便宜且能顺带发现新ETF），窗口计算与个股共用 <see cref="YearGapFor"/>。取不到列表就跳过ETF、不算失败。</summary>
+    private async Task<List<string>> FetchEtfBarsForYearAsync(
+        NamedBarSource source, DateTime yearStart, DateTime yearEnd, Dictionary<string, DateTime> earliestByCode,
+        SqliteBarRepository currentRepo, ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes,
+        FetchStats stats, IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
+    {
+        if (_etfListProvider == null) return new List<string>();
+        List<StockListEntry> etfs;
+        try { etfs = await _etfListProvider.GetAllStocksAsync(progress, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { errors.Add($"获取ETF列表失败（跳过ETF）：{ex.Message}"); return new List<string>(); }
+        if (etfs.Count == 0) { progress?.Report("ETF列表为空（接口可能不可达/被限流），本轮跳过ETF。"); return new List<string>(); }
+
+        progress?.Report($"开始补 {yearStart:yyyy} 年 ETF 日K（{etfs.Count} 只）...");
+        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, etfs.Select(e => (e.Code, e.Name)), SqliteStockMetaUpsert.TypeEtf);
+        int done = 0;
+        await Task.WhenAll(etfs.Select(etf =>
+        {
+            var (s, e) = YearGapFor(etf.Code, earliestByCode, yearStart, yearEnd);
+            return ProcessOneStockAsync(etf.Code, source, s, e, currentRepo, errors, failedCodes, stats, progress,
+                etfs.Count, () => Interlocked.Increment(ref done), sw, ct);
+        }));
+        progress?.Report($"ETF 日K补齐完成（{etfs.Count} 只）。");
+        return etfs.Select(e => e.Code).ToList();
+    }
+
+    /// <summary>
+    /// 按指定区间补资金净流入（2026-07-29新增，给"拉取指定年份"用）——跟K线同样的"只补缺口"语义：
+    /// 本地最早一行已早于区间起点就跳过，落在区间内就只补前面那段，没有就抓整个区间。写入全部走
+    /// InsertOrIgnore（历史行是既成事实；区间含今天时今天那行走 Upsert，跟主流程一致）。失败逐只记入
+    /// <see cref="Manifest.FailedNetInflowCodes"/>，可用"重新拉取失败股票"重试。
+    /// </summary>
+    private async Task FetchNetInflowRangeAsync(
+        IReadOnlyList<string> codes, DateTime rangeStart, DateTime rangeEnd, IProgress<string>? progress, CancellationToken ct)
+    {
+        var failedNetInflowCodes = new ConcurrentBag<string>();
+        try
+        {
+            var repo = new SqliteNetInflowRepository(_paths.CurrentDb);
+            repo.EnsureSchema();
+            var earliest = repo.GetEarliestPeriodStartByCode();
+            progress?.Report($"开始补资金净流入 {rangeStart:yyyy-MM-dd} ~ {rangeEnd:yyyy-MM-dd}（共 {codes.Count} 只，逐只查询、只补本地缺的那段，会比较慢）...");
+
+            int totalRows = 0, failCount = 0, skipCount = 0, done = 0;
+            await Task.WhenAll(codes.Select(async code =>
+            {
+                var (start, end) = YearGapFor(code, earliest, rangeStart, rangeEnd);
+                if (start.Date > end.Date) { Interlocked.Increment(ref skipCount); return; }
+
+                List<NetInflow> rows;
+                try { rows = await _netInflowFetcher.FetchAsync(code, start, end, ct); }
+                catch (OperationCanceledException) { throw; }
+                catch
+                {
+                    Interlocked.Increment(ref failCount);
+                    failedNetInflowCodes.Add(code);
+                    return;
+                }
+
+                if (rows.Count > 0)
+                {
+                    lock (_dbLock)
+                    {
+                        var todaysRows = rows.Where(r => r.PeriodStart.Date == DateTime.Today).ToList();
+                        var olderRows = rows.Where(r => r.PeriodStart.Date != DateTime.Today).ToList();
+                        if (olderRows.Count > 0) repo.InsertOrIgnore(olderRows);
+                        if (todaysRows.Count > 0) repo.Upsert(todaysRows);
+                    }
+                    Interlocked.Add(ref totalRows, rows.Count);
+                }
+                if (Interlocked.Increment(ref done) % 200 == 0)
+                    progress?.Report($"资金净流入补齐中：已处理 {done}/{codes.Count} 只、写入 {totalRows} 条（跳过本地已有 {skipCount} 只，失败 {failCount} 只）");
+            }));
+
+            progress?.Report($"资金净流入补齐完成：写入 {totalRows} 条、跳过本地已有 {skipCount} 只" +
+                             (failCount > 0 ? $"、{failCount} 只失败（可用\"重新拉取失败股票\"重试）" : ""));
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            progress?.Report($"补资金净流入整体失败（不影响K线）：{ex.Message}");
+            foreach (var code in codes) failedNetInflowCodes.Add(code);
+        }
+
+        lock (_dbLock)
+        {
+            var manifest = _manifestStore.Load();
+            manifest.FailedNetInflowCodes = ComputeUpdatedFailedCodes(manifest.FailedNetInflowCodes, codes, failedNetInflowCodes);
+            _manifestStore.Save(manifest);
+        }
     }
 
     /// <summary>

@@ -110,6 +110,24 @@ public class SqliteNetInflowRepository : INetInflowRepository
         return (periodStart, fetchedAt);
     }
 
+    /// <summary>每个代码本地最早的 period_start（一次查询返回全部代码，2026-07-29新增）——给"拉取指定
+    /// 年份"用，判定逻辑与 <see cref="SqliteBarRepository.GetEarliestPeriodStartByCode"/> 完全一致：
+    /// 只补目标年里本地还缺的那一段，已有的年份不重复请求。</summary>
+    public Dictionary<string, DateTime> GetEarliestPeriodStartByCode()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, MIN(period_start) FROM NetInflow GROUP BY code;";
+        var result = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(1)) continue;
+            result[reader.GetString(0)] = DateTime.ParseExact(reader.GetString(1), DateFormat, CultureInfo.InvariantCulture);
+        }
+        return result;
+    }
+
     public List<NetInflow> Query(string code, DateTime? start = null, DateTime? end = null)
     {
         using var conn = Open();
