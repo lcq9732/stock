@@ -22,7 +22,12 @@ public sealed class IcStats
     public static IcStats From(IReadOnlyList<double> ics)
     {
         var s = new IcStats { N = ics.Count };
-        if (ics.Count == 0) return s;
+        if (ics.Count == 0)
+        {
+            // 没有任何有效期（比如基本面因子在财报数据抓取前）——显示为"-"而不是误导性的 0.000
+            s.Mean = s.Std = s.Icir = s.WinRate = double.NaN;
+            return s;
+        }
         s.Mean = Stats.Mean(ics);
         s.Std = Stats.Std(ics);
         s.Icir = s.Std > 0 ? s.Mean / s.Std : double.NaN;
@@ -95,12 +100,18 @@ public static class Evaluator
         return new SharedEval { Periods = periods, PeriodRet = ret, Tradable = tradable, BenchRet = bench };
     }
 
-    /// <summary>池规则：当日有收盘且有成交、非ST（当前名称）、上市满 MinListedDays。</summary>
+    /// <summary>池规则：当日有收盘且有成交、非ST（当前名称）、上市满 MinListedDays。
+    /// 退市股特殊处理：不做按名剔除（终止时名称几乎都带退/ST，按名剔会把整段历史删掉），
+    /// 只剔除临近最后一根K线的 DelistExcludeDays 段（≈退市整理期，当时实盘可从名称/公告获知）。</summary>
     public static bool IsEligible(MarketData md, int s, int t)
     {
         double c = md.Close[s][t], a = md.Amount[s][t];
         if (double.IsNaN(c) || c <= 0 || double.IsNaN(a) || a <= 0) return false;
-        if (md.IsSt[s]) return false;
+        if (md.IsDelisted[s])
+        {
+            if (t > md.LastBarIdx[s] - Config.DelistExcludeDays) return false;
+        }
+        else if (md.IsSt[s]) return false;
         int first = md.FirstBarIdx[s];
         if (first < 0) return false;
         // 窗口开头几天就有数据的视为老股；窗口中途出现的按上市对待

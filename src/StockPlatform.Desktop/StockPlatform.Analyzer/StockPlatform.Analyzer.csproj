@@ -41,6 +41,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\StockPlatform.Logic\StockPlatform.Logic.csproj" />
     <ProjectReference Include="..\..\StockPlatform.Data\StockPlatform.Data.csproj" />
+    <!-- 因子Tab复用 FactorLab 的因子库/评估引擎/名单构建（引用的是它的dll，不影响其独立exe用法） -->
+    <ProjectReference Include="..\StockPlatform.FactorLab\StockPlatform.FactorLab.csproj" />
   </ItemGroup>
 
 </Project>

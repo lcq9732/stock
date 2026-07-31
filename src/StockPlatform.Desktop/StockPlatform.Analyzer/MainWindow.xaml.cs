@@ -87,8 +87,8 @@ public partial class MainWindow : Window
         if (DataContext is not MainViewModel vm) return;
         if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "自选股" })
             vm.WatchlistTab.Reload(); // picks up anything added from another tab this session
-        if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "每日晨检" })
-            vm.MorningCheckTab.Reload(); // 同上——本Session新加的自选/刚更新完的数据，切过来就是最新体检结果
+        // 每日晨检不在切Tab时自动体检（读全库+逐只算、会顿一下）——改成纯手动，用户点该Tab里的"刷新"按钮才算，
+        // 这样开程序秒开、切Tab也不卡（2026-07-31 按用户要求从"启动/切Tab自动跑"改为全手动）。
     }
 
     // WPF's DataGridCheckBoxColumn needs two clicks by default (the first click only focuses/
@@ -322,6 +322,13 @@ public partial class MainWindow : Window
     private void BoardMemberQuoteDetailButton_Click(object sender, RoutedEventArgs e)
     {
         if (((FrameworkElement)sender).DataContext is BoardMemberRowViewModel row)
+            OpenQuoteDetail(row.Code, row.Name);
+    }
+
+    // 因子法Tab最新名单的"K线详情"——同一个纯行情窗口。
+    private void FactorQuoteDetailButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is FactorPickRowViewModel row)
             OpenQuoteDetail(row.Code, row.Name);
     }
 

@@ -152,6 +152,24 @@ public class SqliteBarRepository : IBarRepository
         return result;
     }
 
+    /// <summary>一次取回所有代码的**最后**一根K线日期（对应 <see cref="GetEarliestPeriodStartByCode"/>）——
+    /// 逐只查 5000+ 次往返太慢时用。目前给"拉取全部"的退市股收尾用：判断某只退市股本地是否还缺最后几天。</summary>
+    public Dictionary<string, DateTime> GetLatestPeriodStartByCode(string granularity)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, MAX(period_start) FROM Bar WHERE granularity = $granularity GROUP BY code;";
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        var result = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(1)) continue;
+            result[reader.GetString(0)] = DateTime.ParseExact(reader.GetString(1), DateFormat, CultureInfo.InvariantCulture);
+        }
+        return result;
+    }
+
     public List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null)
     {
         using var conn = Open();

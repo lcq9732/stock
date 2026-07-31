@@ -5,3 +5,9 @@ publish/
 
 # 移动端签名 keystore——绝不提交，但务必自己备份好，发新版必须用同一个（见 scripts/build-apk.ps1）
 *.keystore
+
+# FactorLab 的评估输出（因子手册/汇总CSV/逐期明细）——全是派生产物，每次运行整体覆盖，重跑约1分钟。
+# 现在默认输出到 publish/factorlab-output（运行时结果统一放 publish 下，已被上面的 publish/ 忽略）；
+# 想留快照就给程序传个目录名（相对名会落到 publish/factorlab-output-日期-说明）。结论写在
+# doc/factorlab-design.md（那个要提交）。下面这条保留：兼容偶尔在项目根跑时的输出。
+factorlab-output*/

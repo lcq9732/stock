@@ -24,6 +24,8 @@ public class TencentThenSinaBarFetcher : IBarDataFetcher
         _fallback.OnStatus += msg => OnStatus?.Invoke(msg);
     }
 
+    public bool SupportsHfq => _primary.SupportsHfq;
+
     public async Task<(string Name, List<Bar> Bars)> FetchAsync(string code, string granularity, DateTime? start, DateTime? end, CancellationToken ct = default)
     {
         try
@@ -33,6 +35,12 @@ public class TencentThenSinaBarFetcher : IBarDataFetcher
         catch (OperationCanceledException)
         {
             throw; // 用户点了"停止"，不是腾讯本身失败，不应该触发新浪回退
+        }
+        catch (Exception) when (granularity == Granularity.DayHfq)
+        {
+            // 后复权没有备胎：新浪只有前复权，回退过去会把前复权数据当成后复权存进库里，
+            // 那比缺数据危险得多（回测会拿错误的收益率算因子）。宁可这只股票这轮失败、下次重试。
+            throw;
         }
         catch (Exception ex)
         {

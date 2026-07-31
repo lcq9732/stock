@@ -73,7 +73,11 @@ public class MorningStockRowViewModel
 {
     public string Code { get; }
     public string Name { get; }
+    /// <summary>方法列显示文本——同一只票被多个方法选中时是合并后的"金叉法、短线法"。</summary>
     public string Method { get; }
+    /// <summary>拆开的来源方法清单（去重前每条自选记录的方法）——给方法列表头的过滤器做包含匹配用，
+    /// 不能拿 <see cref="Method"/> 的合并字符串做相等比较（那样"金叉法、短线法"选"金叉法"会漏掉）。</summary>
+    public IReadOnlyList<string> Methods { get; }
     public string StatusText { get; }
     public Brush StatusColor { get; }
     public string DataDate { get; }
@@ -81,6 +85,9 @@ public class MorningStockRowViewModel
     public string Ma60Text { get; private set; } = "—";
     public string SincePickText { get; private set; } = "—";
     public Brush SincePickColor { get; private set; } = Brushes.Gray;
+    /// <summary>"较基准涨跌"的数值形式（持仓=较买入价，观察=较自选日收盘）——给汇总里"该方法整体
+    /// 平均涨跌/胜率"用，方法过滤后这几个数字就是各选股方法的横向对比口径。</summary>
+    public double? SinceBasisPct { get; private set; }
     public string DrawdownText { get; private set; } = "—";
     public string PnlText { get; private set; } = "—";
     public Brush PnlColor { get; private set; } = Brushes.Gray;
@@ -104,14 +111,15 @@ public class MorningStockRowViewModel
     /// <summary>排序权重：0=止损 1=止盈 2=筹码警示 3=趋势弱 4=正常，问题最严重的排最前。</summary>
     public int Severity { get; private set; } = 4;
 
-    /// <param name="methodsDisplay">方法列显示文本——同一只票可能被多个方法各加过一条自选记录，
-    /// 晨检按股票去重后把来源方法合并展示（如"耀哥法、阶梯低点法"），体检基准（自选日期/价格）
+    /// <param name="methods">该股的全部来源方法（同一只票可能被多个方法各加过一条自选记录）——显示时
+    /// 合并成"耀哥法、阶梯低点法"，同时原样留一份给方法过滤器做包含匹配。体检基准（自选日期/价格）
     /// 用最早那条记录（entry）：最早的峰值最高，止损纪律触发得最保守。</param>
-    public MorningStockRowViewModel(WatchlistEntry entry, string methodsDisplay, IBarRepository barRepository, IShareholderRepository shareholderRepository)
+    public MorningStockRowViewModel(WatchlistEntry entry, IReadOnlyList<string> methods, IBarRepository barRepository, IShareholderRepository shareholderRepository)
     {
         Code = entry.Code;
         Name = entry.Name;
-        Method = methodsDisplay;
+        Methods = methods;
+        Method = string.Join("、", methods);
         IsClosed = entry.BuyPrice is > 0 && entry.SellPrice is > 0;
         IsHolding = entry.BuyPrice is > 0 && !IsClosed;
         (StatusText, StatusColor) = IsHolding ? ("持仓", (Brush)Brushes.Firebrick)
@@ -146,6 +154,7 @@ public class MorningStockRowViewModel
         if (basisPrice > 0)
         {
             sinceBasisPct = (last.Close - basisPrice) / basisPrice * 100;
+            SinceBasisPct = sinceBasisPct;
             SincePickText = $"{(sinceBasisPct >= 0 ? "+" : "")}{sinceBasisPct:F1}%";
             SincePickColor = sinceBasisPct >= 0 ? Brushes.Red : Brushes.Green;
         }
@@ -241,6 +250,15 @@ public class MorningStockRowViewModel
     }
 }
 
+/// <summary>方法列表头下拉过滤器的一个选项（2026-07-29新增）——<see cref="Method"/> 为 null 表示"全部方法"。
+/// <see cref="Display"/> 带上该方法的股票只数（如"金叉法 (8)"），选之前就能看出各方法各选了多少只，
+/// 便于横向对比各方法的表现。</summary>
+public class MethodFilterOption
+{
+    public string? Method { get; init; }
+    public string Display { get; init; } = "";
+}
+
 /// <summary>
 /// "每日晨检" tab —— 把 2026-07 用本地数据回测验证过的几条量化纪律做成每天早上看一眼的
 /// 仪表盘（回测结论见 doc/人口变局报告验证与回测分析.pdf 及项目记忆）：
@@ -249,6 +267,9 @@ public class MorningStockRowViewModel
 /// ② 自选股逐只体检：15%回撤止损、+50%减仓1/3、跌破MA60不加仓、股东户数暴增警示；
 /// ③ 汇总成"今日行动建议"，早上执行一次，按结果规划当天动作。
 /// 只读本地数据不联网；打开程序/切到本Tab/点刷新时重算。
+/// 方法列表头带下拉过滤器（2026-07-29新增）：选某个方法后表格与"今日行动建议"都只算该方法选出的股票，
+/// 用来横向对比各选股方法的实际表现；体检结果本身在 <see cref="Reload"/> 里一次算好，切换过滤只是筛选，
+/// 不重算、不重读数据库。
 /// </summary>
 public class MorningCheckTabViewModel : INotifyPropertyChanged
 {
@@ -266,9 +287,35 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
     private readonly JsonWatchlistStore _watchlistStore;
 
     public ObservableCollection<IndexLightRowViewModel> IndexRows { get; } = new();
+    /// <summary>表格实际显示的行——= <see cref="_allRows"/> 按当前方法过滤后的结果。</summary>
     public ObservableCollection<MorningStockRowViewModel> StockRows { get; } = new();
 
-    private string _dataDateText = "";
+    /// <summary>本轮体检的全部结果（未过滤），按"持仓优先→严重度→代码"排好序。过滤只从这里筛，
+    /// 不重算体检，所以切换方法过滤是瞬时的。</summary>
+    private readonly List<MorningStockRowViewModel> _allRows = new();
+    /// <summary>本轮自选记录条数（去重前）——汇总里"N 条自选记录按股票去重"那句要用。</summary>
+    private int _entryCount;
+    /// <summary>本轮大盘总开关的"沪深300/创业板指 有几个在MA60上"——切换过滤要重建汇总，得留着。</summary>
+    private int _gateAboveCount;
+
+    /// <summary>方法列表头的过滤选项：第一项固定是"全部方法"，其后是本轮出现过的各方法（带只数）。</summary>
+    public ObservableCollection<MethodFilterOption> MethodFilters { get; } = new();
+
+    private MethodFilterOption? _selectedMethodFilter;
+    /// <summary>当前选中的方法过滤项。切换时只做筛选+重建汇总，不重读数据库。</summary>
+    public MethodFilterOption? SelectedMethodFilter
+    {
+        get => _selectedMethodFilter;
+        set
+        {
+            if (ReferenceEquals(_selectedMethodFilter, value)) return;
+            _selectedMethodFilter = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedMethodFilter)));
+            ApplyMethodFilter();
+        }
+    }
+
+    private string _dataDateText = "尚未体检——点右上角【刷新】按钮开始（不在启动时自动跑，避免拖慢开程序）";
     public string DataDateText { get => _dataDateText; set => Set(ref _dataDateText, value); }
 
     private string _gateText = "";
@@ -318,7 +365,8 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             "   规则保质期约6个月，到期应重新回测复核。",
             "每日晨检——规则说明"));
 
-        Reload();
+        // 首次体检不在构造时同步跑（会阻塞窗口显示，双击后半天不出界面）——改由 MainWindow.Loaded
+        // 后用后台优先级触发（见 MainWindow 构造函数），先把窗口显示出来、再填充体检结果。
     }
 
     /// <summary>Public so MainWindow can call it when the user switches to this tab（同自选股Tab的
@@ -343,8 +391,8 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             if (symbol == "sz399006") chinextAbove = row.AboveMa60;
         }
 
-        int aboveCount = (csi300Above == true ? 1 : 0) + (chinextAbove == true ? 1 : 0);
-        (GateText, GateColor) = aboveCount switch
+        _gateAboveCount = (csi300Above == true ? 1 : 0) + (chinextAbove == true ? 1 : 0);
+        (GateText, GateColor) = _gateAboveCount switch
         {
             2 => ("🟢 总开关：开启——沪深300、创业板指均在60日线上，可正常建仓", Brushes.SeaGreen),
             1 => ("🟡 总开关：半开——沪深300/创业板指只有一个在60日线上，谨慎、轻仓", Brushes.DarkOrange),
@@ -356,7 +404,9 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         // 填过买入价（真实持仓）的记录优先作基准（止损/止盈要按真实成本算），否则用最早那条
         // 记录（最早的峰值最高，止损触发最保守）；方法列合并展示所有来源。
         var entries = _watchlistStore.Load();
-        var rows = entries
+        _entryCount = entries.Count;
+        _allRows.Clear();
+        _allRows.AddRange(entries
             .GroupBy(e => e.Code)
             .Select(g =>
             {
@@ -364,18 +414,53 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
                              .ThenByDescending(e => e.BuyPrice is > 0)                              // 其次已平仓（留痕）
                              .ThenBy(e => e.BuyDate ?? DateTime.MaxValue)
                              .ThenBy(e => e.DataDate).ThenBy(e => e.AddedAt).First();
-                var methods = string.Join("、", g.Select(e => e.Method).Distinct());
+                var methods = g.Select(e => e.Method).Distinct().ToList();
                 return new MorningStockRowViewModel(basis, methods, _barRepository, _shareholderRepository);
             })
             .OrderByDescending(r => r.IsHolding)   // 持仓排在观察前面——真金白银的先看
-            .ThenBy(r => r.Severity).ThenBy(r => r.Code)
-            .ToList();
-        foreach (var r in rows) StockRows.Add(r);
+            .ThenBy(r => r.Severity).ThenBy(r => r.Code));
 
-        BuildSummary(aboveCount, rows, entries.Count);
+        RebuildMethodFilters();
+        ApplyMethodFilter();
     }
 
-    private void BuildSummary(int gateAboveCount, List<MorningStockRowViewModel> rows, int entryCount)
+    /// <summary>重建方法列表头的过滤下拉项（"全部方法" + 本轮出现过的各方法，都带只数）——刷新后
+    /// 尽量保留用户当前选中的方法（选项对象会重建，靠方法名重新对上），那个方法本轮没有了就退回"全部"。</summary>
+    private void RebuildMethodFilters()
+    {
+        var keep = _selectedMethodFilter?.Method;
+        var counts = _allRows
+            .SelectMany(r => r.Methods)
+            .GroupBy(m => m)
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        MethodFilters.Clear();
+        MethodFilters.Add(new MethodFilterOption { Method = null, Display = $"全部方法 ({_allRows.Count})" });
+        foreach (var kv in counts.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key))
+            MethodFilters.Add(new MethodFilterOption { Method = kv.Key, Display = $"{kv.Key} ({kv.Value})" });
+
+        // 直接改字段、不走属性 setter——这里不该触发 ApplyMethodFilter（调用方紧接着就会调一次）。
+        _selectedMethodFilter = MethodFilters.FirstOrDefault(o => o.Method == keep) ?? MethodFilters[0];
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedMethodFilter)));
+    }
+
+    /// <summary>按当前选中的方法筛选表格并重建汇总——体检结果已在 <see cref="Reload"/> 里算好，这里
+    /// 只做筛选，所以切换过滤是瞬时的、不重读数据库。</summary>
+    private void ApplyMethodFilter()
+    {
+        var method = _selectedMethodFilter?.Method;
+        var rows = method == null
+            ? _allRows
+            : _allRows.Where(r => r.Methods.Contains(method)).ToList();
+
+        StockRows.Clear();
+        foreach (var r in rows) StockRows.Add(r);
+        BuildSummary(_gateAboveCount, rows, _entryCount, method);
+    }
+
+    /// <param name="methodFilter">当前生效的方法过滤（null=全部）——过滤生效时汇总只统计该方法选出的
+    /// 股票，并在标题上标出来，这样"按方法对比表现"看到的数字和表格是一致的。</param>
+    private void BuildSummary(int gateAboveCount, IReadOnlyList<MorningStockRowViewModel> rows, int entryCount, string? methodFilter)
     {
         var sb = new StringBuilder();
         sb.AppendLine(gateAboveCount switch
@@ -387,7 +472,9 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
 
         if (rows.Count == 0)
         {
-            sb.AppendLine("2) 自选股为空——先在各选股Tab里勾选\"加入自选\"，晨检会每天逐只体检。");
+            sb.AppendLine(methodFilter == null
+                ? "2) 自选股为空——先在各选股Tab里勾选\"加入自选\"，晨检会每天逐只体检。"
+                : $"2) 【仅方法：{methodFilter}】该方法名下暂无自选股——把方法列表头的下拉切回\"全部方法\"看全部。");
         }
         else
         {
@@ -400,9 +487,20 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             var okWatch = rows.Where(r => r.Severity == 4 && !r.IsHolding && !r.IsClosed).Select(r => r.Name).ToList();
             var closed = rows.Where(r => r.IsClosed).Select(r => $"{r.Name}({r.RealizedText})").ToList();
             int holding = rows.Count(r => r.IsHolding);
-            // 去重说明只在真有重复记录时展示，避免平时多一句废话。
-            var dedupNote = entryCount != rows.Count ? $"，{entryCount} 条自选记录按股票去重" : "";
-            sb.AppendLine($"2) 自选股 {rows.Count} 只体检结果（持仓 {holding} 只 / 观察 {rows.Count - holding - closed.Count} 只 / 已平仓 {closed.Count} 只{dedupNote}）：");
+            // 去重说明只在"全部方法 + 真有重复记录"时展示：过滤后拿总记录数跟子集比是没有意义的。
+            var dedupNote = methodFilter == null && entryCount != rows.Count ? $"，{entryCount} 条自选记录按股票去重" : "";
+            var filterNote = methodFilter == null ? "" : $"【仅方法：{methodFilter}】";
+            sb.AppendLine($"2) {filterNote}自选股 {rows.Count} 只体检结果（持仓 {holding} 只 / 观察 {rows.Count - holding - closed.Count} 只 / 已平仓 {closed.Count} 只{dedupNote}）：");
+
+            // 方法横向对比用的整体口径：平均"较基准涨跌"+上涨占比（持仓算较买入价、观察算较自选日收盘）。
+            var pcts = rows.Where(r => r.SinceBasisPct.HasValue).Select(r => r.SinceBasisPct!.Value).ToList();
+            if (pcts.Count > 0)
+            {
+                var avg = pcts.Average();
+                int up = pcts.Count(p => p >= 0);
+                sb.AppendLine($"   · {(methodFilter == null ? "全部" : methodFilter)}整体：平均较基准 {(avg >= 0 ? "+" : "")}{avg:F1}%，" +
+                              $"上涨 {up} 只 / 下跌 {pcts.Count - up} 只（占比 {(double)up / pcts.Count * 100:F0}%）");
+            }
             if (stop.Count > 0) sb.AppendLine($"   · [持仓]触发15%回撤止损（最优先处理）：{string.Join("、", stop)}");
             if (trim.Count > 0) sb.AppendLine($"   · [持仓]触发+50%止盈减仓：{string.Join("、", trim)}");
             if (chip.Count > 0) sb.AppendLine($"   · 股东户数暴增警示：{string.Join("、", chip)}");

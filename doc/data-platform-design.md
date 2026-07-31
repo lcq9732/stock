@@ -229,6 +229,9 @@ Fetcher ──压缩上传──▶ GitHub Releases(tag=data, 公开仓库) ─�
 
 设计原则：**用"维度值"代替"写死字段"**，保证后续加新的数据类型/周期时不需要改表结构、不需要数据库迁移。
 
+> ⚠️ **本节只是早期设计记录，只覆盖最初几张表（Bar/FundamentalMetric/NetInflow/StockMeta/…），已不反映现状。**
+> 当前数据库共 **15 张表**，完整表清单 + 逐字段说明 + 数据源/更新方式见 **[数据字典 → doc/data-dictionary.md](data-dictionary.md)**；权威 schema 以 `src/StockPlatform.Data/Sqlite/SqliteSchema.cs` 为准。
+
 ```sql
 -- 行情K线，多粒度统一存储
 CREATE TABLE Bar (

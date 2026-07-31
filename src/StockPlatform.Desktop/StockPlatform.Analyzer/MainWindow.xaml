@@ -114,7 +114,23 @@
                                         </Style>
                                     </DataGridTextColumn.ElementStyle>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Header="方法" Binding="{Binding Method}" Width="80" />
+                                <!-- 方法列表头带下拉过滤器：选某个方法后，表格和下面的"今日行动建议"都只算
+                                     该方法选出的股票（含平均涨跌/上涨占比），用来横向对比各选股方法的表现。
+                                     列头不在行的可视树里、拿不到 Tab 的 DataContext，所以用 RelativeSource
+                                     往上找 DataGrid 再取它的 DataContext（WPF 里列头绑定的标准做法）。
+                                     CanUserSort=False：避免点下拉时顺带触发这一列的排序。 -->
+                                <DataGridTextColumn Binding="{Binding Method}" Width="150" CanUserSort="False">
+                                    <DataGridTextColumn.Header>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="方法" VerticalAlignment="Center" />
+                                            <ComboBox Width="98" Margin="6,0,0,0" Padding="4,1"
+                                                      ItemsSource="{Binding DataContext.MethodFilters, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                      SelectedItem="{Binding DataContext.SelectedMethodFilter, RelativeSource={RelativeSource AncestorType=DataGrid}, Mode=TwoWay}"
+                                                      DisplayMemberPath="Display"
+                                                      ToolTip="按选股方法过滤：只看某个方法选出的股票，表格和&quot;今日行动建议&quot;（含平均涨跌、上涨占比）都跟着只算这个方法，便于横向对比各方法表现。括号里是该方法的股票只数。切回&quot;全部方法&quot;看全部" />
+                                        </StackPanel>
+                                    </DataGridTextColumn.Header>
+                                </DataGridTextColumn>
                                 <DataGridTextColumn Header="基准日期" Binding="{Binding DataDate}" Width="95">
                                     <DataGridTextColumn.HeaderStyle>
                                         <Style TargetType="DataGridColumnHeader">
@@ -636,6 +652,87 @@
                                  IsInactiveSelectionHighlightEnabled="True"
                                  ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
                     </GroupBox>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="因子法">
+                <Grid DataContext="{Binding FactorTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="2*" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="3*" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                        <Button Content="运行因子选股" Command="{Binding RunCommand}" Width="110"
+                                ToolTip="加载全量日线跑27个因子的完整评估（约1分钟），得到各因子IC、去重结论和合成因子的最新Top50名单。评估协议与已知局限（幸存者偏差等）见 doc/factorlab-design.md" />
+                        <TextBlock Text="{Binding StatusText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray"
+                                   MaxWidth="900" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="360" />
+                        </Grid.ColumnDefinitions>
+
+                        <DataGrid Grid.Column="0" ItemsSource="{Binding FactorRows}" SelectedItem="{Binding SelectedFactor}"
+                                  AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
+                                  GridLinesVisibility="Horizontal" HeadersVisibility="Column" AlternatingRowBackground="#F5F5F5"
+                                  ToolTip="点击行在右侧查看该因子的构造公式与作用说明；IC等数字在运行评估后填充">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="因子" Binding="{Binding Name}" Width="150" />
+                                <DataGridTextColumn Header="类别" Binding="{Binding Category}" Width="50" />
+                                <DataGridTextColumn Header="角色" Binding="{Binding Role}" Width="70" />
+                                <DataGridTextColumn Header="IC内" Binding="{Binding IcInText}" Width="60" />
+                                <DataGridTextColumn Header="ICIR内" Binding="{Binding IcirInText}" Width="60" />
+                                <DataGridTextColumn Header="中性IC内" Binding="{Binding IcNeuInText}" Width="70" />
+                                <DataGridTextColumn Header="IC外" Binding="{Binding IcOutText}" Width="60" />
+                                <DataGridTextColumn Header="多空外" Binding="{Binding LsAnnOutText}" Width="65" />
+                                <DataGridTextColumn Header="换手" Binding="{Binding TurnoverText}" Width="50" />
+                                <DataGridTextColumn Header="去重" Binding="{Binding DedupText}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <Border Grid.Column="1" Margin="8,0,0,0" BorderBrush="#DDDDDD" BorderThickness="1" Padding="8" Background="#FAFAFA">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <TextBlock Text="{Binding SelectedFactorDetail}" TextWrapping="Wrap" FontSize="12" />
+                            </ScrollViewer>
+                        </Border>
+                    </Grid>
+
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,4">
+                        <TextBlock Text="{Binding PicksHeaderText}" FontWeight="Bold" VerticalAlignment="Center" />
+                        <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
+                                ToolTip="把勾选的股票加入自选（Method=因子法，记录评估时的最新收盘价），加入后可在自选股Tab跟踪、每日晨检Tab逐日体检" />
+                    </StackPanel>
+
+                    <DataGrid Grid.Row="3" ItemsSource="{Binding PickRows}" AutoGenerateColumns="False" IsReadOnly="False"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5"
+                              ToolTip="合成因子得分最高的股票；&quot;主要贡献&quot;列出该股得分最高的三个成分因子。排序输出仅供研究，不构成买入建议">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
+                                <DataGridCheckBoxColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridCheckBoxColumn.Header>
+                            </DataGridCheckBoxColumn>
+                            <DataGridTextColumn Header="名次" Binding="{Binding Rank}" Width="50" IsReadOnly="True" />
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="130" IsReadOnly="True" />
+                            <DataGridTextColumn Header="收盘" Binding="{Binding CloseText}" Width="70" IsReadOnly="True" />
+                            <DataGridTextColumn Header="合成得分" Binding="{Binding ScoreText}" Width="75" IsReadOnly="True" />
+                            <DataGridTextColumn Header="主要贡献因子" Binding="{Binding ContribText}" Width="*" IsReadOnly="True" />
+                            <DataGridTemplateColumn Header="操作" Width="110">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <Button Content="K线详情" Width="90" Margin="2,1" Click="FactorQuoteDetailButton_Click" />
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
                 </Grid>
             </TabItem>
 

@@ -7,6 +7,18 @@ namespace StockPlatform.Logic.Models;
 public static class Granularity
 {
     public const string Day = "day";
+
+    /// <summary>
+    /// 日线的**后复权**版本（2026-07-30新增）。为什么要单独存一份：数据源的前复权（<see cref="Day"/>）
+    /// 是"减法式"（原价 − 累计分红），显示用没问题（最新价=真实价），但往前推十年后，高分红股票的
+    /// 复权价会被减到接近零甚至为负，用它算收益率会得出物理上不可能的结果——2016~2019 实测有 1498 只
+    /// 股票（占全市场27%）出现过单日 ±11% 以上的"涨跌幅"，最大 +7200%。后复权是乘法式、永不为负、
+    /// 收益率正确，专供回测（FactorLab）使用；界面展示仍用前复权。
+    /// 只对**个股和退市股**抓取：指数不除权（两种复权返回同一序列）、ETF 暂不回测、板块指数是本地合成的。
+    /// 不生成对应的周/月线（回测用不到，省一半空间和抓取时间）。
+    /// </summary>
+    public const string DayHfq = "day_hfq";
+
     public const string Week = "week";
     public const string Month = "month";
     public const string Min1 = "min1";

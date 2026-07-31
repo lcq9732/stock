@@ -8,6 +8,10 @@
     <RootNamespace>StockPlatform.FactorLab</RootNamespace>
     <LangVersion>latest</LangVersion>
     <DebugType>none</DebugType>
+    <!-- Analyzer(自包含单文件exe)要引用本项目——NETSDK1150不允许自包含exe引用非自包含exe，
+         所以这里也标成自包含。只影响构建产物形态，控制台用法不变。 -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
   </PropertyGroup>
 
   <ItemGroup>

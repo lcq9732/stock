@@ -55,7 +55,7 @@ public class MainViewModel : INotifyPropertyChanged
     private string _dataStatusText = "";
     public string DataStatusText { get => _dataStatusText; private set => Set(ref _dataStatusText, value); }
 
-    /// <summary>Date typed in for "拉取当天" (see doc/data-platform-design.md) — free text so the
+    /// <summary>Date typed in for "补指定历史日"（旧名"拉取当天"） (see doc/data-platform-design.md) — free text so the
     /// user can pick any day, defaults to today. Parsed on click, not as-you-type, so a
     /// momentarily invalid string while editing doesn't disable the button underneath them.</summary>
     private string _fetchDayText = DateOnly.FromDateTime(DateTime.Today).ToString("yyyy-MM-dd");
@@ -67,16 +67,27 @@ public class MainViewModel : INotifyPropertyChanged
     private string _lookbackYearsText = "3";
     public string LookbackYearsText { get => _lookbackYearsText; set => Set(ref _lookbackYearsText, value); }
 
-    /// <summary>"拉取指定年份"要补的自然年（2026-07-29新增）——往回逐年补历史用，见
+    /// <summary>"拉取指定年份区间"的起始年（2026-07-29新增，同日从单年改为区间）——往回补历史用，见
     /// FetchOrchestrator.RunFetchYearAsync。默认填去年（最常见的用法是把去年补齐）；跟"首次回看"
     /// 是两件事：回看年数只影响"从没抓过的标的"，调大它也不会让已有标的的历史往前延长，要补更早的
     /// 年份就得用这个按钮。点击时解析，编辑中途的非法值不会禁用按钮。</summary>
     private string _fetchYearText = (DateTime.Today.Year - 1).ToString();
     public string FetchYearText { get => _fetchYearText; set => Set(ref _fetchYearText, value); }
 
+    /// <summary>"拉取指定年份区间"的结束年——留空表示"从起始年一直补到现在"；与起始年填一样就是只补那一年。</summary>
+    private string _fetchYearEndText = "";
+    public string FetchYearEndText { get => _fetchYearEndText; set => Set(ref _fetchYearEndText, value); }
+
+    /// <summary>"覆盖重抓前复权"（2026-07-30新增）——勾上后区间抓取不再跳过本地已有的部分，而是把整段
+    /// 前复权按数据源当前基准重写一遍，用来一次性抹平历史上分批入库造成的复权基准接缝（见
+    /// FetchOrchestrator.RepairDriftedHistoryAsync）。默认不勾：勾了这一轮会失去"已有就跳过"的优化、
+    /// 耗时与首次回补相当。日常的漂移由抓取时的自动检测修正，不需要靠这个。</summary>
+    private bool _overwriteQfq;
+    public bool OverwriteQfq { get => _overwriteQfq; set => Set(ref _overwriteQfq, value); }
+
     /// <summary>Comma-separated keywords for the 中标/订单公告 keyword sweep — see
     /// AnnouncementFetchOrchestrator. Defaults to the two most common order-win announcement
-    /// phrasings. Used automatically by both "拉取全部" and "拉取当天" now (see
+    /// phrasings. Used automatically by both "拉取全部" and "补指定历史日" now (see
     /// FetchOrchestrator.FetchAnnouncementsAsync) — not a separately-triggered action anymore.</summary>
     private string _announcementKeywordsText = "中标,签订合同";
     public string AnnouncementKeywordsText { get => _announcementKeywordsText; set => Set(ref _announcementKeywordsText, value); }
@@ -97,6 +108,8 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand UploadDailyCommand { get; }
     public RelayCommand BackfillDailyCommand { get; }
     public RelayCommand FetchPeriodicCommand { get; }
+    public RelayCommand FetchFinancialsCommand { get; }
+    public RelayCommand FetchDividendCommand { get; }
     public RelayCommand ScheduledFetchAllCommand { get; }
     public RelayCommand ScheduledFetchDayCommand { get; }
 
@@ -133,6 +146,8 @@ public class MainViewModel : INotifyPropertyChanged
         UploadDailyCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: false), _ => !IsBusy);
         BackfillDailyCommand = new RelayCommand(async _ => await RunBackfillDailyHistoryAsync(), _ => !IsBusy);
         FetchPeriodicCommand = new RelayCommand(async _ => await RunFetchPeriodicAsync(), _ => !IsBusy);
+        FetchFinancialsCommand = new RelayCommand(async _ => await RunFetchFinancialsAsync(), _ => !IsBusy);
+        FetchDividendCommand = new RelayCommand(async _ => await RunFetchDividendAsync(), _ => !IsBusy);
         ScheduledFetchAllCommand = new RelayCommand(async _ => await RunScheduledFetchAllAsync(), _ => !IsBusy);
         ScheduledFetchDayCommand = new RelayCommand(async _ => await RunScheduledFetchDayAsync(), _ => !IsBusy);
 
@@ -288,22 +303,39 @@ public class MainViewModel : INotifyPropertyChanged
             Log($"日期格式不对：\"{FetchDayText}\"，请用 yyyy-MM-dd 格式（例如 2026-07-06）");
             return Task.CompletedTask;
         }
-        return RunOperationAsync("拉取当天",
+        return RunOperationAsync("补指定历史日",
             (progress, ct) => _orchestrator.RunFetchDayAsync(SelectedSource, date, ParseAnnouncementKeywords(), progress, ct));
     }
 
-    /// <summary>"拉取指定年份"（见 FetchOrchestrator.RunFetchYearAsync）——把某个自然年里能取到历史的
-    /// 各类数据一次补齐（K线/资金净流入/融资余额/龙虎榜/公告），只补本地还缺的部分，可反复点、可随时停。
-    /// 年份的合法范围由编排层校验（A股最早1990年、不能晚于今年），这里只做"是不是4位整数"的输入校验。</summary>
+    /// <summary>解析界面上的年份区间两个输入框。结束年留空=从起始年补到现在；起止相同=只补那一年。
+    /// 年份的合法范围（A股最早1990年、不能晚于今年、起≤止）由编排层校验，这里只做格式校验。</summary>
+    private bool TryParseYearRange(out int startYear, out int endYear, out string label)
+    {
+        endYear = DateTime.Today.Year; // 结束年留空 → 一直补到现在
+        label = "";
+        if (!int.TryParse(FetchYearText.Trim(), out startYear))
+        {
+            Log($"起始年份格式不对：\"{FetchYearText}\"，请填4位年份（例如 {DateTime.Today.Year - 1}）");
+            return false;
+        }
+        var endText = FetchYearEndText.Trim();
+        if (endText.Length > 0 && !int.TryParse(endText, out endYear))
+        {
+            Log($"结束年份格式不对：\"{FetchYearEndText}\"，请填4位年份或留空（留空=补到现在）");
+            return false;
+        }
+        label = startYear == endYear ? $"{startYear}年" : $"{startYear}~{endYear}年";
+        return true;
+    }
+
+    /// <summary>"拉取指定年份区间"（见 FetchOrchestrator.RunFetchYearAsync）——把 [起始年,结束年] 里能取到
+    /// 历史的各类数据一次补齐（K线/退市股/资金净流入/融资余额/龙虎榜/公告），只补本地还缺的部分，
+    /// 可反复点、可随时停。</summary>
     private Task RunFetchYearAsync()
     {
-        if (!int.TryParse(FetchYearText.Trim(), out var year))
-        {
-            Log($"年份格式不对：\"{FetchYearText}\"，请填4位年份（例如 {DateTime.Today.Year - 1}）");
-            return Task.CompletedTask;
-        }
-        return RunOperationAsync($"拉取{year}年数据",
-            (progress, ct) => _orchestrator.RunFetchYearAsync(SelectedSource, year, ParseAnnouncementKeywords(), progress, ct));
+        if (!TryParseYearRange(out var startYear, out var endYear, out var label)) return Task.CompletedTask;
+        return RunOperationAsync($"拉取{label}数据" + (OverwriteQfq ? "(覆盖重抓前复权)" : ""),
+            (progress, ct) => _orchestrator.RunFetchYearAsync(SelectedSource, startYear, endYear, ParseAnnouncementKeywords(), progress, ct, OverwriteQfq));
     }
 
     private Task RunFetchBoardsAsync() =>
@@ -327,6 +359,16 @@ public class MainViewModel : INotifyPropertyChanged
     private Task RunFetchPeriodicAsync() =>
         RunOperationAsync("一键拉取定期数据", (progress, ct) => _orchestrator.RunFetchPeriodicAsync(progress, ct));
 
+    /// <summary>拉取财务报表（见 FetchOrchestrator.RunFetchFinancialsAsync）——已并入"一键拉取定期数据"，
+    /// 这个独立按钮给首次回补用：不用连带跑几小时的股东数据全量刷新。</summary>
+    private Task RunFetchFinancialsAsync() =>
+        RunOperationAsync("拉取财务报表", (progress, ct) => _orchestrator.RunFetchFinancialsAsync(progress, ct));
+
+    /// <summary>拉取分红送配（见 FetchOrchestrator.RunFetchDividendAsync）——已并入"一键拉取定期数据"，
+    /// 这个独立按钮给单独刷新分红用，不用连带跑几小时的其它定期数据。</summary>
+    private Task RunFetchDividendAsync() =>
+        RunOperationAsync("拉取分红送配", (progress, ct) => _orchestrator.RunFetchDividendAsync(progress, ct));
+
     /// <summary>定时拉取全部：点后等到"触发时间"再跑"拉取全部"（已过则立即）。参数在点击时先校验。</summary>
     private async Task RunScheduledFetchAllAsync()
     {
@@ -339,7 +381,9 @@ public class MainViewModel : INotifyPropertyChanged
             (progress, ct) => _orchestrator.RunFetchAsync(SelectedSource, lookbackYears, ParseAnnouncementKeywords(), progress, ct));
     }
 
-    /// <summary>定时拉取当天：点后等到"触发时间"再跑"拉取当天"（已过则立即）。日期用"日期"框（默认今天）。</summary>
+    /// <summary>定时补指定日（旧名"定时拉取当天"）：点后等到"触发时间"再跑"补指定历史日"（已过则立即）。
+    /// 日期用"日期"框（默认今天）。日常无人值守请用"定时拉取全部"——只有它会自动补断档，耗时还一样，
+    /// 见 FetchOrchestrator 类注释里 2026-07-31 的复核结论。</summary>
     private async Task RunScheduledFetchDayAsync()
     {
         if (!DateOnly.TryParseExact(FetchDayText.Trim(), "yyyy-MM-dd", out var date))
@@ -347,7 +391,7 @@ public class MainViewModel : INotifyPropertyChanged
             Log($"日期格式不对：\"{FetchDayText}\"，请用 yyyy-MM-dd 格式（例如 2026-07-06）");
             return;
         }
-        await RunScheduledAsync("拉取当天",
+        await RunScheduledAsync("补指定历史日",
             (progress, ct) => _orchestrator.RunFetchDayAsync(SelectedSource, date, ParseAnnouncementKeywords(), progress, ct));
     }
 

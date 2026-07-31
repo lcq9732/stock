@@ -48,4 +48,8 @@ public class Manifest
     /// <summary>股东数据（新浪股本股东页：户数+十大股东+十大流通股东）抓取失败、还没补上的股票代码
     /// （2026-07-16新增）——逐只精确记录，共用"重新拉取失败股票"重试。全市场逐只抓、量大易有零星失败。</summary>
     public List<string> FailedShareholderCodes { get; set; } = new();
+
+    /// <summary>分红送配（新浪分红派息页 vISSUE_ShareBonus）抓取失败、还没补上的股票代码
+    /// （2026-07-31新增）——逐只精确记录，共用"重新拉取失败股票"重试。全市场逐只抓、量大易有零星失败。</summary>
+    public List<string> FailedDividendCodes { get; set; } = new();
 }

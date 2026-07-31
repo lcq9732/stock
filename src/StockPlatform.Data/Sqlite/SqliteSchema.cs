@@ -138,6 +138,28 @@ public static class SqliteSchema
                 PRIMARY KEY (code, report_date, kind, rank)
             );
 
+            CREATE TABLE IF NOT EXISTS DelistedStock (
+                code TEXT PRIMARY KEY,      -- 6位A股代码
+                name TEXT,                  -- 终止上市时的简称（如"乐视退"）
+                exchange TEXT,              -- sse=上交所, szse=深交所
+                list_date TEXT,
+                delist_date TEXT,           -- 终止上市日（上交所转板/合并的行缺失为NULL）
+                fetched_at TEXT,
+                -- 已经尝试过补"最后几天"K线的时间（见 FetchOrchestrator.CatchUpDelistedTailsAsync）。
+                -- 必须有这个标记：停牌后才退市的股票（K线止于停牌日、早于终止日）永远满足"本地最后一根
+                -- 早于终止日"，没有标记就会每天徒劳重抓一次。成功尝试过即置位，之后永久跳过。
+                tail_fetched_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS FinancialReport (
+                code TEXT NOT NULL,         -- 6位股票代码
+                report_date TEXT NOT NULL,  -- 报告期（季度末），不是公告日（数据源没有公告日）
+                metric_key TEXT NOT NULL,   -- 规范化科目键，见 FinancialKeys
+                value REAL,                 -- 单位：元；利润表/现金流为年内累计口径
+                fetched_at TEXT,
+                PRIMARY KEY (code, report_date, metric_key)
+            );
+
             CREATE TABLE IF NOT EXISTS MarginDetail (
                 trade_date TEXT NOT NULL,   -- 交易日
                 code TEXT NOT NULL,         -- 6位标的代码
@@ -148,6 +170,23 @@ public static class SqliteSchema
                 short_volume REAL,          -- 融券余量(股/份)
                 fetched_at TEXT,
                 PRIMARY KEY (trade_date, code)
+            );
+
+            -- 分红送配（2026-07-31新增，新浪 vISSUE_ShareBonus 分红派息页，非东财）——每只股票历年每个
+            -- 分红方案一行。数据库里原本没有任何分红明细：前复权已把分红效果揉进价格、反而看不出"哪天除权、
+            -- 每股派多少"，且减法式前复权对高分红老股会算出负价（见 project_qfq_hfq），所以分红必须单独抓。
+            -- 用途：股息率因子、除权除息日核对。金额均为"每10股"口径（数据源如此）。
+            CREATE TABLE IF NOT EXISTS Dividend (
+                code TEXT NOT NULL,             -- 6位股票代码
+                announce_date TEXT NOT NULL,    -- 公告日期（方案标识，同股同日唯一）
+                bonus_shares REAL,              -- 送股（每10股送X股）
+                transfer_shares REAL,           -- 转增（每10股转增X股）
+                dividend_yuan REAL,             -- 派息（税前，每10股派X元）→ 每股股息=X/10
+                progress TEXT,                  -- 进度：实施/预案/董事会通过/不分配 等
+                record_date TEXT,               -- 股权登记日（可空：方案未实施/进行中，源给 "--"）
+                ex_date TEXT,                   -- 除权除息日（可空，同上）
+                fetched_at TEXT,
+                PRIMARY KEY (code, announce_date)
             );
 
             -- 反查热点列索引（2026-07-16）：这两条反查用的不是主键最左前缀，无索引会全表扫。
@@ -174,6 +213,8 @@ public static class SqliteSchema
 
         // 2026-07-16：指数成分加"纳入日期"列（老库已有 IndexCons 表的补列）。
         AddColumnIfMissing(conn, "IndexCons", "in_date", "TEXT");
+        // 2026-07-29：退市股"最后几天K线"的一次性补齐标记（见 DelistedStock 表注释）。
+        AddColumnIfMissing(conn, "DelistedStock", "tail_fetched_at", "TEXT");
     }
 
     /// <summary>若 <paramref name="table"/> 已存在、但其建表 SQL 的主键里不含 <paramref name="pkColumn"/>，

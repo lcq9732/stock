@@ -64,13 +64,18 @@ public class TencentBarFetcher : IBarDataFetcher
         };
     }
 
+    public bool SupportsHfq => true;
+
     public async Task<(string Name, List<Bar> Bars)> FetchAsync(string code, string granularity, DateTime? start, DateTime? end, CancellationToken ct = default)
     {
-        if (granularity != Granularity.Day)
-            throw new ArgumentException($"TencentBarFetcher 目前只直接支持日线（周/月请用本地聚合，分钟线暂未实现）：'{granularity}'");
+        if (granularity != Granularity.Day && granularity != Granularity.DayHfq)
+            throw new ArgumentException($"TencentBarFetcher 目前只直接支持日线/后复权日线（周/月请用本地聚合，分钟线暂未实现）：'{granularity}'");
 
-        return await _rateLimiter.RunAsync(() => FetchInternalAsync(code, start, end, ct), ct);
+        return await _rateLimiter.RunAsync(() => FetchInternalAsync(code, granularity, start, end, ct), ct);
     }
+
+    /// <summary>接口的复权参数与返回节点名：前复权 qfq/qfqday，后复权 hfq/hfqday（指数节点是 day，下方两者都认）。</summary>
+    private static string FqParam(string granularity) => granularity == Granularity.DayHfq ? "hfq" : "qfq";
 
     // Tencent's server hard-caps every response at 640 bars, no matter what "count" we ask for
     // (verified empirically — even requesting 2000 still returns exactly 640). A 3-year daily
@@ -79,7 +84,7 @@ public class TencentBarFetcher : IBarDataFetcher
     private const int PageHardCap = 640;
     private const int MaxPages = 10; // 10 * 640 ≈ 6400 trading days ≈ 25 years — comfortably more than we'd ever request
 
-    private async Task<(string, List<Bar>)> FetchInternalAsync(string code, DateTime? start, DateTime? end, CancellationToken ct)
+    private async Task<(string, List<Bar>)> FetchInternalAsync(string code, string granularity, DateTime? start, DateTime? end, CancellationToken ct)
     {
         var startDate = (start ?? DateTime.Today.AddYears(-3)).Date;
         var endDate = (end ?? DateTime.Today).Date;
@@ -90,7 +95,7 @@ public class TencentBarFetcher : IBarDataFetcher
 
         for (int page = 0; page < MaxPages; page++)
         {
-            var (pageName, pageBars) = await FetchPageAsync(code, pageEnd, ct);
+            var (pageName, pageBars) = await FetchPageAsync(code, granularity, pageEnd, ct);
             name ??= pageName;
             if (pageBars.Count == 0) break;
 
@@ -113,14 +118,14 @@ public class TencentBarFetcher : IBarDataFetcher
         return (name ?? code, result);
     }
 
-    private async Task<(string Name, List<Bar> Bars)> FetchPageAsync(string code, DateTime pageEnd, CancellationToken ct)
+    private async Task<(string Name, List<Bar> Bars)> FetchPageAsync(string code, string granularity, DateTime pageEnd, CancellationToken ct)
     {
         var symbol = ToSymbol(code);
-        // newfqkline（而不是老的 fqkline）——同一个host、同样的qfq前复权、同样的640条上限和分页
-        // 方式，但每行在 volume 之后多带了 换手率 和 成交额 两个字段（见下方解析），老的 fqkline
-        // 只到 volume 为止。2026-07-10 为了补上 成交额/换手率 改用这个接口。
+        // newfqkline（而不是老的 fqkline）——同一个host、同样的640条上限和分页方式，但每行在 volume
+        // 之后多带了 换手率 和 成交额 两个字段（见下方解析），老的 fqkline 只到 volume 为止。
+        // 2026-07-10 为了补上 成交额/换手率 改用这个接口。末尾的 qfq/hfq 决定复权方式（见 FqParam）。
         var url = "http://web.ifzq.gtimg.cn/appstock/app/newfqkline/get" +
-                  $"?param={symbol},day,,{pageEnd:yyyy-MM-dd},{PageHardCap},qfq";
+                  $"?param={symbol},day,,{pageEnd:yyyy-MM-dd},{PageHardCap},{FqParam(granularity)}";
 
         HttpResponseMessage resp;
         try
@@ -155,7 +160,10 @@ public class TencentBarFetcher : IBarDataFetcher
             : code;
 
         var bars = new List<Bar>();
-        if (stockNode.TryGetProperty("qfqday", out var rows) || stockNode.TryGetProperty("day", out rows))
+        // 后复权节点是 hfqday、前复权是 qfqday、指数是 day——按本次请求的复权方式优先取对应节点，
+        // 取不到再退回 day（指数），绝不互相顶替（否则会把前复权数据当成后复权存进去）。
+        var primaryNode = FqParam(granularity) + "day";
+        if (stockNode.TryGetProperty(primaryNode, out var rows) || stockNode.TryGetProperty("day", out rows))
         {
             foreach (var row in rows.EnumerateArray())
             {
@@ -183,7 +191,7 @@ public class TencentBarFetcher : IBarDataFetcher
                 bars.Add(new Bar
                 {
                     Code = code,
-                    Granularity = Granularity.Day,
+                    Granularity = granularity,
                     PeriodStart = date,
                     Open = open,
                     Close = close,

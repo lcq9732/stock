@@ -10,8 +10,22 @@
 
     Run from anywhere; paths are resolved relative to this script's location.
 .EXAMPLE
-    .\scripts\publish.ps1
+    .\scripts\publish.ps1        # 两个都发
+.EXAMPLE
+    .\scripts\publish.ps1 -a     # 只发分析程序 Analyzer（Fetcher 正在运行、占用 exe 时用）
+.EXAMPLE
+    .\scripts\publish.ps1 -f     # 只发抓取程序 Fetcher（Analyzer 正在运行时用）
 #>
+
+param(
+    # 不带参数=两个都发；-a 只发分析程序(Analyzer)；-f 只发抓取程序(Fetcher)。用于其中一个正在
+    # 运行（exe 被占用）、只想发另一个的场景。同时给 -a -f 等于都发。
+    [Alias("a")][switch]$Analyzer,
+    [Alias("f")][switch]$Fetcher
+)
+
+# 一个都没指定 → 默认两个都发
+if (-not $Analyzer -and -not $Fetcher) { $Analyzer = $true; $Fetcher = $true }
 
 $ErrorActionPreference = "Stop"
 
@@ -23,8 +37,13 @@ $projects = @(
     @{ Name = "StockPlatform.Analyzer"; Csproj = Join-Path $repoRoot "src\StockPlatform.Desktop\StockPlatform.Analyzer\StockPlatform.Analyzer.csproj" },
     @{ Name = "StockPlatform.Fetcher";  Csproj = Join-Path $repoRoot "src\StockPlatform.Desktop\StockPlatform.Fetcher\StockPlatform.Fetcher.csproj" }
 )
+# 按 -a/-f 只保留要发的（其余逻辑不变：仍发到临时目录再拷 exe，不动 publish\data）
+$projects = @($projects | Where-Object {
+    ($Analyzer -and $_.Name -eq "StockPlatform.Analyzer") -or
+    ($Fetcher -and $_.Name -eq "StockPlatform.Fetcher")
+})
 
-Write-Host "发布目录：$publishDir"
+Write-Host ("发布目录：{0}（本次发布：{1}）" -f $publishDir, (($projects | ForEach-Object { $_.Name }) -join "、"))
 if (-not (Test-Path (Join-Path $publishDir "data"))) {
     Write-Warning "没找到 publish\data 目录，请确认这是不是正确的发布位置（脚本不会自动创建这个目录）"
 }

@@ -163,49 +163,21 @@ public static class Report
     /// <summary>最新交易日的合成因子Top名单：代码/名称/得分/主要贡献因子。返回控制台/手册用的行文本。</summary>
     static List<string> WritePicks(string path, MarketData md, CompositeFactor comp, FactorResult compResult, IReadOnlyList<FactorResult> results)
     {
-        int lastT = md.NDays - 1, nS = md.NStocks;
-        var byName = results.ToDictionary(r => r.Factor.Name);
-
-        // 每个成分因子在最后交易日的秩分（与合成构造同一算法），用于展示贡献来源
-        var compScores = new Dictionary<string, double[]>();
-        foreach (var (f, sign, w) in comp.Components)
-        {
-            var vals = byName[f.Name].LatestValues;
-            var idx = new List<int>(nS);
-            for (int s = 0; s < nS; s++) if (!double.IsNaN(vals[s])) idx.Add(s);
-            var scores = new double[nS];
-            Array.Fill(scores, double.NaN);
-            if (idx.Count >= 2)
-            {
-                var ranks = Stats.Ranks(idx.Select(s => vals[s]).ToArray());
-                for (int i = 0; i < idx.Count; i++)
-                    scores[idx[i]] = sign * w * (2.0 * ranks[i] / (idx.Count + 1) - 1);
-            }
-            compScores[f.Name] = scores;
-        }
-
-        var eligible = new List<int>(nS);
-        for (int s = 0; s < nS; s++)
-            if (Evaluator.IsEligible(md, s, lastT) && !double.IsNaN(compResult.LatestValues[s])) eligible.Add(s);
-        var top = eligible.OrderByDescending(s => compResult.LatestValues[s]).Take(Config.TopN).ToList();
+        var rows = Picks.Build(md, comp, compResult, results, Config.TopN);
+        var componentOrder = comp.Components.Select(c => c.Factor.Name).ToList();
 
         var sb = new StringBuilder();
         sb.Append("名次,代码,名称,合成得分");
-        foreach (var (f, _, _) in comp.Components) sb.Append($",{f.Name}");
+        foreach (var name in componentOrder) sb.Append($",{name}");
         sb.AppendLine();
         var lines = new List<string>();
-        for (int i = 0; i < top.Count; i++)
+        foreach (var row in rows)
         {
-            int s = top[i];
-            sb.Append($"{i + 1},{md.Codes[s]},{md.Names[s]},{compResult.LatestValues[s]:0.000}");
-            foreach (var (f, _, _) in comp.Components) sb.Append($",{Num(compScores[f.Name][s], "0.000")}");
+            var byFactor = row.Contribs.ToDictionary(c => c.Factor, c => c.Score);
+            sb.Append($"{row.Rank},{row.Code},{row.Name},{row.Score:0.000}");
+            foreach (var name in componentOrder) sb.Append($",{Num(byFactor[name], "0.000")}");
             sb.AppendLine();
-            var topContrib = comp.Components
-                .Select(c => (c.Factor.Name, Score: compScores[c.Factor.Name][s]))
-                .Where(x => !double.IsNaN(x.Score))
-                .OrderByDescending(x => x.Score).Take(3)
-                .Select(x => x.Name);
-            lines.Add($"{i + 1}. {md.Codes[s]} {md.Names[s]}（{compResult.LatestValues[s]:0.000}；主要贡献：{string.Join("、", topContrib)}）");
+            lines.Add($"{row.Rank}. {row.Code} {row.Name}（{row.Score:0.000}；主要贡献：{row.TopContribsText}）");
         }
         File.WriteAllText(path, sb.ToString(), Utf8Bom);
 
@@ -223,11 +195,23 @@ public static class Report
         int inN = sh.Periods.Count(p => p.InSample), outN = sh.Periods.Count - inN;
         sb.AppendLine("# FactorLab 因子手册");
         sb.AppendLine();
-        sb.AppendLine($"- 数据：{md.Dates[0]} ~ {md.Dates[^1]}（{md.NDays} 个交易日，{md.NStocks} 只 A 股，前复权日线）");
+        sb.AppendLine(md.UsingHfq
+            ? $"- 数据：{md.Dates[0]} ~ {md.Dates[^1]}（{md.NDays} 个交易日，{md.NStocks} 只 A 股，**后复权**日线）"
+            : $"- 数据：{md.Dates[0]} ~ {md.Dates[^1]}（{md.NDays} 个交易日，{md.NStocks} 只 A 股）\n"
+              + "- ⚠️ **警告：库里没有后复权日线，本次降级用了前复权。** 数据源的前复权是减法式，回看越久"
+              + "高分红股的复权价越接近零甚至为负，收益率会严重失真（实测2016~2019有27%的股票出现过物理上"
+              + "不可能的单日涨跌）。**本报告的长周期结论不可信**，请先在 Fetcher 跑一次\"拉取区间数据\"补后复权。");
+        if (md.DirtyBarsDropped > 0)
+            sb.AppendLine($"- 脏数据剔除：{md.DirtyBarsDropped:N0} 根（价格≤0 或单日涨跌超 ±{Config.MaxDailyReturn:P0} 的物理不可能值）");
         sb.AppendLine($"- 协议：T 收盘算因子 → T+1 开盘买入 → 持有 {Config.HoldDays} 个交易日；剔除 ST/次新/停牌/一字板；双边成本 {Config.RoundTripCost:P1}");
         sb.AppendLine($"- 切分：样本内 {inN} 期（< {Config.SplitDate}），样本外 {outN} 期。**筛选只看样本内，样本外仅作验证。**");
         sb.AppendLine($"- 中性IC：因子先做 winsorize→标准化→行业内去均值→对市值回归取残差，再算 RankIC，反映剥离规模/行业风格后的独立信息（行业覆盖率约46%，无归属股票归为一组）。");
-        sb.AppendLine($"- 已知局限：无退市股（幸存者偏差）、ST 按当前名称、历史市值为近似、股东户数披露滞后为估计值。");
+        int delistedInPool = Enumerable.Range(0, md.NStocks).Count(s => md.IsDelisted[s] && md.FirstBarIdx[s] >= 0);
+        sb.AppendLine(delistedInPool > 0
+            ? $"- 股票池含 {delistedInPool} 只已退市股（有K线者，缓解幸存者偏差；不做按名ST剔除，只剔近退市{Config.DelistExcludeDays}日）。其余局限：在市股ST按当前名称、股东户数披露滞后为估计值。"
+            : "- 已知局限：无退市股（幸存者偏差，跑一次 Fetcher 的\"拉取区间数据\"可补齐）、ST 按当前名称、股东户数披露滞后为估计值。");
+        sb.AppendLine("- ⚠️ 历史市值是**近似值**：用「最新流通市值 ÷ 最新收盘 × 当日收盘」折算，忽略了期间的股本变动"
+                      + "（增发/送转）。回测窗口越长偏差越大，**小市值因子与市值中性化的结论要相应打折**。");
         sb.AppendLine();
         sb.AppendLine("## 汇总");
         sb.AppendLine();

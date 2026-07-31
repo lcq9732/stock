@@ -8,44 +8,8 @@ namespace StockPlatform.FactorLab;
 /// <summary>用法：FactorLab [数据库路径] [输出目录]。缺省时向上查找 publish/data/local/total.sqlite。</summary>
 public static class Program
 {
-    /// <summary>因子注册表（M2：27个）。新因子在此登记即可进入评估和因子手册。</summary>
-    static List<IFactor> BuildFactors() =>
-    [
-        // 趋势
-        new Momentum(20),
-        new Momentum(60, skip: 5),
-        new Momentum(120),
-        new NewHighDistance60(),
-        // 反转
-        new Reversal(5),   // 阳性对照
-        new Reversal(10),
-        new Reversal(20),
-        new MaDeviation(20),
-        new MaDeviation(60),
-        // 波动
-        new LowVolatility20(),
-        new LowAmplitude20(),
-        new LowMax20(),
-        new AmplitudeShrink(),
-        // 量价
-        new LowTurnover20(),
-        new VolumeShrink(5, 60),
-        new VolumeShrink(20, 120),
-        new PriceVolumeDiverge(20),
-        new PriceVolumeDiverge(60),
-        new StableTurnover20(),
-        new Amihud20(),
-        new OvernightReversal20(),
-        new IntradayMomentum20(),
-        new LowUpperShadow20(),
-        // 规模
-        new SmallSize(),
-        // 资金
-        new MarginChange20(),  // 阴性对照
-        new LhbCold20(),
-        // 筹码
-        new HolderShrink(),    // 阴性对照
-    ];
+    /// <summary>因子清单在 <see cref="FactorRegistry"/> 登记（与 Analyzer 因子Tab共用）。</summary>
+    static List<IFactor> BuildFactors() => FactorRegistry.BuildAll();
 
     public static int Main(string[] args)
     {
@@ -56,7 +20,13 @@ public static class Program
             Console.Error.WriteLine("找不到数据库。用法：FactorLab <total.sqlite路径> [输出目录]");
             return 1;
         }
-        string outDir = args.Length > 1 ? args[1] : "factorlab-output";
+        // 运行时结果统一放 publish 目录下（跟数据库一样，见 doc/data-platform-design.md）。默认
+        // publish/factorlab-output；命令行传的输出目录若是相对路径也落到 publish 下（如归档快照
+        // "factorlab-output-日期-说明" → publish/factorlab-output-日期-说明），绝对路径则原样用。
+        var publishDir = ProbePublishDir();
+        string outDir = args.Length > 1
+            ? (Path.IsPathRooted(args[1]) ? args[1] : Path.Combine(publishDir ?? ".", args[1]))
+            : Path.Combine(publishDir ?? ".", "factorlab-output");
 
         var sw = Stopwatch.StartNew();
         Console.WriteLine($"数据库：{dbPath}");
@@ -110,6 +80,22 @@ public static class Program
             {
                 var candidate = Path.Combine(dir.FullName, "publish", "data", "local", "total.sqlite");
                 if (File.Exists(candidate)) return candidate;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>从当前目录和程序目录逐级向上找 publish 目录——运行时结果数据（数据库、因子实验输出等）
+    /// 都放这里，跟 ProbeDb 找 total.sqlite 同一套向上查找。找不到返回 null（退回当前目录）。</summary>
+    static string? ProbePublishDir()
+    {
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        {
+            var dir = new DirectoryInfo(start);
+            for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
+            {
+                var candidate = Path.Combine(dir.FullName, "publish");
+                if (Directory.Exists(candidate)) return candidate;
             }
         }
         return null;

@@ -15,6 +15,9 @@ public static class SqliteStockMetaUpsert
     public const string TypeIndex = "index";
     public const string TypeEtf = "etf";
     public const string TypeBoard = "board";
+    /// <summary>已退市个股（2026-07-29）——故意不用 'stock'：<see cref="GetAll"/>（拉取当天/拉取全部的
+    /// 本地抓取清单）只认 'stock'，退市股不该被日常抓取轮询；但查询页/FactorLab 按代码前缀选池时能看到。</summary>
+    public const string TypeDelisted = "delisted";
 
     /// <summary>写入/更新一批标的的 code+name+type（INSERT OR REPLACE，保留已有的 exchange/list_date）。
     /// 不显式传 type 时默认按个股 'stock' 处理。</summary>

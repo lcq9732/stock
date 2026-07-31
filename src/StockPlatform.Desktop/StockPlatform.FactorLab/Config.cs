@@ -27,6 +27,19 @@ public static class Config
     /// <summary>单期截面有效样本低于该数则跳过该期（防止早期数据不全时的噪声IC）。</summary>
     public const int MinCrossSection = 300;
 
+    /// <summary>退市股在最后一根K线前的这段交易日内不可买入（近似退市整理期——当时名称已带"退"、
+    /// 交易所已公告，属实盘可同期获知的信息；持有中进入该段的仍按真实K线结算亏损）。</summary>
+    public const int DelistExcludeDays = 30;
+
+    /// <summary>
+    /// 日收益的物理上限容差：超过这个幅度的相邻日涨跌一律判为脏数据、该股当日剔除。
+    /// A股主板 ±10%、创业板/科创板 ±20%，这里统一按最宽的 ±20% 再留 5 个百分点余量
+    /// （上市首日、退市整理期、停牌复牌首日确实可能突破，宁可放过也不误杀正常数据）。
+    /// 存在的意义：2026-07-30 发现数据源的前复权是"减法式"，十年前的高分红股复权价被减到接近零，
+    /// 算出过 +7200% 的假涨幅且 close 仍为正——只靠 close>0 拦不住。这是最后一道防线。
+    /// </summary>
+    public const double MaxDailyReturn = 0.25;
+
     /// <summary>年化用的每年交易日数。</summary>
     public const double TradingDaysPerYear = 242.0;
 
