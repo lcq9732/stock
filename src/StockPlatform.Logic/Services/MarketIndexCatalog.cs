@@ -17,10 +17,15 @@ namespace StockPlatform.Logic.Services;
 /// </summary>
 public static class MarketIndexCatalog
 {
+    /// <summary>上证指数。除了作为要抓的指数之一，还被用作**"最新交易日"的锚**——指数不会停牌、
+    /// 不会退市，它最新一根日线的日期就是"最近一个已收盘的交易日"，这样判断交易日就不需要在本地
+    /// 维护一份A股节假日日历（见 FetchOrchestrator.ResolveMarketCapAsOfDateAsync）。</summary>
+    public const string ShanghaiCompositeSymbol = "sh000001";
+
     /// <summary>要抓取的大盘指数清单。加新指数只需在这里加一行（用腾讯的带前缀符号）。</summary>
     public static readonly IReadOnlyList<(string Symbol, string Name)> All = new[]
     {
-        ("sh000001", "上证指数"),
+        (ShanghaiCompositeSymbol, "上证指数"),
         ("sz399001", "深证成指"),
         ("sz399006", "创业板指"),
         ("sh000300", "沪深300"),

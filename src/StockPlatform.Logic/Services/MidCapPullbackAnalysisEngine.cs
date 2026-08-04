@@ -9,14 +9,21 @@ namespace StockPlatform.Logic.Services;
 /// daily bars for most rules but also reads week/month bars (already derived by
 /// FetchOrchestrator on every fetch, see doc/data-platform-design.md) for the MACD rules.
 ///
-/// Rule 4 (流通市值) depends on FundamentalMetric data that, as of this writing, no fetcher in
-/// this repo ever populates (see MetricKeys.CirculatingMarketCap's doc comment). Deliberately
-/// NOT treated as an Error/skip like insufficient day/week/month history — every stock would
-/// error out today with zero market-cap data anywhere, hiding whether rules 1/2/3/5-10 even work.
-/// Instead a missing market cap just fails rule 4 (Satisfied=false, Basis explains why), same as
-/// any other unmet condition — the other 9 stay fully visible/verifiable today, and once a future
-/// data-fetching change starts writing that metric, rule 4 starts actually discriminating with no
-/// changes needed here.
+/// Rule 4 (流通市值) reads FundamentalMetric / MetricKeys.CirculatingMarketCap. **这条现在是真的在
+/// 判了**——早期注释说"没有任何 fetcher 写过这个 key，所以 rule4 恒不满足"，那已经不成立：
+/// FetchOrchestrator.FetchMarketCapAsync 从 2026-07-09 起每次"拉取全部"/"拉取当天"都写，2026-08-04
+/// 实测 publish/data/local/total.sqlite 有 80,515 行 / 5,539 只股票。按最新 as_of_date 的值分档：
+/// 1,328 只（24%）落在 (80亿, 300亿) 区间内 → rule4 满足；3,660 只 ≤80亿、551 只 ≥300亿 → 不满足。
+/// 也就是说 rule4 已经是一条实际起筛选作用的硬条件，不再是"恒 false 的占位"——改这个阈值会真的
+/// 改变彬哥法的选股结果。阈值本身经核对无误：库里存的是"元"（600036 的 value ÷ 同日收盘 = 恒定
+/// 20,628,944,429 股），跟 MinMarketCap/MaxMarketCap 的 80*1e8 / 300*1e8 单位一致。
+///
+/// 缺数据时走的是 **DataMissing=true → 被 AllSatisfiedIgnoringMissingData 整条跳过**（跟 rule11/
+/// rule12 同一套处理），不是早期注释说的"当成普通未满足条件判负"。两者对 Passed 的影响完全相反，
+/// 别照着旧描述推断行为。仍然缺数据的是"新浪实时列表里查不到"的那批：实测 5,853 只纯6位A股代码里
+/// 有 314 只没有任何市值行（退市/长期停牌为主）；ETF（sh5*/sz1*）和本地合成的板块指数（gn_*）也没有，
+/// 但它们本来就不在本引擎的股票池里。这批股票的 rule4 被跳过，其余 11 条照常算——所以一只票可以
+/// 在完全没有市值数据的情况下依然 Passed=true。
 ///
 /// Rule 11 (股东户数环比下降，2026-07-17新增) reads 股东户数时间序列 (<see cref="IShareholderRepository"/>)。
 /// 硬条件=最新报告期户数 &lt; 上一报告期（环比下降，筹码集中的方向）；"是否接近近2年最低"只写进依据文字
@@ -66,9 +73,13 @@ public class MidCapPullbackAnalysisEngine
         if (monthBars.Count < MinMonthBarsRequired)
             return Error(code, $"月线历史数据不足（仅 {monthBars.Count} 条），至少需要 {MinMonthBarsRequired} 条");
 
-        // Query 按 as_of_date 升序排列，最后一条就是最新；没有任何数据获取程序写过这个 key（见
-        // MetricKeys.CirculatingMarketCap），所以目前 hasMarketCap 恒为 false——rule4 恒不满足，
-        // 但不阻止其余9条规则照常计算和展示。
+        // Query 按 as_of_date 升序排列（SQL 里就是 ORDER BY as_of_date），所以 [^1] 就是最新快照。
+        // hasMarketCap 现在绝大多数股票都是 true（见类注释：5,539 只有数据），rule4 是一条真的在起
+        // 作用的硬条件；只有新浪实时列表查不到的退市/长期停牌股才会 false，那时按 DataMissing 整条
+        // 跳过（不判负），其余 11 条照常计算和展示。
+        // as_of_date 是"这个值属于哪个交易日"（2026-08-04 起，见 FetchOrchestrator.ResolveMarketCapAsOfDateAsync；
+        // 更早写入的行是"抓取那天"的旧语义）。这里只用来取最新值、不跟 dayBars[i].PeriodStart 对齐——
+        // 市值只在每次抓取时刷新，落后交易日一两天是常态，判 80亿/300亿 区间不受这点价格波动影响。
         var marketCapRows = _fundamentalRepository.Query(code, MetricKeys.CirculatingMarketCap);
         bool hasMarketCap = marketCapRows.Count > 0;
         double marketCap = hasMarketCap ? marketCapRows[^1].Value : double.NaN;

@@ -111,13 +111,31 @@ public class SinaStockListProvider : IStockListProvider
             // 字段含义在 SinaListMarketCapFetcher 引入前用贵州茅台/000001/300750三只股本结构不同
             // 的股票跟 TencentMarketCapFetcher 的结果做过交叉校验，见 doc/data-platform-design.md
             // 3.5节。缺失/非数字/<=0 一律按"没有数据"处理，不写入假的0元市值。
-            double? marketCap = item.TryGetProperty("nmc", out var nmcEl) && nmcEl.ValueKind == JsonValueKind.Number
-                ? nmcEl.GetDouble() * 10_000
-                : null;
-            if (marketCap <= 0) marketCap = null;
+            double? marketCap = ReadNumber(item, "nmc") is > 0 and var nmc ? nmc * 10_000 : null;
 
-            result.Add(new StockListEntry(code, name, marketCap));
+            // "trade"（最新价）：盘前/周末/节假日这个字段是 0（此时 nmc 是用 "settlement" 昨收算的，
+            // 属于上一个交易日），开盘后才是当日实时价——见 StockListEntry.LastPrice 的注释，
+            // SinaListMarketCapFetcher 靠它判断市场此刻是否在交易。<=0 归 null。
+            double? lastPrice = ReadNumber(item, "trade") is > 0 and var t ? t : null;
+
+            result.Add(new StockListEntry(code, name, marketCap, lastPrice));
         }
         return result;
+    }
+
+    /// <summary>这个接口的数值字段类型不统一——有的是 JSON 数字（<c>nmc</c>），有的是带尾随零的字符串
+    /// （<c>trade</c> 回的是 "0.000" 这种）。统一按"能解析成数就用，否则 null"处理，免得字段类型
+    /// 哪天变了就静默丢数据。</summary>
+    private static double? ReadNumber(JsonElement item, string name)
+    {
+        if (!item.TryGetProperty(name, out var el)) return null;
+        return el.ValueKind switch
+        {
+            JsonValueKind.Number => el.GetDouble(),
+            JsonValueKind.String => double.TryParse(el.GetString(),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null,
+            _ => null,
+        };
     }
 }
