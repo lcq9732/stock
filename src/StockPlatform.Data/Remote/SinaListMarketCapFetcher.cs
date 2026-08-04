@@ -48,6 +48,27 @@ public class SinaListMarketCapFetcher : IMarketCapFetcher
             .Where(s => !wanted.Contains(s.Code))
             .Select(s => (s.Code, s.Name))
             .ToList();
-        return new MarketCapFetchResult(entries, newlyDiscovered);
+        return new MarketCapFetchResult(entries, newlyDiscovered, IsMarketLive(allStocks));
+    }
+
+    /// <summary>
+    /// 判断"扫描这一刻市场是否已经开盘"——决定这批市值该记到哪个交易日（见
+    /// <see cref="MarketCapFetchResult.QuotesAreLive"/>）。判据是全市场有最新价（<c>trade</c>&gt;0）
+    /// 的股票占比：盘前/周末/节假日新浪把所有股票的最新价都返回 0（2026-08-04 09:07 盘前实测确认，
+    /// 此时市值是拿 <c>settlement</c> 昨收算的），开盘后绝大多数股票都有价。
+    ///
+    /// 用**占比**而不是"有没有任何一只有价"，是因为长期停牌股在盘中也是 0 价——个别 0 价属于常态，
+    /// 全场 0 价才说明没开盘。阈值取 50%：真实的两种状态分别接近 0% 和接近 100%，中间地带不存在，
+    /// 所以阈值取多少都不敏感，取中间值最稳。
+    ///
+    /// 扫描本身要跑一两分钟（约55页+每页间隔），横跨 09:30 开盘那一刻时前半段无价、后半段有价——
+    /// 这种情况占比会落在中间，判成哪边都不算错：跨开盘意味着这批值本身就是"半截昨收半截实时"混的，
+    /// 无论记哪天都不完美，收盘后再跑一次会用干净的收盘值覆盖掉（Upsert 主键含 as_of_date）。
+    /// </summary>
+    private static bool IsMarketLive(List<StockListEntry> allStocks)
+    {
+        if (allStocks.Count == 0) return false;
+        int withPrice = allStocks.Count(s => s.LastPrice is > 0);
+        return withPrice > allStocks.Count / 2;
     }
 }

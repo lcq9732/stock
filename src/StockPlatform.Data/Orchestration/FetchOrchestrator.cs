@@ -423,7 +423,7 @@ public class FetchOrchestrator
         progress?.Report($"共 {stocks.Count} 只股票，数据源：{source.Name}，开始抓取（已用时 {FormatElapsed(sw.Elapsed)}）");
         SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, stocks.Select(s => (s.Code, s.Name)));
 
-        await FetchMarketCapAsync(stocks.Select(s => s.Code).ToList(), progress, ct);
+        await FetchMarketCapAsync(source, stocks.Select(s => s.Code).ToList(), progress, ct);
         await FetchNetInflowAsync(stocks.Select(s => s.Code).ToList(), today, exactDayOnly: false, progress, ct);
         await FetchAnnouncementsAsync(
             announcementKeywords, DateOnly.FromDateTime(today.AddDays(-AnnouncementLookbackDaysForFetchAll)),
@@ -509,7 +509,7 @@ public class FetchOrchestrator
         // 流通市值本来就要扫一遍全市场列表，顺带发现的新股（本地列表里还没有的代码）在这里并入
         // 本轮的 stocks——这样"拉取当天"也能当天就把新股纳入K线/资金净流入抓取，不用非得先专门跑
         // 一次"拉取全部"才会发现它（2026-07-10新增，见 FetchMarketCapAsync 的类注释）。
-        var newCodes = await FetchMarketCapAsync(stocks.Select(s => s.Code).ToList(), progress, ct);
+        var newCodes = await FetchMarketCapAsync(source, stocks.Select(s => s.Code).ToList(), progress, ct);
         if (newCodes.Count > 0)
             stocks = stocks.Concat(newCodes).ToList();
 
@@ -1263,7 +1263,7 @@ public class FetchOrchestrator
         }
 
         if (failedMarketCapCodes.Count > 0)
-            await FetchMarketCapAsync(failedMarketCapCodes, progress, ct);
+            await FetchMarketCapAsync(source, failedMarketCapCodes, progress, ct);
 
         if (failedNetInflowCodes.Count > 0)
             await FetchNetInflowAsync(failedNetInflowCodes, DateTime.Today, exactDayOnly: false, progress, ct);
@@ -1616,10 +1616,20 @@ public class FetchOrchestrator
     /// "拉取全部"和"拉取当天"都会跑一遍——"拉取当天"因此也会完整扫一遍全市场列表（只为了刷新
     /// 市值，不影响它K线只抓本地已知股票的行为），用户已确认接受这个额外耗时（2026-07-08）。
     /// 失败按非致命处理——查不到就跳过，不影响本轮K线抓取的其余部分（市值数据缺失只会让
-    /// MidCapPullbackAnalysisEngine 的条件4判不满足，不会导致程序崩溃或影响其他方法）。写入用
+    /// MidCapPullbackAnalysisEngine 的条件4被当作"缺数据"跳过，不会导致程序崩溃或影响其他方法）。写入用
     /// Upsert（主键是 code+metric_key+as_of_date）——同一天内如果跑了不止一次，后面这次会覆盖
     /// 前面那次，只认最后一次抓到的值，不是"当天已经有了就跳过"（比如某天先在盘中跑过一次、收盘
     /// 后又跑了一次，库里最终留下的是收盘后那次更准的值，不会被盘中那次锁住）。
+    ///
+    /// **as_of_date 记的是"这个值属于哪个交易日"，不是"哪天跑的抓取"（2026-08-04改）**：市值接口只给
+    /// "当下"的快照、不带日期，而快照的基准价在盘前/周末/节假日是**上一个交易日的收盘**——以前这里一律
+    /// 写 <c>DateTime.Today</c>，于是周六跑一次就会凭空多出一行"周六的市值"（值其实是周五收盘），
+    /// 盘前跑则把上一交易日的值记到今天名下。实测过的错位样本：2026-07-11(周六)/2026-08-01(周六) 的行
+    /// 是 07-10/07-31 的收盘值，2026-07-23 08:02 那行是 07-22 的收盘值。现在改成
+    /// <see cref="ResolveMarketCapAsOfDateAsync"/> 解析出的交易日，DailyIncrementExporter 按
+    /// <c>as_of_date LIKE 'D%'</c> 导出日增量也因此对齐了（以前周末抓的市值行会漏出增量包）。
+    /// 注意这跟"补指定历史日"的 <c>date</c> 参数无关——接口给不出往年的市值，无论补哪一天，
+    /// 市值刷的都是"当下"那个交易日的快照（补往年的 RunFetchYearAsync 干脆整段跳过市值）。
     ///
     /// 失败追踪（2026-07-09新增）：这是整轮扫描性质的操作，不是逐只单独查，所以"失败"粒度是
     /// "这一轮扫描失败了"——扫描失败时把本轮请求的 <paramref name="codes"/> 全部记进
@@ -1633,7 +1643,7 @@ public class FetchOrchestrator
     /// 净流入抓取——不过"拉取当天"性质上只抓一天，新股不会像"拉取全部"那样自动回补历史，仍然需要
     /// 跑一次"拉取全部"才能补齐历史（这个方法只保证新股"从现在起不再被漏掉"）。
     /// </summary>
-    private async Task<List<(string Code, string Name)>> FetchMarketCapAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct)
+    private async Task<List<(string Code, string Name)>> FetchMarketCapAsync(NamedBarSource source, IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct)
     {
         List<string> failedThisRun;
         var newlyDiscovered = new List<(string Code, string Name)>();
@@ -1642,17 +1652,18 @@ public class FetchOrchestrator
             progress?.Report("正在扫描全市场股票列表以刷新流通市值（顺带发现新股），会比较慢...");
             var result = await _marketCapFetcher.GetMarketCapsAsync(codes, progress, ct);
             var fetchedAt = DateTime.Now;
+            var asOfDate = await ResolveMarketCapAsOfDateAsync(source, result.QuotesAreLive, progress, ct);
             var metrics = result.Entries.Select(e => new FundamentalMetric
             {
                 Code = e.Code,
                 MetricKey = MetricKeys.CirculatingMarketCap,
-                AsOfDate = DateTime.Today,
+                AsOfDate = asOfDate,
                 Value = e.CirculatingMarketCap,
-                Source = "EastMoney",
+                Source = _marketCapFetcher.GetType().Name,
                 FetchedAt = fetchedAt,
             });
             _fundamentalRepository.Upsert(metrics);
-            progress?.Report($"流通市值写入完成，共 {result.Entries.Count} 条");
+            progress?.Report($"流通市值写入完成，共 {result.Entries.Count} 条，归到交易日 {asOfDate:yyyy-MM-dd}");
 
             if (result.NewlyDiscoveredCodes.Count > 0)
             {
@@ -1681,6 +1692,55 @@ public class FetchOrchestrator
         }
 
         return newlyDiscovered;
+    }
+
+    /// <summary>
+    /// 解析"这批流通市值快照属于哪个交易日"（2026-08-04新增，取代原先一律写 <c>DateTime.Today</c>）。
+    ///
+    /// 市值接口只给"当下"的快照且不带日期，所以日期得自己定。两步：
+    /// 1. <paramref name="quotesAreLive"/>==true（扫描时全市场大多数股票都有最新价 → 今天已开盘，见
+    ///    <see cref="MarketCapFetchResult.QuotesAreLive"/>）→ 值就是当日行情，记今天。**盘中跑属于这一档**：
+    ///    日期是对的，只是值还不是收盘价，收盘后再跑一次就会被更准的值覆盖（Upsert 同 as_of_date 覆盖）。
+    /// 2. 否则（盘前、周末、节假日，或该实现给不出这个信号）→ 快照的基准价是**上一个交易日的收盘**，
+    ///    于是去问数据源要上证指数最近几根日线，最新那根的日期就是那个交易日。用指数是因为它不停牌、
+    ///    不退市，永远有最新一根；这样就**不需要在本地维护A股节假日日历**，国庆/春节这种连休也天然处理对
+    ///    （实测：2026-08-04 09:07 盘前请求返回的最新日线是 2026-08-03，正是上一个交易日）。
+    ///
+    /// 刻意用当前选定的 <paramref name="source"/> 而不是固定某一家：本轮K线马上就要用它，能用才跑到这里，
+    /// 不会因为"锚用了另一家、而那家在用户环境里连不上"凭空多一个故障点。
+    ///
+    /// 锚请求失败/返回空时回退到今天并在日志里说明——市值本身已经抓到了，不值得为了日期把整步判失败；
+    /// 回退的后果就是退回改动前的老行为（可能多出一行非交易日的市值），不会丢数据。
+    /// </summary>
+    private async Task<DateTime> ResolveMarketCapAsOfDateAsync(
+        NamedBarSource source, bool? quotesAreLive, IProgress<string>? progress, CancellationToken ct)
+    {
+        var today = DateTime.Today;
+        if (quotesAreLive == true) return today;
+
+        try
+        {
+            // datelen 由 start/end 跨度推出来，给 15 天足够覆盖春节这种最长连休。
+            var (_, bars) = await source.Fetcher.FetchAsync(
+                MarketIndexCatalog.ShanghaiCompositeSymbol, Granularity.Day, today.AddDays(-15), today, ct);
+            var latest = bars.Count > 0 ? bars[^1].PeriodStart.Date : default;
+            if (latest != default && latest <= today)
+            {
+                if (latest != today)
+                    progress?.Report($"当前不在交易时段，流通市值快照归到上一个交易日 {latest:yyyy-MM-dd}");
+                return latest;
+            }
+            progress?.Report($"未能从上证指数日线判断最新交易日（返回 {bars.Count} 根），流通市值按今天记");
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // 用户点了"停止"
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"判断最新交易日失败（不影响市值抓取，按今天记）：{ex.Message}");
+        }
+        return today;
     }
 
     /// <summary>
