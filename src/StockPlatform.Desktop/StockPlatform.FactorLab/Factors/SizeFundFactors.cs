@@ -44,6 +44,34 @@ public sealed class MarginChange20 : IFactor
         });
 }
 
+/// <summary>融资余额占流通市值比例（取负）——杠杆拥挤度。</summary>
+public sealed class LowMarginRatio : IFactor
+{
+    public string Name => "低融资占比";
+    public string Category => "资金";
+    public string Formula => "-(融资余额 / 近似流通市值)";
+    public string Description =>
+        "杠杆资金的拥挤程度。民间说法是'融资占比超10%有风险、5%以内正常'——2026-08-04 用十年数据实测，" +
+        "这个说法**在风险维度上成立、在收益维度上不成立**：占比越高，波动率(5.5%→7.9%)、最差单期" +
+        "(-11%→-20%)、Beta(1.07→1.42) 全部单调上升；市场暴跌的10期里，占比0~3%的组跑赢指数0.6%，" +
+        ">10%的组跑输3.8%——强平螺旋是真的。但**平均收益在各档之间几乎持平**（每20日0.52%~0.66%），" +
+        "所以它本质是**Beta/风险的代理变量，不是alpha来源**：高融资占比的股票就是投机资金偏爱的高弹性品种，" +
+        "涨跌都放大。取负后'低杠杆拥挤'为高分。注意只有两融标的才有值（2016年仅988只、现在约4200只），" +
+        "截面天然偏向大盘股，且早年覆盖太少。";
+    public string Direction => "值越大=融资占比越低（杠杆越不拥挤）";
+    public FactorRole Role => FactorRole.Candidate;
+
+    public double[][] Compute(MarketData md) =>
+        Rolling.Apply(md, 1, (s, t) =>
+        {
+            double bal = md.MarginBalance[s][t];
+            double sh = md.FloatShares[s], c = md.Close[s][t];
+            if (double.IsNaN(bal) || bal <= 0 || double.IsNaN(sh) || double.IsNaN(c) || c <= 0) return double.NaN;
+            double cap = sh * c;
+            return cap > 0 ? -(bal / cap) : double.NaN;
+        });
+}
+
 /// <summary>股东户数环比下降。此前已验证截面基本无效，作为阴性对照。</summary>
 public sealed class HolderShrink : IFactor
 {

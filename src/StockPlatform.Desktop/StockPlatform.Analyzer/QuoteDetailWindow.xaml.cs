@@ -8,6 +8,7 @@ using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using StockPlatform.Analyzer.ViewModels;
+using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
@@ -21,17 +22,23 @@ namespace StockPlatform.Analyzer;
 public partial class QuoteDetailWindow : Window
 {
     private readonly string _code;
+    private readonly string _name;
     private readonly IBarRepository _barRepository;
+    /// <summary>本地数据库文件——"其他数据"按钮要按表直接读十几张表，走
+    /// <see cref="SqliteStockDossierReader"/> 而不是各仓储（原因见那个类的注释），所以这里需要路径。</summary>
+    private readonly string _dbPath;
     private string _granularity = Granularity.Day;
     private QuoteChartResult _chart = new();
 
-    public QuoteDetailWindow(string code, string name, IBarRepository barRepository)
+    public QuoteDetailWindow(string code, string name, IBarRepository barRepository, string dbPath)
     {
         InitializeComponent();
         Loaded += (_, _) => WindowState = WindowState.Maximized;
 
         _code = code;
+        _name = name;
         _barRepository = barRepository;
+        _dbPath = dbPath;
         TitleText.Text = $"{code} {name}";
 
         SetQuoteHeader();
@@ -100,6 +107,31 @@ public partial class QuoteDetailWindow : Window
     {
         foreach (var b in new[] { DayButton, WeekButton, MonthButton })
             b.Background = ReferenceEquals(b, selected) ? new SolidColorBrush(Color.FromRgb(0xCC, 0xE5, 0xFF)) : SystemColors.ControlBrush;
+    }
+
+    /// <summary>"其他数据"——把这只标的在库里除K线之外的所有数据读出来另开窗口展示（见
+    /// <see cref="StockDossierWindow"/>）。放到后台线程读：要扫十几张表，其中 MarginDetail /
+    /// BoardMember / Lhb 的主键最左列都不是股票代码（分别是 trade_date / board_code / trade_date），
+    /// 按代码查是全表扫，在几 GB 的库上可能要一两秒，卡在UI线程上会让窗口假死。</summary>
+    private async void OtherDataButton_Click(object sender, RoutedEventArgs e)
+    {
+        OtherDataButton.IsEnabled = false;
+        var previousCursor = Cursor;
+        Cursor = Cursors.Wait;
+        try
+        {
+            var dossier = await Task.Run(() => new SqliteStockDossierReader(_dbPath).Read(_code, _name));
+            new StockDossierWindow(dossier) { Owner = this }.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"读取其他数据失败：{ex.Message}", "其他数据", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            Cursor = previousCursor;
+            OtherDataButton.IsEnabled = true;
+        }
     }
 
     private void SubIndicatorCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)

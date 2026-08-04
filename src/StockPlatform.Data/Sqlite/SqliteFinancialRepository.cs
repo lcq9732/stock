@@ -1,11 +1,12 @@
 using Microsoft.Data.Sqlite;
+using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Data.Sqlite;
 
 /// <summary>FinancialReport 表（财务报表关键科目）的存取。每次抓取返回该股全部历史，整体覆盖
 /// （DELETE+INSERT，与股东数据的 ReplaceByCode 同一套语义）。</summary>
-public class SqliteFinancialRepository
+public class SqliteFinancialRepository : IFinancialRepository
 {
     private readonly string _connectionString;
 
@@ -59,6 +60,35 @@ public class SqliteFinancialRepository
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
+    }
+
+    public Dictionary<string, FinancialSnapshot> GetLatestSnapshotByCode()
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        // 每只股票只取它自己最新那一期的全部科目——相关子查询在 (code, report_date) 主键上走索引，
+        // 比把 268 万行全拉回内存再筛快得多。
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT f.code, f.report_date, f.metric_key, f.value
+            FROM FinancialReport f
+            WHERE f.report_date = (SELECT MAX(report_date) FROM FinancialReport WHERE code = f.code);
+            """;
+        var result = new Dictionary<string, FinancialSnapshot>(StringComparer.Ordinal);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var code = reader.GetString(0);
+            if (!result.TryGetValue(code, out var snap))
+            {
+                snap = new FinancialSnapshot { ReportDate = DateTime.Parse(reader.GetString(1)) };
+                result[code] = snap;
+            }
+            if (!reader.IsDBNull(3)) snap.Values[reader.GetString(2)] = reader.GetDouble(3);
+        }
+        return result;
     }
 
     /// <summary>每个代码本地最新的报告期——给"按报告期跳过"的增量逻辑用（财报一季度才变一次，

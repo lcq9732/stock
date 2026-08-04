@@ -81,6 +81,31 @@ public class WatchlistEntry
     /// <summary>手动录入的卖出价——见 <see cref="SellDate"/>。</summary>
     public double? SellPrice { get; set; }
 
+    /// <summary>是否放进"我的交易池"（2026-07-31新增）——把两种用途分开：各选股方法丢进自选的票默认
+    /// 只是**算法验证样本**（用来统计各方法的准确率，见晨检的方法过滤器），不代表我要买；勾上这个才
+    /// 表示"这只我打算买/卖、请每天盯着它"。每日晨检默认只体检交易池里的票。
+    ///
+    /// "显式加入"标记。</summary>
+    public bool InTradePool { get; set; }
+
+    /// <summary>"显式移出"标记（2026-07-31新增，为了让已平仓的能移出交易池）。
+    ///
+    /// 为什么不把 <see cref="InTradePool"/> 改成 bool? 用 null/false 区分"没设置过"和"移出过"：因为库里
+    /// 已经存在的记录早就被写成了显式 <c>false</c>（那是加上这个字段时的默认值，不是用户的决定），
+    /// 再用 false 表示"移出过"会把历史上的持仓/已平仓记录误判成"用户主动移出"、让它们凭空从交易池
+    /// 消失。单独加一个新字段就没有这种歧义：老数据里没有它 → 反序列化为 false → 一切照旧。</summary>
+    public bool RemovedFromPool { get; set; }
+
+    /// <summary>实际是否属于交易池：
+    /// ① **未平仓的持仓**（填了买入价、还没填卖出价）恒为真——钱还在里面就必须每天盯，移不出去；
+    /// ② 否则：没被显式移出，且（显式加入过 或 有买入记录）。
+    /// 已平仓（买入价+卖出价都有）落在②：默认仍留在池里当交易留痕，但**允许显式移出**——那笔交易
+    /// 已经结束，没道理继续占着每天要看的清单。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsInTradePool =>
+        (BuyPrice is > 0 && SellPrice is not (> 0))
+        || (!RemovedFromPool && (InTradePool || BuyPrice is > 0));
+
     public int SatisfiedCount { get; set; }
     public int TotalCount { get; set; }
 

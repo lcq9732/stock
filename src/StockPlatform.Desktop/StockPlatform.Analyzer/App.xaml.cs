@@ -25,8 +25,12 @@ public partial class App : Application
         shareholderRepository.EnsureSchema();
         var marginRepository = new SqliteMarginRepository(paths.TotalDb);
         marginRepository.EnsureSchema();
+        var financialRepository = new SqliteFinancialRepository(paths.TotalDb);
+        financialRepository.EnsureSchema();
+        var dividendRepository = new SqliteDividendRepository(paths.TotalDb);
+        dividendRepository.EnsureSchema();
 
-        var viewModel = new MainViewModel(paths, barRepository, fundamentalRepository, netInflowRepository, boardRepository, shareholderRepository, marginRepository);
+        var viewModel = new MainViewModel(paths, barRepository, fundamentalRepository, netInflowRepository, boardRepository, shareholderRepository, marginRepository, financialRepository, dividendRepository);
         var window = new MainWindow { DataContext = viewModel };
         window.Show();
     }

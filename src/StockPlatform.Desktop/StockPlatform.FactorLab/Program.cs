@@ -28,6 +28,13 @@ public static class Program
             ? (Path.IsPathRooted(args[1]) ? args[1] : Path.Combine(publishDir ?? ".", args[1]))
             : Path.Combine(publishDir ?? ".", "factorlab-output");
 
+        // 第3个参数=持有期（交易日），默认5。基本面因子是季度级慢信号，用 20 评估才公平（见 Config.HoldDays）。
+        if (args.Length > 2 && int.TryParse(args[2], out var holdDays) && holdDays >= 1 && holdDays <= 60)
+        {
+            Config.HoldDays = holdDays;
+            Console.WriteLine($"持有期改为 {holdDays} 个交易日（默认5）——注意与默认持有期的结果不可比。");
+        }
+
         var sw = Stopwatch.StartNew();
         Console.WriteLine($"数据库：{dbPath}");
         var md = MarketData.Load(dbPath, msg => Console.WriteLine($"  [{sw.Elapsed.TotalSeconds,6:0.0}s] {msg}"));
@@ -50,21 +57,28 @@ public static class Program
 
         var compEq = CompositeFactor.Build("合成-等权", icirWeighted: false, results, dedup, md, shared);
         var compIcir = CompositeFactor.Build("合成-ICIR加权", icirWeighted: true, results, dedup, md, shared);
+        var compStyle = CompositeFactor.Build("合成-风格均衡", icirWeighted: true, results, dedup, md, shared, styleBalanced: true);
         results.Add(Evaluator.Evaluate(compEq, md, shared));
         var compIcirResult = Evaluator.Evaluate(compIcir, md, shared);
         results.Add(compIcirResult);
-        Console.WriteLine($"  [{sw.Elapsed.TotalSeconds,6:0.0}s] 合成因子完成（成分 {compIcir.Components.Count} 个）");
+        var compStyleResult = Evaluator.Evaluate(compStyle, md, shared);
+        results.Add(compStyleResult);
+        Console.WriteLine($"  [{sw.Elapsed.TotalSeconds,6:0.0}s] 合成因子完成（成分 {compIcir.Components.Count} 个，另含风格均衡版）");
 
         Console.WriteLine($"  [{sw.Elapsed.TotalSeconds,6:0.0}s] 全量相关性矩阵…");
         var corr = Evaluator.CorrelationMatrix(results, shared);
 
-        // 组合回测：ICIR加权合成为主策略，叠加 MA60 指数择时
+        // 组合回测：三个合成版本各跑一遍，直接对比哪种合成方式更适合实盘
         var portfolios = new List<PortfolioResult>
         {
-            Portfolio.Run(results[^2], md, shared), // 合成-等权
+            Portfolio.Run(results[^3], md, shared), // 合成-等权
             Portfolio.Run(compIcirResult, md, shared),
+            Portfolio.Run(compStyleResult, md, shared),
         };
 
+        // 最新名单用 ICIR加权版——三者样本内外都接近（IC内 0.109~0.114），但它样本内IC/组合夏普都最高，
+        // 且 2026-08-03 的三方对比里风格均衡版全期年化反而最低（+4.4% vs +5.8%/+6.5%），
+        // 没有证据支持"风格均衡更好"，就不拿它当默认。三个版本的组合曲线都在 portfolio.csv 里可对比。
         Report.WriteAll(outDir, md, shared, results, corr, dedup, portfolios, (compIcir, compIcirResult));
         Console.WriteLine($"\n[{sw.Elapsed.TotalSeconds:0.0}s] 完成。明细与因子手册见：{Path.GetFullPath(outDir)}");
         return 0;

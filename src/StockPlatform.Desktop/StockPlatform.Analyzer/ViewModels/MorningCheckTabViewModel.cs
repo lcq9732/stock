@@ -65,8 +65,8 @@ public class IndexLightRowViewModel
 /// ③ 跌破自身MA60 → 趋势转弱不加仓；④ 最新股东户数环比暴增(>+20%) → 筹码分散警示。
 /// 多条同时命中时全部列出，颜色取最severe的一条。
 ///
-/// "持仓 vs 观察"（2026-07-29新增）：自选股Tab里手动填了买入价的算真实持仓——基准=买入价/买入日，
-/// 止损/止盈纪律生效，有股数还给出盈亏金额；没填的只是观察中——基准=自选价/自选日，止损/止盈
+/// "持仓 vs 待买"（2026-07-29新增）：自选股Tab里手动填了买入价的算真实持仓——基准=买入价/买入日，
+/// 止损/止盈纪律生效，有股数还给出盈亏金额；没填的只是待买——基准=自选价/自选日，止损/止盈
 /// 不触发（没持有就没什么可减仓的），只做趋势/筹码提示。
 /// </summary>
 public class MorningStockRowViewModel
@@ -85,13 +85,13 @@ public class MorningStockRowViewModel
     public string Ma60Text { get; private set; } = "—";
     public string SincePickText { get; private set; } = "—";
     public Brush SincePickColor { get; private set; } = Brushes.Gray;
-    /// <summary>"较基准涨跌"的数值形式（持仓=较买入价，观察=较自选日收盘）——给汇总里"该方法整体
+    /// <summary>"较基准涨跌"的数值形式（持仓=较买入价，待买=较自选日收盘）——给汇总里"该方法整体
     /// 平均涨跌/胜率"用，方法过滤后这几个数字就是各选股方法的横向对比口径。</summary>
     public double? SinceBasisPct { get; private set; }
     public string DrawdownText { get; private set; } = "—";
     public string PnlText { get; private set; } = "—";
     public Brush PnlColor { get; private set; } = Brushes.Gray;
-    /// <summary>纪律参考价——持仓：止损线(买入后最高收盘×0.85)和止盈线(买入价×1.5)；观察：参考
+    /// <summary>纪律参考价——持仓：止损线(买入后最高收盘×0.85)和止盈线(买入价×1.5)；待买：参考
     /// 买点(线下=站上MA60的价位、线上=回踩MA20位置)。机械推导自回测过的纪律，不是预测。</summary>
     public string AdviceText { get; private set; } = "—";
     public string HolderChangeText { get; private set; } = "—";
@@ -101,7 +101,7 @@ public class MorningStockRowViewModel
     /// <summary>是否真实持仓中（填过买入价且还没填卖出价）——止损/止盈纪律只对它生效。</summary>
     public bool IsHolding { get; }
 
-    /// <summary>是否已平仓（买入价、卖出价都填了）——交易已结束，回到观察语义，但状态列单独标出，
+    /// <summary>是否已平仓（买入价、卖出价都填了）——交易已结束，回到待买语义，但状态列单独标出，
     /// 持仓盈亏列显示最终已实现结果，作为交易留痕。</summary>
     public bool IsClosed { get; }
 
@@ -124,7 +124,7 @@ public class MorningStockRowViewModel
         IsHolding = entry.BuyPrice is > 0 && !IsClosed;
         (StatusText, StatusColor) = IsHolding ? ("持仓", (Brush)Brushes.Firebrick)
                                   : IsClosed ? ("已平仓", Brushes.SteelBlue)
-                                  : ("观察", Brushes.Gray);
+                                  : ("待买", Brushes.Gray);   // 在交易池里但还没填买入价=打算买、还没买
         var basisDate = IsHolding ? (entry.BuyDate ?? entry.DataDate) : entry.DataDate;
         DataDate = basisDate.ToString("yyyy-MM-dd") + (IsHolding ? "买" : "");
         Compute(entry, basisDate, barRepository, shareholderRepository);
@@ -225,7 +225,7 @@ public class MorningStockRowViewModel
         }
 
         var actions = new List<string>();
-        // 止损/止盈只对真实持仓生效——观察仓没有可卖的仓位，跌破也只是"这次选中失效"，不发操作指令。
+        // 止损/止盈只对真实持仓生效——待买的票没有可卖的仓位，跌破也只是"这次选中失效"，不发操作指令。
         if (IsHolding && drawdownPct <= -15) { actions.Add($"止损纪律：距买入后高点回撤{-drawdownPct:F0}%，减仓/清仓并复核逻辑"); Severity = Math.Min(Severity, 0); }
         if (IsHolding && sinceBasisPct >= 50) { actions.Add($"止盈纪律：较买入价+{sinceBasisPct:F0}%，减仓1/3锁定利润"); Severity = Math.Min(Severity, 1); }
         if (holderChgPct > 20) { actions.Add($"筹码警示：户数环比+{holderChgPct:F0}%，散户涌入"); Severity = Math.Min(Severity, 2); }
@@ -233,7 +233,7 @@ public class MorningStockRowViewModel
 
         if (actions.Count == 0)
         {
-            ActionText = IsHolding ? "✓ 正常，继续持有" : "✓ 正常，继续观察";
+            ActionText = IsHolding ? "✓ 正常，继续持有" : "✓ 正常，等买点";
             ActionColor = Brushes.SeaGreen;
         }
         else
@@ -346,19 +346,21 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             "   · 只有一个线上 → 半开：谨慎、轻仓\n" +
             "   · 都线下 → 关闭：不建新仓、逐步降仓，等重新站上再回来\n" +
             "   回测：创业板指3年 +82% vs 买入持有 +50%，最大回撤 -20% vs -32%\n\n" +
-            "二、自选股逐只体检（按严重度排序；持仓排在观察前面）\n" +
-            "   持仓 / 观察 / 已平仓：在自选股Tab给某只票填了\"买入价\"就算真实持仓（基准=买入价/买入日，\n" +
-            "   有股数还显示盈亏金额）；没填=观察仓（基准=自选价/自选日，止损止盈不触发）；\n" +
+            "二、交易池逐只体检（按严重度排序；持仓排在待买前面）\n" +
+            "   ★ 只体检\"我的交易\"页里的票——各选股方法丢进\"自选股\"的只是算法验证样本、不会进这里。\n" +
+            "     要盯某只票：\"自选股\"页勾选→\"加入交易池\"，或\"查询\"页搜到→\"加入交易池\"。\n" +
+            "   持仓 / 待买 / 已平仓：在\"我的交易\"页给某只票填了\"买入价\"就算真实持仓（基准=买入价/买入日，\n" +
+            "   有股数还显示盈亏金额）；没填=待买（基准=自选价/自选日，止损止盈不触发）；\n" +
             "   买入价+卖出价都填了=已平仓（显示最终已实现盈亏，作为交易留痕沉淀，供复盘纪律执行情况）。\n" +
             "   参考价列：持仓给建议卖出价=止损线(买入后最高收盘×0.85)和止盈线(买入价×1.5)；\n" +
-            "   观察给建议买入价=线下为\"站上60日线的价位\"、线上为\"回踩MA20位置\"。这些是纪律的机械\n" +
+            "   待买给建议买入价=线下为\"站上60日线的价位\"、线上为\"回踩MA20位置\"。这些是纪律的机械\n" +
             "   换算（把触发条件翻译成价格），不是对股价的预测。\n" +
             "   1. 止损纪律[仅持仓]：距买入后最高收盘回撤≥15% → 减仓/清仓并复核逻辑\n" +
             "      （只适用于个股/集中持仓；对指数、分散组合用MA60退出，别用固定止损）\n" +
             "   2. 止盈纪律[仅持仓]：较买入价涨幅≥50% → 减仓1/3锁定利润\n" +
             "   3. 筹码警示：最新股东户数环比>+20% → 散户涌入，几乎每期回测垫底组\n" +
             "      （户数只用于排雷，不用于选股——检验显示\"户数下降\"没有选股超额）\n" +
-            "   4. 趋势弱：收盘在自身60日线下 → 持仓不加仓 / 观察暂不买入（月均落后线上组0.6pp）\n\n" +
+            "   4. 趋势弱：收盘在自身60日线下 → 持仓不加仓 / 待买暂不买入（月均落后线上组0.6pp）\n\n" +
             "三、使用节奏\n" +
             "   每天早上开盘前：先\"从服务端更新数据\"，再看本Tab → 按\"今日行动建议\"执行。\n" +
             "   规则参数（MA60/15%/50%/20%）为回测原值，请勿为了历史好看微调——那是过拟合。\n" +
@@ -403,7 +405,9 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         // 同一只票可能被多个方法各加过一条自选记录——按股票去重，一只票只体检/列出一次：
         // 填过买入价（真实持仓）的记录优先作基准（止损/止盈要按真实成本算），否则用最早那条
         // 记录（最早的峰值最高，止损触发最保守）；方法列合并展示所有来源。
-        var entries = _watchlistStore.Load();
+        // 只体检"我的交易"池里的票（2026-07-31起）——各选股方法丢进自选的是"算法验证样本"，不代表
+        // 我要买；每天早上要盯的只是打算买卖的那一小撮。交易池的维护在"我的交易"Tab。
+        var entries = _watchlistStore.Load().Where(e => e.IsInTradePool).ToList();
         _entryCount = entries.Count;
         _allRows.Clear();
         _allRows.AddRange(entries
@@ -417,7 +421,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
                 var methods = g.Select(e => e.Method).Distinct().ToList();
                 return new MorningStockRowViewModel(basis, methods, _barRepository, _shareholderRepository);
             })
-            .OrderByDescending(r => r.IsHolding)   // 持仓排在观察前面——真金白银的先看
+            .OrderByDescending(r => r.IsHolding)   // 持仓排在待买前面——真金白银的先看
             .ThenBy(r => r.Severity).ThenBy(r => r.Code));
 
         RebuildMethodFilters();
@@ -473,8 +477,9 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         if (rows.Count == 0)
         {
             sb.AppendLine(methodFilter == null
-                ? "2) 自选股为空——先在各选股Tab里勾选\"加入自选\"，晨检会每天逐只体检。"
-                : $"2) 【仅方法：{methodFilter}】该方法名下暂无自选股——把方法列表头的下拉切回\"全部方法\"看全部。");
+                ? "2) 交易池为空——晨检只体检\"我的交易\"页里的票（打算买卖的那些）。去\"自选股\"页勾选后点\"加入交易池\"，" +
+                  "或在\"查询\"页搜到后点\"加入交易池\"；各方法丢进自选的票只是算法验证样本，不会自动进来。"
+                : $"2) 【仅方法：{methodFilter}】交易池里没有该方法来源的票——把方法列表头的下拉切回\"全部方法\"看全部。");
         }
         else
         {
@@ -488,11 +493,11 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             var closed = rows.Where(r => r.IsClosed).Select(r => $"{r.Name}({r.RealizedText})").ToList();
             int holding = rows.Count(r => r.IsHolding);
             // 去重说明只在"全部方法 + 真有重复记录"时展示：过滤后拿总记录数跟子集比是没有意义的。
-            var dedupNote = methodFilter == null && entryCount != rows.Count ? $"，{entryCount} 条自选记录按股票去重" : "";
+            var dedupNote = methodFilter == null && entryCount != rows.Count ? $"，{entryCount} 条记录按股票去重" : "";
             var filterNote = methodFilter == null ? "" : $"【仅方法：{methodFilter}】";
-            sb.AppendLine($"2) {filterNote}自选股 {rows.Count} 只体检结果（持仓 {holding} 只 / 观察 {rows.Count - holding - closed.Count} 只 / 已平仓 {closed.Count} 只{dedupNote}）：");
+            sb.AppendLine($"2) {filterNote}交易池 {rows.Count} 只体检结果（持仓 {holding} 只 / 待买 {rows.Count - holding - closed.Count} 只 / 已平仓 {closed.Count} 只{dedupNote}）：");
 
-            // 方法横向对比用的整体口径：平均"较基准涨跌"+上涨占比（持仓算较买入价、观察算较自选日收盘）。
+            // 方法横向对比用的整体口径：平均"较基准涨跌"+上涨占比（持仓算较买入价、待买算较自选日收盘）。
             var pcts = rows.Where(r => r.SinceBasisPct.HasValue).Select(r => r.SinceBasisPct!.Value).ToList();
             if (pcts.Count > 0)
             {
@@ -505,11 +510,11 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             if (trim.Count > 0) sb.AppendLine($"   · [持仓]触发+50%止盈减仓：{string.Join("、", trim)}");
             if (chip.Count > 0) sb.AppendLine($"   · 股东户数暴增警示：{string.Join("、", chip)}");
             if (weakHold.Count > 0) sb.AppendLine($"   · [持仓]60日线下不加仓：{string.Join("、", weakHold)}");
-            if (weakWatch.Count > 0) sb.AppendLine($"   · [观察]60日线下暂不买入：{string.Join("、", weakWatch)}");
+            if (weakWatch.Count > 0) sb.AppendLine($"   · [待买]60日线下暂不买入：{string.Join("、", weakWatch)}");
             if (okHold.Count > 0) sb.AppendLine($"   · [持仓]正常继续持有：{string.Join("、", okHold)}");
-            if (okWatch.Count > 0) sb.AppendLine($"   · [观察]正常（开关重开后优先买入候选）：{string.Join("、", okWatch)}");
+            if (okWatch.Count > 0) sb.AppendLine($"   · [待买]正常（开关重开后优先下手）：{string.Join("、", okWatch)}");
             if (closed.Count > 0) sb.AppendLine($"   · 已平仓交易留痕：{string.Join("、", closed)}");
-            if (holding == 0) sb.AppendLine("   （提示：买入后到自选股Tab把买入日期/买入价/股数填上，止损止盈就按你的真实成本盯）");
+            if (holding == 0) sb.AppendLine("   （提示：买入后到“我的交易”页把买入日期/买入价/股数填上，止损止盈就按你的真实成本盯）");
         }
 
         sb.Append("3) 纪律提醒：止损/止盈今天就执行，不等\"再看一天\"；参数不微调；每季度重新回测一次规则。");

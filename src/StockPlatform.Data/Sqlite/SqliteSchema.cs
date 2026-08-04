@@ -160,6 +160,14 @@ public static class SqliteSchema
                 PRIMARY KEY (code, report_date, metric_key)
             );
 
+            CREATE TABLE IF NOT EXISTS StockIndustry (
+                code TEXT PRIMARY KEY,      -- 6位股票代码
+                class_code TEXT,            -- 证监会门类代码 A~S（两所官网，覆盖沪深全部）
+                class_name TEXT,            -- 门类名称，如"制造业"（太粗，仅作兜底）
+                major_name TEXT,            -- 证监会大类名称，如"汽车制造业"（新浪，约覆盖58%）
+                fetched_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS MarginDetail (
                 trade_date TEXT NOT NULL,   -- 交易日
                 code TEXT NOT NULL,         -- 6位标的代码

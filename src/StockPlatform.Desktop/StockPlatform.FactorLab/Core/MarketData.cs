@@ -38,8 +38,10 @@ public sealed class MarketData
     /// "按当前股本折算的历史市值"——用后复权序列时这个折算是正确的（比值即真实涨跌），但**忽略了
     /// 期间的股本变动**（增发/送转），窗口越长偏差越大，见因子手册的局限说明。无数据为 NaN。</summary>
     public required double[] FloatShares { get; init; }
-    /// <summary>行业编号（Board board_type=1，多归属取第一个）。-1=无行业数据（覆盖率约46%，中性化时单独一组）。</summary>
+    /// <summary>行业编号（证监会分类：大类优先、门类兜底；老库退回板块表）。-1=无行业数据，中性化时单独一组。</summary>
     public required int[] Industry { get; init; }
+    /// <summary>行业名称（与 <see cref="Industry"/> 同源，供界面展示）。没有则空字符串。</summary>
+    public required string[] IndustryName { get; init; }
     /// <summary>上证指数收盘价（按交易日历对齐），用于 MA 择时。</summary>
     public required double[] IndexClose { get; init; }
     /// <summary>真实价格（前复权日线的收盘，最新日=实际成交价），只用于名单展示，不参与任何计算。</summary>
@@ -47,6 +49,18 @@ public sealed class MarketData
     /// <summary>本次用的是不是后复权数据。false 表示库里还没有 day_hfq、降级用了前复权，
     /// 长周期收益率不可信，报告里必须显著标注。</summary>
     public required bool UsingHfq { get; init; }
+    /// <summary>主力净流入（元，正=净流入）。2026-08-03：这张表补齐到十年了（原来只有3个月，是当初
+    /// 没做资金流因子的唯一原因），现在可以做。非交易日/无数据为 NaN。</summary>
+    public required double[][] NetInflow { get; init; }
+    /// <summary>每股票按除权日升序的现金分红（除权日下标, 每股派息元）。只含"实施"且有除权日的方案。</summary>
+    public required (int ExIdx, double PerShare)[][] Dividends { get; init; }
+    /// <summary>每股票按可用日升序的十大流通股东合计持股占比(%)。可用日折算同财报（法定披露截止日）。</summary>
+    public required (int AvailIdx, double Ratio)[][] TopHolderRatio { get; init; }
+    /// <summary>北向（陆股通）持股占流通股比例(%)——十大流通股东里"香港中央结算有限公司"那一行。
+    /// 2026-08-04：库里没有独立的北向表，但这个持有人就是陆股通的名义持有人，等价可用。
+    /// ⚠️ 只有当北向持股大到能进前十大时才看得见，所以是**截断观测**：看不见≠没有，只是不足前十大。</summary>
+    public required (int AvailIdx, double Ratio)[][] NorthboundRatio { get; init; }
+
     /// <summary>每股票按报告期升序的财务季度记录（基本面因子用）。库里没抓过财报时全为空数组。
     /// AvailIdx=按法定披露截止日（一季报4-30/半年报8-31/三季报10-31/年报次年4-30）折算的可用交易日下标
     /// ——数据源没有公告日，用法定截止日是保守估计（宁可信号晚到、不可前视）。</summary>
@@ -262,29 +276,64 @@ public sealed class MarketData
         }
         log($"流通股本近似值覆盖 {floatShares.Count(x => !double.IsNaN(x))} 只");
 
-        // 7) 行业归属（board_type=1；覆盖率约46%，无归属为-1）
+        // 7) 行业归属（中性化用）。优先 StockIndustry 表（证监会分类：大类优先、门类兜底，
+        //    2026-08-04 新增，沪深全覆盖）；老库没有这张表时退回板块表（board_type=1，仅约44%覆盖，
+        //    其余全挤在一个"未知"组里，中性化基本失效——这正是加 StockIndustry 的原因）。
         var industry = new int[nS];
         Array.Fill(industry, -1);
+        var industryName = new string[nS];
+        Array.Fill(industryName, "");
         int industryCount = 0;
-        using (var cmd = conn.CreateCommand())
+        var groupIds = new Dictionary<string, int>(StringComparer.Ordinal);
+        bool hasIndustryTable;
+        using (var check = conn.CreateCommand())
         {
+            check.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='StockIndustry'";
+            hasIndustryTable = check.ExecuteScalar() != null;
+        }
+        if (hasIndustryTable)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT code, class_name, major_name FROM StockIndustry";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (!codeIndex.TryGetValue(r.GetString(0), out int s)) continue;
+                var major = r.IsDBNull(2) ? "" : r.GetString(2);
+                var cls = r.IsDBNull(1) ? "" : r.GetString(1);
+                var best = major.Length > 0 ? major : cls;
+                if (best.Length == 0) continue;
+                if (!groupIds.TryGetValue(best, out int id)) groupIds[best] = id = groupIds.Count;
+                industry[s] = id;
+                industryName[s] = best;
+                industryCount++;
+            }
+        }
+        if (industryCount == 0)
+        {
+            using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT bm.stock_code, MIN(bm.board_code) FROM BoardMember bm
                 JOIN Board b ON bm.board_code = b.board_code
                 WHERE b.board_type = 1 GROUP BY bm.stock_code
                 """;
-            var boardIds = new Dictionary<string, int>();
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
                 if (!codeIndex.TryGetValue(r.GetString(0), out int s)) continue;
                 var board = r.GetString(1);
-                if (!boardIds.TryGetValue(board, out int id)) boardIds[board] = id = boardIds.Count;
+                if (!groupIds.TryGetValue(board, out int id)) groupIds[board] = id = groupIds.Count;
                 industry[s] = id;
+                industryName[s] = board;
                 industryCount++;
             }
+            log($"⚠ 未找到 StockIndustry 表，退回板块表：行业覆盖 {industryCount} 只（{groupIds.Count} 个组）"
+                + "——覆盖不足会让中性IC失真，建议在 Fetcher 跑一次\"拉取行业分类\"");
         }
-        log($"行业归属覆盖 {industryCount} 只");
+        else
+        {
+            log($"行业归属覆盖 {industryCount} 只（{groupIds.Count} 个行业，证监会分类：大类优先/门类兜底）");
+        }
 
         // 8) 龙虎榜上榜标记
         var lhb = new bool[nS][];
@@ -393,6 +442,122 @@ public sealed class MarketData
             }
         }
 
+        // 11) 主力净流入（2026-08-03：已补齐十年，可做资金流因子）
+        var netInflow = Alloc();
+        long niRows = 0;
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT code, period_start, main_net_inflow FROM NetInflow WHERE main_net_inflow IS NOT NULL";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (!codeIndex.TryGetValue(r.GetString(0), out int s)) continue;
+                if (!DateOnly.TryParse(r.GetString(1)[..10], out var d) || !dateIndex.TryGetValue(d, out int t)) continue;
+                netInflow[s][t] = r.GetDouble(2);
+                niRows++;
+            }
+        }
+        log($"主力净流入 {niRows:N0} 条");
+
+        // 12) 现金分红（只取"实施"且有除权日的；派息字段是每10股，这里换算成每股）
+        var divRaw = new Dictionary<int, List<(int, double)>>();
+        using (var check = conn.CreateCommand())
+        {
+            check.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='Dividend'";
+            if (check.ExecuteScalar() != null)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    SELECT code, ex_date, dividend_yuan FROM Dividend
+                    WHERE progress='实施' AND dividend_yuan > 0 AND ex_date IS NOT NULL AND ex_date <> ''
+                    """;
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    if (!codeIndex.TryGetValue(r.GetString(0), out int s)) continue;
+                    if (!DateOnly.TryParse(r.GetString(1)[..10], out var d)) continue;
+                    if (d > dates[^1]) continue;
+                    int idx = d < dates[0] ? 0 : LowerBound(dates, d);
+                    if (!divRaw.TryGetValue(s, out var list)) divRaw[s] = list = [];
+                    list.Add((idx, r.GetDouble(2) / 10.0)); // 每10股 → 每股
+                }
+            }
+        }
+        var dividends = new (int, double)[nS][];
+        for (int s = 0; s < nS; s++)
+            dividends[s] = divRaw.TryGetValue(s, out var l) ? l.OrderBy(x => x.Item1).ToArray() : [];
+        log($"现金分红覆盖 {divRaw.Count} 只");
+
+        // 13) 十大流通股东：合计持股占比 + 北向（陆股通）持股占比（可用日折算同财报：法定披露截止日）
+        var thRaw = new Dictionary<int, Dictionary<DateOnly, double>>();
+        var nbRaw = new Dictionary<int, Dictionary<DateOnly, double>>();
+        using (var check = conn.CreateCommand())
+        {
+            check.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name='TopShareholder'";
+            if (check.ExecuteScalar() != null)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    SELECT code, report_date, SUM(ratio) FROM TopShareholder
+                    WHERE kind='float' AND ratio IS NOT NULL AND report_date >= '2015-01-01'
+                    GROUP BY code, report_date
+                    """;
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    if (!codeIndex.TryGetValue(r.GetString(0), out int s)) continue;
+                    if (!DateOnly.TryParse(r.GetString(1)[..10], out var d)) continue;
+                    if (!thRaw.TryGetValue(s, out var m)) thRaw[s] = m = [];
+                    m[d] = r.GetDouble(2);
+                }
+
+                // 北向：持有人是"香港中央结算有限公司"（陆股通的名义持有人）。注意要排除
+                // "香港中央结算(代理人)有限公司"——那是H股的名义持有人，不是陆股通。
+                using var nb = conn.CreateCommand();
+                nb.CommandText = """
+                    SELECT code, report_date, SUM(ratio) FROM TopShareholder
+                    WHERE kind='float' AND ratio IS NOT NULL AND report_date >= '2015-01-01'
+                      AND holder_name LIKE '%香港中央结算%' AND holder_name NOT LIKE '%代理人%'
+                    GROUP BY code, report_date
+                    """;
+                using var rn = nb.ExecuteReader();
+                while (rn.Read())
+                {
+                    if (!codeIndex.TryGetValue(rn.GetString(0), out int s)) continue;
+                    if (!DateOnly.TryParse(rn.GetString(1)[..10], out var d)) continue;
+                    if (!nbRaw.TryGetValue(s, out var m)) nbRaw[s] = m = [];
+                    m[d] = rn.GetDouble(2);
+                }
+            }
+        }
+        static DateOnly ReportDeadline(DateOnly report) => report.Month switch
+        {
+            3 => new DateOnly(report.Year, 4, 30),
+            6 => new DateOnly(report.Year, 8, 31),
+            9 => new DateOnly(report.Year, 10, 31),
+            _ => new DateOnly(report.Year + 1, 4, 30),
+        };
+        (int, double)[][] ToAvailSeries(Dictionary<int, Dictionary<DateOnly, double>> raw)
+        {
+            var arr = new (int, double)[nS][];
+            for (int s = 0; s < nS; s++) arr[s] = [];
+            foreach (var (s, m) in raw)
+            {
+                var seq = new List<(int, double)>();
+                foreach (var (d, ratio) in m.OrderBy(kv => kv.Key))
+                {
+                    var dl = ReportDeadline(d);
+                    if (dl > dates[^1]) continue;
+                    seq.Add((dl < dates[0] ? 0 : LowerBound(dates, dl), ratio));
+                }
+                if (seq.Count > 0) arr[s] = seq.OrderBy(x => x.Item1).ToArray();
+            }
+            return arr;
+        }
+        var topHolder = ToAvailSeries(thRaw);
+        var northbound = ToAvailSeries(nbRaw);
+        log($"十大流通股东覆盖 {thRaw.Count} 只；其中北向(陆股通)持股可见 {nbRaw.Count} 只");
+
         // ST/退市标记按"当前名称"判断（无历史更名数据）；"退"覆盖退市整理期的 XX退/退市XX 命名
         var isSt = names.Select(n => n.Contains("ST", StringComparison.OrdinalIgnoreCase) || n.Contains('退')).ToArray();
 
@@ -402,9 +567,10 @@ public sealed class MarketData
             IsSt = isSt, FirstBarIdx = firstBar, LastBarIdx = lastBar, IsDelisted = isDelisted,
             Open = open, Close = close, High = high, Low = low, Amount = amount, Turnover = turnover,
             MarginBalance = margin, HolderChg = holderChg, FloatShares = floatShares,
-            Industry = industry, LhbFlag = lhb, IndexClose = indexClose,
+            Industry = industry, IndustryName = industryName, LhbFlag = lhb, IndexClose = indexClose,
             DisplayClose = displayClose, UsingHfq = usingHfq, DirtyBarsDropped = dirty,
-            Financials = financials,
+            Financials = financials, NetInflow = netInflow, Dividends = dividends, TopHolderRatio = topHolder,
+            NorthboundRatio = northbound,
         };
     }
 

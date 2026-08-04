@@ -77,6 +77,31 @@ public class JsonWatchlistStore
         }
     }
 
+    /// <summary>把若干条自选加入/移出"我的交易池"（2026-07-31新增）——交易池是"我打算买卖、要每天盯"的
+    /// 那一小撮，跟"算法验证样本"分开（见 <see cref="WatchlistEntry.InTradePool"/>）。返回实际改动的条数。
+    /// 移出时不清空买卖信息（交易记录要留痕）：**未平仓的持仓**移不出去（<see cref="WatchlistEntry.IsInTradePool"/>
+    /// 恒为真），要移出得先清掉买入信息；已平仓的可以正常移出。</summary>
+    public int SetTradePool(IEnumerable<Guid> ids, bool inPool)
+    {
+        lock (_fileLock)
+        {
+            var idSet = ids.ToHashSet();
+            var all = LoadUnlocked();
+            int changed = 0;
+            foreach (var e in all.Where(e => idSet.Contains(e.Id)))
+            {
+                // 两个标记一起写，保证"加入↔移出"可以来回切：加入=显式加入+清掉移出标记；
+                // 移出=打上移出标记+清掉加入标记（见 WatchlistEntry.IsInTradePool 的判定）。
+                var before = e.IsInTradePool;
+                e.InTradePool = inPool;
+                e.RemovedFromPool = !inPool;
+                if (e.IsInTradePool != before) changed++;
+            }
+            Save(all);
+            return changed;
+        }
+    }
+
     public void Remove(IEnumerable<Guid> ids)
     {
         lock (_fileLock)

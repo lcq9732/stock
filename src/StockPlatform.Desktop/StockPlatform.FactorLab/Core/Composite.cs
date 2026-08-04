@@ -25,11 +25,12 @@ public sealed class CompositeFactor : IFactor
 
     public double[][] Compute(MarketData md) => _matrix;
 
-    /// <summary>从已评估的单因子结果构建合成因子。icirWeighted=false 为等权。</summary>
+    /// <summary>从已评估的单因子结果构建合成因子。icirWeighted=false 为等权。
+    /// styleBalanced=true 时按**风格分组**再合成，见下方注释。</summary>
     public static CompositeFactor Build(
         string name, bool icirWeighted,
         IReadOnlyList<FactorResult> results, Dictionary<int, string?> dedup,
-        MarketData md, SharedEval sh)
+        MarketData md, SharedEval sh, bool styleBalanced = false)
     {
         // 入选：去重保留的候选 且 样本内|ICIR|≥门槛
         var picked = new List<(FactorResult R, int Sign, double Weight)>();
@@ -42,6 +43,26 @@ public sealed class CompositeFactor : IFactor
             picked.Add((r, Math.Sign(r.IcIn.Mean), icirWeighted ? Math.Abs(r.IcIn.Icir) : 1.0));
         }
         if (picked.Count == 0) throw new InvalidOperationException("没有因子满足合成入选条件");
+
+        // 风格分组：先在每个风格内部按权重归一，再让**每个风格整体等权**。
+        // 为什么需要：平铺合成里因子个数就是话语权——"冷落蓄势"族（低换手/换手稳定/低波动/低彩票性/
+        // 低上影线/缩量比…）光成员就十几个，而分红、资金、筹码各只有一两个，去重阈值0.8又拦不住
+        // 族内0.6~0.7的相关，结果强信号被同族稀释、风格多样性名存实亡（2026-08-03 实测：新增6个因子
+        // 后平铺合成的Top50反而从+7.1%降到+6.5%）。按风格等权后，每个信息来源的话语权与它的
+        // 因子数量脱钩。风格取自 IFactor.Category（趋势/反转/波动/量价/规模/基本面/分红/资金/筹码）。
+        if (styleBalanced)
+        {
+            var byStyle = picked.GroupBy(x => x.R.Factor.Category).ToList();
+            var rebalanced = new List<(FactorResult R, int Sign, double Weight)>();
+            foreach (var g in byStyle)
+            {
+                double inner = g.Sum(x => x.Weight);
+                foreach (var x in g)
+                    rebalanced.Add((x.R, x.Sign, x.Weight / inner / byStyle.Count));
+            }
+            picked = rebalanced;
+        }
+
         double wSum = picked.Sum(x => x.Weight);
         var comps = picked.Select(x => ((IFactor)x.R.Factor, x.Sign, x.Weight / wSum)).ToList();
 
@@ -56,7 +77,12 @@ public sealed class CompositeFactor : IFactor
         string formula = $"Σ 方向×权重×秩分(-1~1)，成分{picked.Count}个：" + string.Join("、",
             picked.Select(x => $"{x.R.Factor.Name}({(x.Sign > 0 ? "+" : "-")}{x.Weight / wSum:0.00})"));
         string desc =
-            $"{(icirWeighted ? "ICIR加权" : "等权")}合成：去重保留且样本内|ICIR|≥{Config.CompositeIcirMin}的候选因子，" +
+            (styleBalanced
+                ? "**按风格分组**再合成（先风格内按权重归一、再让每个风格整体等权）——平铺合成里因子个数就是"
+                  + "话语权，'冷落蓄势'族十几个成员会把分红/资金/筹码这些只有一两个因子的风格淹没；"
+                  + "风格等权让每个信息来源的话语权与因子数量脱钩。"
+                : "")
+            + $"{(icirWeighted ? "ICIR加权" : "等权")}合成：去重保留且样本内|ICIR|≥{Config.CompositeIcirMin}的候选因子，" +
             "方向按样本内IC符号锁定（含把先验取向跑反的因子翻转使用，这属于样本内决策，样本外不再改动）。" +
             "每期把每个成分因子转为截面秩分(-1~1)后加权平均，要求至少60%成分有值。合成的意义：单因子信号弱且不稳，" +
             "低相关因子平均后信噪比提升——这是多因子框架的核心假设，其成立与否看本因子样本外表现。";

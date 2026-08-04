@@ -12,6 +12,12 @@ public sealed class PickRow
     public required List<(string Factor, double Score)> Contribs { get; init; }
     public required DateOnly DataDate { get; init; }
     public required double LatestClose { get; init; }
+    /// <summary>证监会行业（大类优先、门类兜底）。库里没抓过行业分类时为空字符串。</summary>
+    public required string Industry { get; init; }
+    /// <summary>融资余额占流通市值比（0.08=8%）。非两融标的为 NaN。
+    /// 2026-08-04 实测：这个比例越高，波动/最差单期/Beta 越大，暴跌时跑输指数越多——
+    /// 它不预测收益（各档平均收益持平），但能用来过滤掉暴跌时容易多亏3~4个点的品种。</summary>
+    public required double MarginRatio { get; init; }
 
     public string TopContribsText => string.Join("、", Contribs.Where(c => !double.IsNaN(c.Score)).Take(3).Select(c => c.Factor));
 }
@@ -64,8 +70,26 @@ public static class Picks
                 DataDate = md.Dates[lastT],
                 // 展示真实成交价（前复权末日=真实价），不是回测用的后复权价——否则名单里会出现"茅台 7287 元"
                 LatestClose = md.DisplayClose[s][lastT],
+                Industry = md.IndustryName[s],
+                MarginRatio = MarginRatioAt(md, s, lastT),
             });
         }
         return rows;
+    }
+
+    /// <summary>某日的融资余额占流通市值比。融资数据按交易日发布、偶有延迟，往前找最多5个交易日；
+    /// 非两融标的返回 NaN。</summary>
+    static double MarginRatioAt(MarketData md, int s, int t)
+    {
+        double sh = md.FloatShares[s], c = md.Close[s][t];
+        if (double.IsNaN(sh) || double.IsNaN(c) || c <= 0) return double.NaN;
+        double cap = sh * c;
+        if (cap <= 0) return double.NaN;
+        for (int i = t; i >= Math.Max(0, t - 5); i--)
+        {
+            double bal = md.MarginBalance[s][i];
+            if (!double.IsNaN(bal) && bal > 0) return bal / cap;
+        }
+        return double.NaN;
     }
 }

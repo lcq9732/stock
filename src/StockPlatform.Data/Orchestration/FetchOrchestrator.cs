@@ -88,6 +88,7 @@ public class FetchOrchestrator
     private readonly IFinancialProvider? _financialProvider;
     private readonly IDividendProvider? _dividendProvider;
     private readonly IDividendRepository? _dividendRepository;
+    private readonly IIndustryProvider? _industryProvider;
     private readonly object _dbLock = new();
 
     // 拉取全部对同一批关键词、同一天窗口重复扫描是安全的（OrderWinAnnouncement 主键去重），所以
@@ -176,7 +177,8 @@ public class FetchOrchestrator
         IDelistedListProvider? delistedListProvider = null,
         IFinancialProvider? financialProvider = null,
         IDividendProvider? dividendProvider = null,
-        IDividendRepository? dividendRepository = null)
+        IDividendRepository? dividendRepository = null,
+        IIndustryProvider? industryProvider = null)
     {
         _paths = paths;
         _manifestStore = manifestStore;
@@ -200,6 +202,7 @@ public class FetchOrchestrator
         _financialProvider = financialProvider;
         _dividendProvider = dividendProvider;
         _dividendRepository = dividendRepository;
+        _industryProvider = industryProvider;
     }
 
     /// <summary>
@@ -2391,7 +2394,15 @@ public class FetchOrchestrator
     public async Task<FetchResult> RunFetchPeriodicAsync(IProgress<string>? progress, CancellationToken ct = default)
     {
         var errors = new List<string>();
-        progress?.Report("依次执行：指数成分/权重 → 股东数据 → 财务报表 → 分红送配（较慢，可能数小时）");
+        progress?.Report("依次执行：行业分类 → 指数成分/权重 → 股东数据 → 财务报表 → 分红送配（较慢，可能数小时）");
+
+        // 行业分类放最前：只要一两分钟，且后面几步都不依赖它，先跑完早出结果
+        if (_industryProvider != null)
+        {
+            try { errors.AddRange((await RunFetchIndustryAsync(progress, ct)).Errors); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { errors.Add($"行业分类整体失败：{ex.Message}"); }
+        }
 
         try { errors.AddRange((await RunFetchIndexConsAsync(progress, ct)).Errors); }
         catch (OperationCanceledException) { throw; }
@@ -2412,8 +2423,51 @@ public class FetchOrchestrator
             catch (Exception ex) { errors.Add($"分红送配整体失败：{ex.Message}"); }
         }
 
-        progress?.Report("指数成分/权重、股东数据、财务报表、分红送配全部处理完毕。");
+        progress?.Report("行业分类、指数成分/权重、股东数据、财务报表、分红送配全部处理完毕。");
         return new FetchResult { Errors = errors };
+    }
+
+    /// <summary>
+    /// 拉取全市场证监会行业分类（2026-08-04新增）——见 <see cref="ExchangeSinaIndustryProvider"/>。
+    /// 两级：门类（两所官网，覆盖沪深全部）+ 大类（新浪，粒度合适但约58%覆盖），消费端优先用大类、
+    /// 缺失退回门类。用途：① 因子法名单显示"板块"；② FactorLab 的行业中性化——原先用板块表只有
+    /// 44% 覆盖、其余全挤在一个"未知"组里，中性IC 一直不够准。
+    /// 行业极少变动，属定期数据，季度跟财报一起跑一次即可；整体覆盖写入，反复跑无副作用。
+    /// </summary>
+    public async Task<FetchResult> RunFetchIndustryAsync(IProgress<string>? progress, CancellationToken ct = default)
+    {
+        if (_industryProvider == null)
+            throw new InvalidOperationException("未配置行业分类数据源（IIndustryProvider）");
+
+        void ForwardStatus(string msg) => progress?.Report(msg);
+        _industryProvider.OnStatus += ForwardStatus;
+        try
+        {
+            var sw = Stopwatch.StartNew();
+            progress?.Report("开始抓取全市场行业分类（两所门类 + 新浪大类）...");
+            var rows = await _industryProvider.GetAllAsync(ct);
+            if (rows.Count == 0)
+            {
+                var msg = "行业分类返回空——接口可能变了，本轮跳过（不影响其它数据）";
+                progress?.Report("⚠ " + msg);
+                var empty = new FetchResult();
+                empty.Errors.Add(msg);
+                return empty;
+            }
+
+            var repo = new SqliteIndustryRepository(_paths.CurrentDb);
+            repo.EnsureSchema();
+            lock (_dbLock) { repo.Upsert(rows); }
+
+            int withMajor = rows.Count(r => !string.IsNullOrEmpty(r.MajorName));
+            progress?.Report($"行业分类完成：{rows.Count} 只（其中 {withMajor} 只有细分大类、其余只有门类），" +
+                             $"用时 {FormatElapsed(sw.Elapsed)}。");
+            return new FetchResult();
+        }
+        finally
+        {
+            _industryProvider.OnStatus -= ForwardStatus;
+        }
     }
 
     /// <summary>

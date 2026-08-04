@@ -14,8 +14,9 @@ namespace StockPlatform.Analyzer.ViewModels;
 /// location/freshness) and exposes each method's own tab view model. See
 /// doc/analysis-app-design.md section 3.2 for why there are five methods and why they don't share
 /// analysis state beyond the underlying data file. 界面 Tab 顺序（也就是这里各 Tab 属性希望呈现
-/// 的顺序）：每日晨检（早上第一眼看的仪表盘，放最前）/ 三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 /
-/// 金叉法，最后是跨方法的自选股。类名仍叫
+/// 的顺序）：每日晨检（早上第一眼看的仪表盘）/ 我的交易（晨检看完就在这里执行、录买卖）——这两个
+/// 是日常动线，放最前；然后才是各选股方法 三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 / 金叉法 / …，
+/// 最后是跨方法的自选股（算法验证样本，只用来统计各方法准不准）。类名仍叫
 /// TriangleConvergence/Foundation/BottomRebound/MidCapPullback/GoldenCross——描述的是算法本身，
 /// 跟人名/Tab 中文名无关。
 /// </summary>
@@ -35,9 +36,20 @@ public class MainViewModel : INotifyPropertyChanged
 
     public IBarRepository BarRepository => _barRepository;
 
+    /// <summary>本地数据库文件的完整路径——"行情详情"里的"其他数据"要按表直接读十几张表
+    /// （见 SqliteStockDossierReader），那些表在这里没有对应仓储被注入，给路径最直接。</summary>
+    public string TotalDbPath => _paths.TotalDb;
+
     public MorningCheckTabViewModel MorningCheckTab { get; }
+    /// <summary>"我的交易"——打算买卖、每天要盯的那一小撮票（晨检只体检这些）。跟 WatchlistTab
+    /// 共用同一个 watchlist.json，靠 WatchlistEntry.IsInTradePool 区分，见 TradePoolTabViewModel。
+    /// 界面上紧跟在"每日晨检"后面：晨检看结论 → 这里执行/录买卖，是日常动线。</summary>
+    public TradePoolTabViewModel TradePoolTab { get; }
     public FoundationTabViewModel FoundationTab { get; }
     public GoldenCrossTabViewModel GoldenCrossTab { get; }
+    /// <summary>"回调法"——按用户自述的买股原则（盈利好/不追高/到价卖）建的方法，
+    /// 条件取舍全部有回测依据，见 PullbackAnalysisEngine 的注释。</summary>
+    public PullbackTabViewModel PullbackTab { get; }
     public BottomReboundTabViewModel BottomReboundTab { get; }
     public MidCapPullbackTabViewModel MidCapPullbackTab { get; }
     public TriangleConvergenceTabViewModel TriangleConvergenceTab { get; }
@@ -67,7 +79,7 @@ public class MainViewModel : INotifyPropertyChanged
     /// <summary>"从GitHub更新数据"的进度/结果单行提示（会被下载百分比等不断覆盖）。</summary>
     public string SyncStatusText { get => _syncStatusText; set => Set(ref _syncStatusText, value); }
 
-    public MainViewModel(AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, INetInflowRepository netInflowRepository, IBoardRepository boardRepository, IShareholderRepository shareholderRepository, IMarginRepository marginRepository)
+    public MainViewModel(AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, INetInflowRepository netInflowRepository, IBoardRepository boardRepository, IShareholderRepository shareholderRepository, IMarginRepository marginRepository, IFinancialRepository financialRepository, IDividendRepository dividendRepository)
     {
         _paths = paths;
         _barRepository = barRepository;
@@ -76,6 +88,7 @@ public class MainViewModel : INotifyPropertyChanged
         MorningCheckTab = new MorningCheckTabViewModel(barRepository, shareholderRepository, watchlistStore);
         FoundationTab = new FoundationTabViewModel(paths, barRepository, watchlistStore);
         GoldenCrossTab = new GoldenCrossTabViewModel(paths, barRepository, watchlistStore);
+        PullbackTab = new PullbackTabViewModel(paths, barRepository, financialRepository, dividendRepository, watchlistStore);
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, shareholderRepository, marginRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);
@@ -85,6 +98,15 @@ public class MainViewModel : INotifyPropertyChanged
         BoardTab = new BoardTabViewModel(boardRepository, barRepository, paths);
         FactorTab = new FactorTabViewModel(paths, watchlistStore);
         WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository, boardRepository);
+        TradePoolTab = new TradePoolTabViewModel(watchlistStore, barRepository, boardRepository);
+
+        // 交易池成员一变（自选页"加入交易池"/交易池页"移出"/查询页直接加入），另外那页要跟着刷新——
+        // 几个页读的是同一份 watchlist.json，不联动就会出现"加进去了但那边还没有"的错觉。
+        // 故意不在这里连带刷新每日晨检：晨检读全库+逐只体检，2026-07-31 已按用户要求改成纯手动
+        // （只有点它自己的"刷新"才算），这里自动触发会把那份"开程序秒开、切Tab不卡"的收益又赔进去。
+        WatchlistTab.TradePoolChanged = () => TradePoolTab.Reload();
+        TradePoolTab.TradePoolChanged = () => WatchlistTab.Reload();
+        QueryTab.TradePoolChanged = () => { TradePoolTab.Reload(); WatchlistTab.Reload(); };
 
         LocalDbPathText = $"本地数据文件：{_paths.TotalDb}（需要手动把 Fetcher 产出的数据库拷贝到这里，用这个文件名）";
 

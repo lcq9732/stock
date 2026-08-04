@@ -54,6 +54,10 @@
             <Button x:Name="DayButton" Content="日K" Width="56" Margin="0,0,4,0" Click="GranularityButton_Click" Tag="day" />
             <Button x:Name="WeekButton" Content="周K" Width="56" Margin="0,0,4,0" Click="GranularityButton_Click" Tag="week" />
             <Button x:Name="MonthButton" Content="月K" Width="56" Click="GranularityButton_Click" Tag="month" />
+            <!-- 图上看不到的那些数据（融资融券/股东/分红/财报/龙虎榜/所属板块指数/公告…）另开窗口
+                 摊开看，见 StockDossierWindow。放在粒度按钮右边、隔开一段距离——它不是粒度切换。 -->
+            <Button x:Name="OtherDataButton" Content="其他数据" Width="80" Margin="24,0,0,0" Click="OtherDataButton_Click"
+                    ToolTip="本地库里这只标的除K线之外的全部数据：融资融券（含融资/融券余额占流通市值、融资买入占成交额）、股东户数、十大股东、分红送配、财务报表、主力净流入、龙虎榜、所属板块/指数、中标公告等" />
         </StackPanel>
 
         <Grid Grid.Row="3">

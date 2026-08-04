@@ -87,8 +87,11 @@ public partial class MainWindow : Window
         if (DataContext is not MainViewModel vm) return;
         if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "自选股" })
             vm.WatchlistTab.Reload(); // picks up anything added from another tab this session
+        if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "我的交易" })
+            vm.TradePoolTab.Reload(); // 同上——刚从"自选股"/"查询"页加进交易池的票，切过来就能看到
         // 每日晨检不在切Tab时自动体检（读全库+逐只算、会顿一下）——改成纯手动，用户点该Tab里的"刷新"按钮才算，
         // 这样开程序秒开、切Tab也不卡（2026-07-31 按用户要求从"启动/切Tab自动跑"改为全手动）。
+        // 同理：交易池成员变动也不自动触发晨检重算（见 MainViewModel 里 TradePoolChanged 的接线）。
     }
 
     // WPF's DataGridCheckBoxColumn needs two clicks by default (the first click only focuses/
@@ -174,6 +177,29 @@ public partial class MainWindow : Window
         }
 
         new MidCapPullbackDetailWindow(row.Result, dayBars, weekBars, monthBars) { Owner = this }.ShowDialog();
+    }
+
+    // 回调法的"条件详情"故意用纯文字，不复用任何一张详情图：它的6个条件里有两条是财务
+    // （净利润/经营现金流），两条是可操作性（成交额/一手金额），现有的详情图都画不出来；
+    // 硬套一张图会让"图上指标"和"判断依据文字"对不上（见 GoldenCrossCriteriaButton_Click 的教训）。
+    // 想看K线走势点旁边的"行情详情"即可。
+    private void PullbackCriteriaButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
+
+        if (row.Error != null)
+        {
+            MessageBox.Show(this, row.Error, "无法显示详情", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var r = row.Result;
+        var text = $"{r.Code} {r.Name}\n" +
+                   $"数据日期 {r.DataDate:yyyy-MM-dd}　收盘 {r.LastClose:F2}\n" +
+                   $"低于MA20 {r.SortScore:F2}%（列表按这个降序排）\n\n" +
+                   string.Join("\n\n", r.Criteria.Select(c =>
+                       $"{(c.DataMissing ? "⚠" : c.Satisfied ? "✓" : "✗")} {c.Name}\n    {c.Basis}"));
+        MessageBox.Show(this, text, "回调法 — 条件详情", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void TriangleConvergenceCriteriaButton_Click(object sender, RoutedEventArgs e)
@@ -311,6 +337,14 @@ public partial class MainWindow : Window
             OpenQuoteDetail(row.Code, row.Name);
     }
 
+    // "我的交易"页的行情详情——行类型跟自选股页是同一个 WatchlistRowViewModel（两页读同一份
+    // watchlist.json，只是筛选不同），所以直接复用同一套打开逻辑。
+    private void TradePoolQuoteDetailButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is WatchlistRowViewModel row)
+            OpenQuoteDetail(row.Code, row.Name);
+    }
+
     // 查询Tab的"K线详情"——跟"行情详情"是同一个纯行情窗口（QuoteDetailWindow），只是入口在查询结果里。
     private void QueryQuoteDetailButton_Click(object sender, RoutedEventArgs e)
     {
@@ -332,6 +366,13 @@ public partial class MainWindow : Window
             OpenQuoteDetail(row.Code, row.Name);
     }
 
+    // 因子法Tab因子清单的"说明"——弹窗显示该因子的构造/方向/作用/逐年IC（见 FactorDetailWindow）。
+    private void FactorExplainButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is not FactorRowViewModel row) return;
+        new FactorDetailWindow($"{row.Name}（{row.Category} / {row.Role}）", row.DetailText) { Owner = this }.ShowDialog();
+    }
+
     // 板块热度Tab里板块自身的"板块K线"——看本地合成的板块指数（code=板块代码 gn_xxx/new_xxx，
     // 见 BoardIndexSynthesizer）。没合成过/没拷数据库时会提示没有日线数据。
     private void BoardIndexQuoteDetailButton_Click(object sender, RoutedEventArgs e)
@@ -350,7 +391,7 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "没有找到该标的的日线数据。\n（若是板块指数，请先在 Fetcher 里\"合成板块指数\"并把数据库拷贝过来）", "无法显示行情", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        new QuoteDetailWindow(code, name, vm.BarRepository) { Owner = this }.ShowDialog();
+        new QuoteDetailWindow(code, name, vm.BarRepository, vm.TotalDbPath) { Owner = this }.ShowDialog();
     }
 
     /// <param name="cutoffDate">非空时把K线截到这一天(含)——阶梯低点法的"按历史截止日期验证"

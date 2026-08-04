@@ -19,11 +19,11 @@ public class QueryRowViewModel : ISelectableRow
     /// <summary>标的类型显示：个股/大盘指数/ETF/板块——2026-07-15 起查询页也能搜到指数/ETF/板块，
     /// 用这列区分（分析仍只跑个股）。</summary>
     public string Type { get; init; } = "";
-    /// <summary>StockMeta 里的原始 type 值——"加入自选"只对个股放行（指数/ETF/板块没有股东户数
+    /// <summary>StockMeta 里的原始 type 值——"加入交易池"只对个股放行（指数/ETF/板块没有股东户数
     /// 等跟踪数据、也不是"选股"语义），用它判断而不是拿显示文本反推。</summary>
     public string TypeRaw { get; init; } = "";
     /// <summary>Plain mutable, same reasoning as ResultRowViewModel.IsSelected — only read when
-    /// "加入自选" is clicked.</summary>
+    /// "加入交易池" is clicked.</summary>
     public bool IsSelected { get; set; }
 }
 
@@ -59,6 +59,9 @@ public class QueryTabViewModel : INotifyPropertyChanged
     public RelayCommand SearchCommand { get; }
     public RelayCommand AddToWatchlistCommand { get; }
 
+    /// <summary>加进交易池后要通知"我的交易"/"自选股"/晨检三页刷新——由 MainViewModel 注入。</summary>
+    public Action? TradePoolChanged { get; set; }
+
     public QueryTabViewModel(AnalyzerPaths paths, IBarRepository barRepository, Watchlist.JsonWatchlistStore watchlistStore)
     {
         _paths = paths;
@@ -68,16 +71,18 @@ public class QueryTabViewModel : INotifyPropertyChanged
         AddToWatchlistCommand = new RelayCommand(_ => AddSelectedToWatchlist());
     }
 
-    /// <summary>查询Tab的"加入自选"——跟各选股方法的 WatchlistAdder 语义一致（按 Code+Method+DataDate
+    /// <summary>查询Tab的"加入交易池"——跟各选股方法的 WatchlistAdder 语义一致（按 Code+Method+DataDate
     /// 去重），但没有分析条件可存：Method 固定"查询"，DataDate/PriceAtPick 用该股最新一根日线，
     /// Criteria 为空。只放行个股；指数/ETF/板块没有股东户数等跟踪数据、也不是"选股"，直接跳过并提示。
-    /// 加入后自动进入"自选股"跟踪与"每日晨检"体检。</summary>
+    ///
+    /// 2026-07-31起直接标记 InTradePool=true：从这里手工搜出来加进去的票，本来就是"我看好、想买卖"的
+    /// （不像各选股方法丢进来的那些只是算法验证样本），所以直接进"我的交易"页、纳入每日晨检体检。</summary>
     private void AddSelectedToWatchlist()
     {
         var selected = Results.Where(r => r.IsSelected).ToList();
         if (selected.Count == 0)
         {
-            StatusText = "先勾选要加入自选的行";
+            StatusText = "先勾选要加入交易池的行";
             return;
         }
 
@@ -98,18 +103,31 @@ public class QueryTabViewModel : INotifyPropertyChanged
                 DataDate = last.PeriodStart,
                 PriceAtPick = last.Close,
                 AddedAt = DateTime.Now,
+                InTradePool = true,   // 手工搜出来加的 = 我看好想买卖的，直接进"我的交易"
                 SatisfiedCount = 0,
                 TotalCount = 0,
             });
         }
 
         int added = _watchlistStore.Add(entries);
+        // 已存在的记录（去重挡下的）也要确保在交易池里——比如这只票之前是某个方法丢进自选的算法样本，
+        // 现在用户从查询页手工加了一次，意思就是"我要买它"，不能因为记录已存在就静默什么都不做。
+        var existingIds = _watchlistStore.Load()
+            .Where(e => entries.Any(n => n.Code == e.Code) && !e.IsInTradePool)
+            .Select(e => e.Id).ToList();
+        if (existingIds.Count > 0) _watchlistStore.SetTradePool(existingIds, true);
         foreach (var r in selected) r.IsSelected = false;
+        if (added > 0 || existingIds.Count > 0) TradePoolChanged?.Invoke();
 
-        var parts = new List<string> { added > 0 ? $"已加入自选 {added} 只" : "勾选的个股都已经在自选里了" };
+        var parts = new List<string>
+        {
+            added > 0 ? $"已加入交易池 {added} 只"
+            : existingIds.Count > 0 ? $"已把 {existingIds.Count} 只已在自选里的票放进交易池"
+            : "勾选的个股都已经在交易池里了",
+        };
         if (skippedType > 0) parts.Add($"跳过 {skippedType} 个非个股（指数/ETF/板块不支持自选跟踪）");
         if (skippedNoBar > 0) parts.Add($"跳过 {skippedNoBar} 个无K线数据的");
-        if (entries.Count > 0 && added < entries.Count) parts.Add($"{entries.Count - added} 只已在自选中未重复加入");
+        if (entries.Count > 0 && added < entries.Count) parts.Add($"{entries.Count - added} 只本来就在自选里（已确保在交易池中）");
         StatusText = string.Join("；", parts);
     }
 

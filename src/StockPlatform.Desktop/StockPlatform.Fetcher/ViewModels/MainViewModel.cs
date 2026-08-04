@@ -110,6 +110,7 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand FetchPeriodicCommand { get; }
     public RelayCommand FetchFinancialsCommand { get; }
     public RelayCommand FetchDividendCommand { get; }
+    public RelayCommand FetchIndustryCommand { get; }
     public RelayCommand ScheduledFetchAllCommand { get; }
     public RelayCommand ScheduledFetchDayCommand { get; }
 
@@ -148,6 +149,7 @@ public class MainViewModel : INotifyPropertyChanged
         FetchPeriodicCommand = new RelayCommand(async _ => await RunFetchPeriodicAsync(), _ => !IsBusy);
         FetchFinancialsCommand = new RelayCommand(async _ => await RunFetchFinancialsAsync(), _ => !IsBusy);
         FetchDividendCommand = new RelayCommand(async _ => await RunFetchDividendAsync(), _ => !IsBusy);
+        FetchIndustryCommand = new RelayCommand(async _ => await RunFetchIndustryAsync(), _ => !IsBusy);
         ScheduledFetchAllCommand = new RelayCommand(async _ => await RunScheduledFetchAllAsync(), _ => !IsBusy);
         ScheduledFetchDayCommand = new RelayCommand(async _ => await RunScheduledFetchDayAsync(), _ => !IsBusy);
 
@@ -368,6 +370,11 @@ public class MainViewModel : INotifyPropertyChanged
     /// 这个独立按钮给单独刷新分红用，不用连带跑几小时的其它定期数据。</summary>
     private Task RunFetchDividendAsync() =>
         RunOperationAsync("拉取分红送配", (progress, ct) => _orchestrator.RunFetchDividendAsync(progress, ct));
+
+    /// <summary>拉取行业分类（见 FetchOrchestrator.RunFetchIndustryAsync）——已并入"一键拉取定期数据"，
+    /// 独立按钮给单独刷新用。只要一两分钟。</summary>
+    private Task RunFetchIndustryAsync() =>
+        RunOperationAsync("拉取行业分类", (progress, ct) => _orchestrator.RunFetchIndustryAsync(progress, ct));
 
     /// <summary>定时拉取全部：点后等到"触发时间"再跑"拉取全部"（已过则立即）。参数在点击时先校验。</summary>
     private async Task RunScheduledFetchAllAsync()

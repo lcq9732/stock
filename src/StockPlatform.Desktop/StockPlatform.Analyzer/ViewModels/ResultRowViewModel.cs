@@ -1,4 +1,5 @@
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Analyzer.ViewModels;
 
@@ -19,6 +20,19 @@ public class ResultRowViewModel : ISelectableRow
     public double? SortScore { get; init; }
     public string ConvergenceQualityText => SortScore.HasValue ? SortScore.Value.ToString("F0") : "";
 
+    /// <summary>分析当天的收盘价（来自 StockScreenResult.LastClose）——回调法的结果表要用它
+    /// 直接列出两个止盈目标价和止损价，省得每只都点开"条件详情"看。</summary>
+    public double? LastClose { get; init; }
+
+    // 回调法结果表专用的三个参考价（跟 SortScore 一样，是方法专属字段挂在共享行模型上）。
+    // 两个目标各有依据、由用户自己选，理由见 PullbackAnalysisEngine 里 QuickTargetPct 的注释。
+    public string QuickTargetText => Fmt(PullbackAnalysisEngine.DefaultQuickTargetPct);
+    public string BigTargetText => Fmt(PullbackAnalysisEngine.DefaultTargetPct);
+    public string StopPriceText => Fmt(-PullbackAnalysisEngine.DefaultStopPct);
+
+    private string Fmt(double pct) =>
+        LastClose is > 0 ? (LastClose.Value * (1 + pct)).ToString("F2") : "";
+
     /// <summary>Bound to the DataGrid's checkbox column — plain mutable property (no
     /// INotifyPropertyChanged) is enough since nothing needs to react live to a check/uncheck,
     /// it's only read when "加入自选" is clicked (see FoundationTabViewModel etc.).</summary>
@@ -35,5 +49,6 @@ public class ResultRowViewModel : ISelectableRow
         Error = r.Error,
         Result = r,
         SortScore = r.SortScore,
+        LastClose = r.LastClose,
     };
 }

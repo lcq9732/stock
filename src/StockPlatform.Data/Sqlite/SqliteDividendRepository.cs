@@ -108,6 +108,28 @@ public class SqliteDividendRepository : IDividendRepository
         return result;
     }
 
+    public Dictionary<string, double> GetTrailingCashDividendPerShare(DateTime since)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        // 表里 dividend_yuan 是"每10股派X元"（数据源口径，见 DividendRow），/10 换成每股。
+        cmd.CommandText = """
+            SELECT code, SUM(dividend_yuan) / 10.0
+            FROM Dividend
+            WHERE progress = '实施' AND dividend_yuan > 0 AND ex_date IS NOT NULL AND ex_date >= $since
+            GROUP BY code;
+            """;
+        cmd.Parameters.AddWithValue("$since", since.ToString(DateFormat, CultureInfo.InvariantCulture));
+        var result = new Dictionary<string, double>(StringComparer.Ordinal);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(1)) continue;
+            result[reader.GetString(0)] = reader.GetDouble(1);
+        }
+        return result;
+    }
+
     public int GetCodeCount()
     {
         using var conn = Open();

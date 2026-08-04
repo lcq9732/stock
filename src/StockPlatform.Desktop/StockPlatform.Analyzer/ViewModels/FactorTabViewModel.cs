@@ -27,9 +27,11 @@ public class FactorRowViewModel
     public string LsAnnOutText { get; init; } = "—";
     public string TurnoverText { get; init; } = "—";
     public string YearlyIcText { get; init; } = "";
-    /// <summary>右侧详情面板的完整说明文本。</summary>
+    /// <summary>点"说明"按钮时弹窗显示的完整文本（见 FactorDetailWindow）。标题行由窗口单独渲染，
+    /// 这里不再重复因子名。IC 等数字表格里都有列，弹窗只补表格放不下的：逐年IC，以及"中性IC 该怎么读"。</summary>
     public string DetailText =>
-        $"【{Name}】（{Category} / {Role}）\n\n构造：{Formula}\n\n方向：{Direction}\n\n作用：{Description}"
+        $"构造：{Formula}\n\n方向：{Direction}\n\n作用：{Description}"
+        + (IcNeuInText != "—" ? $"\n\n中性IC(样本内) {IcNeuInText} vs IC内 {IcInText}　—— 两者差距大说明信号主要来自规模/行业暴露" : "")
         + (YearlyIcText.Length > 0 ? $"\n\n逐年IC：{YearlyIcText}" : "")
         + (DedupText.Length > 0 ? $"\n\n去重：{DedupText}" : "");
 }
@@ -41,11 +43,20 @@ public class FactorPickRowViewModel : ISelectableRow
     public int Rank { get; init; }
     public string Code { get; init; } = "";
     public string Name { get; init; } = "";
+    /// <summary>行业。优先用库里的证监会分类（StockIndustry 表，沪深全覆盖，大类优先/门类兜底），
+    /// 缺失时退回本地静态申万映射（IndustryClassifier，漏掉大量2021年后上市的次新股）。
+    /// 因子选股尤其需要看这个：合成因子经常一口气选出一堆同行业的票，行业分散得靠人工把关。</summary>
+    public string Board => !string.IsNullOrEmpty(Industry) ? Industry : IndustryClassifier.GetIndustry(Code);
+    /// <summary>来自 FactorLab 的证监会行业名（库里没抓过行业分类时为空）。</summary>
+    public string Industry { get; init; } = "";
     public string ScoreText { get; init; } = "";
     public string ContribText { get; init; } = "";
     public string CloseText { get; init; } = "";
     public DateTime DataDate { get; init; }
     public double LatestClose { get; init; }
+    /// <summary>融资余额占流通市值比（0.08=8%），非两融标的为 NaN。</summary>
+    public double MarginRatio { get; init; }
+    public string MarginRatioText => double.IsNaN(MarginRatio) ? "—" : MarginRatio.ToString("0.0%");
 }
 
 /// <summary>
@@ -71,13 +82,10 @@ public class FactorTabViewModel : INotifyPropertyChanged
     public ObservableCollection<FactorRowViewModel> FactorRows { get; } = new();
     public ObservableCollection<FactorPickRowViewModel> PickRows { get; } = new();
 
+    /// <summary>当前选中行——只用于表格的高亮/键盘导航。说明不再跟随选中显示（2026-08-03 改成
+    /// 点行内的"说明"按钮弹窗，见 MainWindow.FactorExplainButton_Click）。</summary>
     private FactorRowViewModel? _selectedFactor;
-    public FactorRowViewModel? SelectedFactor
-    {
-        get => _selectedFactor;
-        set { Set(ref _selectedFactor, value); PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedFactorDetail))); }
-    }
-    public string SelectedFactorDetail => _selectedFactor?.DetailText ?? "点击左侧因子行查看构造公式和作用说明";
+    public FactorRowViewModel? SelectedFactor { get => _selectedFactor; set => Set(ref _selectedFactor, value); }
 
     private bool _isRunning;
     public bool IsRunning { get => _isRunning; private set => Set(ref _isRunning, value); }
@@ -87,6 +95,26 @@ public class FactorTabViewModel : INotifyPropertyChanged
 
     private string _picksHeaderText = "最新名单（先运行因子选股）";
     public string PicksHeaderText { get => _picksHeaderText; set => Set(ref _picksHeaderText, value); }
+
+    /// <summary>是否从名单里剔除融资余额占流通市值比过高的股票（2026-08-04新增）。
+    /// 依据：十年实测，融资占比越高波动/Beta/最差单期越大，市场暴跌的10期里 >10% 档跑输指数3.8%、
+    /// 而 0~3% 档跑赢0.6%；但**平均收益各档持平**——所以这是降波动的工具，不是增收益的工具，
+    /// 默认不勾。勾上后名单会变短（不补位），因为补进来的是得分更低的股票。</summary>
+    private bool _filterHighMargin;
+    public bool FilterHighMargin
+    {
+        get => _filterHighMargin;
+        set { Set(ref _filterHighMargin, value); ApplyPickFilter(); }
+    }
+
+    private double _marginThreshold = 0.08;
+    /// <summary>剔除阈值（0.08=8%）。实测风险从3%就开始单调上升、并非到10%才突变，所以默认取8%
+    /// 而不是民间说的10%；填10%更宽松、填5%更严格。</summary>
+    public double MarginThreshold
+    {
+        get => _marginThreshold;
+        set { Set(ref _marginThreshold, value); ApplyPickFilter(); }
+    }
 
     public RelayCommand RunCommand { get; }
     public RelayCommand AddToWatchlistCommand { get; }
@@ -123,10 +151,10 @@ public class FactorTabViewModel : INotifyPropertyChanged
 
             FactorRows.Clear();
             foreach (var row in outcome.Factors) FactorRows.Add(row);
-            PickRows.Clear();
-            foreach (var row in outcome.Picks) PickRows.Add(row);
+            _allPicks = outcome.Picks;
+            _picksDate = outcome.DataDate;
+            ApplyPickFilter();
 
-            PicksHeaderText = $"最新名单（{outcome.DataDate:yyyy-MM-dd} 收盘，合成-ICIR加权 Top{FLConfig.TopN}）——因子排序输出，不构成买入建议";
             StatusText = $"完成：{outcome.Factors.Count} 个因子（含合成），名单 {outcome.Picks.Count} 只；协议与局限见 doc/factorlab-design.md";
         }
         catch (Exception ex)
@@ -137,6 +165,35 @@ public class FactorTabViewModel : INotifyPropertyChanged
         {
             IsRunning = false;
         }
+    }
+
+    /// <summary>未过滤的完整名单——过滤开关变动时从它重建 PickRows，不用重跑评估。</summary>
+    private List<FactorPickRowViewModel> _allPicks = new();
+    private DateOnly _picksDate;
+
+    /// <summary>按当前的融资占比过滤开关重建可见名单。剔除后**不补位**——补进来的是得分更低的股票，
+    /// 那等于用"更差的选股"换"更低的波动"，两件事应该分开决策。</summary>
+    private void ApplyPickFilter()
+    {
+        if (_allPicks.Count == 0) return;
+        var visible = FilterHighMargin
+            ? _allPicks.Where(p => double.IsNaN(p.MarginRatio) || p.MarginRatio <= MarginThreshold).ToList()
+            : _allPicks;
+
+        PickRows.Clear();
+        foreach (var row in visible) PickRows.Add(row);
+
+        int removed = _allPicks.Count - visible.Count;
+        // 行业集中度提示：合成因子常常一口气选出一堆同行业的票（都是同一种"状态"），
+        // 把"覆盖几个行业 / 最大行业占几只"直接摆出来，省得人工数。
+        var byBoard = visible.GroupBy(p => p.Board).ToList();
+        string topBoard = byBoard.Count == 0 ? "" :
+            byBoard.OrderByDescending(g => g.Count()).First() is var g0 && g0.Count() > 1
+                ? $"，最集中的是{g0.Key}({g0.Count()}只)" : "";
+        PicksHeaderText = $"最新名单（{_picksDate:yyyy-MM-dd} 收盘，合成-ICIR加权 Top{FLConfig.TopN}）"
+            + (FilterHighMargin ? $"，已剔除融资占比>{MarginThreshold:0.#%} 的 {removed} 只，剩 {visible.Count} 只" : "")
+            + (byBoard.Count > 0 ? $"；覆盖 {byBoard.Count} 个行业{topBoard}" : "")
+            + "——因子排序输出，不构成买入建议";
     }
 
     private sealed record Outcome(List<FactorRowViewModel> Factors, List<FactorPickRowViewModel> Picks, DateOnly DataDate);
@@ -199,6 +256,8 @@ public class FactorTabViewModel : INotifyPropertyChanged
             CloseText = double.IsNaN(p.LatestClose) ? "—" : p.LatestClose.ToString("0.00"),
             DataDate = p.DataDate.ToDateTime(TimeOnly.MinValue),
             LatestClose = p.LatestClose,
+            Industry = p.Industry,
+            MarginRatio = p.MarginRatio,
         }).ToList();
 
         return new Outcome(factorRows, picks, md.Dates[^1]);

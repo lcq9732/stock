@@ -115,7 +115,10 @@ public partial class App : Application
         var dividendRepository = new SqliteDividendRepository(paths.CurrentDb);
         dividendRepository.EnsureSchema();
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository);
+        // 证监会行业分类(两所门类+新浪大类)——因子法显示"板块"、FactorLab 行业中性化都用它。
+        var industryProvider = new ExchangeSinaIndustryProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider);
 
         var viewModel = new MainViewModel(paths, orchestrator, sources);
         var window = new MainWindow { DataContext = viewModel };

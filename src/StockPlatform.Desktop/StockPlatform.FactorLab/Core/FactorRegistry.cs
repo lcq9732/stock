@@ -46,8 +46,21 @@ public static class FactorRegistry
         new LowLeverage(),
         new EarningsYield(),
         new BookToPrice(),
+        // 分红（2026-08-03，Dividend 表新到位——"高股息"是 A股 2021~2024 最强风格之一，此前无法测）
+        new DividendYield(),
+        new DividendConsistency(),
+        // 资金流（2026-08-03，NetInflow 补齐十年，此前只有3个月做不了）
+        new MoneyFlow20(),
+        new FlowPriceDiverge20(),
+        // 筹码：十大流通股东（库里躺了545万行从没用过）
+        new HolderConcentration(),
+        new HolderConcentrationChange(),
+        // 北向（陆股通）——数据来自十大流通股东里的"香港中央结算有限公司"，季度级、截断观测
+        new NorthboundHolding(),
+        new NorthboundChange(),
         // 资金
         new MarginChange20(),  // 阴性对照
+        new LowMarginRatio(),  // 融资占比（水平量，与上面的"变化量"是两回事）
         new LhbCold20(),
         // 筹码
         new HolderShrink(),    // 阴性对照

@@ -3,8 +3,11 @@ namespace StockPlatform.FactorLab;
 /// <summary>评估协议参数（doc/factorlab-design.md 第3节）。改动切分点/成本后样本内外结论不可比，需整体重跑。</summary>
 public static class Config
 {
-    /// <summary>持有期（交易日）：T日收盘算因子，T+1开盘买入，T+1+HoldDays开盘结算。</summary>
-    public const int HoldDays = 5;
+    /// <summary>持有期（交易日）：T日收盘算因子，T+1开盘买入，T+1+HoldDays开盘结算。
+    /// 默认5日（量价因子的自然节奏）；可用命令行第3个参数改（如 20）——基本面因子是季度级慢信号，
+    /// 5日IC会严重低估它们（2026-08-01实测BP十分组完美单调但5日ICIR只有0.28），换长持有期才是公平的秤。
+    /// 注意改了持有期后新旧结果不可比。</summary>
+    public static int HoldDays { get; set; } = 5;
 
     /// <summary>因子预热期（交易日）——最长回看窗口(120)留余量，评估从此下标之后开始。</summary>
     public const int WarmupDays = 126;
