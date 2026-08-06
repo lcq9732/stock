@@ -141,6 +141,19 @@ public class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 刷新"本地数据最新到 X"那行状态文字——**放到后台线程跑**（2026-08-04改）。
+    ///
+    /// 原因：这行字要执行 <c>SELECT MAX(period_start) FROM Bar WHERE granularity='day'</c>，Bar 表的
+    /// 主键是 (code, granularity, period_start)，前导列不是 granularity，所以这个查询只能把整个主键
+    /// 覆盖索引扫一遍。库已经涨到 7GB+，实测暖状态约 2.6 秒、冷启动（开机后首次读这个文件）几十秒。
+    /// 以前它是在构造函数里同步跑的，于是窗口要等它结束才出现——用户以为没启动就重复双击，开出
+    /// 好几个实例（这也是加 <see cref="Shared.SingleInstanceGuard"/> 的直接原因）。
+    ///
+    /// 只有这一行字是慢的，其它 Tab 的数据加载合计约 0.5 秒，所以**不需要锁住界面**：窗口立刻可用，
+    /// 这行字先显示"正在统计…"、几秒后自己变成结果。没有做成"建索引"是因为给 7GB 的表新建索引本身
+    /// 要跑几分钟、还会让每次写入变慢，代价比收益大（用户 2026-08-04 确认按"先出界面"的思路解决）。
+    /// </summary>
     private void RefreshDataStatus()
     {
         if (!File.Exists(_paths.TotalDb))
@@ -149,9 +162,23 @@ public class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        var latest = _barRepository.GetOverallLatestPeriodStart(Granularity.Day);
-        DataStatusText = latest == null
-            ? "数据文件存在，但里面没有任何日线数据"
-            : $"本地数据最新到 {latest:yyyy-MM-dd}";
+        DataStatusText = "正在统计本地数据范围…（库较大，首次约需数秒，界面可正常使用）";
+        _ = Task.Run(() =>
+        {
+            string text;
+            try
+            {
+                var latest = _barRepository.GetOverallLatestPeriodStart(Granularity.Day);
+                text = latest == null
+                    ? "数据文件存在，但里面没有任何日线数据"
+                    : $"本地数据最新到 {latest:yyyy-MM-dd}";
+            }
+            catch (Exception ex)
+            {
+                text = $"读取数据范围失败：{ex.Message}";
+            }
+            // DataStatusText 的 setter 会触发 PropertyChanged → WPF 绑定必须在 UI 线程上更新
+            System.Windows.Application.Current?.Dispatcher.Invoke(() => DataStatusText = text);
+        });
     }
 }

@@ -20,6 +20,14 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // 只允许开一个实例（2026-08-04新增，见 SingleInstanceGuard 的类注释）——两个 Fetcher 同时抓取
+        // 会往同一个 SQLite 写、互相锁表，历史上因为启动要等几十秒、用户重复双击真的开出过多个。
+        if (!Desktop.Shared.SingleInstanceGuard.TryAcquire("Fetcher", "A股历史数据获取程序"))
+        {
+            Shutdown();
+            return;
+        }
+
         var paths = new FetchPaths();
 
         // Each source gets its own rate limiter — they're independent servers with independent
@@ -123,5 +131,11 @@ public partial class App : Application
         var viewModel = new MainViewModel(paths, orchestrator, sources);
         var window = new MainWindow { DataContext = viewModel };
         window.Show();
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        Desktop.Shared.SingleInstanceGuard.Release();
+        base.OnExit(e);
     }
 }

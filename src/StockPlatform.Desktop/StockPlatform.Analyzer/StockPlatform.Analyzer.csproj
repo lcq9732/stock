@@ -38,6 +38,11 @@
     <EmbeddedResource Include="Resources\IndustryMap.tsv" />
   </ItemGroup>
 
+  <!-- 单实例守卫跟 Fetcher 共用同一份源码（不是各自复制一份）——见该文件的类注释 -->
+  <ItemGroup>
+    <Compile Include="..\Shared\SingleInstanceGuard.cs" Link="Shared\SingleInstanceGuard.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\StockPlatform.Logic\StockPlatform.Logic.csproj" />
     <ProjectReference Include="..\..\StockPlatform.Data\StockPlatform.Data.csproj" />

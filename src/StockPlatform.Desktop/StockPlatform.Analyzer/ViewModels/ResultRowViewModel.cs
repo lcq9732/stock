@@ -24,6 +24,15 @@ public class ResultRowViewModel : ISelectableRow
     /// 直接列出两个止盈目标价和止损价，省得每只都点开"条件详情"看。</summary>
     public double? LastClose { get; init; }
 
+    /// <summary>回调法的用途分类："底仓"/"主动仓"/"底仓+主动仓"；其它方法为空。
+    /// 见 StockScreenResult.Category。</summary>
+    public string Category { get; init; } = "";
+    public bool IsBaseHolding => Category.Contains(PullbackAnalysisEngine.CategoryBase);
+
+    /// <summary>股息率（近12个月已实施派息 ÷ 现价）；没算的方法显示空。</summary>
+    public double? DividendYield { get; init; }
+    public string DividendYieldText => DividendYield.HasValue ? $"{DividendYield.Value * 100:F2}%" : "";
+
     // 回调法结果表专用的三个参考价（跟 SortScore 一样，是方法专属字段挂在共享行模型上）。
     // 两个目标各有依据、由用户自己选，理由见 PullbackAnalysisEngine 里 QuickTargetPct 的注释。
     public string QuickTargetText => Fmt(PullbackAnalysisEngine.DefaultQuickTargetPct);
@@ -50,5 +59,7 @@ public class ResultRowViewModel : ISelectableRow
         Result = r,
         SortScore = r.SortScore,
         LastClose = r.LastClose,
+        Category = r.Category ?? "",
+        DividendYield = r.DividendYield,
     };
 }

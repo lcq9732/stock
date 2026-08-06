@@ -654,7 +654,12 @@
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="行业" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
+                            <!-- 用途分类：底仓=长期持有吃分红（不看回调），主动仓=位置在验证档位内、到价就走。
+                                 位置判断和用途判断是两回事，见 PullbackAnalysisEngine 的分类注释。 -->
+                            <DataGridTextColumn Header="类型" Binding="{Binding Category}" Width="95" IsReadOnly="True" />
                             <DataGridTextColumn Header="低于MA20%" Binding="{Binding SortScore, StringFormat={}{0:F2}}" Width="90" IsReadOnly="True" />
+                            <!-- 股息率：底仓看它够不够3%，主动仓拿它判断该不该改成长期持有 -->
+                            <DataGridTextColumn Header="股息率" Binding="{Binding DividendYieldText}" Width="70" IsReadOnly="True" />
                             <DataGridTextColumn Header="现价" Binding="{Binding LastClose, StringFormat={}{0:F2}}" Width="70" IsReadOnly="True" />
                             <!-- 两个止盈目标并列，由用户按当时判断选一个：+2%是他现在的打法(回测期望为负)，
                                  +10%是本方法条件校准所用的口径。理由见 PullbackAnalysisEngine 注释。 -->

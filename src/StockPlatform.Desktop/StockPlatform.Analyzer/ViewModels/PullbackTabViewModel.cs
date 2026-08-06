@@ -54,15 +54,25 @@ public class PullbackTabViewModel : INotifyPropertyChanged
     public string MarketStateText { get => _marketStateText; private set => Set(ref _marketStateText, value); }
 
     public string CriteriaInfoText =>
-        "回调法 — 入选条件（固定用日线；6条必须全部满足）：\n\n" +
+        "回调法 — 先过4条共同硬条件，再分成「底仓」和「主动仓」两类（固定用日线）\n\n" +
+        "════ 共同硬条件（两类都要过）════\n" +
         "1. 净利润为正（最新一期财报，归母净利润>0）\n" +
         "2. 经营现金流为正（赚的是真钱，不是账面利润）\n" +
         "3. 20日均成交额 ≥ 1亿元（进得去出得来）\n" +
-        "4. 收盘价低于 MA20（不追高，买回调）\n" +
-        "5. 距一年内最高价已回撤 ≥ 10%\n" +
-        $"6. 一手（100股）金额 ≤ 总资产的{MaxPositionPct * 100:F0}%\n" +
+        $"4. 一手（100股）金额 ≤ 总资产的{MaxPositionPct * 100:F0}%\n" +
         "    ——高价股买一手就重仓，到需要减仓时只剩\"全清\"一个选项，仓位余地要在建仓时留出来\n\n" +
-        "排序：按\"低于MA20的幅度\"降序，跌得越深排越前。\n" +
+        "════ 底仓候选：长期持有吃分红，故意不看回调 ════\n" +
+        "  · 股息率 ≥ 3%（要有实质现金流，持满一年分红还免税）\n" +
+        "  · 经营现金流 / 净利润 ≥ 1.0（利润得变成真钱）\n" +
+        "  · 日均波幅(60日) ≤ 1.5%（能扛住，才敢放大仓位）\n\n" +
+        "  为什么底仓不看\"低于MA20\"：高股息蓝筹常年待在MA20上方（防御属性使然），\n" +
+        "  用回调信号去卡它们等于永远买不到。底仓该按月定投建仓，不是等跌了才买。\n" +
+        "  例：中国移动股息率4.75%、招商银行5.00%，日均波幅都只有1.0%，但两只都在MA20上方。\n\n" +
+        "════ 主动仓候选：到价就走 ════\n" +
+        "  · 低于MA20 在 3%~25%（回测验证过的档位，见下）\n" +
+        "  · 距一年内最高价已回撤 ≥ 10%\n" +
+        "  · 日均波幅(60日) ≤ 4.5%\n\n" +
+        "排序：底仓在前（按离MA20由近及远），主动仓在后（按跌幅由深到浅）。\n" +
         "扫描范围已排除：ETF/指数/板块、ST与退市股、科创板(688)、北交所(8x/4x)。\n" +
         "    ——排除后两个板块是因为下面那份回测的样本本来就没包含它们，结论不能外推过去。\n\n" +
         "── 回测依据（2022-06~2026-02，44个时点，186226个样本，+10%止盈/-10%止损/最长持有120日）──\n\n" +
@@ -76,7 +86,12 @@ public class PullbackTabViewModel : INotifyPropertyChanged
         "  -8~-15%   平均2.98%  胜率65.0%   样本 3650  ← 效果好且样本足\n" +
         "  -15~-20%  平均5.61%  胜率78.1%   样本  319  ← 效果最好\n" +
         "  -20~-25%  平均4.67%  胜率73.3%   样本   45   参考价值有限\n" +
-        "  深于-25%                         样本  <10  ⚠ 已超出验证范围，属于外推\n\n" +
+        "  深于-25%                         样本  <10  ⚠ 已超出验证范围，故设为主动仓上限\n\n" +
+        "主动仓那条 4.5% 波幅上限的依据（按日均波幅分档）：\n" +
+        "  0~1.5%   平均0.94% 胜率54.4%      2.5~3.5% 平均1.67% 胜率58.4%\n" +
+        "  1.5~2.5% 平均1.67% 胜率58.3%      3.5~4.5% 平均2.10% 胜率60.5%\n" +
+        "  >4.5%    平均0.03% 胜率50.2%  ← 只有这一档垮掉，等于随机，所以只挡它\n" +
+        "  （更严的 ≤3.5%、≤2.5% 在回测里都没有增益，没有证据就不加，避免过拟合）\n\n" +
         "⚠ 分档虽然单调，但分年看并不稳定：深跌档2025年是+7.57%，2022年是-1.54%（反向），\n" +
         "且深跌样本有近三成来自2025-01-13和2025-04-16两个V型底。本质是\"买跌有效当且仅当后面\n" +
         "有反弹\"，所以深跌只作排序依据和提示，不设为入选门槛。\n\n" +
@@ -205,8 +220,11 @@ public class PullbackTabViewModel : INotifyPropertyChanged
                 }
             });
 
-            // 跌得越深排越前（SortScore = 低于MA20的百分比）
-            foreach (var r in rows.OrderByDescending(r => r.SortScore ?? 0))
+            // 底仓在前（按股息率意义上的稳健度，这里用"离MA20近"近似正序），主动仓在后按跌幅降序。
+            // 两组的排序逻辑本来就不同：底仓比的是质量、主动仓比的是位置。
+            foreach (var r in rows.Where(r => r.IsBaseHolding).OrderBy(r => r.SortScore ?? 0))
+                Results.Add(r);
+            foreach (var r in rows.Where(r => !r.IsBaseHolding).OrderByDescending(r => r.SortScore ?? 0))
                 Results.Add(r);
 
             Log($"分析完成，共扫描 {codes.Count} 个代码（已排除ETF/指数/ST/科创板/北交所），" +
@@ -216,21 +234,27 @@ public class PullbackTabViewModel : INotifyPropertyChanged
 
             if (passedCount > 0)
             {
-                // 按回测档位报一下分布——入选数量本身就是市场状态的温度计：正常市场深跌档只有零星
+                int baseCount = Results.Count(r => r.IsBaseHolding);
+                int activeCount = Results.Count - baseCount;
+                Log($"分类：底仓候选 {baseCount} 只（高股息+现金流覆盖+低波动，长期持有吃分红）、" +
+                    $"主动仓候选 {activeCount} 只（位置在回测验证档位内，到价就走）");
+
+                // 主动仓按回测档位报分布——数量本身就是市场状态的温度计：正常市场深跌档只有零星
                 // 几只，一旦几百只同时跌破MA20两位数，说明是系统性下跌而不是个股回调，这时"买回调"
                 // 的前提（后面有反弹）最不可靠。
-                int shallow = Results.Count(r => r.SortScore < 3);
-                int mid = Results.Count(r => r.SortScore >= 3 && r.SortScore < 8);
-                int deep = Results.Count(r => r.SortScore >= 8 && r.SortScore < 15);
-                int veryDeep = Results.Count(r => r.SortScore >= 15 && r.SortScore < 25);
-                int extreme = Results.Count(r => r.SortScore >= 25);
-                Log($"按跌幅分档：浅跌(0~3%) {shallow} 只 · 中跌(3~8%) {mid} 只 · 深跌(8~15%) {deep} 只 · " +
-                    $"超跌(15~25%) {veryDeep} 只 · 极端(>25%) {extreme} 只");
-                Log("回测里效果最好且样本充足的是深跌与超跌两档（8%~20%）；" +
-                    "跌超25%的历史样本不足10个，属于外推，通常伴随个股利空，点\"条件详情\"会标出来。");
-                if (deep + veryDeep + extreme > 100)
-                    Log($"⚠ 有 {deep + veryDeep + extreme} 只同时跌破MA20超过8%，这是系统性下跌而非个股回调，" +
+                var act = Results.Where(r => !r.IsBaseHolding).ToList();
+                int mid = act.Count(r => r.SortScore >= 3 && r.SortScore < 8);
+                int deep = act.Count(r => r.SortScore >= 8 && r.SortScore < 15);
+                int veryDeep = act.Count(r => r.SortScore >= 15 && r.SortScore < 25);
+                Log($"主动仓按跌幅分档：中跌(3~8%) {mid} 只 · 深跌(8~15%) {deep} 只 · 超跌(15~25%) {veryDeep} 只" +
+                    "（回测里深跌 2.98%/胜率65.0%、超跌 5.61%/胜率78.1% 效果最好且样本充足）");
+                if (deep + veryDeep > 100)
+                    Log($"⚠ 有 {deep + veryDeep} 只同时跌破MA20超过8%，这是系统性下跌而非个股回调，" +
                         "\"买回调\"赖以成立的前提（后面有反弹）此时最不可靠，建议只观察或大幅降低仓位。");
+                if (baseCount > 0 && activeCount > 0 &&
+                    !Results.Any(r => r.Category.Contains("+")))
+                    Log("注意：本次没有任何一只同时符合两类——高股息低波动的票都在MA20上方（防御属性使然），" +
+                        "跌到位的都是低股息高波动的。这本身就是当前市场结构的写照。");
             }
         }
         catch (Exception ex)

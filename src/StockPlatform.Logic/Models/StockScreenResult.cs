@@ -53,6 +53,16 @@ public class StockScreenResult
     public DateTime? DataDate { get; set; }
     public double? LastClose { get; set; }
 
+    /// <summary>近12个月已实施派息算出的股息率（0.05=5%）；没算的方法为 null。放在这里而不是
+    /// 只写进 Criteria 文字里，是因为它是结果表要直接展示、用户扫一眼就要比较的列（见回调法）。</summary>
+    public double? DividendYield { get; set; }
+
+    /// <summary>可选的分类标签——同一个方法的结果分成用途不同的几组时用（目前只有回调法：
+    /// "底仓"=高股息低波动、适合长期持有吃分红；"主动仓"=位置在回测验证档位内、适合到价就走。
+    /// 其它方法为 null）。为什么要分：位置判断和用途判断是两回事，一只票"跌到位了"不代表
+    /// 它适合长期拿，反过来高股息蓝筹常年在MA20上方、永远进不了回调信号但正是底仓该买的。</summary>
+    public string? Category { get; set; }
+
     /// <summary>Optional 0–100 quality/ranking score for methods where "passed" is a fuzzy match and
     /// candidates should be ranked rather than treated as equally good. Only 三角收敛
     /// (TriangleConvergenceAnalysisEngine) sets it today — its "收敛质量" (how tightly the two

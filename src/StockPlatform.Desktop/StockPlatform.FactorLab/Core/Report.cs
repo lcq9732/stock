@@ -167,17 +167,18 @@ public static class Report
         var componentOrder = comp.Components.Select(c => c.Factor.Name).ToList();
 
         var sb = new StringBuilder();
-        sb.Append("名次,代码,名称,合成得分");
+        sb.Append("名次,代码,名称,行业,融资占比,合成得分");
         foreach (var name in componentOrder) sb.Append($",{name}");
         sb.AppendLine();
         var lines = new List<string>();
         foreach (var row in rows)
         {
             var byFactor = row.Contribs.ToDictionary(c => c.Factor, c => c.Score);
-            sb.Append($"{row.Rank},{row.Code},{row.Name},{row.Score:0.000}");
+            sb.Append($"{row.Rank},{row.Code},{row.Name},{row.Industry}," +
+                      $"{(double.IsNaN(row.MarginRatio) ? "" : row.MarginRatio.ToString("0.0%"))},{row.Score:0.000}");
             foreach (var name in componentOrder) sb.Append($",{Num(byFactor[name], "0.000")}");
             sb.AppendLine();
-            lines.Add($"{row.Rank}. {row.Code} {row.Name}（{row.Score:0.000}；主要贡献：{row.TopContribsText}）");
+            lines.Add($"{row.Rank}. {row.Code} {row.Name}[{row.Industry}]（{row.Score:0.000}；主要贡献：{row.TopContribsText}）");
         }
         File.WriteAllText(path, sb.ToString(), Utf8Bom);
 

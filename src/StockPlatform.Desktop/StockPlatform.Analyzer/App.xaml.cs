@@ -12,6 +12,14 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // 只允许开一个实例（2026-08-04新增，见 SingleInstanceGuard 的类注释）——两个 Analyzer 同时
+        // 编辑 watchlist.json 会互相覆盖（那个文件是整体读-改-写），所以这不只是体验问题。
+        if (!Desktop.Shared.SingleInstanceGuard.TryAcquire("Analyzer", "A股批量分析程序"))
+        {
+            Shutdown();
+            return;
+        }
+
         var paths = new AnalyzerPaths();
         var barRepository = new SqliteBarRepository(paths.TotalDb);
         barRepository.EnsureSchema();
@@ -33,5 +41,11 @@ public partial class App : Application
         var viewModel = new MainViewModel(paths, barRepository, fundamentalRepository, netInflowRepository, boardRepository, shareholderRepository, marginRepository, financialRepository, dividendRepository);
         var window = new MainWindow { DataContext = viewModel };
         window.Show();
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        Desktop.Shared.SingleInstanceGuard.Release();
+        base.OnExit(e);
     }
 }

@@ -1901,11 +1901,15 @@ public class FetchOrchestrator
         if (!File.Exists(_paths.CurrentDb))
             return new DataStatus { LastFetchAt = manifest.LastFetchAt, LastFetchKind = manifest.LastFetchKind };
 
+        // 一次扫描同时拿最早+最晚（2026-08-04）——以前分两次调，等于把 7GB 的主键覆盖索引扫两遍，
+        // 实测 5.2 秒 vs 合成后 3.1 秒。这个方法整体仍然慢（冷启动几十秒），所以调用方
+        // （Fetcher 的 MainViewModel.RefreshDataStatus）已改成在后台线程跑、不挡窗口显示。
         var repo = new SqliteBarRepository(_paths.CurrentDb);
+        var (earliest, latest) = repo.GetOverallPeriodStartRange(Granularity.Day);
         return new DataStatus
         {
-            EarliestDay = repo.GetOverallEarliestPeriodStart(Granularity.Day),
-            LatestDay = repo.GetOverallLatestPeriodStart(Granularity.Day),
+            EarliestDay = earliest,
+            LatestDay = latest,
             LastFetchAt = manifest.LastFetchAt,
             LastFetchKind = manifest.LastFetchKind,
         };

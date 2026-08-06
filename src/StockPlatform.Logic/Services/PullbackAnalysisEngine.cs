@@ -35,12 +35,42 @@ public class PullbackAnalysisEngine
 
     private const int MaWindow = 20;
     private const int AmountWindow = 20;
+    /// <summary>日均波幅的统计窗口（交易日）。</summary>
+    private const int VolatilityWindow = 60;
 
     /// <summary>20日均成交额下限（元）。1亿是"进得去出得来"的经验线，也是回测基准用的口径。</summary>
     public double MinAvgAmount { get; init; } = 100_000_000;
 
     /// <summary>距一年高点至少回撤多少才算"已经回调过"。</summary>
     public double MinPullbackFromHigh { get; init; } = 0.10;
+
+    // ── 两类候选各自的门槛 ──
+    //
+    // 分成两类的原因：**位置判断和用途判断是两回事**。高股息蓝筹（中国移动股息率4.75%、
+    // 招商银行5.00%）常年待在MA20上方，永远进不了"低于MA20"这个回调信号，但它们正是
+    // 底仓该买的；反过来跌到位的票（宁波韵升 现金流/净利仅0.49、股息率0.90%）位置对了，
+    // 却不适合长期拿。所以底仓不看回调、主动仓才看。
+    //
+    /// <summary>底仓：股息率下限。要能提供实质现金流，持满一年分红还免税。</summary>
+    public double BaseMinDividendYield { get; init; } = 0.03;
+    /// <summary>底仓：经营现金流至少要覆盖净利润（利润得变成真钱，长期持有才踏实）。</summary>
+    public double BaseMinOcfCoverage { get; init; } = 1.0;
+    /// <summary>底仓：日均波幅上限。要能扛住、能放大仓位，不能天天心跳。</summary>
+    public double BaseMaxDailyVolatility { get; init; } = 0.015;
+
+    /// <summary>主动仓：低于MA20的幅度必须落在回测验证过的档位内。
+    /// 下限3%——0~3%那档平均0.29%/胜率51.3%，接近随机；
+    /// 上限25%——更深的历史样本不足10个，属于外推（见 <see cref="DepthNote"/>）。</summary>
+    public double ActiveMinBelowMa20 { get; init; } = 0.03;
+    public double ActiveMaxBelowMa20 { get; init; } = 0.25;
+    /// <summary>主动仓：日均波幅上限4.5%。这是唯一有回测支持的波动率护栏——按波幅分档，
+    /// 0~1.5%档0.94%/54.4%、1.5~2.5%档1.67%/58.3%、2.5~3.5%档1.67%/58.4%、
+    /// 3.5~4.5%档2.10%/60.5%，**只有 >4.5% 那档垮掉：0.03%/50.2%，等于随机**。
+    /// 更严的波幅上限（≤3.5%、≤2.5%）在回测里都没有增益，所以只挡这一档、不多设。</summary>
+    public double ActiveMaxDailyVolatility { get; init; } = 0.045;
+
+    public const string CategoryBase = "底仓";
+    public const string CategoryActive = "主动仓";
 
     /// <summary>一手（100股）的金额上限（元）。默认 = 总资产100万×15%；调用方按用户实际总资产
     /// 和单票上限覆盖。这条是专门为高价股设的：茅台一手约13.5万，在55万本金下占到24.5%，
@@ -124,6 +154,14 @@ public class PullbackAnalysisEngine
         double yearHigh = double.MinValue;
         for (int t = i - TradingDaysPerYear + 1; t <= i; t++) yearHigh = Math.Max(yearHigh, bars[t].High);
 
+        // 日均波幅：近60个交易日 |当日涨跌| 的均值。分类要用——底仓要低波动（能扛能放大仓位），
+        // 主动仓要挡掉 >4.5% 那档（-10%止损在那种波动下两三天就会被噪音打掉）。
+        double volatility = 0;
+        int volDays = Math.Min(VolatilityWindow, i);
+        for (int t = i - volDays + 1; t <= i; t++)
+            if (bars[t - 1].Close > 0) volatility += Math.Abs(bars[t].Close / bars[t - 1].Close - 1);
+        volatility = volDays > 0 ? volatility / volDays : 0;
+
         double belowMa20 = ma20 > 0 ? close / ma20 - 1 : 0;      // 负数=低于MA20
         double pullback = yearHigh > 0 ? (yearHigh - close) / yearHigh : 0;
         double lotAmount = close * 100;
@@ -131,6 +169,7 @@ public class PullbackAnalysisEngine
         var fin = _financials.GetValueOrDefault(code);
         double? netProfit = fin?.Get(FinancialKeys.NetProfitParent);
         double? ocf = fin?.Get(FinancialKeys.Ocf);
+        double? ocfCoverage = netProfit is > 0 && ocf.HasValue ? ocf.Value / netProfit.Value : null;
 
         var dps = _dividendPerShare.GetValueOrDefault(code);
         double dividendYield = close > 0 ? dps / close : 0;
@@ -141,6 +180,7 @@ public class PullbackAnalysisEngine
             Granularity = Granularity.Day,
             DataDate = bars[i].PeriodStart,
             LastClose = close,
+            DividendYield = dividendYield,
             SortScore = -belowMa20 * 100,       // 跌得越深排越前
             Criteria = new List<CriterionResult>
             {
@@ -170,19 +210,6 @@ public class PullbackAnalysisEngine
                 },
                 new()
                 {
-                    Name = "不追高：收盘价低于MA20",
-                    Satisfied = close < ma20,
-                    Basis = $"收盘={close:F2}；MA20={ma20:F2}；偏离={belowMa20 * 100:+0.00;-0.00}%" +
-                            (close < ma20 ? $"　{DepthNote(belowMa20)}" : ""),
-                },
-                new()
-                {
-                    Name = $"已回调：距一年高点≥{MinPullbackFromHigh * 100:F0}%",
-                    Satisfied = pullback >= MinPullbackFromHigh,
-                    Basis = $"一年内最高={yearHigh:F2}；现价={close:F2}；已回撤={pullback * 100:F1}%",
-                },
-                new()
-                {
                     Name = $"一手金额≤{MaxLotAmount / 1e4:F1}万（留出仓位余地）",
                     Satisfied = lotAmount <= MaxLotAmount,
                     Basis = $"一手(100股)={lotAmount:N0}元" +
@@ -190,13 +217,62 @@ public class PullbackAnalysisEngine
                 },
             },
         };
-        result.Passed = result.Criteria.AllSatisfiedIgnoringMissingData();
+        bool commonOk = result.Criteria.AllSatisfiedIgnoringMissingData();
 
-        // 执行参考（不参与筛选）：两个止盈目标 + 止损价 + 股息率。两个目标各有依据，由用户
-        // 按当时判断选一个，见上面 QuickTargetPct/TargetPct 的注释。
+        // ── 底仓判定：能不能长期拿着吃分红。**故意不看"是否低于MA20"** ——
+        //    高股息蓝筹常年在MA20上方，用回调信号去卡它们等于永远买不到。
+        bool baseYield = dividendYield >= BaseMinDividendYield;
+        bool baseCoverage = ocfCoverage is not null && ocfCoverage >= BaseMinOcfCoverage;
+        bool baseVol = volatility <= BaseMaxDailyVolatility;
+        bool isBase = commonOk && baseYield && baseCoverage && baseVol;
+
+        // ── 主动仓判定：位置对不对、波动扛不扛得住止损。
+        double depth = -belowMa20;                      // 正数=低于MA20多少
+        bool actDepth = depth >= ActiveMinBelowMa20 && depth <= ActiveMaxBelowMa20;
+        bool actPullback = pullback >= MinPullbackFromHigh;
+        bool actVol = volatility <= ActiveMaxDailyVolatility;
+        bool isActive = commonOk && actDepth && actPullback && actVol;
+
+        result.Category = (isBase, isActive) switch
+        {
+            (true, true) => $"{CategoryBase}+{CategoryActive}",
+            (true, false) => CategoryBase,
+            (false, true) => CategoryActive,
+            _ => null,
+        };
+        result.Passed = isBase || isActive;
+
         result.Criteria.Add(new CriterionResult
         {
-            Name = "【执行参考】两个止盈目标 / 止损价",
+            Name = $"【底仓判定】{(isBase ? "✓ 符合" : "✗ 不符合")}（长期持有吃分红，不看回调）",
+            Satisfied = isBase,
+            Basis =
+                $"{(baseYield ? "✓" : "✗")} 股息率 {dividendYield * 100:F2}%（需≥{BaseMinDividendYield * 100:F0}%）\n" +
+                $"    {(baseCoverage ? "✓" : "✗")} 经营现金流/净利润 " +
+                $"{(ocfCoverage.HasValue ? ocfCoverage.Value.ToString("F2") : "无数据")}" +
+                $"（需≥{BaseMinOcfCoverage:F1}，利润要变成真钱）\n" +
+                $"    {(baseVol ? "✓" : "✗")} 日均波幅 {volatility * 100:F2}%" +
+                $"（需≤{BaseMaxDailyVolatility * 100:F1}%，能扛住才敢放大仓位）",
+        });
+        result.Criteria.Add(new CriterionResult
+        {
+            Name = $"【主动仓判定】{(isActive ? "✓ 符合" : "✗ 不符合")}（到价就走）",
+            Satisfied = isActive,
+            Basis =
+                $"{(actDepth ? "✓" : "✗")} 低于MA20 {depth * 100:F2}%" +
+                $"（需在{ActiveMinBelowMa20 * 100:F0}%~{ActiveMaxBelowMa20 * 100:F0}%的回测验证档位内）" +
+                $"　{DepthNote(belowMa20)}\n" +
+                $"    {(actPullback ? "✓" : "✗")} 距一年高点 {pullback * 100:F1}%" +
+                $"（需≥{MinPullbackFromHigh * 100:F0}%；一年内最高 {yearHigh:F2}）\n" +
+                $"    {(actVol ? "✓" : "✗")} 日均波幅 {volatility * 100:F2}%" +
+                $"（需≤{ActiveMaxDailyVolatility * 100:F1}%；>4.5%那档回测只有0.03%/胜率50.2%，等于随机）",
+        });
+
+        // 执行参考（不参与筛选）：两个止盈目标 + 止损价。两个目标各有依据，由用户按当时判断
+        // 选一个，见上面 QuickTargetPct/TargetPct 的注释。底仓不用这组价——它靠时间和分红。
+        result.Criteria.Add(new CriterionResult
+        {
+            Name = "【执行参考】两个止盈目标 / 止损价（主动仓用）",
             Satisfied = true,
             Basis =
                 $"现价 {close:F2}\n" +
@@ -205,16 +281,8 @@ public class PullbackAnalysisEngine
                 $"    大目标 {close * (1 + TargetPct):F2}（+{TargetPct * 100:F0}%，本方法条件校准所用）" +
                 $"——回测平均 +0.96%、胜率54.7%\n" +
                 $"    止损价 {close * (1 - StopPct):F2}（-{StopPct * 100:F0}%）" +
-                $"——不设止损会把亏损推迟成尾部风险，不是消除亏损",
-        });
-        result.Criteria.Add(new CriterionResult
-        {
-            Name = "【执行参考】股息率",
-            Satisfied = true,
-            Basis = $"近12个月已实施派息 {dps:F3} 元/股，股息率 {dividendYield * 100:F2}%" +
-                    (dividendYield >= 0.03
-                        ? "（≥3%：更适合当底仓长期持有，持满一年分红免税）"
-                        : "（偏低：按主动仓打法到价就走即可）"),
+                $"——不设止损会把亏损推迟成尾部风险，不是消除亏损\n" +
+                $"    底仓不用这组价：它靠持有时间和分红，按月定投建仓、持满一年分红免税",
         });
 
         return result;

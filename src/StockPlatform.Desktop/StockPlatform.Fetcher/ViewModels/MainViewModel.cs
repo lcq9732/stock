@@ -204,19 +204,48 @@ public class MainViewModel : INotifyPropertyChanged
     private List<string> ParseAnnouncementKeywords() =>
         AnnouncementKeywordsText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
+    /// <summary>
+    /// 刷新"本地数据覆盖：X 至 Y"那行状态文字——**放到后台线程跑**（2026-08-04改）。
+    ///
+    /// 原因：它要在 Bar 表上求全库最早/最晚交易日，而 Bar 的主键是 (code, granularity, period_start)、
+    /// 前导列不是 granularity，MIN/MAX 用不上有序性，只能把整个主键覆盖索引扫完。库涨到 7GB 后实测：
+    /// 暖状态约 3 秒，**冷启动（开机后首次读这个文件）实测整个窗口要等 39 秒才出现**——用户以为没启动
+    /// 就重复双击，开出好几个 Fetcher，两个实例同时抓取会往同一个 SQLite 写、互相锁表。
+    ///
+    /// 改法：窗口先出来（构造函数里不再等它），这行字先显示"正在统计…"，算完自己刷上去。抓取按钮
+    /// 不依赖这行字，所以**不需要锁住界面**。同时把原来分两次的 MIN/MAX 合成一次扫描（省 41%，见
+    /// SqliteBarRepository.GetOverallPeriodStartRange）。另外也加了单实例守卫（SingleInstanceGuard）。
+    ///
+    /// 没有改成"给 Bar 建 (granularity, period_start) 索引"：给 7GB 的表新建索引本身要跑几分钟、
+    /// 每次写入也会变慢，代价大于收益（用户 2026-08-04 确认按"先出界面"的思路解决）。
+    /// </summary>
     private void RefreshDataStatus()
     {
-        var status = _orchestrator.GetDataStatus();
-        if (status.EarliestDay == null || status.LatestDay == null)
+        DataStatusText = "正在统计本地数据范围…（库较大，首次可能要数十秒；不影响下面的抓取按钮）";
+        _ = Task.Run(() =>
         {
-            DataStatusText = "本地还没有任何K线数据";
-        }
-        else
-        {
-            DataStatusText = $"本地数据覆盖：{status.EarliestDay:yyyy-MM-dd} 至 {status.LatestDay:yyyy-MM-dd}";
-            if (status.LastFetchAt != null)
-                DataStatusText += $"；上次抓取：{status.LastFetchAt:yyyy-MM-dd HH:mm}（{status.LastFetchKind}）";
-        }
+            string text;
+            try
+            {
+                var status = _orchestrator.GetDataStatus();
+                if (status.EarliestDay == null || status.LatestDay == null)
+                {
+                    text = "本地还没有任何K线数据";
+                }
+                else
+                {
+                    text = $"本地数据覆盖：{status.EarliestDay:yyyy-MM-dd} 至 {status.LatestDay:yyyy-MM-dd}";
+                    if (status.LastFetchAt != null)
+                        text += $"；上次抓取：{status.LastFetchAt:yyyy-MM-dd HH:mm}（{status.LastFetchKind}）";
+                }
+            }
+            catch (Exception ex)
+            {
+                text = $"读取数据范围失败：{ex.Message}";
+            }
+            // DataStatusText 的 setter 触发 PropertyChanged → 必须回到 UI 线程更新绑定
+            System.Windows.Application.Current?.Dispatcher.Invoke(() => DataStatusText = text);
+        });
     }
 
     private void Log(string message)

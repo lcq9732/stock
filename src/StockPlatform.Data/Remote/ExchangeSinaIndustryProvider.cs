@@ -90,10 +90,12 @@ public class ExchangeSinaIndustryProvider : IIndustryProvider
             bool got = false;
             foreach (var block in doc.RootElement.EnumerateArray())
             {
-                // ⚠️ 这个接口把 pagecount 返回成**字符串**（"145"），直接 TryGetInt32 会失败、
-                // pageCount 停在1，结果只抓到第一页20条（2026-08-04 实测踩过）。两种类型都认。
+                // ⚠️ 响应里有4个tab块（A股/B股/CDR/A+B股），只有A股那块有数据、pagecount=145，
+                // 后面几块都是 0——必须取**最大值**，否则会被后面的 0 覆盖，循环停在第一页只拿到20条
+                // （2026-08-04 实测踩过这个坑）。顺带兼容 pagecount 是字符串的情况。
                 if (page == 1 && block.TryGetProperty("metadata", out var meta) &&
-                    meta.TryGetProperty("pagecount", out var pc) && TryReadInt(pc, out var n)) pageCount = n;
+                    meta.TryGetProperty("pagecount", out var pc) && TryReadInt(pc, out var n) && n > pageCount)
+                    pageCount = n;
                 if (!block.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) continue;
                 foreach (var item in data.EnumerateArray())
                 {

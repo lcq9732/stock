@@ -25,4 +25,9 @@
     <ProjectReference Include="..\..\StockPlatform.Data\StockPlatform.Data.csproj" />
   </ItemGroup>
 
+  <!-- 单实例守卫跟 Analyzer 共用同一份源码（不是各自复制一份）——见该文件的类注释 -->
+  <ItemGroup>
+    <Compile Include="..\Shared\SingleInstanceGuard.cs" Link="Shared\SingleInstanceGuard.cs" />
+  </ItemGroup>
+
 </Project>
