@@ -220,15 +220,26 @@ public partial class MainWindow : Window
         new RisingLowsDetailWindow(row.Result, bars) { Owner = this }.ShowDialog();
     }
 
-    // 短线法的"条件详情"复用金叉法的详情窗口（GoldenCrossDetailWindow）——短线法用到的指标
-    // （MA5/MA10、前20日最高价突破线、成交量对比5日均量、MACD）正好是那张图已经画的一个子集，
-    // 且突破线用的是同一套"前20日最高价"口径，图和条件文字对得上（见 ShortTermAnalysisEngine 注释）。
+    // 短线法的"条件详情"——2026-08-07 规则替换后改用纯文字，不再复用金叉法的详情图。
+    // 旧版9条正好是那张图画的指标子集，所以能共用；新版加了两条财务条件（净利/经营现金流）和
+    // MA20位置，那张图都画不出来，硬套会让"图上指标"和"判断依据文字"对不上。想看走势点"行情详情"。
     private void ShortTermCriteriaButton_Click(object sender, RoutedEventArgs e)
     {
-        if (DataContext is not MainViewModel vm) return;
         if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
-        if (!TryGetBars(vm, row, out var bars)) return;
-        new GoldenCrossDetailWindow(row.Result, bars) { Owner = this }.ShowDialog();
+
+        if (row.Error != null)
+        {
+            MessageBox.Show(this, row.Error, "无法显示详情", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var r = row.Result;
+        var text = $"{r.Code} {r.Name}\n" +
+                   $"数据日期 {r.DataDate:yyyy-MM-dd}　收盘 {r.LastClose:F2}\n" +
+                   $"低于MA20 {r.SortScore:F2}%（列表按这个降序排）\n\n" +
+                   string.Join("\n\n", r.Criteria.Select(c =>
+                       $"{(c.DataMissing ? "⚠" : c.Satisfied ? "✓" : "✗")} {c.Name}\n    {c.Basis}"));
+        MessageBox.Show(this, text, "短线法 — 条件详情", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void WatchlistCriteriaButton_Click(object sender, RoutedEventArgs e)

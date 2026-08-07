@@ -33,6 +33,17 @@ public class ResultRowViewModel : ISelectableRow
     public double? DividendYield { get; init; }
     public string DividendYieldText => DividendYield.HasValue ? $"{DividendYield.Value * 100:F2}%" : "";
 
+    /// <summary>档位标签："档位名 胜率% / 样本数"，见 StockScreenResult.DepthBucket。
+    /// 样本数一起显示是有意的——超跌档78%的胜率只建立在319个样本上，别只看胜率。</summary>
+    public string DepthBucket { get; init; } = "";
+
+    /// <summary>日均波幅（近60日）；没算的方法显示空。超过4.5%时加 ⚠ ——那一档回测只有
+    /// 0.03%/胜率50.2%（等于随机），且-10%止损在这种波动下两三天就会被噪音打掉。</summary>
+    public double? DailyVolatility { get; init; }
+    public string DailyVolatilityText => DailyVolatility.HasValue
+        ? $"{DailyVolatility.Value * 100:F2}%{(DailyVolatility.Value > 0.045 ? " ⚠" : "")}"
+        : "";
+
     // 回调法结果表专用的三个参考价（跟 SortScore 一样，是方法专属字段挂在共享行模型上）。
     // 两个目标各有依据、由用户自己选，理由见 PullbackAnalysisEngine 里 QuickTargetPct 的注释。
     public string QuickTargetText => Fmt(PullbackAnalysisEngine.DefaultQuickTargetPct);
@@ -61,5 +72,7 @@ public class ResultRowViewModel : ISelectableRow
         LastClose = r.LastClose,
         Category = r.Category ?? "",
         DividendYield = r.DividendYield,
+        DailyVolatility = r.DailyVolatility,
+        DepthBucket = r.DepthBucket ?? "",
     };
 }

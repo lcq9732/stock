@@ -12,9 +12,10 @@ using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Analyzer.ViewModels;
 
-/// <summary>"短线法" tab — daily-close short-term entry screen (see ShortTermAnalysisEngine). Fixed
-/// to daily bars. 放量倍数/涨幅上限/流通市值区间 are user-adjustable; 近期涨停是加分项，结果按它
-/// 从高到低排序（涨停多=资金关注多，排前面），不影响是否入选。</summary>
+/// <summary>"短线法" tab —— 2026-08-07 规则整体替换，见 <see cref="ShortTermAnalysisEngine"/>。
+/// 从"放量突破追涨"改成"回调埋伏"，参数不再暴露给界面调整：这套9条的每个阈值都是回测选出来的，
+/// 随手改一个（比如把量比放宽到1.5）就会落到被证伪的那一侧，所以固定住、只在ⓘ里说明依据。
+/// 顶部显示大盘MA60状态——两种环境都为正，但下行时明显更好（4.28% vs 1.83%），是出手前的背景。</summary>
 public class ShortTermTabViewModel : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -28,24 +29,11 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
 
     private readonly AnalyzerPaths _paths;
     private readonly IBarRepository _barRepository;
-    private readonly INetInflowRepository _netInflowRepository;
-    private readonly IFundamentalMetricRepository _fundamentalRepository;
+    private readonly IFinancialRepository _financialRepository;
     private readonly JsonWatchlistStore _watchlistStore;
 
     public ObservableCollection<string> LogLines { get; } = new();
     public ObservableCollection<ResultRowViewModel> Results { get; } = new();
-
-    private double _volumeSurgeRatio = 1.5;
-    public double VolumeSurgeRatio { get => _volumeSurgeRatio; set => Set(ref _volumeSurgeRatio, value); }
-
-    private double _maxDayGainPct = 7;
-    public double MaxDayGainPct { get => _maxDayGainPct; set => Set(ref _maxDayGainPct, value); }
-
-    private double _minCapYi = 30;
-    public double MinCapYi { get => _minCapYi; set => Set(ref _minCapYi, value); }
-
-    private double _maxCapYi = 300;
-    public double MaxCapYi { get => _maxCapYi; set => Set(ref _maxCapYi, value); }
 
     private bool _isBusy;
     public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
@@ -53,18 +41,69 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
     private string _progressText = "";
     public string ProgressText { get => _progressText; set => Set(ref _progressText, value); }
 
+    private string _marketStateText = "（点\"开始分析\"后显示）";
+    public string MarketStateText { get => _marketStateText; private set => Set(ref _marketStateText, value); }
+
     public string CriteriaInfoText =>
-        $"短线法 — 入选条件（固定用日线；前7条为必须满足，第8条为过滤；近15日涨停是加分项、不作硬性门槛）：\n\n" +
-        "1. 均线多头启动：收盘 > MA5 > MA10，且 MA10 拐头向上\n" +
-        $"2. 放量：当日成交量 ≥ 前5日均量 × {VolumeSurgeRatio:F1}\n" +
-        "3. 突破：收盘价创近20日新高（最高价口径）\n" +
-        "4. MACD动能确认：MACD柱转正且放大，或 DIF 在0轴上方金叉\n" +
-        "5. 主力资金净流入：最新交易日主力净流入 > 0\n" +
-        $"6. 流通市值适中：{MinCapYi:F0}亿 ~ {MaxCapYi:F0}亿\n" +
-        $"7. 不追高：当日涨幅 ≤ {MaxDayGainPct:F1}%\n" +
-        "8. 过滤：排除 ST/*ST、北交所\n\n" +
-        "结果只显示以上条件全部满足的股票，并按\"近15日涨停次数\"从高到低排序（涨停多的排前面——有资金关注、弹性大，但不作硬性入选条件）。\n\n" +
-        "说明：适合 T+1 下的短线/波段——盘后选出\"明天值得关注的启动票\"，不做分时/打板。信号失败率不低，实盘请配止损（如跌破MA5或买入价-5%）。放量倍数/涨幅上限/流通市值区间都可在上方调整。";
+        "短线法 — 回调埋伏型（2026-08-07 规则整体替换，固定用日线，8条必须全部满足）\n\n" +
+        "【旧版已废弃】原来的\"均线多头启动+放量+突破20日新高+主力净流入+市值区间+涨幅≤7%\"是\n" +
+        "追涨型。新版方向相反：找\"跌到位、动能刚要转、但市场还没放量追进去\"的票。\n" +
+        "换掉的依据就是下面的回测——旧版核心的\"放量突破\"恰恰是被证伪的一侧：\n" +
+        "入场当日放量的平均收益 0.14%，缩量的 1.01%，差七倍。\n\n" +
+        "════ 质量底线（2条）════\n" +
+        "1. 净利润为正（最新一期财报，归母净利润>0）\n" +
+        "2. 经营现金流为正（赚的是真钱）\n" +
+        "   —— 只保留底线，不做质量优选：ROE/净利增长这类重基本面筛选在回测里是负贡献\n\n" +
+        "════ 位置（2条）════\n" +
+        "3. 低于 MA20 在 3%~25% 之间（回测验证过的档位）\n" +
+        "4. 距一年内最高价已回撤 ≥ 10%\n\n" +
+        "════ 动能（4条）════\n" +
+        "5. MACD柱连续 ≥2天 收窄，且仍在0轴下方（正在向0轴靠）\n" +
+        "6. 入场时机 —— ★这一条按大盘状态分两个分支★\n" +
+        "     · 上证 < MA60（熊市）：MA5 拐头向上 **且 收盘仍低于 MA5**\n" +
+        "         回测 4.62% / 胜率73.2% / 样本1338（不加价格位置只有 3.29%/66.6%）\n" +
+        "         理由：熊市反弹又快又短，等价格站上MA5，第一段已经被吃掉了\n" +
+        "     · 上证 > MA60（牛市）：MA5 拐头向上（不限价格位置）\n" +
+        "         回测 3.29% / 胜率66.6% / 样本1629\n" +
+        "7. KDJ 处于金叉状态（K>D），且不是当日刚金叉\n" +
+        "8. 当日未放量：量比 ≤ 1.2（当日量 ÷ 前5日均量）\n\n" +
+        "════ 仅提示、不拦截 ════\n" +
+        "· 日均波幅(60日)：原为第9条硬条件，2026-08-07 按要求降级。\n" +
+        "  它是回测里唯一站得住的护栏——分档 0~1.5%档0.94%、1.5~2.5%档1.67%、2.5~3.5%档1.67%、\n" +
+        "  3.5~4.5%档2.10%，唯独 >4.5% 那档垮成 0.03%/胜率50.2%（等于随机）；\n" +
+        "  且给它放宽止损只会更差（+15/-15→0.25%，+20/-20→-0.36%）。\n" +
+        "  ⚠ 现在超过4.5%的票也会入选，条件详情里会标出来，请自行减半仓位或跳过。\n\n" +
+        "排序：按\"低于MA20的幅度\"降序，跌得越深排越前。\n" +
+        "扫描范围排除：ETF/指数/板块、ST与退市股、科创板(688)、北交所(8x/4x)。\n\n" +
+        "──────── 回测依据 ────────\n" +
+        "2022-06~2026-02，89个时点、28020个入场样本，财报按法定披露截止日滞后避免未来函数；\n" +
+        "口径 = +10%止盈 / -10%止损 / 最长持有120交易日。逐层叠加：\n\n" +
+        "  基准（位置+波幅+流动性）        平均 0.59%   胜率 52.9%   样本28020\n" +
+        "  + MACD柱连续2天收窄且为负       平均 0.96%   胜率 54.8%   样本 9322\n" +
+        "  + 当日未放量（量比<1.2）        平均 1.05%   胜率 55.2%   样本 8345\n" +
+        "  + MA5拐头向上                 平均 2.77%   胜率 63.9%   样本 2915\n" +
+        "  + KDJ金叉状态且非当日刚叉        平均 3.35%   胜率 66.8%   样本 2424\n\n" +
+        "大盘>MA60 时 1.83%/59.1%，大盘<MA60 时 4.28%/71.6% —— 两种环境都为正。\n\n" +
+        "──────── 两个反直觉的点（别改回去）────────\n\n" +
+        "① 指标交叉那一天是最差的买点，不是最好的：\n" +
+        "   KDJ「当日刚金叉」 -1.23% / 胜率43.9%，而金叉后的延续状态 3.35% / 66.8%\n" +
+        "   MACD「只收窄一天」 -0.46% / 胜率47.6%（全表最差），所以要求连续≥2天\n" +
+        "   交叉瞬间噪音最大，要等它站稳一两天。\n\n" +
+        "② K值不是越低越好：\n" +
+        "   K在40~60  平均5.37% 胜率76.9%      K在0~40  平均1.93% 胜率59.8%\n" +
+        "   太低说明还在超卖磨底，中位说明动能起来了但没超买。所以只要求K>D，不额外要求低位。\n\n" +
+        "──────── 量比分档 ────────\n" +
+        "  缩量<0.8      平均4.63%  胜率73.2%   ← 最优\n" +
+        "  平量0.8~1.2   平均1.64%  胜率58.3%\n" +
+        "  放量>1.2      平均-0.07% 胜率49.4%   ← 已被市场发现，太晚了\n\n" +
+        "──────── 为什么牛市那侧没有做得更严 ────────\n" +
+        "回测显示牛市里改用「确认型」（MACD已转正 + 收盘站上MA5）能到 5.17%/胜率75.9%，\n" +
+        "但那只有 116 个样本，且在该环境下命中率仅 0.41%——等于牛市里工具几乎不出信号。\n" +
+        "2026-08-07 与用户确认：只改熊市分支，牛市保持原样。用户的判断是\n" +
+        "「牛市可能就不用这套方法，毕竟遍地好股」——这和数据也吻合：牛市里中跌档(-0.01%)、\n" +
+        "深跌档(0.09%)收益基本为零，只有超跌档(1.81%)还有效，本来就没多少可选的。\n\n" +
+        "参数不开放调整：每个阈值都是回测选出来的，随手放宽一个就会落到被证伪的一侧。\n" +
+        "⚠ 所有阈值在同一批历史数据上选出，有过拟合成分，需前向跟踪验证。";
 
     public RelayCommand AnalyzeCommand { get; }
     public RelayCommand ShowCriteriaInfoCommand { get; }
@@ -72,12 +111,11 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
     public RelayCommand ExportCommand { get; }
 
     public ShortTermTabViewModel(AnalyzerPaths paths, IBarRepository barRepository,
-        INetInflowRepository netInflowRepository, IFundamentalMetricRepository fundamentalRepository, JsonWatchlistStore watchlistStore)
+        IFinancialRepository financialRepository, JsonWatchlistStore watchlistStore)
     {
         _paths = paths;
         _barRepository = barRepository;
-        _netInflowRepository = netInflowRepository;
-        _fundamentalRepository = fundamentalRepository;
+        _financialRepository = financialRepository;
         _watchlistStore = watchlistStore;
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
@@ -88,10 +126,31 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
             var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "短线法", Granularity.Day);
             Log(added > 0 ? $"已将 {added} 只股票加入自选" : "没有勾选股票，或勾选的都已经在自选里了");
         });
-        ExportCommand = new RelayCommand(_ => GridExporter.ExportResults("短线法", Results, includeScore: true, scoreHeader: "近15日涨停"));
+        ExportCommand = new RelayCommand(_ =>
+            GridExporter.ExportResults("短线法", Results, includeScore: true, scoreHeader: "低于MA20%"));
     }
 
     private void Log(string message) => LogLines.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {message}");
+
+    /// <summary>上证收盘 vs MA60——**决定用哪个分支的入场时机条件**，不只是提示。
+    /// 返回 (是否在MA60上方, 显示文字)；本地缺指数日线时按"上方"处理（较保守的那个分支）。</summary>
+    private (bool AboveMa60, string Text) ComputeMarketState()
+    {
+        var bars = _barRepository.Query("sh000001", Granularity.Day);
+        if (bars.Count < 60) return (true, "⚠ 无法计算大盘状态（本地缺上证指数日线），按大盘>MA60分支处理");
+        int i = bars.Count - 1;
+        double ma60 = 0;
+        for (int t = i - 59; t <= i; t++) ma60 += bars[t].Close;
+        ma60 /= 60;
+        double close = bars[i].Close;
+        bool above = close > ma60;
+        var text = $"大盘（{bars[i].PeriodStart:yyyy-MM-dd}）：上证 {close:F2}，MA60 {ma60:F2}，" +
+                   $"位于MA60{(above ? "上方" : "下方")} {Math.Abs(close / ma60 - 1) * 100:F2}% → " +
+                   (above
+                       ? "启用【大盘>MA60分支】：第7条只要求 MA5 拐头向上，不限价格位置（回测 3.29%/胜率66.6%）"
+                       : "启用【大盘<MA60分支·提前埋伏】：第7条额外要求 收盘仍低于MA5（回测 4.62%/胜率73.2%）");
+        return (above, text);
+    }
 
     private async Task RunAnalyzeAsync()
     {
@@ -106,11 +165,17 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
                 return;
             }
 
+            var (aboveMa60, stateText) = ComputeMarketState();
+            MarketStateText = stateText;
+            Log(stateText);
+
+            ProgressText = "正在载入财务数据…";
+            var financials = await Task.Run(() => _financialRepository.GetLatestSnapshotByCode());
+            Log($"已载入 {financials.Count} 只股票的财务快照");
+
             var names = SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
-            var engine = new ShortTermAnalysisEngine(_barRepository, _netInflowRepository, _fundamentalRepository);
-            double ratio = VolumeSurgeRatio, maxGain = MaxDayGainPct, minCap = MinCapYi, maxCap = MaxCapYi;
-            int errorCount = 0;
-            var missingDataCounts = new Dictionary<string, int>();
+            var engine = new ShortTermAnalysisEngine(_barRepository, financials, aboveMa60);
+            int errorCount = 0, noFinancialCount = 0;
             var passed = new List<StockScreenResult>();
 
             await Task.Run(() =>
@@ -118,27 +183,60 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
                 for (int i = 0; i < codes.Count; i++)
                 {
                     var code = codes[i];
-                    ProgressText = $"正在分析 {code} ({i + 1}/{codes.Count})";
-                    var name = names.GetValueOrDefault(code, code);
-                    var result = engine.Analyze(code, name, ratio, maxGain, minCap, maxCap);
+                    // ETF/指数/板块没有财报；科创板与北交所不在回测样本内，结论不能外推过去。
+                    if (!names.TryGetValue(code, out var name)) continue;
+                    if (code.StartsWith("sh") || code.StartsWith("sz") || code.StartsWith("gn_") ||
+                        code.StartsWith("new_") || code.StartsWith("dy_")) continue;
+                    if (code.StartsWith("688") || code.StartsWith("8") || code.StartsWith("4")) continue;
+                    if (name.Contains("ST") || name.StartsWith("退")) continue;
+
+                    if (i % 100 == 0) ProgressText = $"正在分析 {code} ({i + 1}/{codes.Count})";
+                    var result = engine.Analyze(code, name);
 
                     if (result.Error != null) { errorCount++; continue; }
-                    foreach (var c in result.Criteria.Where(c => c.DataMissing))
-                        missingDataCounts[c.Name] = missingDataCounts.GetValueOrDefault(c.Name) + 1;
+                    if (result.Criteria.Any(c => c.DataMissing)) noFinancialCount++;
                     if (!result.Passed) continue;
-
                     passed.Add(result);
                 }
             });
 
-            foreach (var r in passed.OrderByDescending(r => r.SortScore ?? 0))
+            // 严格组在前、次优组在后，各自按跌幅降序（两组的历史表现不同，不能混排）
+            foreach (var r in passed.Where(r => r.Category == ShortTermAnalysisEngine.CategoryStrict)
+                                    .OrderByDescending(r => r.SortScore ?? 0))
+                Results.Add(ResultRowViewModel.From(r));
+            foreach (var r in passed.Where(r => r.Category == ShortTermAnalysisEngine.CategoryNearMiss)
+                                    .OrderByDescending(r => r.SortScore ?? 0))
                 Results.Add(ResultRowViewModel.From(r));
 
-            var missingSummary = missingDataCounts.Count > 0
-                ? "；" + string.Join("；", missingDataCounts.Select(kv => $"「{kv.Key}」这条条件因缺数据被跳过（不计入该条件，不代表股票被跳过，其余条件正常判断）：{kv.Value} 只涉及"))
-                : "";
-            Log($"分析完成，共扫描 {codes.Count} 只股票，{passed.Count} 只满足全部条件（已按近15日涨停次数从高到低排序）" +
-                (errorCount > 0 ? $"，{errorCount} 只因历史数据不足/次新被跳过" : "") + missingSummary);
+            int strictCount = passed.Count(r => r.Category == ShortTermAnalysisEngine.CategoryStrict);
+            int nearCount = passed.Count - strictCount;
+            Log($"分析完成，共扫描 {codes.Count} 个代码（已排除ETF/指数/ST/科创板/北交所），" +
+                $"严格组 {strictCount} 只（8条全过，回测4.62%/胜率73.2%）、" +
+                $"次优组 {nearCount} 只（只差入场时机，价格已站上MA5，回测3.29%/胜率66.6%）" +
+                (errorCount > 0 ? $"，{errorCount} 只因历史数据不足被跳过" : "") +
+                (noFinancialCount > 0 ? $"，{noFinancialCount} 只缺财务数据（该条被跳过，其余正常判断）" : ""));
+            if (strictCount == 0 && nearCount > 0)
+                Log("今日没有严格组信号——\"收盘仍低于MA5\"是个窄窗口（要求今天比5天前高、但仍低于近5日均价），" +
+                    "普涨日常常一只都没有。次优组仍是正期望，可以看，但要知道埋伏窗口已经过了。");
+
+            if (passed.Count > 0)
+            {
+                int mid = Results.Count(r => r.SortScore is >= 3 and < 8);
+                int deep = Results.Count(r => r.SortScore is >= 8 and < 15);
+                int veryDeep = Results.Count(r => r.SortScore >= 15);
+                Log($"按跌幅分档：中跌(3~8%) {mid} 只 · 深跌(8~15%) {deep} 只 · 超跌(15~25%) {veryDeep} 只");
+                int highVol = Results.Count(r => r.Result.Criteria
+                    .Any(c => c.Name.Contains("日均波幅") && c.Basis.Contains("⚠")));
+                if (highVol > 0)
+                    Log($"⚠ 其中 {highVol} 只日均波幅超过4.5%（该档回测0.03%/胜率50.2%，等于随机）——" +
+                        "波幅这条现在只提示不拦截，点\"条件详情\"能看到具体数值，建议减半仓位或跳过。");
+                Log("这8条同时满足是很苛刻的组合（带波幅条件时回测命中率约8.6%），" +
+                    "所以正常市场下每天只有个位数结果，为0也是正常的——宁可没信号，不要放宽条件。");
+            }
+            else
+            {
+                Log("今日无符合条件的股票。这套条件命中率很低，没信号是常态，不要因此放宽阈值。");
+            }
         }
         catch (Exception ex)
         {

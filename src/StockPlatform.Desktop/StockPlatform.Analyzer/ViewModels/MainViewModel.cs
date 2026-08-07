@@ -93,7 +93,7 @@ public class MainViewModel : INotifyPropertyChanged
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, shareholderRepository, marginRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);
         RisingLowsTab = new RisingLowsTabViewModel(paths, barRepository, watchlistStore);
-        ShortTermTab = new ShortTermTabViewModel(paths, barRepository, netInflowRepository, fundamentalRepository, watchlistStore);
+        ShortTermTab = new ShortTermTabViewModel(paths, barRepository, financialRepository, watchlistStore);
         QueryTab = new QueryTabViewModel(paths, barRepository, watchlistStore);
         BoardTab = new BoardTabViewModel(boardRepository, barRepository, paths);
         FactorTab = new FactorTabViewModel(paths, watchlistStore);

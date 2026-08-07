@@ -658,8 +658,13 @@
                                  位置判断和用途判断是两回事，见 PullbackAnalysisEngine 的分类注释。 -->
                             <DataGridTextColumn Header="类型" Binding="{Binding Category}" Width="95" IsReadOnly="True" />
                             <DataGridTextColumn Header="低于MA20%" Binding="{Binding SortScore, StringFormat={}{0:F2}}" Width="90" IsReadOnly="True" />
+                            <!-- 档位 胜率/样本数：样本数必须一起看，见短线法表里的同名列 -->
+                            <DataGridTextColumn Header="档位 胜率/样本" Binding="{Binding DepthBucket}" Width="130" IsReadOnly="True" />
                             <!-- 股息率：底仓看它够不够3%，主动仓拿它判断该不该改成长期持有 -->
                             <DataGridTextColumn Header="股息率" Binding="{Binding DividendYieldText}" Width="70" IsReadOnly="True" />
+                            <!-- 日均波幅：底仓门槛≤1.5%、主动仓≤4.5%，是两类分野的直接依据 -->
+                            <DataGridTextColumn Header="日均波幅" Binding="{Binding DailyVolatilityText}" Width="80" IsReadOnly="True"
+                                                SortMemberPath="DailyVolatility" />
                             <DataGridTextColumn Header="现价" Binding="{Binding LastClose, StringFormat={}{0:F2}}" Width="70" IsReadOnly="True" />
                             <!-- 两个止盈目标并列，由用户按当时判断选一个：+2%是他现在的打法(回测期望为负)，
                                  +10%是本方法条件校准所用的口径。理由见 PullbackAnalysisEngine 注释。 -->
@@ -756,26 +761,15 @@
                 <Grid DataContext="{Binding ShortTermTab}" Margin="0,10,0,0">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                         <RowDefinition Height="130" />
                     </Grid.RowDefinitions>
 
-                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-                        <TextBlock Text="固定使用日线" VerticalAlignment="Center" Foreground="Gray" />
-                        <TextBlock Text="放量倍数：" VerticalAlignment="Center" Margin="16,0,0,0"
-                                   ToolTip="当日成交量 ≥ 前5日均量 × 此倍数（默认1.5）" />
-                        <TextBox Text="{Binding VolumeSurgeRatio, UpdateSourceTrigger=LostFocus}" Width="45" Margin="4,0" />
-
-                        <TextBlock Text="涨幅上限(%)：" VerticalAlignment="Center" Margin="12,0,0,0"
-                                   ToolTip="当日涨幅超过这个值就算追高、不选（默认7）" />
-                        <TextBox Text="{Binding MaxDayGainPct, UpdateSourceTrigger=LostFocus}" Width="45" Margin="4,0" />
-
-                        <TextBlock Text="流通市值(亿)：" VerticalAlignment="Center" Margin="12,0,0,0"
-                                   ToolTip="只选流通市值落在此区间的股票（默认30~300亿）" />
-                        <TextBox Text="{Binding MinCapYi, UpdateSourceTrigger=LostFocus}" Width="45" Margin="4,0" />
-                        <TextBlock Text="~" VerticalAlignment="Center" />
-                        <TextBox Text="{Binding MaxCapYi, UpdateSourceTrigger=LostFocus}" Width="45" Margin="4,0" />
-
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
+                        <!-- 参数不再开放调整：9条阈值都是回测选出来的，放宽任何一个都会落到被证伪的
+                             那一侧（比如量比从1.2放到1.5，就从"未放量1.05%"掉进"放量-0.07%"）。 -->
+                        <TextBlock Text="固定日线 · 8条全满足才入选 · 参数已按回测锁定" VerticalAlignment="Center" Foreground="Gray" />
                         <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
                         <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
                                 Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件说明" />
@@ -786,10 +780,14 @@
                         <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
                     </StackPanel>
 
-                    <DataGrid x:Name="ShortTermGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
+                    <!-- 大盘MA60状态：两种环境都为正，但下行时明显更好（4.28% vs 1.83%）。只提示不过滤。 -->
+                    <TextBlock Grid.Row="1" Text="{Binding MarketStateText}" Foreground="#8B4513" Margin="0,0,0,8"
+                               TextWrapping="Wrap" />
+
+                    <DataGrid x:Name="ShortTermGrid" Grid.Row="2" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
                               CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
                               AlternatingRowBackground="#F5F5F5"
-                              ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;条件详情&quot;/&quot;行情详情&quot;查看对应图表">
+                              ToolTip="按&quot;低于MA20的幅度&quot;降序；勾选后点&quot;加入自选&quot;可以跟踪">
                         <DataGrid.Columns>
                             <DataGridCheckBoxColumn Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="36" CanUserSort="False">
                                 <DataGridCheckBoxColumn.Header>
@@ -798,10 +796,20 @@
                             </DataGridCheckBoxColumn>
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
-                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
-                            <DataGridTextColumn Header="近15日涨停" Binding="{Binding ConvergenceQualityText}" Width="90" IsReadOnly="True"
-                                                SortMemberPath="SortScore" />
-                            <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
+                            <DataGridTextColumn Header="行业" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
+                            <!-- 严格组(8条全过, 回测4.62%/73.2%) vs 次优组(只差入场时机, 3.29%/66.6%)。
+                                 两组历史表现不同，故分组排序、不混排。 -->
+                            <DataGridTextColumn Header="分组" Binding="{Binding Category}" Width="110" IsReadOnly="True" />
+                            <DataGridTextColumn Header="低于MA20%" Binding="{Binding SortScore, StringFormat={}{0:F2}}" Width="90" IsReadOnly="True" />
+                            <!-- 档位 胜率/样本数：样本数必须一起看——超跌档78%只建立在319个样本上，
+                                 深跌档65%有3650个，后者可信得多。 -->
+                            <DataGridTextColumn Header="档位 胜率/样本" Binding="{Binding DepthBucket}" Width="130" IsReadOnly="True" />
+                            <!-- 日均波幅：决定该配多大仓位；>4.5% 带 ⚠（那档回测等于随机，-10%止损两三天就被噪音打掉） -->
+                            <DataGridTextColumn Header="日均波幅" Binding="{Binding DailyVolatilityText}" Width="80" IsReadOnly="True"
+                                                SortMemberPath="DailyVolatility" />
+                            <DataGridTextColumn Header="现价" Binding="{Binding LastClose, StringFormat={}{0:F2}}" Width="70" IsReadOnly="True" />
+                            <DataGridTextColumn Header="目标+10%" Binding="{Binding BigTargetText}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="止损-10%" Binding="{Binding StopPriceText}" Width="80" IsReadOnly="True" />
                             <DataGridTemplateColumn Header="操作" Width="160">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
@@ -815,7 +823,7 @@
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
+                    <GroupBox Grid.Row="3" Header="运行日志" Margin="0,10,0,0">
                         <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
                                  IsInactiveSelectionHighlightEnabled="True"

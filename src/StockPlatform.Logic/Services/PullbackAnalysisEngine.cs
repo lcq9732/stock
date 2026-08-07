@@ -116,6 +116,21 @@ public class PullbackAnalysisEngine
     /// <summary>把"低于MA20的幅度"落到回测验证过的档位上，并明确标出哪些是没有样本支撑的外推——
     /// 回测里 -8~-20% 是效果最好且样本充足的区间（-8~-15%: 3650个样本/胜率65.0%，
     /// -15~-20%: 319个/78.1%），-20~-25% 只有45个样本、更深只有10个，不能当结论用。</summary>
+    /// <summary>档位短标签（结果表的一列）："档位名 胜率% / 样本数"。样本数必须一起显示——
+    /// 超跌档胜率78.1%看着最诱人，但只有319个样本，可信度远不如深跌档的3650个。
+    /// 入参同 <see cref="DepthNote"/>：负数表示低于MA20。</summary>
+    private static string DepthBucketLabel(double belowMa20)
+    {
+        double d = belowMa20 * 100;
+        if (d >= 0) return "在MA20上方";
+        if (d > -3) return "浅跌 51% / 9718";
+        if (d > -8) return "中跌 54% / 10603";
+        if (d > -15) return "深跌 65% / 3650";
+        if (d > -20) return "超跌 78% / 319";
+        if (d > -25) return "⚠ 20~25% / 仅45";
+        return "⚠ 超验证范围 / <10";
+    }
+
     private static string DepthNote(double belowMa20)
     {
         double d = belowMa20 * 100;
@@ -181,6 +196,8 @@ public class PullbackAnalysisEngine
             DataDate = bars[i].PeriodStart,
             LastClose = close,
             DividendYield = dividendYield,
+            DailyVolatility = volatility,
+            DepthBucket = DepthBucketLabel(belowMa20),
             SortScore = -belowMa20 * 100,       // 跌得越深排越前
             Criteria = new List<CriterionResult>
             {

@@ -82,9 +82,9 @@
             <oxy:PlotView Grid.Row="1" x:Name="MainPlot" Model="{Binding MainPlotModel}" />
         </Grid>
 
-        <!-- 副图1/2——内容不固定，表头左边是一个下拉框（成交量/MACD/KDJ/RSI手工切换），默认
-             成交量+MACD。图例是代码里根据当前选的指标动态生成的（见 QuoteDetailWindow.xaml.cs
-             RebuildChart），不像其它窗口那样能写死在XAML里。 -->
+        <!-- 副图1/2——内容不固定，表头左边是一个下拉框（成交量/MACD/KDJ/RSI等手工切换），
+             默认 MACD + KDJ（见 QuoteDetailWindow.xaml.cs 构造函数里的说明）。图例是代码里
+             根据当前选的指标动态生成的（见 RebuildChart），不像其它窗口那样能写死在XAML里。 -->
         <Grid Grid.Row="4" Margin="0,8,0,0">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />

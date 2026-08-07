@@ -43,8 +43,11 @@ public partial class QuoteDetailWindow : Window
 
         SetQuoteHeader();
         HighlightGranularityButton(DayButton);
-        Sub1IndicatorCombo.SelectedIndex = (int)QuoteSubIndicator.Volume;
-        Sub2IndicatorCombo.SelectedIndex = (int)QuoteSubIndicator.Macd;
+        // 默认 MACD + KDJ（2026-08-07 由 成交量+MACD 改成这样）——短线法的入场判定就是看这两个
+        // （MACD柱连续收窄、KDJ金叉延续），打开行情详情要能直接对上条件详情里写的数值。
+        // 成交量仍可从下拉框切回来。
+        Sub1IndicatorCombo.SelectedIndex = (int)QuoteSubIndicator.Macd;
+        Sub2IndicatorCombo.SelectedIndex = (int)QuoteSubIndicator.Kdj;
 
         MainPlot.MouseMove += OnMainMouseMove;
         Sub1Plot.MouseMove += OnSubMouseMove;
