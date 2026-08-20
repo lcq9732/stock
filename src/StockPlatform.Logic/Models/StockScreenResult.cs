@@ -62,10 +62,25 @@ public class StockScreenResult
     /// 也是回调法区分底仓/主动仓的依据之一。</summary>
     public double? DailyVolatility { get; set; }
 
+    /// <summary>盈利趋势的展示文本（如"25年 +2.53 / 3年累计 +5.88"，单位亿元；连亏会带 ⚠）。
+    /// **只展示不过滤**——回测显示把它做成硬条件反而降低收益（见 IFinancialRepository
+    /// .GetRecentAnnualNetProfitByCode 的说明），但回测样本排除了ST/退市股，测不出踩雷风险，
+    /// 所以把这个信息摆在结果表里由用户自己判断。没算的方法为 null。</summary>
+    public string? ProfitTrend { get; set; }
+
+    /// <summary>最近3个完整年度归母净利润的累计值（元）；用于结果表排序和高亮。没算的方法为 null。</summary>
+    public double? ThreeYearCumProfit { get; set; }
+
     /// <summary>该结果落在哪个回测档位的**短标签**（如"深跌 65% / 3650"= 档位名 + 历史胜率 +
     /// 样本数）；没分档的方法为 null。条件详情里已有完整说明，这里是给结果表当一列用的精简版——
     /// 不点开就能一眼看出这只票所处档位的历史胜率和样本量（样本量决定这个胜率有多可信）。</summary>
     public string? DepthBucket { get; set; }
+
+    /// <summary>KDJ 子状态的展示文本（如"今日刚叉 K18 ⚠"/"延续 K46 最优区"）；只有短线法算。
+    /// 为什么单独开一列：2026-08-18 起"当日刚金叉"不再否决入选（K>D 就算通过），但回测里它是
+    /// 全表最差的一档，跟"金叉已延续几天"的风险完全不是一回事。既然不再用它过滤，就必须在结果表
+    /// 里显式标出来，否则"严格组"三个字会把两种质量差很远的信号混成一样。没算的方法为 null。</summary>
+    public string? KdjState { get; set; }
 
     /// <summary>可选的分类标签——同一个方法的结果分成用途不同的几组时用（目前只有回调法：
     /// "底仓"=高股息低波动、适合长期持有吃分红；"主动仓"=位置在回测验证档位内、适合到价就走。

@@ -31,11 +31,18 @@ namespace StockPlatform.Logic.Services;
 /// | + MA5拐头向上 | 2.77% | 63.9% | 2915 |
 /// | + KDJ金叉状态且非当日刚叉 | **3.35%** | **66.8%** | 2424 |
 ///
+/// 注意最后一行是**回测时的口径**：2026-08-18 按用户要求，KDJ 这条已放宽成"只要 K&gt;D 就算过"，
+/// 不再排除当日刚金叉（见下面第1点）。所以现行版本的实际表现会落在 3.35% 和"只要金叉"之间，
+/// 上表那个 3.35%/66.8% 不再是现行口径的预期值。当日刚叉的样本仍会在条件说明里被标出来。
+///
 /// 大盘上行(&gt;MA60) 1.83%/59.1%、下行 4.28%/71.6%——**两种环境都为正**，这是它比之前几版稳的地方。
 ///
-/// **两个反直觉的点（都验证过，别改回去）**：
+/// **两个反直觉的点（都验证过）**：
 /// 1. **交叉那一天是最差的买点**。KDJ"当日刚金叉" -1.23%/胜率43.9%，而金叉后的延续状态 3.35%/66.8%；
-///    MACD 同理，"只收窄一天" -0.46%/47.6%，所以要求**连续≥2天**收窄。指标交叉的瞬间噪音最大。
+///    MACD 同理，"只收窄一天" -0.46%/47.6%。指标交叉的瞬间噪音最大。
+///    → MACD 那半条**仍在执行**（要求连续≥2天收窄）；KDJ 那半条 2026-08-18 按用户要求已取消，
+///      当日刚金叉现在也算通过，只在条件说明里加⚠标注。改回去只需把 kdjOk 恢复成
+///      <c>kdjAbove &amp;&amp; !kdjCrossedToday</c>。
 /// 2. **K值不是越低越好**。K在40~60 是 5.37%/76.9%，K在0~40 只有 1.93%/59.8%——太低说明还在
 ///    超卖磨底，中位说明动能起来了但没超买。所以只要求 K&gt;D，不额外要求低位。
 /// </summary>
@@ -76,6 +83,9 @@ public class ShortTermAnalysisEngine
 
     private readonly IBarRepository _barRepository;
     private readonly IReadOnlyDictionary<string, FinancialSnapshot> _financials;
+    /// <summary>近3个完整年度的归母净利（升序）——**只用于展示**，不参与筛选，理由见
+    /// <see cref="ProfitTrendText"/>。</summary>
+    private readonly IReadOnlyDictionary<string, List<(int Year, double NetProfitParent)>> _annualProfits;
 
     /// <summary>大盘（上证）是否在MA60上方。**决定用哪个分支的入场时机条件**，见 <see cref="Analyze"/>
     /// 里第7条。调用方在扫描前算一次传进来（全市场共用同一个大盘状态，不必每只票重算）。</summary>
@@ -83,11 +93,28 @@ public class ShortTermAnalysisEngine
 
     public ShortTermAnalysisEngine(IBarRepository barRepository,
         IReadOnlyDictionary<string, FinancialSnapshot> financials,
+        IReadOnlyDictionary<string, List<(int Year, double NetProfitParent)>> annualProfits,
         bool marketAboveMa60)
     {
         _barRepository = barRepository;
         _financials = financials;
+        _annualProfits = annualProfits;
         _marketAboveMa60 = marketAboveMa60;
+    }
+
+    /// <summary>把近几年年报净利拼成一行展示文本，连亏/累计为负时带 ⚠。
+    /// **这是提示不是过滤**：回测里把"最近年度&gt;0"或"三年累计&gt;0"做成硬条件，收益反而从 2.55%
+    /// 掉到 2.40%/2.47%——被剔掉的那批（困境反转3.15%、昔日辉煌5.63%、持续亏损3.33%）表现全都
+    /// 高于基准，因为超跌反弹的弹性恰恰来自基本面最难看的票。但回测样本已排除ST/退市股，
+    /// 测不出"踩雷退市"这类尾部风险，所以信息要摆出来让人自己判断。</summary>
+    private static (string Text, double? Cum) ProfitTrendText(
+        IReadOnlyDictionary<string, List<(int Year, double NetProfitParent)>> annuals, string code)
+    {
+        if (!annuals.TryGetValue(code, out var list) || list.Count == 0) return ("无年报数据", null);
+        double cum = list.Sum(x => x.NetProfitParent);
+        var parts = list.Select(x => $"{x.Year % 100}年{x.NetProfitParent / 1e8:+0.00;-0.00}");
+        string warn = list[^1].NetProfitParent <= 0 || cum <= 0 ? " ⚠" : "";
+        return ($"{string.Join(" ", parts)}｜累计{cum / 1e8:+0.00;-0.00}亿{warn}", cum);
     }
 
     public StockScreenResult Analyze(string code, string name)
@@ -155,7 +182,10 @@ public class ShortTermAnalysisEngine
         var (k, d, _) = TechnicalIndicators.KDJ(closes, highs, lows);
         bool kdjAbove = k[i] > d[i];
         bool kdjCrossedToday = kdjAbove && k[i - 1] <= d[i - 1];
-        bool kdjOk = kdjAbove && !kdjCrossedToday;
+        // 2026-08-18 按用户要求放宽：**只要 K>D 就算过**，不再排除"当日刚金叉"。
+        // 回测上这一放宽是有代价的（当日刚叉那档 -1.23%/胜率43.9%，金叉延续档 3.35%/66.8%，
+        // 见类注释的表），所以当日刚叉**仍然照常标注出来**（见下面这条的 Basis），只是不再否决。
+        bool kdjOk = kdjAbove;
 
         double volBase = 0;
         for (int t = i - VolBaseWindow; t < i; t++) volBase += bars[t].Volume;
@@ -166,6 +196,8 @@ public class ShortTermAnalysisEngine
         var fin = _financials.GetValueOrDefault(code);
         double? netProfit = fin?.Get(FinancialKeys.NetProfitParent);
         double? ocf = fin?.Get(FinancialKeys.Ocf);
+
+        var trend = ProfitTrendText(_annualProfits, code);
 
         // 入场时机这一条要单独拿出来引用（判定"是否只差这一条"用），所以先建好再放进列表。
         var timingCriterion = new CriterionResult
@@ -193,6 +225,9 @@ public class ShortTermAnalysisEngine
             LastClose = close,
             DailyVolatility = volatility,
             DepthBucket = DepthBucketLabel(belowMa20),
+            KdjState = KdjStateLabel(k[i], kdjAbove, kdjCrossedToday),
+            ProfitTrend = trend.Text,
+            ThreeYearCumProfit = trend.Cum,
             SortScore = belowMa20 * 100,     // 跌得越深排越前
             Criteria = new List<CriterionResult>
             {
@@ -237,6 +272,19 @@ public class ShortTermAnalysisEngine
                 // 1.5~2.5%档1.67%/58.3%、2.5~3.5%档1.67%/58.4%、3.5~4.5%档2.10%/60.5%，
                 // 唯独 >4.5% 那档垮成 0.03%/胜率50.2%（等于随机），且放宽止损只会更差
                 // （+15/-15→0.25%、+20/-20→-0.36%）。所以超限时仍然显式标注，由用户自己取舍。
+                // 【盈利趋势】只提示不过滤——理由见 ProfitTrendText 的注释。
+                new()
+                {
+                    Name = "【仅提示】近年归母净利趋势",
+                    Satisfied = true,
+                    Basis = trend.Text +
+                            (trend.Cum is <= 0
+                                ? "\n    ⚠ 三年累计为负——单期微利可能是一次性损益或季节性，多年累计才看得出真实盈利能力。" +
+                                  "\n    注意：回测里把这条做成硬条件反而降低收益（被剔掉的那批平均3.15%~5.63%，高于2.55%基准），" +
+                                  "\n    因为超跌反弹的弹性正来自基本面难看的票。但回测样本已排除ST/退市股，测不出踩雷风险，" +
+                                  "\n    所以这条留给你自己判断：要不要碰连续亏损的公司。"
+                                : ""),
+                },
                 new()
                 {
                     Name = "【仅提示】日均波幅(60日)",
@@ -259,12 +307,25 @@ public class ShortTermAnalysisEngine
                 timingCriterion,
                 new()
                 {
-                    Name = "KDJ 处于金叉状态（K>D），且不是当日刚金叉",
+                    Name = "KDJ 处于金叉状态（K>D）",
                     Satisfied = kdjOk,
-                    Basis = $"K={k[i]:F1}；D={d[i]:F1}" +
-                            (!kdjAbove ? "；K<D 未金叉"
-                             : kdjCrossedToday ? "；今日刚金叉——交叉当天是最差买点(-1.23%/胜率43.9%)，等一天再看"
-                             : $"；金叉延续中{(k[i] >= 40 && k[i] <= 60 ? "，K在40~60最优区间(5.37%/胜率76.9%)" : "")}"),
+                    // 分档数字来自 2026-08-19 重跑的分档回测，口径见 KdjStateLabel 的注释；结果表的
+                    // "KDJ状态"列用的是同一批数字，改文案时两处一起改。
+                    Basis = $"K={k[i]:F1}；D={d[i]:F1}；{KdjStateLabel(k[i], kdjAbove, kdjCrossedToday)}" +
+                            (!kdjAbove
+                                ? "；K<D 未金叉，本条不通过——该状态回测 0.36%/胜率51.8%（16001样本），五档里最弱"
+                                : kdjCrossedToday
+                                    ? "；⚠ 今日刚金叉：2026-08-18 起这一档不再否决入选（K>D 即算通过），但它是四档里最差的一档" +
+                                      "——0.63%/胜率53.0%（19221样本），只比未金叉好一点。多等一天等它变成“金叉延续”，" +
+                                      "期望值就跳到 1.3~2.5%。要不要等自己定，要进建议仓位减半。" +
+                                      "（本类早期注释里的 -1.23%/43.9% 出自2424样本的窄回测，全样本复现不出负期望）"
+                                    : k[i] >= 40 && k[i] <= 60
+                                        ? "；金叉延续 + K在40~60，四档里最稳的一档：2.53%/胜率62.6%（48120样本）"
+                                        : k[i] < 40
+                                            ? "；金叉延续但K仍在超卖区(<40)：1.25%/胜率56.1%（93724样本）——正期望，" +
+                                              "但明显不如K回到40~60那档，说明反弹才刚起步、还没确认"
+                                            : "；金叉延续且K>60：4.59%/胜率72.9%，但只有5046个样本（同时满足“低于MA20 3~25%”" +
+                                              "和“K>60”本身就很少见），样本量不足以当成可靠优势，别为了凑这一档去放宽别的条件"),
                 },
                 new()
                 {
@@ -299,6 +360,34 @@ public class ShortTermAnalysisEngine
                     $"回测口径就是这组参数，换成 +2% 止盈会变成负期望（见回调法的说明）。",
         });
         return result;
+    }
+
+    /// <summary>结果表"KDJ状态"列的短标签："状态 + K值 + 该档历史期望/胜率·样本数"。
+    ///
+    /// 为什么要单独一列：2026-08-18 起"当日刚金叉"不再否决入选（第8条放宽成 K&gt;D 即可），
+    /// 于是"严格组"里混进了两种质量差很远的信号。不把子状态摆出来，表面上都是"9条全过"。
+    ///
+    /// 分档数字口径（2026-08-19 重跑）：在**其余8条都满足**的样本上按KDJ子状态分组，
+    /// 后复权日线、2016年至今、剔除688/8x/4x/920xxx，出场规则 +10%止盈/-10%止损/最长120交易日
+    /// （跟本类其它注释里的回测口径一致，可以横向比）：
+    ///   未金叉(K≤D)         16,001样本   0.36% / 胜率51.8%   ← 最弱，仍然否决
+    ///   今日刚金叉           19,221样本   0.63% / 胜率53.0%   ← 放宽后能进来的那一档，四档里最差
+    ///   延续·K在40~60       48,120样本   2.53% / 胜率62.6%   ← 最稳
+    ///   延续·K&lt;40(超卖)     93,724样本   1.25% / 胜率56.1%
+    ///   延续·K&gt;60            5,046样本   4.59% / 胜率72.9%   ← 数字最好但样本太少，不当依据
+    ///
+    /// ⚠ 修正：本类原注释里写的"当日刚叉 -1.23%/胜率43.9%"来自更早那次窄样本回测（2022-06~2026-02、
+    /// 89个时点、2424样本），在 2016年至今的全样本上**复现不出负期望**——刚叉仍是四档里最差，
+    /// 但期望是正的(+0.63%)。所以放宽第8条并没有放进一批负期望的信号，只是放进了最弱的一档。
+    /// 样本数一起显示是刻意的，理由同 DepthBucketLabel。
+    /// </summary>
+    private static string KdjStateLabel(double kVal, bool above, bool crossedToday)
+    {
+        if (!above) return $"未金叉 K{kVal:F0} 0.4%/52%·1.6万";
+        if (crossedToday) return $"⚠今日刚叉 K{kVal:F0} 0.6%/53%·1.9万";
+        if (kVal >= 40 && kVal <= 60) return $"延续·最优 K{kVal:F0} 2.5%/63%·4.8万";
+        if (kVal < 40) return $"延续·超卖 K{kVal:F0} 1.3%/56%·9.4万";
+        return $"延续·K高 K{kVal:F0} 4.6%/73%·5046";
     }
 
     /// <summary>档位短标签（结果表的一列）："档位名 胜率% / 样本数"。样本数必须一起显示——

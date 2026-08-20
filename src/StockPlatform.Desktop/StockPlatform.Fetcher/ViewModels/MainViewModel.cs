@@ -19,6 +19,9 @@ public class MainViewModel : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     }
 
+    /// <summary>通知一个"算出来的"属性变了（它本身没有字段，跟着别的属性走）。</summary>
+    private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
     private readonly FetchOrchestrator _orchestrator;
 
     public ObservableCollection<string> LogLines { get; } = new();
@@ -45,10 +48,28 @@ public class MainViewModel : INotifyPropertyChanged
     private readonly StreamWriter? _logFileWriter;
     private readonly FetchPaths _paths;
 
-    /// <summary>失败股票的重试名单里还有多少只（见 FetchOrchestrator.GetFailedCodeCount）——
-    /// 只在这个数字大于0时"重新拉取失败股票"按钮才可点。</summary>
-    private int _failedCodeCount;
-    public int FailedCodeCount { get => _failedCodeCount; private set => Set(ref _failedCodeCount, value); }
+    /// <summary>还有哪些东西等着重试（见 FetchOrchestrator.GetFailedRetrySummary）——
+    /// 只在 <see cref="HasFailed"/> 为真时"重新拉取失败股票"按钮才可点。
+    ///
+    /// 2026-08-19 由原来的"一个总数"改成分类汇总：流通市值是整轮扫描，失败时会把整批代码记进
+    /// 名单，加总后按钮上会显示"（5547）"，被读成丢了5547只票的数据，实际只是一次市值快照没取到
+    /// 外加3只资金流。现在按钮直接显示"K线 0 只 · 市值 1 轮 · 净流入 3 只"这样的分类文字。</summary>
+    private FailedRetrySummary _failedRetry = new();
+    public FailedRetrySummary FailedRetry
+    {
+        get => _failedRetry;
+        private set
+        {
+            Set(ref _failedRetry, value);
+            Raise(nameof(FailedRetryText));
+            Raise(nameof(HasFailed));
+        }
+    }
+
+    /// <summary>按钮上那行字。</summary>
+    public string FailedRetryText => _failedRetry.Describe();
+
+    public bool HasFailed => _failedRetry.Any;
 
     /// <summary>本地数据覆盖范围 + 上次实际抓取时间（见 FetchOrchestrator.GetDataStatus）——帮用户
     /// 判断该不该再点一次抓取，不用凭感觉重复点或者担心漏了哪天。</summary>
@@ -103,13 +124,13 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand StopCommand { get; }
     public RelayCommand RetryFailedCommand { get; }
     public RelayCommand FetchBoardsCommand { get; }
-    public RelayCommand BackfillAmountTurnoverCommand { get; }
     public RelayCommand UploadBaselineCommand { get; }
     public RelayCommand UploadDailyCommand { get; }
     public RelayCommand BackfillDailyCommand { get; }
     public RelayCommand FetchPeriodicCommand { get; }
     public RelayCommand FetchFinancialsCommand { get; }
     public RelayCommand FetchDividendCommand { get; }
+    public RelayCommand FetchShareholderCommand { get; }
     public RelayCommand FetchIndustryCommand { get; }
     public RelayCommand ScheduledFetchAllCommand { get; }
     public RelayCommand ScheduledFetchDayCommand { get; }
@@ -140,15 +161,15 @@ public class MainViewModel : INotifyPropertyChanged
         FetchDayCommand = new RelayCommand(async _ => await RunFetchDayAsync(), _ => !IsBusy);
         FetchYearCommand = new RelayCommand(async _ => await RunFetchYearAsync(), _ => !IsBusy);
         StopCommand = new RelayCommand(_ => _cts?.Cancel(), _ => IsBusy);
-        RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && FailedCodeCount > 0);
+        RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && HasFailed);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
-        BackfillAmountTurnoverCommand = new RelayCommand(async _ => await RunBackfillAmountTurnoverAsync(), _ => !IsBusy);
         UploadBaselineCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: true), _ => !IsBusy);
         UploadDailyCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: false), _ => !IsBusy);
         BackfillDailyCommand = new RelayCommand(async _ => await RunBackfillDailyHistoryAsync(), _ => !IsBusy);
         FetchPeriodicCommand = new RelayCommand(async _ => await RunFetchPeriodicAsync(), _ => !IsBusy);
         FetchFinancialsCommand = new RelayCommand(async _ => await RunFetchFinancialsAsync(), _ => !IsBusy);
         FetchDividendCommand = new RelayCommand(async _ => await RunFetchDividendAsync(), _ => !IsBusy);
+        FetchShareholderCommand = new RelayCommand(async _ => await RunFetchShareholderAsync(), _ => !IsBusy);
         FetchIndustryCommand = new RelayCommand(async _ => await RunFetchIndustryAsync(), _ => !IsBusy);
         ScheduledFetchAllCommand = new RelayCommand(async _ => await RunScheduledFetchAllAsync(), _ => !IsBusy);
         ScheduledFetchDayCommand = new RelayCommand(async _ => await RunScheduledFetchDayAsync(), _ => !IsBusy);
@@ -255,7 +276,7 @@ public class MainViewModel : INotifyPropertyChanged
         _logFileWriter?.WriteLine(line);
     }
 
-    private void RefreshFailedCodeCount() => FailedCodeCount = _orchestrator.GetFailedCodeCount();
+    private void RefreshFailedCodeCount() => FailedRetry = _orchestrator.GetFailedRetrySummary();
 
     private void StartHeartbeat()
     {
@@ -372,10 +393,12 @@ public class MainViewModel : INotifyPropertyChanged
     private Task RunFetchBoardsAsync() =>
         RunOperationAsync("拉取板块", (progress, ct) => _orchestrator.RunFetchBoardsAsync(progress, ct));
 
-    /// <summary>一次性修复历史数据的回填（见 FetchOrchestrator.RunBackfillAmountTurnoverAsync）——界面已
-    /// 移除按钮(全库成交额已补齐)，方法保留以备将来复用。幂等，可随时停止后再点、只会继续补还缺的。</summary>
-    private Task RunBackfillAmountTurnoverAsync() =>
-        RunOperationAsync("回填成交额/换手率", (progress, ct) => _orchestrator.RunBackfillAmountTurnoverAsync(SelectedSource, progress, ct));
+    // 【已移除】RunBackfillAmountTurnoverAsync 的 ViewModel 包装和 BackfillAmountTurnoverCommand
+    // （2026-08-15）：界面上早就没有对应按钮，这个 Command 属性没有任何 XAML 绑定，属于死代码。
+    // 回填任务本身也确实做完了——全库日线 1291 万行里 amount 为0的只剩 19 行(0.0%)；turnover 的
+    // 7.3% 空值全部集中在板块指数(57万行)和ETF/指数(37万行)上，它们本来就没有换手率概念，个股只有 280 行。
+    // 编排层的 FetchOrchestrator.RunBackfillAmountTurnoverAsync 按原注释保留、以备将来复用，
+    // 要重新启用时在这里加回四行包装即可。
 
     private Task RunRetryFailedAsync() =>
         RunOperationAsync("重新拉取失败股票", (progress, ct) => _orchestrator.RunRetryFailedAsync(SelectedSource, progress, ct));
@@ -399,6 +422,14 @@ public class MainViewModel : INotifyPropertyChanged
     /// 这个独立按钮给单独刷新分红用，不用连带跑几小时的其它定期数据。</summary>
     private Task RunFetchDividendAsync() =>
         RunOperationAsync("拉取分红送配", (progress, ct) => _orchestrator.RunFetchDividendAsync(progress, ct));
+
+    /// <summary>拉取股东数据（见 FetchOrchestrator.RunFetchShareholderAsync）——2026-08-15 补的独立按钮。
+    /// 它本来只存在于"一键拉取定期数据"的链条里、而且排在第3位（行业分类 → 指数成分/权重 → 股东数据
+    /// → 财务报表 → 分红），前两步就要跑很久，导致想单独刷新股东数据时**实际上没有办法**——
+    /// 修完解析bug后重抓那次就卡在这里：用户点了定期数据但没等到第3步，数据一行都没更新。
+    /// 财务报表/分红/行业分类早就各有独立按钮，股东数据漏了，这里补上。</summary>
+    private Task RunFetchShareholderAsync() =>
+        RunOperationAsync("拉取股东数据", (progress, ct) => _orchestrator.RunFetchShareholderAsync(progress, ct));
 
     /// <summary>拉取行业分类（见 FetchOrchestrator.RunFetchIndustryAsync）——已并入"一键拉取定期数据"，
     /// 独立按钮给单独刷新用。只要一两分钟。</summary>

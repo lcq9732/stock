@@ -18,6 +18,14 @@ public class AnalyzerPaths
     /// 以后被误当成"可以直接删了重新拷贝"的那类文件（见 JsonWatchlistStore）。</summary>
     public string WatchlistPath => Path.Combine(BaseDir, "watchlist.json");
 
+    /// <summary>交易费率设置（佣金/过户费/印花税，用户在"我的交易"页填）——跟 <see cref="WatchlistPath"/>
+    /// 同理：分析程序自己的本地状态，不是 Fetcher 的共享数据，放在 LocalDir 外面。</summary>
+    public string TradeFeePath => Path.Combine(BaseDir, "trade-fees.json");
+
+    /// <summary>仓位计算器的参数（可投资总资金、凯利折扣、单票上限等，用户在【仓位计算器】窗口填）——
+    /// 同样是分析程序自己的本地状态，放在 LocalDir 外面。</summary>
+    public string PositionSizingPath => Path.Combine(BaseDir, "position-sizing.json");
+
     public AnalyzerPaths(string? baseDir = null)
     {
         BaseDir = baseDir ?? Path.Combine(AppContext.BaseDirectory, "data");

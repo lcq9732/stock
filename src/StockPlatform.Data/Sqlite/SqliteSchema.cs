@@ -134,6 +134,7 @@ public static class SqliteSchema
                 shares REAL,                -- 持股数量
                 ratio REAL,                 -- 占比(%)
                 share_type TEXT,            -- 股本性质
+                change_direction TEXT,      -- 相对上期的增减方向：增/减，无标记为NULL
                 fetched_at TEXT,
                 PRIMARY KEY (code, report_date, kind, rank)
             );
@@ -223,6 +224,11 @@ public static class SqliteSchema
         AddColumnIfMissing(conn, "IndexCons", "in_date", "TEXT");
         // 2026-07-29：退市股"最后几天K线"的一次性补齐标记（见 DelistedStock 表注释）。
         AddColumnIfMissing(conn, "DelistedStock", "tail_fetched_at", "TEXT");
+        // 2026-08-13：十大股东加"增减方向"列。新浪页面在持股数后面挂了个涨跌箭头（↑增↓减），
+        // 以前解析时被当成脏字符导致整格失败、持股数静默变0（14953行受影响，见
+        // SinaShareholderProvider.ParseD）；修复时把这个方向本身也存下来——机构调仓方向是有用信息。
+        // 老库的历史行这一列为 NULL，等用户重新"拉取股东数据"时按 code 覆盖写入。
+        AddColumnIfMissing(conn, "TopShareholder", "change_direction", "TEXT");
     }
 
     /// <summary>若 <paramref name="table"/> 已存在、但其建表 SQL 的主键里不含 <paramref name="pkColumn"/>，

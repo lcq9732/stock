@@ -94,11 +94,11 @@ public partial class MainWindow : Window
         // 同理：交易池成员变动也不自动触发晨检重算（见 MainViewModel 里 TradePoolChanged 的接线）。
     }
 
-    // WPF's DataGridCheckBoxColumn needs two clicks by default (the first click only focuses/
-    // selects the cell; only the second actually reaches the checkbox). Focusing the cell during
-    // the tunneling PreviewMouseLeftButtonDown — before the same click bubbles back up to the
-    // checkbox's own click handling — makes the very first click land on the checkbox instead.
-    // Wired as an implicit DataGridCell style in MainWindow.xaml, applies to every grid.
+    // 让单元格在鼠标按下的 Tunneling 阶段就获得焦点。原本是为了解决"勾选框要点两下"，但那条路走不通
+    // （DataGridCheckBoxColumn 显示态的复选框 IsHitTestVisible=false，只让单元格获得焦点并不会进入
+    // 编辑态）——2026-08-12 改成用模板列里的普通 CheckBox 才真正一点即勾，见 MainWindow.xaml 里的
+    // SelectCheckBoxCell。这个处理器保留下来仍有用：可编辑的文本单元格（"我的交易"页录买卖信息那几列）
+    // 也受益于"一下点进去就能改"，不用先点一次选中行。隐式 DataGridCell 样式，本窗口所有表通用。
     private void DataGridCell_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (sender is DataGridCell { IsFocused: false, IsEditing: false } cell)
@@ -354,6 +354,47 @@ public partial class MainWindow : Window
     {
         if (((FrameworkElement)sender).DataContext is WatchlistRowViewModel row)
             OpenQuoteDetail(row.Code, row.Name);
+    }
+
+    // "我的交易"Tab的【交易记录】——录这只票的每一笔买入/卖出（金字塔式建仓、分批止盈）。窗口里改的是
+    // 拷贝，点保存才整份写回 watchlist.json；取消什么都不动。存完刷新两个列表：持仓状态变了会影响
+    // "我的交易"的排序（持仓优先）和"自选股"页的"在交易池"标记。晨检不在这里自动重算——跟交易池成员
+    // 变动一样，要等用户主动点【刷新】（见本文件上方的接线说明）。
+    private void TradeLotsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if (((FrameworkElement)sender).DataContext is not WatchlistRowViewModel row) return;
+
+        var dialog = new TradeLotsWindow($"{row.Name}（{row.Code}）交易记录", row.Entry.Lots, vm.TradePoolTab.FeeStore) { Owner = this };
+        bool saved = dialog.ShowDialog() == true;
+
+        // 费率是在这个窗口里改的、账户级全局生效——改过就得刷新，**哪怕用户点了取消**（取消只针对
+        // 本只票的成交明细），否则整表的含费盈亏和止亏价还停在老费率上。
+        if (!saved && !dialog.FeesChanged) return;
+        if (saved) row.ApplyLots(dialog.Result);
+        vm.TradePoolTab.Reload();
+        vm.WatchlistTab.Reload();
+    }
+
+    // 【仓位计算器】——"我的交易"页顶部那个按钮：不针对具体某只票，纯算"这样一笔机会该下多少注"。
+    private void PositionSizingButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        new PositionSizingWindow(vm.SizingStore) { Owner = this }.ShowDialog();
+    }
+
+    // 【仓位计算器】——行上那个【仓位】按钮：把这只票的现价（最新收盘）和当前持仓股数带进去，
+    // 直接算出"该减多少股/还能加多少股"。窗口只做计算不改数据，所以关掉后不用刷新列表。
+    private void TradePoolSizingButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if (((FrameworkElement)sender).DataContext is not WatchlistRowViewModel row) return;
+
+        new PositionSizingWindow(vm.SizingStore, $"{row.Name}（{row.Code}）",
+            row.LatestClose, row.Entry.RemainingShares,
+            vm.BarRepository, row.Code,
+            row.LatestCloseDate, row.NetAvgCost,
+            vm.TradePoolTab.FeeStore.Current) { Owner = this }.ShowDialog();
     }
 
     // 查询Tab的"K线详情"——跟"行情详情"是同一个纯行情窗口（QuoteDetailWindow），只是入口在查询结果里。

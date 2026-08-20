@@ -17,13 +17,19 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
 
     public WatchlistEntry Entry { get; }
     private readonly JsonWatchlistStore _store;
+    private readonly TradeFeeStore _fees;
     private double? _latestClose;
 
-    public WatchlistRowViewModel(WatchlistEntry entry, IBarRepository barRepository, string conceptBoards, JsonWatchlistStore store)
+    /// <summary>本行成交明细的汇总（含佣金/过户费/印花税）——费率改了或成交明细改了就重算。</summary>
+    private TradeCostSummary _cost;
+
+    public WatchlistRowViewModel(WatchlistEntry entry, IBarRepository barRepository, string conceptBoards, JsonWatchlistStore store, TradeFeeStore fees)
     {
         Entry = entry;
         Board = conceptBoards;
         _store = store;
+        _fees = fees;
+        _cost = TradeCostSummary.For(entry.Lots, fees.Current);
         ComputeTracking(barRepository);
     }
 
@@ -37,6 +43,22 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     public string Method => Entry.Method;
     public string DataDate => Entry.DataDate.ToString("yyyy-MM-dd");
     public double PriceAtPick => Entry.PriceAtPick;
+
+    /// <summary>"加入时价格（那天的日期）"——格式跟 <see cref="LatestCloseText"/> 一模一样，
+    /// 两列并排就能直接看出"从哪天的多少钱，走到今天的多少钱"。
+    ///
+    /// 日期用的是 <see cref="WatchlistEntry.DataDate"/>（这个价所属的交易日）而不是 AddedAt
+    /// （点"加入"的时刻）：只有同为"价格所属交易日"，跟最新收盘那列才是同一口径、能直接比。
+    /// 两者不是同一天时（比如周末把周五的信号加进来），AddedAt 在悬停提示里给出。</summary>
+    public string PriceAtPickText =>
+        Entry.PriceAtPick > 0 ? $"{Entry.PriceAtPick:F2}（{Entry.DataDate:yyyy-MM-dd}）" : "—";
+
+    /// <summary>加入时价格那格的悬停提示——点"加入"的实际时刻，以及跟数据日期的关系。</summary>
+    public string PriceAtPickTooltip =>
+        Entry.PriceAtPick > 0
+            ? $"{Entry.DataDate:yyyy-MM-dd} 的收盘价 {Entry.PriceAtPick:F2}（信号就是按这一天的数据选出来的）\n"
+              + $"实际点击加入的时刻：{Entry.AddedAt:yyyy-MM-dd HH:mm}"
+            : "没有记录加入时的价格";
     public string AddedAt => Entry.AddedAt.ToString("yyyy-MM-dd HH:mm");
     public string SatisfiedText => $"{Entry.SatisfiedCount}/{Entry.TotalCount}";
 
@@ -52,10 +74,23 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     /// <summary>"选中后涨跌幅"的数值形式——给"自选股"页统计各方法准确率用（平均涨跌/胜率）。</summary>
     public double? SincePickPct { get; private set; }
 
+    /// <summary>本地K线里最新一根的收盘价（没数据时为 null）——【仓位计算器】用它把建议金额折成股数、
+    /// 推出止损价和两档止盈价。</summary>
+    public double? LatestClose => _latestClose;
+
+    /// <summary>上面那个收盘价是**哪一天**的。盘中打开程序时今天的K线还没入库，它就是昨天的收盘价——
+    /// 所以凡是把它当"现价"用的地方都要把日期一起显示出来，否则用户会以为那是实时价
+    /// （用户 2026-08-19 指出）。</summary>
+    public DateTime? LatestCloseDate { get; private set; }
+
+    /// <summary>含费成本均价（买入总支出÷买入总股数，没买过或老数据没填股数时为 null）——
+    /// 【仓位计算器】只把它当**参考信息**显示，不参与仓位计算（成本是沉没成本，见那个窗口的说明）。</summary>
+    public double? NetAvgCost => _cost.NetAvgCost;
+
     /// <summary>是否在"我的交易"池里（显式勾入，或已填买入价）——"自选股"页用一列标出来，让人一眼看出
     /// 哪些样本自己真的下手了。</summary>
-    public string TradePoolText => Entry.IsInTradePool ? (Entry.BuyPrice is > 0 ? "✔持仓" : "✔已加入") : "";
-    public Brush TradePoolColor => Entry.BuyPrice is > 0 ? Brushes.Firebrick : Brushes.SeaGreen;
+    public string TradePoolText => Entry.IsInTradePool ? (Entry.HasBought ? "✔持仓" : "✔已加入") : "";
+    public Brush TradePoolColor => Entry.HasBought ? Brushes.Firebrick : Brushes.SeaGreen;
 
     private void ComputeTracking(IBarRepository barRepository)
     {
@@ -64,6 +99,7 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
 
         var latest = bars[^1];
         _latestClose = latest.Close;
+        LatestCloseDate = latest.PeriodStart;
         LatestCloseText = $"{latest.Close:F2}（{latest.PeriodStart:yyyy-MM-dd}）";
         var pct = (latest.Close - Entry.PriceAtPick) / Entry.PriceAtPick * 100;
         SincePickPct = pct;
@@ -71,121 +107,194 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
         ChangeColor = pct >= 0 ? Brushes.Red : Brushes.Green; // 国内看盘习惯：涨红跌绿
     }
 
-    // ── 手动持仓信息（买入日期/买入价/股数，2026-07-29新增）——单元格里直接编辑，提交时解析并
-    //    立即持久化；解析不了的输入丢弃（Raise让界面回显旧值）。三个都空=观察中、没买。 ──
+    // ── 持仓信息（2026-08-11起支持多笔买入/卖出，见 TradeLot）——买卖明细在"我的交易"Tab点
+    //    【交易记录】录入，这里只显示汇总：总股数 + 加权均价。一笔都没有=观察中、还没买。 ──
 
-    public string BuyDateText
+    /// <summary>买入汇总："3笔 1,500股 均12.34"；没买过显示"—"。老数据没填股数时只显示均价。</summary>
+    public string BuySummaryText => LotSummary(Entry.BuyLots.Count, Entry.TotalBuyShares, Entry.AvgBuyPrice);
+
+    /// <summary>卖出汇总，格式同 <see cref="BuySummaryText"/>；一笔没卖显示"—"。</summary>
+    public string SellSummaryText => LotSummary(Entry.SellLots.Count, Entry.TotalSellShares, Entry.AvgSellPrice);
+
+    /// <summary>还拿着多少股（部分卖出后就是剩下的那部分）——已全部卖出显示"已清仓"。</summary>
+    public string PositionText =>
+        !Entry.HasBought ? "—"
+        : Entry.IsClosedTrade ? "已清仓"
+        : Entry.RemainingShares > 0 ? $"{Entry.RemainingShares:N0}股" : "—";
+
+    // ── 财报披露日（2026-08-17新增）——手填，本地库里没有"预约披露日"这种数据（只有已披露的报告期）。
+    //    单元格里直接编辑、失焦即存；解析不了的输入丢弃（Raise 让界面回显旧值）。 ──
+
+    public string EarningsDateText
     {
-        get => Entry.BuyDate?.ToString("yyyy-MM-dd") ?? "";
+        get => Entry.EarningsDate?.ToString("yyyy-MM-dd") ?? "";
         set
         {
             var t = (value ?? "").Trim();
-            if (t.Length == 0) Entry.BuyDate = null;
-            else if (DateTime.TryParse(t, out var d)) Entry.BuyDate = d.Date;
-            PersistTradeInfo();
+            if (t.Length == 0) Entry.EarningsDate = null;
+            else if (DateTime.TryParse(t, out var d)) Entry.EarningsDate = d.Date;
+            _store.UpdateEarningsDate(Entry.Id, Entry.EarningsDate);
+            Raise(nameof(EarningsDateText));
+            Raise(nameof(EarningsColor));
+            Raise(nameof(EarningsTooltip));
         }
     }
 
-    public string BuyPriceText
+    /// <summary>距财报还有几天（自然日）；没填或已过去为 null / 负数。</summary>
+    private int? DaysToEarnings => Entry.EarningsDate is { } d ? (int)(d - DateTime.Today).TotalDays : null;
+
+    /// <summary>临近财报标红——跟晨检用同一个提前量（<see cref="MorningStockRowViewModel.EarningsWarnDays"/>），
+    /// 两处不能各定各的，否则这边红了那边不提醒。跨财报持仓是回测参数里没有的事件风险。</summary>
+    public Brush EarningsColor =>
+        DaysToEarnings is { } d && d >= 0 && d <= MorningStockRowViewModel.EarningsWarnDays
+            ? Brushes.Firebrick
+            : Brushes.Black;
+
+    public string EarningsTooltip => DaysToEarnings switch
     {
-        get => Entry.BuyPrice?.ToString("F2") ?? "";
-        set
+        null => "手填下一次财报的披露日期（如 2026-08-26）——本地库里没有预约披露日，只能自己录。\n填了以后每日晨检会在临近时提醒。",
+        0 => "今天披露财报——利好出尽/低于预期都可能，跨事件持仓的风险自己认。",
+        > 0 and <= MorningStockRowViewModel.EarningsWarnDays =>
+            $"还有 {DaysToEarnings} 天披露财报（{Entry.EarningsDate:MM-dd}）。\n短线法/回调法的参数是按普通交易日回测的，没区分财报窗口：预期打得越满，兑现日越容易利好出尽。",
+        > 0 => $"{Entry.EarningsDate:yyyy-MM-dd} 披露财报，还有 {DaysToEarnings} 天。",
+        _ => $"{Entry.EarningsDate:yyyy-MM-dd} 已披露。记得跑一次\"季度/不定期\"抓取，把新报告期入库——在那之前，各方法的财务条件用的还是上一期数据。",
+    };
+
+    /// <summary>止亏价——剩下的股票卖到这个价刚好不赚不亏（买入费用已在成本里，卖出的佣金/过户费/
+    /// 印花税按这个价再扣一遍；分批卖过的把已落袋的钱也算进去了）。已清仓/没买过显示"—"。</summary>
+    public string BreakEvenText
+    {
+        get
         {
-            var t = (value ?? "").Trim();
-            if (t.Length == 0) Entry.BuyPrice = null;
-            else if (double.TryParse(t, out var p) && p > 0) Entry.BuyPrice = p;
-            PersistTradeInfo();
+            if (!Entry.HasBought || Entry.IsClosedTrade) return "—";
+            if (_cost.NetAvgCost is null) return "未填股数";
+            return _cost.BreakEvenPrice() switch
+            {
+                null => "—",
+                <= 0 => "已保本",
+                var p => $"{p:F3}",
+            };
         }
     }
 
-    public string SharesText
+    /// <summary>止亏价相对现价的位置——现价已经跌破止亏价就标红（再卖就是真亏钱了）。</summary>
+    public Brush BreakEvenColor
+        => _latestClose is > 0 && _cost.BreakEvenPrice() is { } p && _latestClose < p
+            ? Brushes.Firebrick
+            : Brushes.Black;
+
+    /// <summary>成交明细的悬停提示——逐笔列出来（日期/方向/价格/股数/该笔费用），外加含费成本均价，
+    /// 不用打开窗口也能核对。</summary>
+    public string LotsTooltip
     {
-        get => Entry.Shares?.ToString() ?? "";
-        set
+        get
         {
-            var t = (value ?? "").Trim();
-            if (t.Length == 0) Entry.Shares = null;
-            else if (int.TryParse(t, out var n) && n > 0) Entry.Shares = n;
-            PersistTradeInfo();
+            if (Entry.Lots.Count == 0) return "还没有成交记录——点【交易记录】录入买入/卖出（可分多笔）";
+            var fees = _fees.Current;
+            var lines = Entry.Lots.OrderBy(l => l.Date).Select(l =>
+                $"{l.Date:yyyy-MM-dd}  {(l.Side == TradeSide.Buy ? "买入" : "卖出")}  {l.Price:F2}"
+                + (l.Shares > 0
+                    ? $" × {l.Shares:N0}股 = {l.Price * l.Shares:N0}元，费用{fees.FeeFor(l):N2}元"
+                    : "（股数未填）")).ToList();
+            if (_cost.NetAvgCost is { } cost)
+                lines.Add($"—— 含费成本均价 {cost:F3}（买入总支出{_cost.NetCost:N0}元 ÷ {_cost.BuyShares:N0}股）");
+            if (_cost.TotalFee > 0)
+                lines.Add($"已发生费用合计 {_cost.TotalFee:N2}元" +
+                          (_cost.BreakEvenPrice() is { } be and > 0 ? $"；止亏价 {be:F3}（已含卖出时还要交的费用）" : ""));
+            lines.Add($"费率：{fees.Describe()}");
+            return string.Join("\n", lines);
         }
     }
 
-    public string SellDateText
+    private static string LotSummary(int count, int shares, double? avgPrice)
     {
-        get => Entry.SellDate?.ToString("yyyy-MM-dd") ?? "";
-        set
-        {
-            var t = (value ?? "").Trim();
-            if (t.Length == 0) Entry.SellDate = null;
-            else if (DateTime.TryParse(t, out var d)) Entry.SellDate = d.Date;
-            PersistTradeInfo();
-        }
+        if (count == 0 || avgPrice is not (> 0)) return "—";
+        return shares > 0
+            ? $"{count}笔 {shares:N0}股 均{avgPrice.Value:F2}"
+            : $"{count}笔 均{avgPrice.Value:F2}（股数未填）";
     }
 
-    public string SellPriceText
+    /// <summary>整体替换本条自选的成交明细（【交易记录】窗口点保存后调用）——落盘并刷新本行显示。</summary>
+    public void ApplyLots(IReadOnlyList<TradeLot> lots)
     {
-        get => Entry.SellPrice?.ToString("F2") ?? "";
-        set
-        {
-            var t = (value ?? "").Trim();
-            if (t.Length == 0) Entry.SellPrice = null;
-            else if (double.TryParse(t, out var p) && p > 0) Entry.SellPrice = p;
-            PersistTradeInfo();
-        }
-    }
-
-    private void PersistTradeInfo()
-    {
-        _store.UpdateTradeInfo(Entry.Id, Entry.BuyDate, Entry.BuyPrice, Entry.Shares, Entry.SellDate, Entry.SellPrice);
-        Raise(nameof(BuyDateText));
-        Raise(nameof(BuyPriceText));
-        Raise(nameof(SharesText));
-        Raise(nameof(SellDateText));
-        Raise(nameof(SellPriceText));
+        _store.UpdateLots(Entry.Id, lots);
+        Entry.Lots = lots.OrderBy(l => l.Date).ToList();
+        Entry.SyncLegacyFromLots();
+        _cost = TradeCostSummary.For(Entry.Lots, _fees.Current);
+        Raise(nameof(BreakEvenText));
+        Raise(nameof(BreakEvenColor));
+        Raise(nameof(BuySummaryText));
+        Raise(nameof(SellSummaryText));
+        Raise(nameof(PositionText));
+        Raise(nameof(LotsTooltip));
         Raise(nameof(HoldingText));
         Raise(nameof(HoldingColor));
+        Raise(nameof(TradePoolText));
+        Raise(nameof(TradePoolColor));
     }
 
-    /// <summary>持仓盈亏——三种状态：没填买入价=观察中；填了买入价没填卖出价=持仓（较买入价的浮动
-    /// 盈亏，有股数带金额）；买入卖出都填了=已平仓（按卖出价算最终已实现盈亏，留痕复盘）。</summary>
+    /// <summary>持仓盈亏——**扣光费用、并把没卖的部分按现价全部卖出**来算："现在全兑现，账户里到底
+    /// 多出/少掉多少钱"。买入的佣金/过户费已经在成本里，卖出那头的佣金/过户费/印花税按现价再扣一遍；
+    /// 分批卖过的，已经落袋的钱也算在里面。收益率按买入总支出算。
+    ///
+    /// 三种状态：没买过=观察中；已全部卖出=已平仓（就是最终已实现结果）；持仓中=按现价全卖的结果。
+    /// 股数没填的老数据摊不出费用，退回纯价格口径并标注。
+    ///
+    /// 注意跟晨检那页的差别：晨检的止损/止盈线是**价格口径**（回测出来的纪律按价格算），这里是钱的口径。</summary>
     public string HoldingText
     {
         get
         {
-            if (Entry.BuyPrice is not (> 0)) return "观察中";
+            if (!Entry.HasBought) return "观察中";
 
-            if (Entry.SellPrice is > 0)
+            // 老数据只填了价格没填股数：摊不出每股费用，退回纯价格口径，并标出来别让人以为含费。
+            if (_cost.NetAvgCost is null) return PriceOnlyHoldingText();
+
+            if (Entry.IsClosedTrade)
             {
-                var spct = (Entry.SellPrice.Value - Entry.BuyPrice.Value) / Entry.BuyPrice.Value * 100;
-                if (Entry.Shares is > 0)
-                {
-                    var spnl = (Entry.SellPrice.Value - Entry.BuyPrice.Value) * Entry.Shares.Value;
-                    return $"已平仓 {(spnl >= 0 ? "+" : "")}{spnl:N0}元（{(spct >= 0 ? "+" : "")}{spct:F2}%）";
-                }
-                return $"已平仓 {(spct >= 0 ? "+" : "")}{spct:F2}%";
+                var pnl = _cost.RealizedNet ?? 0;
+                var pct = _cost.RealizedNetPct ?? 0;
+                return $"已平仓 {(pnl >= 0 ? "+" : "")}{pnl:N0}元（{(pct >= 0 ? "+" : "")}{pct:F2}%，含费）";
             }
 
             if (_latestClose is not (> 0)) return "无最新价";
-            var pct = (_latestClose.Value - Entry.BuyPrice.Value) / Entry.BuyPrice.Value * 100;
-            var text = $"{(pct >= 0 ? "+" : "")}{pct:F2}%";
-            if (Entry.Shares is > 0)
-            {
-                var pnl = (_latestClose.Value - Entry.BuyPrice.Value) * Entry.Shares.Value;
-                text += $"（{(pnl >= 0 ? "+" : "")}{pnl:N0}元）";
-            }
+
+            var total = _cost.TotalPnlIfLiquidated(_latestClose.Value) ?? 0;
+            var totalPct = _cost.TotalPnlPctIfLiquidated(_latestClose.Value) ?? 0;
+            var text = $"{(total >= 0 ? "+" : "")}{total:N0}元（{(totalPct >= 0 ? "+" : "")}{totalPct:F2}%）";
+            // 分批卖过的：顺带标一下其中已经落袋的部分，剩下的才是还浮着的。
+            if (_cost.RealizedNet is { } r)
+                text += $"，其中已落袋{(r >= 0 ? "+" : "")}{r:N0}元";
             return text;
         }
+    }
+
+    /// <summary>股数未知的老记录用的退化显示：只能按价格算涨跌幅，没法算费用和金额。</summary>
+    private string PriceOnlyHoldingText()
+    {
+        if (Entry.IsClosedTrade)
+        {
+            var spct = Entry.RealizedPct ?? 0;
+            return $"已平仓 {(spct >= 0 ? "+" : "")}{spct:F2}%（未填股数，不含费）";
+        }
+        if (_latestClose is not (> 0)) return "无最新价";
+        var cost = Entry.AvgBuyPrice!.Value;
+        var pct = (_latestClose.Value - cost) / cost * 100;
+        return $"{(pct >= 0 ? "+" : "")}{pct:F2}%（未填股数，不含费）";
     }
 
     public Brush HoldingColor
     {
         get
         {
-            if (Entry.BuyPrice is not (> 0)) return Brushes.Gray;
-            if (Entry.SellPrice is > 0)
-                return Entry.SellPrice >= Entry.BuyPrice ? Brushes.Red : Brushes.Green;
+            if (!Entry.HasBought) return Brushes.Gray;
+            if (Entry.IsClosedTrade)
+                return (_cost.RealizedNetPct ?? Entry.RealizedPct) >= 0 ? Brushes.Red : Brushes.Green;
             if (_latestClose is not (> 0)) return Brushes.Gray;
-            return _latestClose >= Entry.BuyPrice ? Brushes.Red : Brushes.Green;
+            // 含费口径：按现价全卖是赚是亏（跟"现价 vs 止亏价"是同一回事）。
+            var pnl = _cost.TotalPnlIfLiquidated(_latestClose.Value)
+                      ?? (_latestClose.Value - (Entry.AvgBuyPrice ?? 0));
+            return pnl >= 0 ? Brushes.Red : Brushes.Green;
         }
     }
 
@@ -213,6 +322,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
     private readonly JsonWatchlistStore _store;
     private readonly IBarRepository _barRepository;
     private readonly IBoardRepository _boardRepository;
+    private readonly TradeFeeStore _fees;
 
     public ObservableCollection<WatchlistRowViewModel> Entries { get; } = new();
 
@@ -232,11 +342,12 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
     /// <summary>加入交易池后要通知"我的交易"页和晨检页重新加载——由 MainViewModel 注入。</summary>
     public Action? TradePoolChanged { get; set; }
 
-    public WatchlistTabViewModel(JsonWatchlistStore store, IBarRepository barRepository, IBoardRepository boardRepository)
+    public WatchlistTabViewModel(JsonWatchlistStore store, IBarRepository barRepository, IBoardRepository boardRepository, TradeFeeStore fees)
     {
         _store = store;
         _barRepository = barRepository;
         _boardRepository = boardRepository;
+        _fees = fees;
         RefreshCommand = new RelayCommand(_ => Reload());
         RemoveSelectedCommand = new RelayCommand(_ => RemoveSelected());
         ExportCommand = new RelayCommand(_ => GridExporter.ExportWatchlist(Entries));
@@ -258,7 +369,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
             var boards = conceptMap.TryGetValue(e.Code, out var list) && list.Count > 0
                 ? string.Join("、", list)
                 : "—";
-            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store));
+            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store, _fees));
         }
         BuildMethodStats();
     }
@@ -315,7 +426,8 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
 
 /// <summary>
 /// "我的交易" tab（2026-07-31新增）——**我打算买卖、要每天盯的那一小撮票**，跟"自选股（算法验证）"
-/// 分开：买入日期/买入价/股数/卖出日期/卖出价只在这里录，每日晨检也只体检这里的票。
+/// 分开：买入/卖出只在这里录（2026-08-11起支持多笔，金字塔式建仓+分批止盈，见 <see cref="TradeLot"/>；
+/// 列表显示的是汇总的总股数和加权均价），每日晨检也只体检这里的票。
 ///
 /// 数据上不是另一份清单，而是同一个 watchlist.json 里 <see cref="WatchlistEntry.IsInTradePool"/>
 /// 为真的那些记录（显式勾进来的 + 已经填了买入价的）——这样一只票"既是算法样本又是我的持仓"不需要
@@ -328,6 +440,7 @@ public class TradePoolTabViewModel
     private readonly JsonWatchlistStore _store;
     private readonly IBarRepository _barRepository;
     private readonly IBoardRepository _boardRepository;
+    private readonly TradeFeeStore _fees;
 
     public ObservableCollection<WatchlistRowViewModel> Entries { get; } = new();
 
@@ -338,16 +451,21 @@ public class TradePoolTabViewModel
     /// <summary>移出交易池后要通知晨检页重新加载——由 MainViewModel 注入。</summary>
     public Action? TradePoolChanged { get; set; }
 
-    public TradePoolTabViewModel(JsonWatchlistStore store, IBarRepository barRepository, IBoardRepository boardRepository)
+    public TradePoolTabViewModel(JsonWatchlistStore store, IBarRepository barRepository, IBoardRepository boardRepository, TradeFeeStore fees)
     {
         _store = store;
         _barRepository = barRepository;
         _boardRepository = boardRepository;
+        _fees = fees;
         RefreshCommand = new RelayCommand(_ => Reload());
         RemoveFromPoolCommand = new RelayCommand(_ => RemoveFromPool());
         ExportCommand = new RelayCommand(_ => GridExporter.ExportWatchlist(Entries));
         Reload();
     }
+
+    /// <summary>交易费率（佣金/过户费/印花税）——用户在【交易记录】窗口里填，那里就是录成交、看费用的
+    /// 地方；本页只是取它来算含费盈亏和止亏价。MainWindow 打开窗口时要把它传进去。</summary>
+    public TradeFeeStore FeeStore => _fees;
 
     public void Reload()
     {
@@ -355,14 +473,14 @@ public class TradePoolTabViewModel
         var conceptMap = _boardRepository.GetConceptBoardsByStock();
         // 持仓中的排最前（真金白银的先看），然后已平仓，最后只是打算买的；同组按加入时间倒序。
         foreach (var e in _store.Load().Where(e => e.IsInTradePool)
-                     .OrderByDescending(e => e.BuyPrice is > 0 && e.SellPrice is not (> 0))
-                     .ThenByDescending(e => e.BuyPrice is > 0)
+                     .OrderByDescending(e => e.IsHoldingPosition)
+                     .ThenByDescending(e => e.HasBought)
                      .ThenByDescending(e => e.AddedAt))
         {
             var boards = conceptMap.TryGetValue(e.Code, out var list) && list.Count > 0
                 ? string.Join("、", list)
                 : "—";
-            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store));
+            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store, _fees));
         }
     }
 
@@ -374,9 +492,9 @@ public class TradePoolTabViewModel
         var selected = Entries.Where(e => e.IsSelected).ToList();
         if (selected.Count == 0) return;
 
-        // 未平仓持仓 = 填了买入价、还没填卖出价（跟 WatchlistEntry.IsInTradePool 的第①条同一判定）
-        var held = selected.Where(e => e.Entry.BuyPrice is > 0 && e.Entry.SellPrice is not (> 0)).Select(e => e.Name).ToList();
-        var movable = selected.Where(e => !(e.Entry.BuyPrice is > 0 && e.Entry.SellPrice is not (> 0))).Select(e => e.Entry.Id).ToList();
+        // 未平仓持仓 = 买过、还没全部卖出（跟 WatchlistEntry.IsInTradePool 的第①条同一判定）
+        var held = selected.Where(e => e.Entry.IsHoldingPosition).Select(e => e.Name).ToList();
+        var movable = selected.Where(e => !e.Entry.IsHoldingPosition).Select(e => e.Entry.Id).ToList();
         if (movable.Count > 0) _store.SetTradePool(movable, false);
         Reload();
         TradePoolChanged?.Invoke();
@@ -384,8 +502,8 @@ public class TradePoolTabViewModel
         if (held.Count > 0)
             System.Windows.MessageBox.Show(
                 $"已移出 {movable.Count} 只。\n\n以下 {held.Count} 只是未平仓的持仓，仍留在交易池：\n{string.Join("、", held)}\n\n" +
-                "钱还在里面就必须每天盯，所以不允许移出。要么先把卖出日期/卖出价填上（平仓后就能移出了），" +
-                "要么把买入信息清空（表示这笔其实没买）。",
+                "钱还在里面就必须每天盯，所以不允许移出。要么在【交易记录】里把剩余股数都卖出（平仓后就能移出了），" +
+                "要么把买入记录删掉（表示这笔其实没买）。",
                 "部分未移出", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
     }
 }

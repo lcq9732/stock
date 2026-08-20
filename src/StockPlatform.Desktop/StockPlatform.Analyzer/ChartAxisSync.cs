@@ -48,7 +48,8 @@ internal static class ChartAxisSync
         double visibleStart, double visibleEnd,
         double initialPlotWidth, double pxPerDayLabel, double pxPerMonthLabel, int tradingDaysPerMonth,
         IReadOnlyList<CandleStickSeries>? candleSeries = null,
-        IReadOnlyList<(LinearAxis YAxis, Func<int, int, (double Min, double Max)?> RangeFn)>? yAxisRanges = null)
+        IReadOnlyList<(LinearAxis YAxis, Func<int, int, (double Min, double Max)?> RangeFn)>? yAxisRanges = null,
+        Action<int, int>? onVisibleRangeChanged = null)
     {
         double plotPixelWidth = initialPlotWidth;
         double currentMin = visibleStart, currentMax = visibleEnd;
@@ -77,13 +78,19 @@ internal static class ChartAxisSync
                 var width = pxPerBar <= 0 ? 0.5 : Math.Clamp(CandleWidthPx / pxPerBar, 0.1, 0.9);
                 foreach (var cs in candleSeries) cs.CandleWidth = width;
             }
+            int startIdx = (int)Math.Floor(min);
+            int endIdx = (int)Math.Ceiling(max);
+
+            // 先让调用方按新的可见区间调整数据，再算Y轴范围——顺序很重要：大盘叠加线是按"可见区间
+            // 左边缘"重新等比锚定的（见 QuoteChartBuilder 的叠加逻辑），必须在算Y范围之前更新好，
+            // 否则这一帧的Y范围用的是上一次锚点下的叠加值，叠加线会跑出面板。
+            onVisibleRangeChanged?.Invoke(startIdx, endIdx);
+
             if (yAxisRanges is { Count: > 0 })
             {
                 // Y轴改成"只看当前可见的这一段K线"重新算范围，而不是OxyPlot默认的"整条系列(可能是
                 // 三年历史)算一次范围就不再变"——不这么改的话，缩放/平移K线图只会移动X轴，Y轴还是
                 // 那个大范围没变，可见的这几十根K线的实际价格波动只占面板高度一小段，看起来很扁。
-                int startIdx = (int)Math.Floor(min);
-                int endIdx = (int)Math.Ceiling(max);
                 foreach (var (yAxis, rangeFn) in yAxisRanges)
                 {
                     var range = rangeFn(startIdx, endIdx);

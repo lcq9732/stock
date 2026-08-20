@@ -102,15 +102,31 @@ public class PullbackAnalysisEngine
     private readonly IBarRepository _barRepository;
     private readonly IReadOnlyDictionary<string, FinancialSnapshot> _financials;
     private readonly IReadOnlyDictionary<string, double> _dividendPerShare;
+    /// <summary>近3个完整年度的归母净利（升序）——**只用于展示**：单期利润会被一次性损益和
+    /// 季节性扭曲（连亏三年的公司也可能某季度微利），多年累计才看得出真实盈利能力。
+    /// 不做成硬条件的理由见 IFinancialRepository.GetRecentAnnualNetProfitByCode。</summary>
+    private readonly IReadOnlyDictionary<string, List<(int Year, double NetProfitParent)>> _annualProfits;
 
     public PullbackAnalysisEngine(
         IBarRepository barRepository,
         IReadOnlyDictionary<string, FinancialSnapshot> financials,
-        IReadOnlyDictionary<string, double> dividendPerShare)
+        IReadOnlyDictionary<string, double> dividendPerShare,
+        IReadOnlyDictionary<string, List<(int Year, double NetProfitParent)>> annualProfits)
     {
         _barRepository = barRepository;
         _financials = financials;
         _dividendPerShare = dividendPerShare;
+        _annualProfits = annualProfits;
+    }
+
+    /// <summary>近几年年报净利拼成一行，连亏或累计为负带 ⚠。同 ShortTermAnalysisEngine 的同名方法。</summary>
+    private (string Text, double? Cum) ProfitTrendText(string code)
+    {
+        if (!_annualProfits.TryGetValue(code, out var list) || list.Count == 0) return ("无年报数据", null);
+        double cum = list.Sum(x => x.NetProfitParent);
+        var parts = list.Select(x => $"{x.Year % 100}年{x.NetProfitParent / 1e8:+0.00;-0.00}");
+        string warn = list[^1].NetProfitParent <= 0 || cum <= 0 ? " ⚠" : "";
+        return ($"{string.Join(" ", parts)}｜累计{cum / 1e8:+0.00;-0.00}亿{warn}", cum);
     }
 
     /// <summary>把"低于MA20的幅度"落到回测验证过的档位上，并明确标出哪些是没有样本支撑的外推——
@@ -188,6 +204,7 @@ public class PullbackAnalysisEngine
 
         var dps = _dividendPerShare.GetValueOrDefault(code);
         double dividendYield = close > 0 ? dps / close : 0;
+        var trend = ProfitTrendText(code);
 
         var result = new StockScreenResult
         {
@@ -198,6 +215,8 @@ public class PullbackAnalysisEngine
             DividendYield = dividendYield,
             DailyVolatility = volatility,
             DepthBucket = DepthBucketLabel(belowMa20),
+            ProfitTrend = trend.Text,
+            ThreeYearCumProfit = trend.Cum,
             SortScore = -belowMa20 * 100,       // 跌得越深排越前
             Criteria = new List<CriterionResult>
             {
@@ -270,6 +289,18 @@ public class PullbackAnalysisEngine
                 $"（需≥{BaseMinOcfCoverage:F1}，利润要变成真钱）\n" +
                 $"    {(baseVol ? "✓" : "✗")} 日均波幅 {volatility * 100:F2}%" +
                 $"（需≤{BaseMaxDailyVolatility * 100:F1}%，能扛住才敢放大仓位）",
+        });
+        // 【盈利趋势】只提示不过滤——单期利润会被一次性损益/季节性扭曲，多年累计才真实；
+        // 但回测显示做成硬条件反而降低收益，所以摆出来由用户自己判断（见 ProfitTrendText）。
+        result.Criteria.Add(new CriterionResult
+        {
+            Name = "【仅提示】近年归母净利趋势",
+            Satisfied = true,
+            Basis = trend.Text +
+                    (trend.Cum is <= 0
+                        ? "\n    ⚠ 三年累计为负——单期微利可能只是一次性损益或季节性。这条只提示不过滤" +
+                          "（回测里做成硬条件反而降低收益），要不要碰连亏公司请自己判断。"
+                        : ""),
         });
         result.Criteria.Add(new CriterionResult
         {

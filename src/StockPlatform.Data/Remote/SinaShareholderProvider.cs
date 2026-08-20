@@ -116,6 +116,7 @@ public class SinaShareholderProvider : IShareholderProvider
                 Shares = ParseD(tds[1]),
                 Ratio = ParseD(tds[2]),
                 ShareType = tds[3],
+                ChangeDirection = ParseChangeDirection(tds[1]),
                 FetchedAt = now,
             });
         }
@@ -157,9 +158,28 @@ public class SinaShareholderProvider : IShareholderProvider
         return Regex.Replace(text, "\\s+", " ").Trim();
     }
 
+    /// <summary>
+    /// 从单元格文本里取数字。**必须先剥掉数字以外的所有字符**——新浪在持股数/占比后面会挂一个
+    /// 环比涨跌箭头（<c>40610695↓</c>），旧版只 Replace 了逗号和百分号，箭头留在串里导致
+    /// <c>double.TryParse</c> 失败、静默返回 0。后果是"排进前十却显示 0 股"这种自相矛盾的数据，
+    /// 库里有 14953 行（0.5%）中招，集中在香港中央结算、高盛、各类ETF 这些调仓频繁的机构上
+    /// （2026-08-13 修复）。这里改成白名单过滤：只保留数字、小数点、正负号，其余一律丢弃，
+    /// 这样将来数据源再加别的装饰符号也不会重蹈覆辙。
+    /// </summary>
     private static double ParseD(string s)
     {
-        s = s.Replace(",", "").Replace("%", "").Trim();
-        return double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : 0;
+        if (string.IsNullOrWhiteSpace(s)) return 0;
+        Span<char> buf = stackalloc char[s.Length];
+        int n = 0;
+        foreach (var ch in s)
+            if (char.IsAsciiDigit(ch) || ch == '.' || ch == '-' || ch == '+') buf[n++] = ch;
+        if (n == 0) return 0;
+        return double.TryParse(buf[..n], NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : 0;
     }
+
+    /// <summary>从持股数单元格里读出环比增减方向。新浪用箭头表示：↑(红)=增持、↓(绿)=减持，
+    /// 没有箭头 = 持股不变或本期新进榜（两者数据源不区分，一律记 null）。</summary>
+    private static string? ParseChangeDirection(string cellText) =>
+        cellText.Contains('↑') ? TopShareholderRow.ChangeUp :
+        cellText.Contains('↓') ? TopShareholderRow.ChangeDown : null;
 }

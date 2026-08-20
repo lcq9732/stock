@@ -61,25 +61,43 @@ public class WatchlistEntry
 
     public DateTime AddedAt { get; set; }
 
-    /// <summary>手动录入的实际买入日期（2026-07-29新增，在自选股Tab里直接编辑）。跟
-    /// <see cref="BuyPrice"/>/<see cref="Shares"/>一起构成"持仓"信息：三个都没填=还没买、只是
-    /// 观察中；填了=真实持仓，每日晨检的止损/止盈纪律按买入价/买入日（而非自选价）计算。
-    /// 老 JSON 里没有这些字段，反序列化自然为 null，向后兼容。</summary>
+    /// <summary>这笔票的全部实际成交（2026-08-11新增）——买入可以有多笔（金字塔式建仓）、卖出也
+    /// 可以有多笔（分批止盈），在"我的交易"Tab点【交易记录】录入。一条都没有=还没买、只是观察中；
+    /// 有买入笔=真实持仓，每日晨检的止损/止盈纪律按**加权平均买入价**和**首次买入日**计算。
+    ///
+    /// 这里是唯一的事实来源，下面那五个单笔字段（BuyDate/BuyPrice/Shares/SellDate/SellPrice）
+    /// 从 2026-08-11 起降级为**由本列表汇总出来的冗余快照**，只为兼容老数据/老版本读取，
+    /// 见 <see cref="SyncLegacyFromLots"/>。</summary>
+    public List<TradeLot> Lots { get; set; } = new();
+
+    /// <summary>【兼容字段，勿直接写】首次买入日期——新代码用 <see cref="FirstBuyDate"/>。
+    /// 2026-07-29 加入时是手动录入的单笔买入日期，2026-08-11 改成多笔后由 <see cref="Lots"/> 汇总，
+    /// 仍然序列化到 JSON 里，这样老版本 exe 读同一份 watchlist.json 也还能显示出持仓。</summary>
     public DateTime? BuyDate { get; set; }
 
-    /// <summary>手动录入的实际买入价——见 <see cref="BuyDate"/>。</summary>
+    /// <summary>【兼容字段，勿直接写】加权平均买入价——新代码用 <see cref="AvgBuyPrice"/>。见 <see cref="BuyDate"/>。</summary>
     public double? BuyPrice { get; set; }
 
-    /// <summary>手动录入的买入股数——见 <see cref="BuyDate"/>；有它才能算持仓盈亏金额。</summary>
+    /// <summary>【兼容字段，勿直接写】股数——未平仓时是**剩余持仓股数**、已平仓时是买入总股数
+    /// （这样老版本那套"(现价-买入价)×股数"的算法两种情况都还对得上）。新代码用
+    /// <see cref="RemainingShares"/>/<see cref="TotalBuyShares"/>。</summary>
     public int? Shares { get; set; }
 
-    /// <summary>手动录入的卖出日期（2026-07-29新增）——填了买入价又填了卖出价=这笔交易已平仓：
-    /// 自选股Tab显示最终已实现盈亏，晨检不再对它执行持仓纪律（状态标"已平仓"、回到观察语义），
-    /// 交易记录留痕供事后复盘（前向记录纪律：把每笔信号和结果攒下来）。</summary>
+    /// <summary>【兼容字段，勿直接写】最后一笔卖出日期，**只在全部卖完（已平仓）时才有值**——
+    /// 部分卖出留 null，否则老版本会把"还拿着一半"的仓位误判成已平仓。新代码用 <see cref="LastSellDate"/>。</summary>
     public DateTime? SellDate { get; set; }
 
-    /// <summary>手动录入的卖出价——见 <see cref="SellDate"/>。</summary>
+    /// <summary>【兼容字段，勿直接写】加权平均卖出价，同样只在已平仓时才有值——见 <see cref="SellDate"/>。
+    /// 新代码用 <see cref="AvgSellPrice"/>。</summary>
     public double? SellPrice { get; set; }
+
+    /// <summary>下一次财报的披露日期（2026-08-17新增，"我的交易"页手填）——交易所/公司预约的披露日，
+    /// 本地数据库里没有这个信息（<c>FinancialReport</c> 只有已经披露的报告期），所以只能手工录。
+    ///
+    /// 用途：**跨财报持仓是短线法/回调法回测里没有的风险**——那些参数是按普通交易日回测出来的，没有
+    /// 区分财报窗口；预期打得越满，兑现日越容易利好出尽。填了以后每日晨检会在临近时提醒（见
+    /// MorningStockRowViewModel 的财报提醒），披露完还会提醒去跑一次季度抓取，把新报告期入库。</summary>
+    public DateTime? EarningsDate { get; set; }
 
     /// <summary>是否放进"我的交易池"（2026-07-31新增）——把两种用途分开：各选股方法丢进自选的票默认
     /// 只是**算法验证样本**（用来统计各方法的准确率，见晨检的方法过滤器），不代表我要买；勾上这个才
@@ -97,14 +115,132 @@ public class WatchlistEntry
     public bool RemovedFromPool { get; set; }
 
     /// <summary>实际是否属于交易池：
-    /// ① **未平仓的持仓**（填了买入价、还没填卖出价）恒为真——钱还在里面就必须每天盯，移不出去；
+    /// ① **未平仓的持仓**（买过、还没卖完）恒为真——钱还在里面就必须每天盯，移不出去；
     /// ② 否则：没被显式移出，且（显式加入过 或 有买入记录）。
-    /// 已平仓（买入价+卖出价都有）落在②：默认仍留在池里当交易留痕，但**允许显式移出**——那笔交易
+    /// 已平仓（买过且已全部卖出）落在②：默认仍留在池里当交易留痕，但**允许显式移出**——那笔交易
     /// 已经结束，没道理继续占着每天要看的清单。</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public bool IsInTradePool =>
-        (BuyPrice is > 0 && SellPrice is not (> 0))
-        || (!RemovedFromPool && (InTradePool || BuyPrice is > 0));
+        IsHoldingPosition || (!RemovedFromPool && (InTradePool || HasBought));
+
+    // ── 多笔成交的汇总（2026-08-11新增，全部现算不缓存：一条自选也就几笔，加载/刷新时算一遍够快） ──
+
+    /// <summary>按股数加权的汇总。<paramref name="lots"/> 里价格 &lt;= 0 的笔直接忽略（没法参与均价）。
+    /// 全部笔的股数都是 0（老数据只填了价格没填股数）时退化成简单平均，并返回 shares=0 表示"股数未知"，
+    /// 调用方据此不显示金额。</summary>
+    private static (int Shares, double? Avg, DateTime? First, DateTime? Last) Aggregate(IEnumerable<TradeLot> lots)
+    {
+        var list = lots.Where(l => l.Price > 0).ToList();
+        if (list.Count == 0) return (0, null, null, null);
+        int shares = list.Sum(l => Math.Max(0, l.Shares));
+        double avg = shares > 0
+            ? list.Sum(l => l.Price * Math.Max(0, l.Shares)) / shares
+            : list.Average(l => l.Price);
+        return (shares, avg, list.Min(l => l.Date), list.Max(l => l.Date));
+    }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<TradeLot> BuyLots => Lots.Where(l => l.Side == TradeSide.Buy && l.Price > 0).ToList();
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<TradeLot> SellLots => Lots.Where(l => l.Side == TradeSide.Sell && l.Price > 0).ToList();
+
+    /// <summary>累计买入股数（0 = 没买过，或老数据没填股数）。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int TotalBuyShares => Aggregate(BuyLots).Shares;
+
+    /// <summary>加权平均买入成本——**持仓成本价**，晨检的止损/止盈线都按它算。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public double? AvgBuyPrice => Aggregate(BuyLots).Avg;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int TotalSellShares => Aggregate(SellLots).Shares;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public double? AvgSellPrice => Aggregate(SellLots).Avg;
+
+    /// <summary>首次买入日期——晨检算"买入后最高收盘"的起点用它（最早的峰值最高，止损最保守）。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public DateTime? FirstBuyDate => Aggregate(BuyLots).First;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public DateTime? LastSellDate => Aggregate(SellLots).Last;
+
+    /// <summary>剩余持仓股数 = 累计买入 − 累计卖出（部分卖出后就是还拿着的那部分）。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int RemainingShares => Math.Max(0, TotalBuyShares - TotalSellShares);
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasBought => AvgBuyPrice is > 0;
+
+    /// <summary>是否已平仓：买过、卖过，且已经没有剩余股数。股数未知的老数据（买卖股数都是0）
+    /// 也算平仓——那正是它当年"填了卖出价=平仓"的语义。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsClosedTrade => HasBought && AvgSellPrice is > 0 && TotalBuyShares - TotalSellShares <= 0;
+
+    /// <summary>是否还持有仓位（买过且没平仓）——**部分卖出仍然算持仓**，钱还在里面。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsHoldingPosition => HasBought && !IsClosedTrade;
+
+    /// <summary>已卖出部分的已实现收益率（按加权均价算，A股常用的移动加权成本口径）；没卖过为 null。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public double? RealizedPct => HasBought && AvgSellPrice is > 0
+        ? (AvgSellPrice.Value - AvgBuyPrice!.Value) / AvgBuyPrice.Value * 100
+        : null;
+
+    /// <summary>已卖出部分的已实现盈亏金额；没卖过、或股数未知时为 null。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public double? RealizedPnl => HasBought && AvgSellPrice is > 0 && TotalSellShares > 0
+        ? (AvgSellPrice.Value - AvgBuyPrice!.Value) * TotalSellShares
+        : null;
+
+    /// <summary>把老数据（单笔 BuyDate/BuyPrice/Shares/SellDate/SellPrice）补成 <see cref="Lots"/> 里的
+    /// 一买一卖。幂等：已经有 Lots 就什么都不做，所以每次加载都调一遍没关系。加载时调用
+    /// （<see cref="JsonWatchlistStore"/>），下次保存时这份迁移结果就一起落盘了。
+    ///
+    /// 卖出笔的股数照抄买入股数——老语义就是"填了卖出价 = 整仓卖掉"，这样迁移后 <see cref="IsClosedTrade"/>
+    /// 仍然为真，不会把历史上的已平仓记录变成还持仓。</summary>
+    public void MigrateLegacyLots()
+    {
+        if (Lots.Count > 0 || BuyPrice is not (> 0)) return;
+
+        int shares = Shares is > 0 ? Shares.Value : 0;
+        Lots.Add(new TradeLot
+        {
+            Side = TradeSide.Buy,
+            Date = (BuyDate ?? DataDate).Date,
+            Price = BuyPrice.Value,
+            Shares = shares,
+        });
+        if (SellPrice is > 0)
+        {
+            Lots.Add(new TradeLot
+            {
+                Side = TradeSide.Sell,
+                Date = (SellDate ?? BuyDate ?? DataDate).Date,
+                Price = SellPrice.Value,
+                Shares = shares,
+            });
+        }
+    }
+
+    /// <summary>把 <see cref="Lots"/> 的汇总结果写回那五个兼容字段——每次改动成交记录后调用
+    /// （<see cref="JsonWatchlistStore.UpdateLots"/>）。用意见 <see cref="BuyDate"/> 的注释：
+    /// 让老版本 exe 读同一份 JSON 时看到的持仓/平仓状态跟新版一致。</summary>
+    public void SyncLegacyFromLots()
+    {
+        var buy = Aggregate(BuyLots);
+        var sell = Aggregate(SellLots);
+
+        BuyDate = buy.First;
+        BuyPrice = buy.Avg;
+        // 未平仓给剩余股数、已平仓给买入总股数——老版本那套 (价差×股数) 两种情况才都算得对。
+        int legacyShares = IsClosedTrade ? buy.Shares : RemainingShares;
+        Shares = legacyShares > 0 ? legacyShares : null;
+        // 只有全部卖完才写卖出字段，否则老版本会把"卖了一半"当成已平仓、不再执行持仓纪律。
+        SellDate = IsClosedTrade ? sell.Last : null;
+        SellPrice = IsClosedTrade ? sell.Avg : null;
+    }
 
     public int SatisfiedCount { get; set; }
     public int TotalCount { get; set; }

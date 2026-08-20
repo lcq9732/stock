@@ -8,45 +8,40 @@
     <!-- 深色主题（仿通达信/常见券商软件）：黑底 + 浅色文字。故意不用 TextBlock 全局隐式样式——
          那会把指标下拉框（浅底）里的文字也染成浅色导致看不清，所以在需要的文字上逐个显式设浅色。 -->
     <Grid Margin="10">
+        <!-- 抬头 2026-08-11 由4行压成2行（用户要求）：
+             第1行 = 代码/名称/现价/涨跌 + 粒度按钮（按钮位置固定，不随股票名或价格长短左右移动）；
+             第2行 = 跟随十字光标的单行信息栏（日期 + 该根K线的开高低收/昨收/量/额/换手 ┃ 涨跌幅 + 各均线）。
+             原来"K线"那条独立表头（在主图正上方）已并入第2行，所以主图区少了一层表头。 -->
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <!-- 斐波那契信息条——只在勾选时出现（平时 Collapsed，不占高度） -->
             <RowDefinition Height="Auto" />
             <RowDefinition Height="3*" />
             <RowDefinition Height="1.5*" />
             <RowDefinition Height="1.5*" />
         </Grid.RowDefinitions>
 
-        <!-- 典型股票APP的抬头：代码/名称 + 最新价 + 涨跌幅（红涨绿跌）——固定按日线算，跟下面
-             图表显示的K线粒度无关（这是"现在的实际价格"，不是"图表这一根的价格"）。 -->
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
-            <TextBlock x:Name="TitleText" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Foreground="#EEEEEE" />
-            <TextBlock x:Name="LatestCloseText" FontSize="18" FontWeight="Bold" Margin="16,0,0,0" VerticalAlignment="Center" />
-            <TextBlock x:Name="ChangeText" FontSize="14" Margin="8,0,0,0" VerticalAlignment="Center" />
-        </StackPanel>
-
-        <!-- 开/最高/最低/昨收/量/额/换手——固定按日线算（现手是逐笔实时数据，这套系统没有，
-             不硬凑）。见典型股票APP行情页的那两行统计，桌面端够宽，合并成一行。 -->
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
-            <TextBlock Text="开:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="OpenText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
-            <TextBlock Text="最高:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="HighText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
-            <TextBlock Text="最低:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="LowText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
-            <TextBlock Text="昨收:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="PrevCloseText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
-            <TextBlock Text="量:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="VolumeText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
-            <TextBlock Text="额:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="AmountText" Margin="2,0,16,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
-            <TextBlock Text="换手:" Foreground="Gray" VerticalAlignment="Center" />
-            <TextBlock x:Name="TurnoverText" Margin="2,0,0,0" VerticalAlignment="Center" Foreground="#DDDDDD" />
-        </StackPanel>
+        <!-- 第1行：代码/名称 + 最新价 + 涨跌幅（红涨青跌）——这两个值固定按**日线**算，跟下面图表当前
+             的K线粒度无关（它表达的是"现在的实际价格"，不是"图表这一根的价格"）。
+             左半边用**固定宽度**的列装标题区：股票名长短不一、价格位数也会变，如果整行用 StackPanel
+             顺排，右边的按钮就会跟着左右移动（用户 2026-08-11 反馈的问题）。现价本身也用等宽字体+
+             固定宽度右对齐，位数变化时涨跌幅不会挪。 -->
+        <Grid Grid.Row="0" Margin="0,0,0,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="430" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                <TextBlock x:Name="TitleText" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Foreground="#EEEEEE" />
+                <TextBlock x:Name="LatestCloseText" FontSize="18" FontWeight="Bold" FontFamily="Consolas" Width="90"
+                           TextAlignment="Right" Margin="14,0,0,0" VerticalAlignment="Center" />
+                <TextBlock x:Name="ChangeText" FontSize="14" FontFamily="Consolas" Margin="10,0,0,0" VerticalAlignment="Center" />
+            </StackPanel>
 
         <!-- K线粒度切换——分时/五日需要实时分时数据，这套系统目前只抓日线（周/月线是本地聚合），
              没有分时数据源，先禁用并在ToolTip里说明，日K/周K/月K是真正可用的。 -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
             <Button x:Name="IntradayButton" Content="分时" Width="56" Margin="0,0,4,0" IsEnabled="False"
                     ToolTip="暂不支持——这套系统目前只抓日线历史数据（周/月线是本地聚合出来的），没有分时/实时数据源" />
             <Button x:Name="FiveDayButton" Content="五日" Width="56" Margin="0,0,12,0" IsEnabled="False"
@@ -54,37 +49,64 @@
             <Button x:Name="DayButton" Content="日K" Width="56" Margin="0,0,4,0" Click="GranularityButton_Click" Tag="day" />
             <Button x:Name="WeekButton" Content="周K" Width="56" Margin="0,0,4,0" Click="GranularityButton_Click" Tag="week" />
             <Button x:Name="MonthButton" Content="月K" Width="56" Click="GranularityButton_Click" Tag="month" />
+
+            <!-- 叠加对应交易所的大盘指数（2026-08-13新增）：沪市配上证指数、深市配深证成指，
+                 自动按代码判断，见 IndexOverlayMatcher.PickFor。
+                 默认**不勾**（2026-08-15 按用户要求改）——叠加会把Y轴撑开去容纳指数的波动、个股自己的
+                 K线就显得扁，平时看单只票不该付这个代价；要比强弱时再勾。 -->
+            <!-- Foreground 不写死在这里：构造函数里按 QuoteChartBuilder.OverlayColor 赋值，
+                 保证这几个字的颜色跟图上那条叠加线永远一致（见 QuoteDetailWindow 构造函数） -->
+            <CheckBox x:Name="OverlayIndexCheck" Content="叠加大盘" IsChecked="False" Margin="20,0,0,0"
+                      VerticalAlignment="Center" Click="OverlayIndexCheck_Click"
+                      ToolTip="把该股所在交易所的大盘指数叠到K线上（沪市→上证指数，深市→深证成指；北交所库里没有对应指数）。&#10;&#10;画法：指数按【当前可见区间的左边缘】等比缩放到个股的价格刻度上，两条线从同一点出发——所以【K线在叠加线上方=这段时间跑赢大盘，下方=跑输】，垂直差距就是相对强弱。&#10;K线仍是真实价格、价格轴照旧有意义；不用第二个Y轴（双轴可以靠调刻度把任意两条线弄成&quot;看起来相关&quot;，不可信）。&#10;平移/缩放时会按新的左边缘重新锚定，所以它始终回答&quot;从我现在看的这一段起谁更强&quot;；信息栏最后会显示强弱百分比。" />
+            <!-- 斐波那契回撤位（2026-08-17新增）——勾上就在主图叠加各档回撤线。右边的下拉决定这些线
+                 是量哪一段行情量出来的：三档自动识别（在最近N个交易日里取最高/最低），或手动点选。
+                 默认短线60日：本程序主用短线法，波段取太长会把支撑位拉到十几个点开外，跟短线法
+                 回测出来的 ±10% 纪律对不上。Foreground 在构造函数里按 QuoteChartBuilder.FibColor 赋值。 -->
+            <CheckBox x:Name="FibCheck" Content="斐波那契" IsChecked="False" Margin="16,0,0,0"
+                      VerticalAlignment="Center" Click="FibCheck_Click"
+                      ToolTip="在主图上叠加斐波那契回撤位（23.6/38.2/50/61.8/78.6%）和两个扩展位（127.2/161.8%）。&#10;&#10;用途是**刻度尺不是信号**：把&quot;跌得够深了&quot;换算成具体价位，给止损和目标价一个客观依据。&#10;右边下拉选量哪一段；选&quot;手动选点&quot;后，按住 Ctrl 在主图上点两下（起点、终点）即可。&#10;&#10;注意它没有基本面机制，学术检验里独立预测力基本为零——当参考刻度用，别当买卖信号。" />
+            <ComboBox x:Name="FibScopeCombo" Width="112" Margin="6,0,0,0" VerticalAlignment="Center"
+                      SelectionChanged="FibScopeCombo_SelectionChanged"
+                      ToolTip="回撤位是量哪一段行情量出来的。自动=在最近这么多个交易日里取最高价和最低价，方向由两者先后决定（低在前=上涨波段，量回调支撑；高在前=下跌波段，量反弹阻力）。">
+                <ComboBoxItem Content="自动·短线60日" />
+                <ComboBoxItem Content="自动·中线120日" />
+                <ComboBoxItem Content="自动·长线250日" />
+                <ComboBoxItem Content="手动选点" />
+            </ComboBox>
+
             <!-- 图上看不到的那些数据（融资融券/股东/分红/财报/龙虎榜/所属板块指数/公告…）另开窗口
                  摊开看，见 StockDossierWindow。放在粒度按钮右边、隔开一段距离——它不是粒度切换。 -->
             <Button x:Name="OtherDataButton" Content="其他数据" Width="80" Margin="24,0,0,0" Click="OtherDataButton_Click"
                     ToolTip="本地库里这只标的除K线之外的全部数据：融资融券（含融资/融券余额占流通市值、融资买入占成交额）、股东户数、十大股东、分红送配、财务报表、主力净流入、龙虎榜、所属板块/指数、中标公告等" />
-        </StackPanel>
-
-        <Grid Grid.Row="3">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="*" />
-            </Grid.RowDefinitions>
-            <!-- 表头：左边"前复权"固定标签（数据本来就是用fqt=1前复权抓的，不是真的可切换的下拉框）
-                 + 一行带涨跌箭头的MA当前值（默认显示最新一根K线，鼠标悬浮到某一天会跟着变成那天的
-                 OHLC+MA，见 QuoteDetailWindow.xaml.cs UpdateMainInfo）。颜色直接标在文字上，不需要
-                 单独的图例色块了。 -->
-            <Border Grid.Row="0" Padding="6,3" Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="K线" FontWeight="Bold" FontSize="12" Margin="0,0,14,0" VerticalAlignment="Center" Foreground="#EEEEEE" />
-                    <TextBlock Grid.Column="1" x:Name="MainInfoText" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Foreground="#DDDDDD" />
-                </Grid>
-            </Border>
-            <oxy:PlotView Grid.Row="1" x:Name="MainPlot" Model="{Binding MainPlotModel}" />
+            </StackPanel>
         </Grid>
 
+        <!-- 第2行：单行信息栏，跟随十字光标（不悬浮时显示最新一根）。日期放最前面 → 一眼知道这些数字
+             是哪一天的；接着是这根K线的 开/最高/最低/收/昨收/量/额/换手，用"┃"明显隔开后再显示涨跌幅
+             和各条均线（颜色跟图上的线一致）。所有数值右对齐补白到固定字符宽 + 等宽字体，所以数字长短
+             变化时各字段的横向位置不动。内容由 QuoteDetailWindow.UpdateMainInfo 拼装。
+             这一行就是原来主图正上方那条"K线 …"表头搬上来的，主图区因此少了一层表头。 -->
+        <Border Grid.Row="1" Padding="6,3" Margin="0,0,0,6" Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
+            <TextBlock x:Name="MainInfoText" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis" Foreground="#DDDDDD" />
+        </Border>
+
+        <!-- 斐波那契信息条（2026-08-17新增）——勾选后才显示：波段端点 + 现价已回撤到哪一档 +
+             各档价位。图上文字挤在左端不好读数，这里把同一批数字平铺出来，还标出离现价最近的
+             支撑/阻力（就是【仓位计算器】取值时会用的那两条线）。 -->
+        <Border Grid.Row="2" x:Name="FibInfoBorder" Padding="6,3" Margin="0,0,0,6" Visibility="Collapsed"
+                Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
+            <TextBlock x:Name="FibInfoText" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center"
+                       TextWrapping="Wrap" Foreground="#DDDDDD" />
+        </Border>
+
+        <!-- 主图：表头已并入上面第2行，这里直接就是图（不再套一层带表头的 Grid） -->
+        <oxy:PlotView Grid.Row="3" x:Name="MainPlot" Model="{Binding MainPlotModel}" />
+
         <!-- 副图1/2——内容不固定，表头左边是一个下拉框（成交量/MACD/KDJ/RSI等手工切换），
-             默认 MACD + KDJ（见 QuoteDetailWindow.xaml.cs 构造函数里的说明）。图例是代码里
-             根据当前选的指标动态生成的（见 RebuildChart），不像其它窗口那样能写死在XAML里。 -->
+             默认 MACD + KDJ（见 QuoteDetailWindow.xaml.cs 构造函数里的说明）。右侧原来有一排图例色块，
+             2026-08-11 去掉了——信息栏里每个数值已经用它在图上那条线/柱子的颜色显示，图例是重复信息。 -->
         <Grid Grid.Row="4" Margin="0,8,0,0">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
@@ -95,7 +117,6 @@
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <ComboBox Grid.Column="0" x:Name="Sub1IndicatorCombo" Width="90" Margin="0,0,14,0" VerticalAlignment="Center"
                               SelectionChanged="SubIndicatorCombo_SelectionChanged">
@@ -126,7 +147,6 @@
                         <ComboBoxItem Content="ASI" />
                     </ComboBox>
                     <TextBlock Grid.Column="1" x:Name="Sub1InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" Foreground="#DDDDDD" />
-                    <StackPanel Grid.Column="2" x:Name="Sub1LegendPanel" Orientation="Horizontal" VerticalAlignment="Center" />
                 </Grid>
             </Border>
             <oxy:PlotView Grid.Row="1" x:Name="Sub1Plot" Model="{Binding Sub1PlotModel}" />
@@ -142,7 +162,6 @@
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <ComboBox Grid.Column="0" x:Name="Sub2IndicatorCombo" Width="90" Margin="0,0,14,0" VerticalAlignment="Center"
                               SelectionChanged="SubIndicatorCombo_SelectionChanged">
@@ -173,7 +192,6 @@
                         <ComboBoxItem Content="ASI" />
                     </ComboBox>
                     <TextBlock Grid.Column="1" x:Name="Sub2InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" Foreground="#DDDDDD" />
-                    <StackPanel Grid.Column="2" x:Name="Sub2LegendPanel" Orientation="Horizontal" VerticalAlignment="Center" />
                 </Grid>
             </Border>
             <oxy:PlotView Grid.Row="1" x:Name="Sub2Plot" Model="{Binding Sub2PlotModel}" />

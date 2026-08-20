@@ -1,0 +1,200 @@
+﻿<Window x:Class="StockPlatform.Analyzer.PositionSizingWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="仓位计算器（凯利公式）" Height="700" Width="1240" MinHeight="560" MinWidth="900"
+        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei">
+    <!-- 尺寸：结果分两列铺开（见下面 Grid.Column=1 里的两栏），配上这个默认大小，常规输入下
+         左右两边都不会出现滚动条。屏幕装不下这么大时构造函数会按工作区收窄（见 FitToScreen）。 -->
+    <Window.Resources>
+        <Style TargetType="TextBox">
+            <Setter Property="Height" Value="24" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0,2" />
+        </Style>
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0,2,8,2" />
+        </Style>
+        <Style x:Key="SectionLabel" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Foreground" Value="#084298" />
+            <Setter Property="Margin" Value="0,8,0,3" />
+        </Style>
+        <!-- 结果区各段的小标题 -->
+        <Style x:Key="ResultHead" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Foreground" Value="#084298" />
+            <Setter Property="Margin" Value="0,0,0,3" />
+        </Style>
+        <Style x:Key="ResultBody" TargetType="TextBlock">
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="LineHeight" Value="19" />
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 抬头压成一行：长解释挪进 ToolTip，省下来的高度留给结果 -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock x:Name="TitleText" FontSize="15" FontWeight="Bold" VerticalAlignment="Center" />
+            <TextBlock Foreground="Gray" VerticalAlignment="Center" Margin="12,0,0,0"
+                       Text="这只票现在该占多少钱 / 已经拿着的该留多少"
+                       ToolTip="用的是凯利公式：上涨概率越高、盈亏比越大，仓位越重。&#10;但概率是你自己估的，所以默认按半凯利打折、再压一道单票上限。&#10;买入前和持仓中是同一个问题——成本价是沉没成本，不参与计算。" />
+        </StackPanel>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="330" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- ── 左：输入 ── -->
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="0,0,14,0">
+                    <TextBlock Style="{StaticResource SectionLabel}" Text="账户（记住，下次自动带出来）" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="105" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="可投资总资金" />
+                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="CapitalBox"
+                                 ToolTip="这笔钱的全部（元）——不是这只票已经投进去的钱。凯利算出来的比例是相对它的。" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="凯利折扣" />
+                        <ComboBox Grid.Row="1" Grid.Column="1" x:Name="FractionCombo" Height="24" Margin="0,2"
+                                  SelectionChanged="Fraction_Changed"
+                                  ToolTip="满凯利假设你的概率估得准，实际上估不准——高估10个点就足以让长期收益转负。半凯利只损失约1/4的理论增长率，却把波动砍一半，是实务默认。">
+                            <ComboBoxItem Content="半凯利（推荐）" Tag="0.5" />
+                            <ComboBoxItem Content="四分之一凯利（更保守）" Tag="0.25" />
+                            <ComboBoxItem Content="满凯利（不建议实盘）" Tag="1" />
+                        </ComboBox>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="单票上限 %" />
+                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="MaxWeightBox"
+                                 ToolTip="不管公式算出多少，单只票最多占总资金的百分之多少。凯利假设“输了还能再来”，个股的停牌/退市/暴雷不满足这个前提，所以要有这条硬线。" />
+                    </Grid>
+
+                    <TextBlock Style="{StaticResource SectionLabel}" Text="这一次的判断" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="105" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="上涨概率 %" />
+                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="ProbBox"
+                                 ToolTip="你认为它上涨的把握，填 60 就是60%。注意：60%其实是很弱的优势，直觉上容易高估。" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="对了能涨 %" />
+                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="GainBox"
+                                 ToolTip="判断对了，你打算涨到哪里就走（你的心理价位）。填 20 就是 +20%。" />
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="错了止损 %" />
+                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="LossBox"
+                                 ToolTip="判断错了，你会在跌多少的时候认输出来。填 10 就是 -10%。这个数决定了盈亏比，也决定了一次错误要付多少钱——必须填，且必须是你真会执行的那个数。" />
+                    </Grid>
+
+                    <!-- 斐波那契取值（2026-08-17新增）——上面那两个百分比原本只能拍脑袋填，这个按钮
+                         按最近一段波段的回撤位把它们算出来：止损放在下方最近那条支撑线下面一点，
+                         目标放在上方最近那条阻力线。取完会同时报出短线法回测口径(±10%)做对照。 -->
+                    <Button x:Name="FromChartButton" Content="从K线取值（斐波那契回撤位）" Height="26" Margin="0,8,0,0"
+                            Click="FromChart_Click"
+                            ToolTip="按这只票最近60个交易日的波段，算出斐波那契回撤位，用它填上面的“对了能涨”和“错了止损”。&#10;止损取现价下方最近的一档回撤位再往下留1%缓冲，目标取上方最近的一档；离现价太近（不到3%/2%）的档位会跳过。&#10;这只是给这两个估计值一个客观的锚，不是预测——最终仍要跟短线法回测出来的 ±10% 口径对照着看。" />
+                    <TextBlock x:Name="FromChartInfoText" TextWrapping="Wrap" Margin="0,5,0,0" FontSize="11"
+                               LineHeight="17" Foreground="#B36B00" />
+
+                    <TextBlock Style="{StaticResource SectionLabel}" Text="价格与持仓（可选）" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="105" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="当前价格" />
+                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="PriceBox"
+                                 ToolTip="用来把金额折成股数、算出分批止盈的目标价。&#10;&#10;从【我的交易】页打开时带的是**本地K线最新一根的收盘价**——盘中打开时今天的K线还没入库，那就是昨天的收盘价（下面会标出是哪天的）。要按盘中实时价算就直接改这个数，下面的目标/止损百分比会自动跟着重算（档位价格不变）。" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="当前持仓股数" />
+                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="SharesBox"
+                                 ToolTip="现在还拿着多少股。填了就会算出“该减多少股/还能加多少股”。还没买就填0。" />
+                    </Grid>
+
+                    <!-- 带进来的价格是哪一天的收盘价（盘中打开时就是昨收），外加含费成本作参考。
+                         内容由 PositionSizingWindow.ShowPriceDateHint 填。 -->
+                    <TextBlock x:Name="PriceHintText" TextWrapping="Wrap" Margin="0,4,0,0" FontSize="11"
+                               LineHeight="16" Foreground="#B36B00" />
+
+                    <TextBlock Margin="0,10,0,0" Foreground="Gray" TextWrapping="Wrap" FontSize="11"
+                               Text="注意：成本价不是输入项，这是故意的（把鼠标停在这里看原因）。"
+                               ToolTip="“该留多少”只跟从现在往后的概率和赔率有关，跟你当初买多少钱进去无关——那是沉没成本。&#10;盯着成本价做决定，正是套牢死扛和赚一点就跑的来源。" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- ── 右：结果。分两栏铺开（左栏=结论和算法，右栏=执行计划），比竖着排能省掉近一半
+                 高度，常规输入下不会出现滚动条。 ── -->
+            <Border Grid.Column="1" BorderBrush="#DDDDDD" BorderThickness="1" Padding="14,12" Background="#FAFAFA">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                            <TextBlock x:Name="HeadlineText" FontSize="19" FontWeight="Bold" TextWrapping="Wrap" />
+                            <TextBlock x:Name="ActionText" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,6,0,0" />
+                            <!-- 按建议减仓会实现多少盈亏（2026-08-19新增）——纯记账信息，不参与计算，
+                                 见 PositionSizingWindow.ShowRealizedHint 的注释。 -->
+                            <TextBlock x:Name="RealizedHintText" TextWrapping="Wrap" Margin="0,6,0,0" FontSize="11"
+                                       LineHeight="17" />
+                            <TextBlock x:Name="WarnText" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#B36B00" LineHeight="19" />
+
+                            <Separator Margin="0,10" />
+                            <TextBlock Style="{StaticResource ResultHead}" Text="算出来的过程" />
+                            <TextBlock x:Name="DetailText" Style="{StaticResource ResultBody}" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1" Margin="12,0,0,0">
+                            <TextBlock Style="{StaticResource ResultHead}" Text="分批止盈计划（按现价推的价位）" />
+                            <TextBlock x:Name="PlanText" Style="{StaticResource ResultBody}" />
+
+                            <Separator Margin="0,10" />
+                            <TextBlock Style="{StaticResource ResultHead}" Text="万一概率估高了" />
+                            <TextBlock x:Name="SensitivityText" Style="{StaticResource ResultBody}" />
+                        </StackPanel>
+                    </Grid>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+
+        <TextBlock Grid.Row="2" Margin="0,8,0,0" Foreground="Gray" TextWrapping="Wrap" FontSize="11"
+                   Text="这是一个把你自己的概率判断换算成仓位的算术工具，不是投资建议，也不预测涨跌。算出来的数字全部取决于你填的三个估计值（概率/涨幅/止损）——公式不会比这三个数更准。" />
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+            <Button Content="保存参数并关闭" Width="120" IsDefault="True" Click="Close_Click"
+                    ToolTip="资金/折扣/上限/涨跌幅这几项会记下来，下次打开自动带出" />
+        </StackPanel>
+    </Grid>
+</Window>

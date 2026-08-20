@@ -476,9 +476,10 @@ public class FetchOrchestrator
 
         SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
 
-        // 每日数据（融资余额/龙虎榜）并入主流程当天抓取——非致命，失败只记 error 不影响 K线；历史用各自
-        // 的"回补"按钮补齐（见 RunFetchMarginAsync / RunFetchLhbAsync）。
-        await FetchMarginOneDayAsync(today, errors, progress, ct);
+        // 每日数据（融资余额/龙虎榜）并入主流程——非致命，失败只记 error 不影响 K线；更早的历史用
+        // "一键补齐每日历史"补。融资余额要回看最近几个交易日、不能只抓当天（两所T+1发布，
+        // 见 MarginLookbackTradingDays 的说明）；龙虎榜当晚就发布，抓当天即可。
+        await FetchMarginRecentAsync(today, errors, progress, ct);
         await FetchLhbOneDayAsync(today, errors, progress, ct);
 
         progress?.Report($"本轮汇总：{stats.Summarize()}");
@@ -580,8 +581,10 @@ public class FetchOrchestrator
 
         SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
 
-        // 每日数据（融资余额/龙虎榜）并入"拉取当天"——抓的是本次指定的那一天。
-        await FetchMarginOneDayAsync(day, errors, progress, ct);
+        // 每日数据（融资余额/龙虎榜）并入"补指定历史日"。融资余额同样按"以该日为终点回看几天、
+        // 跳过本地已有"处理（见 MarginLookbackTradingDays）——补历史某天时，它前面几天多半也缺，
+        // 顺手一起补掉；已有的日子不会重复请求。龙虎榜仍只抓指定那一天。
+        await FetchMarginRecentAsync(day, errors, progress, ct);
         await FetchLhbOneDayAsync(day, errors, progress, ct);
 
         progress?.Report($"本轮汇总：{stats.Summarize()}");
@@ -1239,6 +1242,23 @@ public class FetchOrchestrator
         }
     }
 
+    /// <summary>重试结束时的一句话总结（2026-08-19新增）。
+    ///
+    /// 加它的原因：以前跑完只在末尾留下"K线没有失败的股票需要重试"，紧接着就是"结束"，看起来像
+    /// 整个操作什么都没干；实际上市值和资金流已经重试完、失败名单也清零了。现在把每一类实际做了
+    /// 什么都列出来，并明确说名单已经更新，用户不用再去猜。</summary>
+    private void ReportRetrySummary(IReadOnlyList<string> done, IProgress<string>? progress)
+    {
+        progress?.Report(done.Count == 0
+            ? "本轮没有需要重试的项目"
+            : "本轮重试完成：" + string.Join("、", done));
+
+        var left = GetFailedRetrySummary();
+        progress?.Report(left.Any
+            ? $"仍有待重试：{left.Describe()}——可以再点一次这个按钮"
+            : "失败名单已全部清零，没有遗留项目");
+    }
+
     private async Task<FetchResult> RunRetryFailedInternalAsync(
         NamedBarSource source, IProgress<string>? progress, CancellationToken ct)
     {
@@ -1262,28 +1282,55 @@ public class FetchOrchestrator
             return new FetchResult();
         }
 
+        // 逐类重试，每类做完记一条"干了什么"——最后统一汇总。原来没有这个汇总，跑完只在末尾留下
+        // 一句"K线没有失败的股票需要重试"，看起来像整个操作什么都没做（用户 2026-08-19 反馈），
+        // 实际上市值和资金流已经重试完并清零了。
+        var done = new List<string>();
+
         if (failedMarketCapCodes.Count > 0)
+        {
+            // 市值是整轮扫描，不是逐只重试——名单里那一大批代码只代表"有一轮要重来"，日志要讲清楚，
+            // 否则"重试 5544 只"和后面"写入 5544 条"看起来像两件事。
+            progress?.Report($"流通市值：整轮重新扫描（上次整轮失败，名单里那 {failedMarketCapCodes.Count} 个代码是当时那批的全体，"
+                           + "不是逐只失败——市值一次请求拿回全市场）");
             await FetchMarketCapAsync(source, failedMarketCapCodes, progress, ct);
+            done.Add("流通市值 1 轮");
+        }
 
         if (failedNetInflowCodes.Count > 0)
+        {
             await FetchNetInflowAsync(failedNetInflowCodes, DateTime.Today, exactDayOnly: false, progress, ct);
+            done.Add($"主力净流入 {failedNetInflowCodes.Count} 只");
+        }
 
         // 指数成分/权重的失败重试（2026-07-16新增）——跟市值/资金流一样，在K线重试之前处理，
         // 各自用自己的失败名单精确重试，可反复点击直到清零（见 RetryIndexAsync）。
         if (failedIndexConsCodes.Count > 0 || failedIndexWeightCodes.Count > 0)
+        {
             await RetryIndexAsync(failedIndexConsCodes, failedIndexWeightCodes, progress, ct);
+            if (failedIndexConsCodes.Count > 0) done.Add($"指数成分 {failedIndexConsCodes.Count} 个");
+            if (failedIndexWeightCodes.Count > 0) done.Add($"指数权重 {failedIndexWeightCodes.Count} 个");
+        }
 
         // 股东数据的失败重试（2026-07-16新增）——逐只精确重试，见 RetryShareholderAsync。
         if (failedShareholderCodes.Count > 0)
+        {
             await RetryShareholderAsync(failedShareholderCodes, progress, ct);
+            done.Add($"股东数据 {failedShareholderCodes.Count} 只");
+        }
 
         // 分红送配的失败重试（2026-07-31新增）——逐只精确重试，见 RetryDividendAsync。
         if (failedDividendCodes.Count > 0)
+        {
             await RetryDividendAsync(failedDividendCodes, progress, ct);
+            done.Add($"分红送配 {failedDividendCodes.Count} 只");
+        }
 
         if (failedCodesList.Count == 0)
         {
-            progress?.Report("K线没有失败的股票需要重试");
+            // K线名单是空的，但上面几类可能已经重试完了——只报"K线没有失败"会让人以为整轮什么都没干。
+            done.Add("K线 0 只（名单本来就是空的）");
+            ReportRetrySummary(done, progress);
             return new FetchResult();
         }
 
@@ -1317,8 +1364,11 @@ public class FetchOrchestrator
         });
         await Task.WhenAll(tasks);
 
-        progress?.Report($"本轮汇总：{stats.Summarize()}");
-        return FinishFetchRun(errors, "重新拉取失败股票", failedCodesList, failedCodes);
+        progress?.Report($"K线本轮汇总：{stats.Summarize()}");
+        done.Add($"K线 {failedCodesList.Count} 只（其中 {failedCodes.Count} 只仍失败）");
+        var retryResult = FinishFetchRun(errors, "重新拉取失败股票", failedCodesList, failedCodes);
+        ReportRetrySummary(done, progress);
+        return retryResult;
     }
 
     /// <summary>
@@ -1915,16 +1965,25 @@ public class FetchOrchestrator
         };
     }
 
-    /// <summary>K线/市值/资金净流入三份失败名单加起来的股票数（2026-07-09起——之前只统计K线）——
-    /// 让Fetcher UI在这三者任意一个有失败记录时都能显示/启用"重新拉取失败股票"按钮。同一只股票
-    /// 如果在多份名单里都出现会被重复计数（比如K线和资金净流入都失败），这样数字才能反映"总共
-    /// 还有多少件事没做完"，而不是去重后的股票数。</summary>
-    public int GetFailedCodeCount()
+    /// <summary>各份失败名单的待重试量（2026-08-19 由原来的"一个总数"改成分类汇总）。
+    ///
+    /// 为什么不能只给一个总数：**流通市值是整轮扫描**，一次请求拿全市场，接口失败时会保守地把
+    /// 这批代码全部记进名单（见 <see cref="FetchMarketCapAsync"/> 的 catch）。于是"1次接口失败"
+    /// 在总数里表现成"5544 支失败"，按钮上写"重新拉取失败股票（5547）"会被读成丢了5547只票的
+    /// 数据，实际上只是一次市值快照没取到、外加3只资金流。所以市值单独按"轮"表达。</summary>
+    public FailedRetrySummary GetFailedRetrySummary()
     {
         var manifest = _manifestStore.Load();
-        return manifest.FailedCodes.Count + manifest.FailedMarketCapCodes.Count + manifest.FailedNetInflowCodes.Count
-             + manifest.FailedIndexConsCodes.Count + manifest.FailedIndexWeightCodes.Count
-             + manifest.FailedShareholderCodes.Count + manifest.FailedDividendCodes.Count;
+        return new FailedRetrySummary
+        {
+            BarCodes = manifest.FailedCodes.Count,
+            MarketCapCodes = manifest.FailedMarketCapCodes.Count,
+            NetInflowCodes = manifest.FailedNetInflowCodes.Count,
+            IndexConsCodes = manifest.FailedIndexConsCodes.Count,
+            IndexWeightCodes = manifest.FailedIndexWeightCodes.Count,
+            ShareholderCodes = manifest.FailedShareholderCodes.Count,
+            DividendCodes = manifest.FailedDividendCodes.Count,
+        };
     }
 
     /// <summary>
@@ -2175,7 +2234,12 @@ public class FetchOrchestrator
     /// "拉取股东数据"（2026-07-16新增）——逐只个股从新浪股本股东页抓取：股东户数(ShareholderCount) +
     /// 十大股东/十大流通股东(TopShareholder)。用本地已有个股列表(需先"拉取全部"一次)，全市场逐只、量大
     /// 较慢。逐只记录失败(<see cref="Manifest.FailedShareholderCodes"/>)，可用"重新拉取失败股票"重试。
-    /// 独立按钮，不掺进主流程（股东数据季度级慢变，不必每天跑）。
+    /// 不掺进"拉取全部"主流程（股东数据季度级慢变，不必每天跑）。
+    ///
+    /// ⚠ 2026-08-15 修正：这个方法从一开始就是 public、注释也写着"独立按钮"，但**界面上的按钮直到
+    /// 今天才真正加上**——在那之前它只能通过"一键拉取定期数据"触发，而且排在第3位（行业分类 →
+    /// 指数成分/权重 → 股东数据 → …），前两步耗时很长。后果：修完持股数解析bug后想重抓验证，
+    /// 点了定期数据却没等到第3步，数据一行都没更新、还以为是修复没生效。
     /// </summary>
     public async Task<FetchResult> RunFetchShareholderAsync(IProgress<string>? progress, CancellationToken ct = default)
     {
@@ -2204,7 +2268,7 @@ public class FetchOrchestrator
         var failed = new ConcurrentBag<string>();
         var attempted = stocks.Select(s => s.Code).ToList();
         var sw = Stopwatch.StartNew();
-        int completed = 0, withData = 0;
+        int completed = 0, withData = 0, suspiciousRows = 0;
         progress?.Report($"开始拉取股东数据（户数+十大股东+十大流通股东），共 {stocks.Count} 只，逐只抓、较慢...");
 
         var tasks = stocks.Select(async stock =>
@@ -2215,6 +2279,16 @@ public class FetchOrchestrator
                 var data = await _shareholderProvider.GetAsync(stock.Code, ct);
                 if (data.Counts.Count > 0 || data.TopHolders.Count > 0)
                 {
+                    // 自洽性检查：排名夹在正数中间却是0 = 那一格没解析出来（2026-08-13 的箭头
+                    // 事故就是这么静默混进14953行的，见 SqliteShareholderRepository
+                    // .FindInconsistentZeroShares）。**只报警不拦截**——局部异常不该中断整批抓取，
+                    // 而且宁可先入库、让用户看到问题，也好过悄悄丢数据。
+                    var bad = SqliteShareholderRepository.FindInconsistentZeroShares(data.TopHolders);
+                    if (bad.Count > 0)
+                    {
+                        Interlocked.Add(ref suspiciousRows, bad.Count);
+                        foreach (var msg in bad.Take(3)) errors.Add($"⚠ 数据可疑 {msg}");
+                    }
                     lock (_dbLock) _shareholderRepository.ReplaceByCode(stock.Code, data);
                     Interlocked.Increment(ref withData);
                 }
@@ -2237,6 +2311,10 @@ public class FetchOrchestrator
 
         progress?.Report($"股东数据完成：{withData} 只有数据、失败 {failed.Count} 只" +
                          (failed.Count > 0 ? "（可点\"重新拉取失败股票\"重试）" : ""));
+        if (suspiciousRows > 0)
+            progress?.Report($"⚠ 有 {suspiciousRows} 行持股数解析为0但排名夹在正数中间——" +
+                             "这通常意味着数据源页面格式变了（比如在数字后面加了新的装饰符号）。" +
+                             "数据已入库但那几行不可信，请检查 SinaShareholderProvider.ParseD 的清洗规则。");
         var result = new FetchResult();
         result.Errors.AddRange(errors);
         return result;
@@ -2287,21 +2365,52 @@ public class FetchOrchestrator
         }
     }
 
-    /// <summary>抓某一天的融资余额并写库（非致命：失败只记 error，不影响主流程其他步骤）——供"拉取全部/
-    /// 当天"并入调用。历史用"回补融资余额"补齐。</summary>
-    private async Task FetchMarginOneDayAsync(DateTime day, ConcurrentBag<string> errors, IProgress<string>? progress, CancellationToken ct)
+    /// <summary>
+    /// 融资余额并入"拉取全部/当天"时回看的交易日数。
+    ///
+    /// **为什么必须回看、不能只抓当天**：两所的融资余额是 **T+1 发布**的——收盘当晚查当天，接口返回空。
+    /// 旧实现只抓 <c>today</c>，于是每次都拿到空、走"无数据（可能非交易日）"分支静默跳过，第二天又只
+    /// 看新的一天，**昨天的数据永远补不上**。2026-08 实测：日线正常更新到 8/14、同样并入主流程的龙虎榜
+    /// （当晚就发布）一天不缺，唯独融资余额从 7/30 起连续缺 12 个交易日；库里更早的记录也全是靠手动点
+    /// "一键补齐每日历史"补的（抓取时间比数据日晚 1~30 天不等），没有一条是当天抓到当天的。
+    ///
+    /// 回看 10 个交易日足够跨过长假（春节最长 9 个交易日），本地已有的日子直接跳过、不发请求，
+    /// 所以日常代价基本为零（正常只会真去抓 1 天）。
+    /// </summary>
+    private const int MarginLookbackTradingDays = 10;
+
+    /// <summary>抓最近若干交易日的融资余额并写库，**跳过本地已有的日子**（非致命：失败只记 error，
+    /// 不影响主流程其他步骤）——供"拉取全部/当天"并入调用。回看的原因见
+    /// <see cref="MarginLookbackTradingDays"/>；补更早的历史用"一键补齐每日历史"。</summary>
+    private async Task FetchMarginRecentAsync(DateTime day, ConcurrentBag<string> errors, IProgress<string>? progress, CancellationToken ct)
     {
         try
         {
             _marginRepository.EnsureSchema();
-            var d = DateOnly.FromDateTime(day);
-            var rows = await _marginProvider.GetDetailAsync(d, ct);
-            if (rows.Count > 0)
+            var have = _marginRepository.GetTradeDates();
+            var end = DateOnly.FromDateTime(day);
+            // 按自然日往前退，够覆盖 MarginLookbackTradingDays 个交易日即可（周末/节假日接口返回空，
+            // 只是白跑一次请求，不影响正确性）——这里不查交易日历，退 2 倍天数足够。
+            var start = end.AddDays(-MarginLookbackTradingDays * 2);
+
+            int wrote = 0, days = 0, skipped = 0;
+            for (var d = start; d <= end; d = d.AddDays(1))
             {
+                ct.ThrowIfCancellationRequested();
+                if (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
+                if (have.Contains(d)) { skipped++; continue; }
+                var rows = await _marginProvider.GetDetailAsync(d, ct);
+                days++;
+                if (rows.Count == 0) continue;          // 非交易日，或当天数据还没发布（明天这轮会补上）
                 lock (_dbLock) _marginRepository.InsertOrIgnore(rows);
+                wrote += rows.Count;
                 progress?.Report($"融资余额 {d:yyyy-MM-dd}：{rows.Count} 条已写入");
             }
-            else progress?.Report($"融资余额 {d:yyyy-MM-dd}：无数据（可能非交易日）");
+
+            progress?.Report(wrote > 0
+                ? $"融资余额：本轮补了 {wrote} 条（试抓 {days} 天，跳过本地已有 {skipped} 天）"
+                : $"融资余额：无新增（试抓 {days} 天都没数据，跳过本地已有 {skipped} 天）。" +
+                  "两所是T+1发布，当天查不到属正常，明天这轮会自动补上。");
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { errors.Add($"融资余额 {day:yyyy-MM-dd}：{ex.Message}"); }

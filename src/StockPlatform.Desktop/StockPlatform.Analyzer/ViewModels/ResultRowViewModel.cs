@@ -37,6 +37,23 @@ public class ResultRowViewModel : ISelectableRow
     /// 样本数一起显示是有意的——超跌档78%的胜率只建立在319个样本上，别只看胜率。</summary>
     public string DepthBucket { get; init; } = "";
 
+    /// <summary>KDJ 子状态（如"今日刚叉 K18 ⚠"/"延续 K46 最优区"）；只有短线法有值。
+    /// 单独一列的原因见 StockScreenResult.KdjState：当日刚金叉已不再否决入选，但它是回测里最差的
+    /// 一档，不显式标出来就会跟"金叉延续中"混成同一个"严格组"。</summary>
+    public string KdjState { get; init; } = "";
+    /// <summary>当日刚金叉——结果表里标红。跟 IsBaseHolding 一样从文本判，标记由
+    /// ShortTermAnalysisEngine.KdjStateLabel 产生，改文案时两边一起改。</summary>
+    public bool IsKdjFreshCross => KdjState.Contains("刚叉");
+    /// <summary>金叉延续且K在40~60——四档里最稳的一档，标绿加粗。</summary>
+    public bool IsKdjSweetSpot => KdjState.Contains("最优");
+
+    /// <summary>近年归母净利趋势（如"23年+6.81 24年+3.40 25年+0.85｜累计+11.06亿"）。连亏或
+    /// 三年累计为负时末尾带 ⚠。**只展示不过滤**——回测显示做成硬条件反而降低收益，但样本排除了
+    /// ST/退市股、测不出踩雷风险，所以摆出来让用户自己判断（见 StockScreenResult.ProfitTrend）。</summary>
+    public string ProfitTrend { get; init; } = "";
+    /// <summary>三年累计净利（元）——给表格按它排序用，负值那些排在一起最容易被看见。</summary>
+    public double? ThreeYearCumProfit { get; init; }
+
     /// <summary>日均波幅（近60日）；没算的方法显示空。超过4.5%时加 ⚠ ——那一档回测只有
     /// 0.03%/胜率50.2%（等于随机），且-10%止损在这种波动下两三天就会被噪音打掉。</summary>
     public double? DailyVolatility { get; init; }
@@ -74,5 +91,8 @@ public class ResultRowViewModel : ISelectableRow
         DividendYield = r.DividendYield,
         DailyVolatility = r.DailyVolatility,
         DepthBucket = r.DepthBucket ?? "",
+        KdjState = r.KdjState ?? "",
+        ProfitTrend = r.ProfitTrend ?? "",
+        ThreeYearCumProfit = r.ThreeYearCumProfit,
     };
 }

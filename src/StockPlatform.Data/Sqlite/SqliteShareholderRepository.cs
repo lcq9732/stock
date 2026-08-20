@@ -71,8 +71,8 @@ public class SqliteShareholderRepository : IShareholderRepository
         {
             cmd.Transaction = tx;
             cmd.CommandText = """
-                INSERT OR IGNORE INTO TopShareholder (code, report_date, kind, rank, holder_name, shares, ratio, share_type, fetched_at)
-                VALUES ($c, $d, $k, $r, $hn, $s, $ra, $st, $at);
+                INSERT OR IGNORE INTO TopShareholder (code, report_date, kind, rank, holder_name, shares, ratio, share_type, change_direction, fetched_at)
+                VALUES ($c, $d, $k, $r, $hn, $s, $ra, $st, $cd, $at);
                 """;
             var pc = cmd.CreateParameter(); pc.ParameterName = "$c"; cmd.Parameters.Add(pc);
             var pd = cmd.CreateParameter(); pd.ParameterName = "$d"; cmd.Parameters.Add(pd);
@@ -82,6 +82,7 @@ public class SqliteShareholderRepository : IShareholderRepository
             var ps = cmd.CreateParameter(); ps.ParameterName = "$s"; cmd.Parameters.Add(ps);
             var pra = cmd.CreateParameter(); pra.ParameterName = "$ra"; cmd.Parameters.Add(pra);
             var pst = cmd.CreateParameter(); pst.ParameterName = "$st"; cmd.Parameters.Add(pst);
+            var pcd = cmd.CreateParameter(); pcd.ParameterName = "$cd"; cmd.Parameters.Add(pcd);
             var pat = cmd.CreateParameter(); pat.ParameterName = "$at"; cmd.Parameters.Add(pat);
             foreach (var r in data.TopHolders)
             {
@@ -93,12 +94,47 @@ public class SqliteShareholderRepository : IShareholderRepository
                 ps.Value = r.Shares;
                 pra.Value = r.Ratio;
                 pst.Value = (object?)r.ShareType ?? DBNull.Value;
+                pcd.Value = (object?)r.ChangeDirection ?? DBNull.Value;
                 pat.Value = r.FetchedAt.ToString(TimeFormat, CultureInfo.InvariantCulture);
                 cmd.ExecuteNonQuery();
             }
         }
 
         tx.Commit();
+    }
+
+    /// <summary>
+    /// 入库前的自洽性检查：**排名夹在两个正数中间、自己却是0**，说明这一格没解析出来。
+    /// 前十大股东是按持股数降序排的，所以第 N 名的持股必然介于第 N-1 名和第 N+1 名之间；
+    /// 出现 0 就一定是解析问题而不是真实数据（真的持股为0根本不会上榜）。
+    ///
+    /// 这个检查是 2026-08-13 那次事故的产物：新浪在持股数后面挂了个环比箭头（<c>40610695↓</c>），
+    /// 旧的 ParseD 只剥逗号和百分号，箭头导致 TryParse 失败、静默返回0，库里 14953 行中招却没人发现，
+    /// 直到用户看结果表时觉得"排进前十却是0股"不合理才暴露。解析已修，这里再加一道防线：
+    /// 数据源将来换别的装饰符号时，能在入库当时就喊出来，而不是等几个月后被肉眼抓到。
+    ///
+    /// 返回可疑行的描述（空列表=正常），由调用方决定是记日志还是拦下来——**这里不抛异常**：
+    /// 单只股票的局部异常不该中断整批抓取。
+    /// </summary>
+    public static List<string> FindInconsistentZeroShares(IEnumerable<TopShareholderRow> rows)
+    {
+        var problems = new List<string>();
+        foreach (var g in rows.GroupBy(r => (r.Code, r.ReportDate, r.Kind)))
+        {
+            var ordered = g.OrderBy(r => r.Rank).ToList();
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                if (ordered[i].Shares > 0) continue;
+                // 只要前面有正数、后面也有正数，这一行的0就是自相矛盾的
+                bool posBefore = ordered.Take(i).Any(r => r.Shares > 0);
+                bool posAfter = ordered.Skip(i + 1).Any(r => r.Shares > 0);
+                if (posBefore && posAfter)
+                    problems.Add($"{g.Key.Code} {g.Key.ReportDate:yyyy-MM-dd} {g.Key.Kind} " +
+                                 $"第{ordered[i].Rank}名「{ordered[i].HolderName}」持股解析为0，" +
+                                 $"但前后名次都有正值——疑似数据源格式变化导致解析失败");
+            }
+        }
+        return problems;
     }
 
     public List<ShareholderCountRow> GetCountSeries(string code)

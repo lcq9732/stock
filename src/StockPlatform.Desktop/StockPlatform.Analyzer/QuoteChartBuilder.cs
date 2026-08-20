@@ -43,17 +43,35 @@ public class QuoteChartResult
     public LinearAxis Sub1YAxis { get; init; } = null!;
     public LineAnnotation Sub1Crosshair { get; init; } = null!;
     public LineAnnotation Sub1HairY { get; init; } = null!;
-    /// <summary>给定bar下标，返回这个副图当前指标该显示的悬浮文字。</summary>
-    public Func<int, string> Sub1FormatInfo { get; init; } = _ => "";
+    /// <summary>给定bar下标，返回这个副图当前指标该显示的信息栏内容——**按值分段带颜色**
+    /// （2026-08-11改，之前是一整条白字）：每段的颜色跟图上那条线/那根柱子一致，这样不用去对照
+    /// 右上角图例就知道哪个数字对应哪条线，跟主图 MA5/MA10/MA20/MA60 的显示方式统一。</summary>
+    public Func<int, IReadOnlyList<QuoteChartBuilder.InfoSegment>> Sub1FormatInfo { get; init; }
+        = _ => Array.Empty<QuoteChartBuilder.InfoSegment>();
 
     public PlotModel Sub2 { get; init; } = new();
     public LinearAxis Sub2DateAxis { get; init; } = null!;
     public LinearAxis Sub2YAxis { get; init; } = null!;
     public LineAnnotation Sub2Crosshair { get; init; } = null!;
     public LineAnnotation Sub2HairY { get; init; } = null!;
-    public Func<int, string> Sub2FormatInfo { get; init; } = _ => "";
+    public Func<int, IReadOnlyList<QuoteChartBuilder.InfoSegment>> Sub2FormatInfo { get; init; }
+        = _ => Array.Empty<QuoteChartBuilder.InfoSegment>();
+
+    /// <summary>叠加的大盘指数名称（如"上证指数"）；没叠加时为 null。</summary>
+    public string? OverlayName { get; init; }
+
+    /// <summary>叠加线的数值——已按"可见区间左边缘"等比缩放到个股的价格刻度上，所以它跟个股收盘价
+    /// 可以直接比：<c>个股收盘/叠加值-1</c> 就是这段时间的**相对强弱**（正=跑赢大盘）。平移/缩放会
+    /// 重新锚定，这个数组的内容随之原地更新（信息栏每次都重新读，拿到的总是当前锚点下的值）。
+    /// 没叠加时为 null。</summary>
+    public double[]? OverlayScaled { get; init; }
 
     public Action<double> UpdatePlotWidth { get; init; } = _ => { };
+
+    /// <summary>本次画上去的斐波那契波段（没勾就是 null）——窗口的信息栏要显示它的端点和各档价位，
+    /// 拿的必须是图上真正用的那一段，不能各算各的。</summary>
+    public FibSwing? Fib { get; init; }
+
     public List<Bar> Bars { get; init; } = new();
     public double[] Ma5 { get; init; } = Array.Empty<double>();
     public double[] Ma10 { get; init; } = Array.Empty<double>();
@@ -111,48 +129,38 @@ public static class QuoteChartBuilder
         _ => kind.ToString(),
     };
 
-    // 副图各条线颜色——为深色底做了提亮，集中定义方便 LegendFor 跟 BuildSub 对上。
+    // 副图各条线颜色——为深色底做了提亮。同一个颜色既用来画线，也用来给信息栏里对应的数值上色
+    // （见 InfoSegment / Seg），所以图上的线和字的颜色天然一致；原来那套图例（LegendFor）因此
+    // 成了重复信息，已于 2026-08-11 连同界面上的色块一起删除。
     private static readonly OxyColor C1 = OxyColor.FromRgb(255, 255, 255); // 白
     private static readonly OxyColor C2 = OxyColor.FromRgb(255, 215, 0);   // 黄
     private static readonly OxyColor C3 = OxyColor.FromRgb(255, 80, 255);  // 品红
     private static readonly OxyColor C4 = OxyColor.FromRgb(0, 210, 150);   // 青绿
     private static readonly OxyColor C5 = OxyColor.FromRgb(255, 140, 0);   // 橙
 
-    public static (string Label, OxyColor Color)[] LegendFor(QuoteSubIndicator kind) => kind switch
-    {
-        QuoteSubIndicator.Volume => new[] { ("成交量(涨)", UpColor), ("成交量(跌)", DownColor), ("MA5", C1), ("MA10", C2) },
-        QuoteSubIndicator.Macd => new[] { ("MACD柱(正)", UpColor), ("MACD柱(负)", OxyColors.LimeGreen), ("DIF（快线）", C1), ("DEA（慢线）", C2) },
-        QuoteSubIndicator.Kdj => new[] { ("K", C1), ("D", C2) },
-        QuoteSubIndicator.Rsi => new[] { ("RSI", C3) },
-        QuoteSubIndicator.Amount => new[] { ("成交额(涨)", UpColor), ("成交额(跌)", DownColor) },
-        QuoteSubIndicator.Turnover => new[] { ("换手率(%)", C3) },
-        QuoteSubIndicator.Boll => new[] { ("中轨", C2), ("上轨", C5), ("下轨", C4), ("收盘", C1) },
-        QuoteSubIndicator.Ema => new[] { ("EMA12", C1), ("EMA26", C2), ("收盘", OxyColors.Gray) },
-        QuoteSubIndicator.Sar => new[] { ("收盘", C1), ("SAR", UpColor) },
-        QuoteSubIndicator.Dmi => new[] { ("+DI", UpColor), ("-DI", DownColor), ("ADX", C1), ("ADXR", C3) },
-        QuoteSubIndicator.Bias => new[] { ("BIAS6", C1), ("BIAS12", C2), ("BIAS24", C3) },
-        QuoteSubIndicator.Cci => new[] { ("CCI", C1) },
-        QuoteSubIndicator.Wr => new[] { ("WR10", C1), ("WR6", C2) },
-        QuoteSubIndicator.Mtm => new[] { ("MTM", C1), ("MTMMA", C2) },
-        QuoteSubIndicator.Roc => new[] { ("ROC", C1), ("ROCMA", C2) },
-        QuoteSubIndicator.Trix => new[] { ("TRIX", C1), ("TRIXMA", C2) },
-        QuoteSubIndicator.Dma => new[] { ("DMA", C1), ("AMA", C2) },
-        QuoteSubIndicator.Obv => new[] { ("OBV", C1), ("OBVMA", C2) },
-        QuoteSubIndicator.Vr => new[] { ("VR", C1), ("VRMA", C2) },
-        QuoteSubIndicator.Mfi => new[] { ("MFI", C1) },
-        QuoteSubIndicator.Emv => new[] { ("EMV", C1), ("EMVMA", C2) },
-        QuoteSubIndicator.Psy => new[] { ("PSY", C1), ("PSYMA", C2) },
-        QuoteSubIndicator.Arbr => new[] { ("AR", C1), ("BR", C2) },
-        QuoteSubIndicator.Asi => new[] { ("ASI", C1), ("ASIMA", C2) },
-        _ => Array.Empty<(string, OxyColor)>(),
-    };
+    /// <summary>大盘叠加线的颜色——灰蓝，刻意选一个跟K线红/青、四条均线（白/黄/品红/绿）都不撞的
+    /// 中性色，一眼能认出"这条不是这只股票自己的线"。
+    ///
+    /// 公开出去（跟 <see cref="Ma5Color"/> 那几个同样的道理）：界面上"叠加大盘"复选框的文字色和信息栏里
+    /// 指数名称的颜色都取自这里，保证"字的颜色 = 图上那条线的颜色"，不用在 XAML/代码里各写一遍色值
+    /// （写死几份迟早会改漏一处、对不上）。</summary>
+    public static readonly OxyColor OverlayColor = OxyColor.FromRgb(120, 170, 255);
+
 
     // 深色面板的左右边距：价格轴放右边（通达信风格），左边只留一点点，右边给价格刻度留够。
     private const double LeftMargin = 8;
     private const double RightMargin = 58;
 
-    public static QuoteChartResult Build(List<Bar> bars, QuoteSubIndicator sub1Kind, QuoteSubIndicator sub2Kind)
+    /// <param name="indexOverlay">要叠加的大盘指数（名称 + 它自己的K线）——传 null 就是不叠加，
+    /// 行为跟加这个功能之前完全一样。叠加的画法见方法体里"大盘叠加"那段注释。</param>
+    /// <param name="fib">要叠加的斐波那契回撤位所依据的波段——传 null 就是不画。波段本身由调用方
+    /// 决定（自动识别或用户手动点选），这里只负责把线画出来。</param>
+    public static QuoteChartResult Build(
+        List<Bar> bars, QuoteSubIndicator sub1Kind, QuoteSubIndicator sub2Kind,
+        (string Name, List<Bar> Bars)? indexOverlay = null,
+        FibSwing? fib = null)
     {
+        Action<int, int>? reanchorOverlay = null;
         var closes = bars.Select(b => b.Close).ToList();
         var ma5 = TechnicalIndicators.SMA(closes, 5);
         var ma10 = TechnicalIndicators.SMA(closes, 10);
@@ -217,12 +225,74 @@ public static class QuoteChartBuilder
             TextVerticalAlignment = OxyPlot.VerticalAlignment.Bottom,
         });
 
+        if (fib != null) AddFibonacci(main, mainDay.Key, fib, bars.Count);
+
         var (mainHairX, mainHairY) = AddCrosshair(main, mainDay.Key, last);
 
         var sub1 = BuildSub(bars, sub1Kind, "QuoteSub1Day", visibleStart, visibleEnd, dayStep, monthStep, last, showDateLabels: false);
         var sub2 = BuildSub(bars, sub2Kind, "QuoteSub2Day", visibleStart, visibleEnd, dayStep, monthStep, last, showDateLabels: true);
 
-        var yRanges = new List<(LinearAxis, Func<int, int, (double, double)?>)> { (mainYAxis, ChartBuilder.YRangeFn(highs, lows, ma5, ma10, ma20, ma60)) };
+        // ── 大盘叠加（2026-08-13新增）──
+        // 做法：把指数按**可见区间左边缘**等比缩放到个股的价格刻度上
+        //     叠加值[i] = 指数[i] / 指数[左边缘] * 个股收盘[左边缘]
+        // 于是叠加线和K线从同一点出发，**两者的垂直差距就是这段时间的相对强弱**（个股在线上=跑赢
+        // 大盘，线下=跑输）。这样K线仍是真实价格、价格轴照旧有意义，也不用引第二个Y轴——双轴可以
+        // 靠调刻度把任意两条线"看起来相关"，是自欺欺人。等比缩放不改变指数的形状，趋势不失真。
+        // 平移/缩放时按新的左边缘重新锚定（见下面传给 Wire 的 onVisibleRangeChanged），所以它永远
+        // 回答"从我现在看的这一段起，谁更强"。
+        double[]? overlayScaled = null;
+        LineSeries? overlaySeries = null;
+        if (indexOverlay is { } ov && ov.Bars.Count > 0)
+        {
+            var aligned = IndexOverlayMatcher.AlignToBars(bars, ov.Bars);   // 按交易日对齐，不是按下标
+            overlayScaled = new double[bars.Count];
+            overlaySeries = new LineSeries
+            {
+                Title = ov.Name,
+                Color = OverlayColor,
+                StrokeThickness = 1.6,
+                LineStyle = LineStyle.Solid,
+                XAxisKey = mainDay.Key,
+                TrackerFormatString = ov.Name + " {4:F2}",
+            };
+            main.Series.Add(overlaySeries);
+
+            // 按给定的左边缘重算整条叠加线（只重算数值，不重建系列对象）
+            void Reanchor(int startIdx, int endIdx)
+            {
+                if (overlayScaled == null || overlaySeries == null) return;
+                // 找左边缘往右第一个"指数和个股都有值"的下标当锚点——左边缘那根可能正好是个股上市
+                // 前/指数缺值，直接拿它当基准会得出 NaN 或荒谬的比例。
+                int anchor = -1;
+                for (int i = Math.Max(0, startIdx); i < bars.Count && i <= Math.Max(endIdx, startIdx); i++)
+                {
+                    if (!double.IsNaN(aligned[i]) && aligned[i] > 0 && bars[i].Close > 0) { anchor = i; break; }
+                }
+                overlaySeries.Points.Clear();
+                if (anchor < 0)
+                {
+                    Array.Fill(overlayScaled, double.NaN);
+                    return;
+                }
+                double factor = bars[anchor].Close / aligned[anchor];
+                for (int i = 0; i < bars.Count; i++)
+                {
+                    overlayScaled[i] = double.IsNaN(aligned[i]) ? double.NaN : aligned[i] * factor;
+                    // NaN 不进点集——OxyPlot 遇到 NaN 会断线，这正是我们要的（缺数据就不画）
+                    if (!double.IsNaN(overlayScaled[i])) overlaySeries.Points.Add(new DataPoint(i, overlayScaled[i]));
+                }
+            }
+
+            Reanchor((int)Math.Floor(visibleStart), (int)Math.Ceiling(visibleEnd));
+            reanchorOverlay = Reanchor;
+        }
+
+        // 主图Y范围要把叠加线算进去，否则它会跑出面板上下边界（叠加线的值域跟着相对强弱走，
+        // 可能明显高于/低于个股价格区间）。没有叠加时行为跟以前完全一样。
+        var mainRangeFn = overlayScaled == null
+            ? ChartBuilder.YRangeFn(highs, lows, ma5, ma10, ma20, ma60)
+            : ChartBuilder.YRangeFn(highs, lows, ma5, ma10, ma20, ma60, overlayScaled);
+        var yRanges = new List<(LinearAxis, Func<int, int, (double, double)?>)> { (mainYAxis, mainRangeFn) };
         if (sub1.RangeFn != null) yRanges.Add((sub1.YAxis, sub1.RangeFn));
         if (sub2.RangeFn != null) yRanges.Add((sub2.YAxis, sub2.RangeFn));
 
@@ -232,7 +302,8 @@ public static class QuoteChartBuilder
             new[] { mainMonth, sub1.MonthAxis, sub2.MonthAxis },
             visibleStart, visibleEnd, ChartBuilder.InitialPlotWidthGuess, ChartBuilder.PxPerDayLabel, ChartBuilder.PxPerMonthLabel, ChartBuilder.TradingDaysPerMonth,
             candleSeries: new[] { candles },
-            yAxisRanges: yRanges);
+            yAxisRanges: yRanges,
+            onVisibleRangeChanged: reanchorOverlay);
 
         return new QuoteChartResult
         {
@@ -253,6 +324,9 @@ public static class QuoteChartBuilder
             Sub2Crosshair = sub2.HairX,
             Sub2HairY = sub2.HairY,
             Sub2FormatInfo = sub2.FormatInfo,
+            OverlayName = overlaySeries == null ? null : indexOverlay!.Value.Name,
+            OverlayScaled = overlayScaled,
+            Fib = fib,
             UpdatePlotWidth = updateWidth,
             Bars = bars,
             Ma5 = ma5,
@@ -262,9 +336,90 @@ public static class QuoteChartBuilder
         };
     }
 
+    // ── 斐波那契回撤位（2026-08-17新增）──
+    // 金色系，跟均线/叠加线的颜色都不撞。61.8%（黄金分割位）和两个端点画得更实，其余档位暗一些：
+    // 图上同时有7~9条线，全用一个亮度会糊成一片、也会喧宾夺主压住K线本身。
+    public static readonly OxyColor FibColor = OxyColor.FromRgb(255, 190, 60);
+    private static readonly OxyColor FibKeyColor = OxyColor.FromRgb(255, 225, 130);
+    private static readonly OxyColor FibExtColor = OxyColor.FromRgb(160, 130, 70);
+
+    /// <summary>
+    /// 把回撤位画到主图上：每档一条水平线（从波段起点向右延伸到最新一根），外加一条连接高低点的
+    /// 斜线，让人一眼看出这些线是量哪一段量出来的。
+    ///
+    /// 两个刻意的处理：
+    /// ① 线画在K线**下层**（BelowSeries）——回撤位是背景刻度，不该盖住K线实体。
+    /// ② 扩展位（&gt;100%）**不纳入Y轴范围计算**（见 Build 里的 mainRangeFn，那里只喂了高低价和均线）。
+    ///    扩展位常常远离当前价格区间，纳进去会把K线压扁成一条带子；线超出面板就不显示那一段，
+    ///    这是可接受的——需要看扩展位时把图缩小即可。
+    /// </summary>
+    private static void AddFibonacci(PlotModel main, string xAxisKey, FibSwing fib, int barCount)
+    {
+        // 连接高低点的斜线：波段本身。虚线、细，只是用来交代"这些水平线是从哪两点量出来的"。
+        var trend = new LineSeries
+        {
+            Title = "FIB波段",
+            XAxisKey = xAxisKey,
+            Color = OxyColor.FromAColor(150, FibColor),
+            StrokeThickness = 1.2,
+            LineStyle = LineStyle.Dash,
+            TrackerFormatString = "FIB波段",
+        };
+        trend.Points.Add(new DataPoint(fib.LowIdx, fib.Low));
+        trend.Points.Add(new DataPoint(fib.HighIdx, fib.High));
+        // 按时间先后排点，否则上涨/下跌波段里会画成反向的线段（OxyPlot 按点序连线）。
+        if (fib.LowIdx > fib.HighIdx) trend.Points.Reverse();
+        main.Series.Add(trend);
+
+        foreach (var lv in FibonacciRetracement.Levels(fib))
+        {
+            bool isEndpoint = lv.Ratio is 0 or 1;
+            bool isGolden = Math.Abs(lv.Ratio - 0.618) < 1e-9;
+            var color = lv.IsExtension ? FibExtColor : (isEndpoint || isGolden ? FibKeyColor : FibColor);
+
+            main.Annotations.Add(new LineAnnotation
+            {
+                Type = LineAnnotationType.Horizontal,
+                XAxisKey = xAxisKey,
+                Y = lv.Price,
+                // 从波段起点画到最右——回撤位只对"这段行情之后"有意义，往左延伸到上市第一天纯属噪音。
+                MinimumX = fib.StartIdx,
+                MaximumX = barCount + 0.6,
+                Color = lv.IsExtension ? OxyColor.FromAColor(170, color) : color,
+                LineStyle = isEndpoint || isGolden ? LineStyle.Solid : LineStyle.Dot,
+                StrokeThickness = isGolden ? 1.4 : 1,
+                Layer = AnnotationLayer.BelowSeries,
+                Text = $"{lv.Label} {lv.Price:F2}",
+                // 文字一律用亮色（线本身才分主次）——标签不可避免要压在K线上，暗色文字压上去就读不出来了。
+                TextColor = FibKeyColor,
+                FontSize = 11,
+                // 文字压在线的左端（波段起点附近）——右端留给现价标签和价格轴，挤在一起就都看不清了。
+                TextLinePosition = 0.02,
+                TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Left,
+                TextVerticalAlignment = OxyPlot.VerticalAlignment.Bottom,
+            });
+        }
+    }
+
+    /// <summary>
+    /// 信息栏里的一段文字 + 它的颜色（2026-08-11新增）——颜色取自图上对应那条线/柱子，让"哪个数字是
+    /// 哪条线"一眼可见，不必去对照右上角图例。
+    ///
+    /// <see cref="Text"/> 里已经把值**右对齐补白到固定宽度**、并带上尾部两个空格：信息栏用的是等宽
+    /// 字体（Consolas，见 QuoteDetailWindow.xaml），标签本身是常量宽度，所以只要值的字符数固定，
+    /// 整条信息栏各字段的横向位置就固定，不会因为数字从 5.6 变成 -12.34 而整排往左右跳（这是用户
+    /// 2026-08-11 反馈的问题）。
+    /// </summary>
+    public readonly record struct InfoSegment(string Text, OxyColor Color);
+
+    /// <summary>拼一段信息栏文字：<c>标签:值</c>，值右对齐到 <paramref name="width"/> 个字符宽、
+    /// 后面固定跟两个空格当字段间隔。宽度按量级选：价格/指标值用默认8，成交量这类大数用12。</summary>
+    private static InfoSegment Seg(string label, string value, OxyColor color, int width = 8)
+        => new($"{label}:{value.PadLeft(width)}  ", color);
+
     private record SubBuildResult(
         PlotModel Model, LinearAxis DateAxis, LinearAxis MonthAxis, LineAnnotation HairX, LineAnnotation HairY,
-        Func<int, string> FormatInfo, LinearAxis YAxis, Func<int, int, (double, double)?>? RangeFn);
+        Func<int, IReadOnlyList<InfoSegment>> FormatInfo, LinearAxis YAxis, Func<int, int, (double, double)?>? RangeFn);
 
     private static SubBuildResult BuildSub(
         List<Bar> bars, QuoteSubIndicator kind, string keyPrefix,
@@ -283,7 +438,7 @@ public static class QuoteChartBuilder
         string key = dayAxis.Key;
         string Fmt(double v) => double.IsNaN(v) ? "—" : v.ToString("F2");
         string Fmt0(double v) => double.IsNaN(v) ? "—" : v.ToString("F0");
-        Func<int, string> formatInfo;
+        Func<int, IReadOnlyList<InfoSegment>> formatInfo;
         Func<int, int, (double, double)?>? rangeFn = null;
 
         var closes = bars.Select(b => b.Close).ToList();
@@ -313,7 +468,8 @@ public static class QuoteChartBuilder
                 var volMa10 = TechnicalIndicators.SMA(volumes, 10);
                 ChartBuilder.AddLine(model, key, volMa5, "MA5", C1);
                 ChartBuilder.AddLine(model, key, volMa10, "MA10", C2);
-                formatInfo = idx => $"成交量:{Fmt0(volumes[idx])}  MA5:{Fmt0(volMa5[idx])}  MA10:{Fmt0(volMa10[idx])}";
+                formatInfo = idx => new[] { Seg("成交量", Fmt0(volumes[idx]), bars[idx].Close >= bars[idx].Open ? UpColor : DownColor, 12),
+                                             Seg("MA5", Fmt0(volMa5[idx]), C1, 12), Seg("MA10", Fmt0(volMa10[idx]), C2, 12) };
                 rangeFn = ChartBuilder.YRangeFn(volumes, volMa5, volMa10);
                 break;
             }
@@ -322,7 +478,7 @@ public static class QuoteChartBuilder
             {
                 var amounts = bars.Select(b => b.Amount).ToList();
                 AddUpDownStems("成交额(涨)", "成交额(跌)", amounts);
-                formatInfo = idx => $"成交额:{FormatYi(amounts[idx])}";
+                formatInfo = idx => new[] { Seg("成交额", FormatYi(amounts[idx]), bars[idx].Close >= bars[idx].Open ? UpColor : DownColor, 10) };
                 rangeFn = ChartBuilder.YRangeFn(amounts);
                 break;
             }
@@ -331,7 +487,7 @@ public static class QuoteChartBuilder
             {
                 var turnovers = bars.Select(b => b.Turnover).ToList();
                 ChartBuilder.AddLine(model, key, turnovers.ToArray(), "换手率", C3);
-                formatInfo = idx => $"换手率:{Fmt(turnovers[idx])}%";
+                formatInfo = idx => new[] { Seg("换手率", Fmt(turnovers[idx]) + "%", C3) };
                 rangeFn = ChartBuilder.YRangeFn(turnovers);
                 break;
             }
@@ -346,18 +502,26 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, dif, "DIF（快线）", C1);
                 ChartBuilder.AddLine(model, key, dea, "DEA（慢线）", C2);
                 ZeroLine();
-                formatInfo = idx => $"DIF:{Fmt(dif[idx])}  DEA:{Fmt(dea[idx])}  MACD柱:{Fmt(macdHist[idx])}";
+                // MACD柱放最前面（2026-08-11 按用户要求）——它是这个指标里最先看的那个值（柱由红转绿/
+                // 由绿转红就是信号），DIF/DEA 是它的来源，排在后面。颜色随正负走，跟图上的柱子一致。
+                formatInfo = idx => new[] { Seg("MACD柱", Fmt(macdHist[idx]), macdHist[idx] >= 0 ? UpColor : OxyColors.LimeGreen),
+                                             Seg("DIF", Fmt(dif[idx]), C1), Seg("DEA", Fmt(dea[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(dif, dea, macdHist);
                 break;
             }
 
             case QuoteSubIndicator.Kdj:
             {
-                var (k, d, _) = TechnicalIndicators.KDJ(closes, highs, lows);
-                yAxis.Minimum = 0; yAxis.Maximum = 100;
+                var (k, d, j) = TechnicalIndicators.KDJ(closes, highs, lows);
+                // J = 3K-2D，经常冲出 0~100（这是它的正常形态，也是超买超卖信号最强的地方），
+                // 所以不能死钉 0..100 把它裁掉——以 0/100 为基准框，再按 J 的实际范围往外扩。
+                var kdjAll = k.Concat(d).Concat(j).Where(v => !double.IsNaN(v)).ToList();
+                yAxis.Minimum = kdjAll.Count > 0 ? Math.Min(0, Math.Floor(kdjAll.Min())) : 0;
+                yAxis.Maximum = kdjAll.Count > 0 ? Math.Max(100, Math.Ceiling(kdjAll.Max())) : 100;
                 ChartBuilder.AddLine(model, key, k, "K", C1);
                 ChartBuilder.AddLine(model, key, d, "D", C2);
-                formatInfo = idx => $"K:{Fmt(k[idx])}  D:{Fmt(d[idx])}";
+                ChartBuilder.AddLine(model, key, j, "J", C3);
+                formatInfo = idx => new[] { Seg("K", Fmt(k[idx]), C1), Seg("D", Fmt(d[idx]), C2), Seg("J", Fmt(j[idx]), C3) };
                 break;
             }
 
@@ -366,7 +530,7 @@ public static class QuoteChartBuilder
                 var rsi = TechnicalIndicators.RSI(closes);
                 yAxis.Minimum = 0; yAxis.Maximum = 100;
                 ChartBuilder.AddLine(model, key, rsi, "RSI", C3);
-                formatInfo = idx => $"RSI:{Fmt(rsi[idx])}";
+                formatInfo = idx => new[] { Seg("RSI", Fmt(rsi[idx]), C3) };
                 break;
             }
 
@@ -377,7 +541,7 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, mid, "中轨", C2);
                 ChartBuilder.AddLine(model, key, upper, "上轨", C5);
                 ChartBuilder.AddLine(model, key, lower, "下轨", C4);
-                formatInfo = idx => $"中轨:{Fmt(mid[idx])}  上轨:{Fmt(upper[idx])}  下轨:{Fmt(lower[idx])}";
+                formatInfo = idx => new[] { Seg("中轨", Fmt(mid[idx]), C2), Seg("上轨", Fmt(upper[idx]), C5), Seg("下轨", Fmt(lower[idx]), C4) };
                 rangeFn = ChartBuilder.YRangeFn(closes, upper, lower);
                 break;
             }
@@ -389,7 +553,7 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, closes.ToArray(), "收盘", OxyColors.Gray);
                 ChartBuilder.AddLine(model, key, ema12, "EMA12", C1);
                 ChartBuilder.AddLine(model, key, ema26, "EMA26", C2);
-                formatInfo = idx => $"EMA12:{Fmt(ema12[idx])}  EMA26:{Fmt(ema26[idx])}";
+                formatInfo = idx => new[] { Seg("EMA12", Fmt(ema12[idx]), C1), Seg("EMA26", Fmt(ema26[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(closes, ema12, ema26);
                 break;
             }
@@ -402,7 +566,7 @@ public static class QuoteChartBuilder
                 for (int i = 0; i < sar.Length; i++)
                     if (!double.IsNaN(sar[i])) dots.Points.Add(new ScatterPoint(i, sar[i]));
                 model.Series.Add(dots);
-                formatInfo = idx => $"SAR:{Fmt(sar[idx])}";
+                formatInfo = idx => new[] { Seg("SAR", Fmt(sar[idx]), UpColor) };
                 rangeFn = ChartBuilder.YRangeFn(closes, sar);
                 break;
             }
@@ -414,7 +578,8 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, mdi, "-DI", DownColor);
                 ChartBuilder.AddLine(model, key, adx, "ADX", C1);
                 ChartBuilder.AddLine(model, key, adxr, "ADXR", C3);
-                formatInfo = idx => $"+DI:{Fmt(pdi[idx])}  -DI:{Fmt(mdi[idx])}  ADX:{Fmt(adx[idx])}  ADXR:{Fmt(adxr[idx])}";
+                formatInfo = idx => new[] { Seg("+DI", Fmt(pdi[idx]), UpColor), Seg("-DI", Fmt(mdi[idx]), DownColor),
+                                             Seg("ADX", Fmt(adx[idx]), C1), Seg("ADXR", Fmt(adxr[idx]), C3) };
                 rangeFn = ChartBuilder.YRangeFn(pdi, mdi, adx, adxr);
                 break;
             }
@@ -428,7 +593,7 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, b12, "BIAS12", C2);
                 ChartBuilder.AddLine(model, key, b24, "BIAS24", C3);
                 ZeroLine();
-                formatInfo = idx => $"BIAS6:{Fmt(b6[idx])}  BIAS12:{Fmt(b12[idx])}  BIAS24:{Fmt(b24[idx])}";
+                formatInfo = idx => new[] { Seg("BIAS6", Fmt(b6[idx]), C1), Seg("BIAS12", Fmt(b12[idx]), C2), Seg("BIAS24", Fmt(b24[idx]), C3) };
                 rangeFn = ChartBuilder.YRangeFn(b6, b12, b24);
                 break;
             }
@@ -438,7 +603,7 @@ public static class QuoteChartBuilder
                 var cci = TechnicalIndicators.CCI(highs, lows, closes);
                 ChartBuilder.AddLine(model, key, cci, "CCI", C1);
                 HLine(100); HLine(-100);
-                formatInfo = idx => $"CCI:{Fmt(cci[idx])}";
+                formatInfo = idx => new[] { Seg("CCI", Fmt(cci[idx]), C1) };
                 rangeFn = ChartBuilder.YRangeFn(cci);
                 break;
             }
@@ -450,7 +615,7 @@ public static class QuoteChartBuilder
                 yAxis.Minimum = 0; yAxis.Maximum = 100;
                 ChartBuilder.AddLine(model, key, wr10, "WR10", C1);
                 ChartBuilder.AddLine(model, key, wr6, "WR6", C2);
-                formatInfo = idx => $"WR10:{Fmt(wr10[idx])}  WR6:{Fmt(wr6[idx])}";
+                formatInfo = idx => new[] { Seg("WR10", Fmt(wr10[idx]), C1), Seg("WR6", Fmt(wr6[idx]), C2) };
                 break;
             }
 
@@ -460,7 +625,7 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, mtm, "MTM", C1);
                 ChartBuilder.AddLine(model, key, mtmMa, "MTMMA", C2);
                 ZeroLine();
-                formatInfo = idx => $"MTM:{Fmt(mtm[idx])}  MTMMA:{Fmt(mtmMa[idx])}";
+                formatInfo = idx => new[] { Seg("MTM", Fmt(mtm[idx]), C1), Seg("MTMMA", Fmt(mtmMa[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(mtm, mtmMa);
                 break;
             }
@@ -471,7 +636,7 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, roc, "ROC", C1);
                 ChartBuilder.AddLine(model, key, rocMa, "ROCMA", C2);
                 ZeroLine();
-                formatInfo = idx => $"ROC:{Fmt(roc[idx])}  ROCMA:{Fmt(rocMa[idx])}";
+                formatInfo = idx => new[] { Seg("ROC", Fmt(roc[idx]), C1), Seg("ROCMA", Fmt(rocMa[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(roc, rocMa);
                 break;
             }
@@ -482,7 +647,7 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, trix, "TRIX", C1);
                 ChartBuilder.AddLine(model, key, trixMa, "TRIXMA", C2);
                 ZeroLine();
-                formatInfo = idx => $"TRIX:{Fmt(trix[idx])}  TRIXMA:{Fmt(trixMa[idx])}";
+                formatInfo = idx => new[] { Seg("TRIX", Fmt(trix[idx]), C1), Seg("TRIXMA", Fmt(trixMa[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(trix, trixMa);
                 break;
             }
@@ -493,7 +658,7 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, dma, "DMA", C1);
                 ChartBuilder.AddLine(model, key, ama, "AMA", C2);
                 ZeroLine();
-                formatInfo = idx => $"DMA:{Fmt(dma[idx])}  AMA:{Fmt(ama[idx])}";
+                formatInfo = idx => new[] { Seg("DMA", Fmt(dma[idx]), C1), Seg("AMA", Fmt(ama[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(dma, ama);
                 break;
             }
@@ -503,7 +668,7 @@ public static class QuoteChartBuilder
                 var (obv, obvMa) = TechnicalIndicators.OBV(closes, volumes);
                 ChartBuilder.AddLine(model, key, obv, "OBV", C1);
                 ChartBuilder.AddLine(model, key, obvMa, "OBVMA", C2);
-                formatInfo = idx => $"OBV:{Fmt0(obv[idx])}  OBVMA:{Fmt0(obvMa[idx])}";
+                formatInfo = idx => new[] { Seg("OBV", Fmt0(obv[idx]), C1, 12), Seg("OBVMA", Fmt0(obvMa[idx]), C2, 12) };
                 rangeFn = ChartBuilder.YRangeFn(obv, obvMa);
                 break;
             }
@@ -513,7 +678,7 @@ public static class QuoteChartBuilder
                 var (vr, vrMa) = TechnicalIndicators.VR(closes, volumes);
                 ChartBuilder.AddLine(model, key, vr, "VR", C1);
                 ChartBuilder.AddLine(model, key, vrMa, "VRMA", C2);
-                formatInfo = idx => $"VR:{Fmt(vr[idx])}  VRMA:{Fmt(vrMa[idx])}";
+                formatInfo = idx => new[] { Seg("VR", Fmt(vr[idx]), C1), Seg("VRMA", Fmt(vrMa[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(vr, vrMa);
                 break;
             }
@@ -523,7 +688,7 @@ public static class QuoteChartBuilder
                 var mfi = TechnicalIndicators.MFI(highs, lows, closes, volumes);
                 yAxis.Minimum = 0; yAxis.Maximum = 100;
                 ChartBuilder.AddLine(model, key, mfi, "MFI", C1);
-                formatInfo = idx => $"MFI:{Fmt(mfi[idx])}";
+                formatInfo = idx => new[] { Seg("MFI", Fmt(mfi[idx]), C1) };
                 break;
             }
 
@@ -533,7 +698,7 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, emv, "EMV", C1);
                 ChartBuilder.AddLine(model, key, emvMa, "EMVMA", C2);
                 ZeroLine();
-                formatInfo = idx => $"EMV:{Fmt(emv[idx])}  EMVMA:{Fmt(emvMa[idx])}";
+                formatInfo = idx => new[] { Seg("EMV", Fmt(emv[idx]), C1), Seg("EMVMA", Fmt(emvMa[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(emv, emvMa);
                 break;
             }
@@ -544,7 +709,7 @@ public static class QuoteChartBuilder
                 yAxis.Minimum = 0; yAxis.Maximum = 100;
                 ChartBuilder.AddLine(model, key, psy, "PSY", C1);
                 ChartBuilder.AddLine(model, key, psyMa, "PSYMA", C2);
-                formatInfo = idx => $"PSY:{Fmt(psy[idx])}  PSYMA:{Fmt(psyMa[idx])}";
+                formatInfo = idx => new[] { Seg("PSY", Fmt(psy[idx]), C1), Seg("PSYMA", Fmt(psyMa[idx]), C2) };
                 break;
             }
 
@@ -553,7 +718,7 @@ public static class QuoteChartBuilder
                 var (ar, br) = TechnicalIndicators.ARBR(opens, highs, lows, closes);
                 ChartBuilder.AddLine(model, key, ar, "AR", C1);
                 ChartBuilder.AddLine(model, key, br, "BR", C2);
-                formatInfo = idx => $"AR:{Fmt(ar[idx])}  BR:{Fmt(br[idx])}";
+                formatInfo = idx => new[] { Seg("AR", Fmt(ar[idx]), C1), Seg("BR", Fmt(br[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(ar, br);
                 break;
             }
@@ -564,7 +729,7 @@ public static class QuoteChartBuilder
                 ChartBuilder.AddLine(model, key, asi, "ASI", C1);
                 ChartBuilder.AddLine(model, key, asiMa, "ASIMA", C2);
                 ZeroLine();
-                formatInfo = idx => $"ASI:{Fmt(asi[idx])}  ASIMA:{Fmt(asiMa[idx])}";
+                formatInfo = idx => new[] { Seg("ASI", Fmt(asi[idx]), C1), Seg("ASIMA", Fmt(asiMa[idx]), C2) };
                 rangeFn = ChartBuilder.YRangeFn(asi, asiMa);
                 break;
             }

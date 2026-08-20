@@ -186,11 +186,14 @@ public class PullbackTabViewModel : INotifyPropertyChanged
             var financials = await Task.Run(() => _financialRepository.GetLatestSnapshotByCode());
             var dividends = await Task.Run(() =>
                 _dividendRepository.GetTrailingCashDividendPerShare(DateTime.Today.AddYears(-1)));
-            Log($"已载入 {financials.Count} 只股票的财务快照、{dividends.Count} 只的近一年派息");
+            var annualProfits = await Task.Run(() => _financialRepository.GetRecentAnnualNetProfitByCode(3));
+            Log($"已载入 {financials.Count} 只股票的财务快照、{dividends.Count} 只的近一年派息、" +
+                $"{annualProfits.Count} 只的近3年年报净利");
 
             var names = SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
 
-            var engine = new PullbackAnalysisEngine(_barRepository, financials, dividends) { MaxLotAmount = maxLot };
+            var engine = new PullbackAnalysisEngine(_barRepository, financials, dividends, annualProfits)
+                { MaxLotAmount = maxLot };
             int passedCount = 0, errorCount = 0, noFinancialCount = 0;
             var rows = new List<ResultRowViewModel>();
             await Task.Run(() =>
@@ -202,9 +205,11 @@ public class PullbackTabViewModel : INotifyPropertyChanged
                     if (!names.TryGetValue(code, out var name)) continue;
                     if (code.StartsWith("sh") || code.StartsWith("sz") || code.StartsWith("gn_") ||
                         code.StartsWith("new_") || code.StartsWith("dy_")) continue;
-                    // 科创板(688)/北交所(8x、4x)排除：引擎注释里那份回测的样本就没包含它们，
+                    // 科创板(688)/北交所排除：引擎注释里那份回测的样本就没包含它们，
                     // 把结论套到没测过的板块上不成立（何况这两个板块还有单独的开户门槛）。
-                    if (code.StartsWith("688") || code.StartsWith("8") || code.StartsWith("4")) continue;
+                    // 北交所有两套代码段：老的 8x/4x 和后来启用的 920xxx，两个都要排（2026-08-13 补）。
+                    if (code.StartsWith("688") || code.StartsWith("8") || code.StartsWith("4")
+                        || code.StartsWith("92")) continue;
                     if (name.Contains("ST") || name.StartsWith("退")) continue;
 
                     if (i % 100 == 0) ProgressText = $"正在分析 {code} ({i + 1}/{codes.Count})";

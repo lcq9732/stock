@@ -91,6 +91,36 @@ public class SqliteFinancialRepository : IFinancialRepository
         return result;
     }
 
+    public Dictionary<string, List<(int Year, double NetProfitParent)>> GetRecentAnnualNetProfitByCode(int count)
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        // 只取 12-31 的年报口径（A股财报是年内累计，只有12-31那期等于全年）。一次全捞回来再在
+        // 内存里按 code 截取最近 N 年——比每只股票发一次查询快得多（5000+ 只 × 一次往返的差别）。
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT code, report_date, value FROM FinancialReport
+            WHERE metric_key = '{FinancialKeys.NetProfitParent}' AND report_date LIKE '%-12-31'
+            ORDER BY code, report_date;
+            """;
+        var result = new Dictionary<string, List<(int, double)>>(StringComparer.Ordinal);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(2)) continue;
+            var code = reader.GetString(0);
+            var year = int.Parse(reader.GetString(1)[..4]);
+            if (!result.TryGetValue(code, out var list)) result[code] = list = new List<(int, double)>();
+            list.Add((year, reader.GetDouble(2)));
+        }
+        // ORDER BY 保证了年份升序，这里只留最近 count 个
+        foreach (var (code, list) in result)
+            if (list.Count > count) result[code] = list.GetRange(list.Count - count, count);
+        return result;
+    }
+
     /// <summary>每个代码本地最新的报告期——给"按报告期跳过"的增量逻辑用（财报一季度才变一次，
     /// 已经有最新一期的股票不用再发请求）。</summary>
     public Dictionary<string, DateTime> GetLatestReportDateByCode()

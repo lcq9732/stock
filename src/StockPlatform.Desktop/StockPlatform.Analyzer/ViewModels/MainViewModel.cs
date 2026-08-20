@@ -13,10 +13,14 @@ namespace StockPlatform.Analyzer.ViewModels;
 /// Root view model — holds what's shared across all analysis methods (the local data file's
 /// location/freshness) and exposes each method's own tab view model. See
 /// doc/analysis-app-design.md section 3.2 for why there are five methods and why they don't share
-/// analysis state beyond the underlying data file. 界面 Tab 顺序（也就是这里各 Tab 属性希望呈现
-/// 的顺序）：每日晨检（早上第一眼看的仪表盘）/ 我的交易（晨检看完就在这里执行、录买卖）——这两个
-/// 是日常动线，放最前；然后才是各选股方法 三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 / 金叉法 / …，
-/// 最后是跨方法的自选股（算法验证样本，只用来统计各方法准不准）。类名仍叫
+/// analysis state beyond the underlying data file.
+///
+/// 界面 Tab 顺序（2026-08-11 按用户要求调整，权威顺序看 MainWindow.xaml 里 TabItem 的排列，这里
+/// 各属性的声明顺序尽量跟它保持一致，方便对照）：
+///   我的交易 / 每日晨检 / 自选股 / 查询 / 短线法  ← 每天真正会点的这几个放最前
+///   然后是其余选股方法与工具，保持原有相对顺序：三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 / 金叉法 /
+///   回调法 / 阶梯低点法 / 因子法 / 板块热度。
+/// 类名仍叫
 /// TriangleConvergence/Foundation/BottomRebound/MidCapPullback/GoldenCross——描述的是算法本身，
 /// 跟人名/Tab 中文名无关。
 /// </summary>
@@ -60,6 +64,10 @@ public class MainViewModel : INotifyPropertyChanged
     public FactorTabViewModel FactorTab { get; }
     public WatchlistTabViewModel WatchlistTab { get; }
 
+    /// <summary>【仓位计算器】的账户级参数（可投资总资金/凯利折扣/单票上限）——窗口由 MainWindow
+    /// 打开，参数在这里持有，两个入口共用同一份（见 PositionSizingWindow）。</summary>
+    public Watchlist.PositionSizingStore SizingStore { get; }
+
     private string _dataStatusText = "";
     public string DataStatusText { get => _dataStatusText; set => Set(ref _dataStatusText, value); }
 
@@ -85,6 +93,12 @@ public class MainViewModel : INotifyPropertyChanged
         _barRepository = barRepository;
 
         var watchlistStore = new JsonWatchlistStore(paths.WatchlistPath);
+        // 交易费率（佣金/过户费/印花税）全程序一份，"我的交易"页可改——两个自选相关的页共用同一个实例，
+        // 否则改完这页那页还按老费率算盈亏。
+        var feeStore = new TradeFeeStore(paths.TradeFeePath);
+        // 仓位计算器的账户级参数（可投资总资金/凯利折扣/单票上限）——跟费率同理，全程序一份，
+        // 两个入口（"我的交易"页顶部按钮、每行的【仓位】按钮）打开的是同一份设置。
+        SizingStore = new PositionSizingStore(paths.PositionSizingPath);
         MorningCheckTab = new MorningCheckTabViewModel(barRepository, shareholderRepository, watchlistStore);
         FoundationTab = new FoundationTabViewModel(paths, barRepository, watchlistStore);
         GoldenCrossTab = new GoldenCrossTabViewModel(paths, barRepository, watchlistStore);
@@ -97,8 +111,8 @@ public class MainViewModel : INotifyPropertyChanged
         QueryTab = new QueryTabViewModel(paths, barRepository, watchlistStore);
         BoardTab = new BoardTabViewModel(boardRepository, barRepository, paths);
         FactorTab = new FactorTabViewModel(paths, watchlistStore);
-        WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository, boardRepository);
-        TradePoolTab = new TradePoolTabViewModel(watchlistStore, barRepository, boardRepository);
+        WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository, boardRepository, feeStore);
+        TradePoolTab = new TradePoolTabViewModel(watchlistStore, barRepository, boardRepository, feeStore);
 
         // 交易池成员一变（自选页"加入交易池"/交易池页"移出"/查询页直接加入），另外那页要跟着刷新——
         // 几个页读的是同一份 watchlist.json，不联动就会出现"加进去了但那边还没有"的错觉。

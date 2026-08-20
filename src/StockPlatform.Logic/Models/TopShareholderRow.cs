@@ -15,5 +15,16 @@ public class TopShareholderRow
     public double Shares { get; set; }             // 持股数量（股）
     public double Ratio { get; set; }              // 占比（%）：total=占总股本，float=占流通股
     public string ShareType { get; set; } = "";    // 股本性质（如 流通A股/国有法人股）
+
+    /// <summary>本期相对上期的持股变化方向：<see cref="ChangeUp"/>/<see cref="ChangeDown"/>，
+    /// 无标记（不变、或本期新进榜）为 null。来源是新浪页面持股数后面的涨跌箭头
+    /// （↑红=增持、↓绿=减持）——这个箭头以前会被解析函数当成脏字符导致整格解析失败、持股数
+    /// 静默变成0（见 SinaShareholderProvider.ParseD 的注释），2026-08-13 修复时顺便把它存下来：
+    /// 机构调仓方向本身就是有用信息，丢掉可惜。</summary>
+    public string? ChangeDirection { get; set; }
+
+    public const string ChangeUp = "增";
+    public const string ChangeDown = "减";
+
     public DateTime FetchedAt { get; set; }
 }

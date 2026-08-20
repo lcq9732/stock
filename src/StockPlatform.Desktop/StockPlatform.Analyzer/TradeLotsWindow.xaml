@@ -1,0 +1,83 @@
+<Window x:Class="StockPlatform.Analyzer.TradeLotsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:StockPlatform.Analyzer"
+        Title="交易记录" Height="540" Width="820" MinHeight="360" MinWidth="620"
+        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="TitleText" Grid.Row="0" FontSize="15" FontWeight="Bold" Margin="0,0,0,4" />
+        <StackPanel Grid.Row="1" Margin="0,0,0,8">
+            <TextBlock Foreground="Gray" TextWrapping="Wrap"
+                       Text="买入、卖出都可以录多笔（金字塔式建仓 / 分批止盈）。表格里双击即可修改；日期填 2026-08-11 这种格式，价格和股数都必须大于0。保存后，&quot;我的交易&quot;列表显示的是这些笔汇总出来的总股数和加权平均价。" />
+
+            <!-- 费率设置——各家券商佣金不一样，做成可填的。全程序共用一份（存 data\trade-fees.json），
+                 在这里改完立刻生效并落盘，下面的费用/汇总跟着重算。单位统一用"万分之"（券商就是这么
+                 报价的），最低佣金按元。 -->
+            <WrapPanel Margin="0,6,0,0">
+                <TextBlock Text="费率：" VerticalAlignment="Center" Foreground="Gray" />
+                <TextBlock Text="佣金 万分之" VerticalAlignment="Center" Margin="4,0,0,0" />
+                <TextBox x:Name="CommissionBox" Width="46" Margin="2,0" LostFocus="FeeInput_LostFocus"
+                         ToolTip="佣金费率，单位万分之（填 1.2 就是万分之1.2 = 0.012%）。买入、卖出都收。" />
+                <TextBlock Text="，最低" VerticalAlignment="Center" />
+                <TextBox x:Name="MinCommissionBox" Width="40" Margin="2,0" LostFocus="FeeInput_LostFocus"
+                         ToolTip="单笔最低佣金（元）——按费率算出来不足这个数就按这个数收。不设下限填0。" />
+                <TextBlock Text="元" VerticalAlignment="Center" />
+                <TextBlock Text="｜过户费 万分之" VerticalAlignment="Center" Margin="10,0,0,0" />
+                <TextBox x:Name="TransferBox" Width="46" Margin="2,0" LostFocus="FeeInput_LostFocus"
+                         ToolTip="过户费费率，单位万分之。买入、卖出都收。" />
+                <TextBlock Text="｜印花税 万分之" VerticalAlignment="Center" Margin="10,0,0,0" />
+                <TextBox x:Name="StampDutyBox" Width="46" Margin="2,0" LostFocus="FeeInput_LostFocus"
+                         ToolTip="印花税费率，单位万分之。只有卖出才收。" />
+                <TextBlock Text="（只卖出收）" VerticalAlignment="Center" Foreground="Gray" />
+                <TextBlock Text="——改完点一下别处即生效，全局保存" VerticalAlignment="Center" Foreground="Gray" Margin="10,0,0,0"
+                           ToolTip="费率是账户级设置，全程序共用一份：在这里改了，所有股票的含费盈亏和止亏价都按新费率重算。" />
+            </WrapPanel>
+        </StackPanel>
+
+        <DataGrid x:Name="LotsGrid" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False"
+                  GridLinesVisibility="Horizontal" HeadersVisibility="Column" AlternatingRowBackground="#F5F5F5"
+                  SelectionMode="Extended" SelectionUnit="FullRow">
+            <DataGrid.Columns>
+                <DataGridComboBoxColumn Header="方向" Width="80"
+                                        SelectedItemBinding="{Binding SideText, UpdateSourceTrigger=PropertyChanged}"
+                                        ItemsSource="{x:Static local:TradeLotEditRow.SideOptions}" />
+                <DataGridTextColumn Header="日期" Width="110"
+                                    Binding="{Binding DateText, UpdateSourceTrigger=PropertyChanged}" />
+                <DataGridTextColumn Header="价格" Width="90"
+                                    Binding="{Binding PriceText, UpdateSourceTrigger=PropertyChanged}" />
+                <DataGridTextColumn Header="股数" Width="100"
+                                    Binding="{Binding SharesText, UpdateSourceTrigger=PropertyChanged}" />
+                <DataGridTextColumn Header="金额" Width="110" IsReadOnly="True"
+                                    Binding="{Binding AmountText}" />
+                <DataGridTextColumn Header="费用" Width="*" IsReadOnly="True"
+                                    Binding="{Binding FeeText}" />
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
+            <Button Content="＋买入" Width="80" Click="AddBuy_Click"
+                    ToolTip="加一笔买入（默认按上一笔的价格带出来，改成实际成交价即可）" />
+            <Button Content="＋卖出" Width="80" Margin="8,0,0,0" Click="AddSell_Click"
+                    ToolTip="加一笔卖出（默认股数=当前剩余持仓，分批卖就改小）" />
+            <Button Content="删除选中" Width="80" Margin="8,0,0,0" Click="DeleteSelected_Click" />
+        </StackPanel>
+
+        <Border Grid.Row="3" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,8,0,0">
+            <TextBlock x:Name="SummaryText" FontWeight="SemiBold" TextWrapping="Wrap" MaxWidth="530"
+                       TextAlignment="Right" />
+        </Border>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="保存" Width="90" IsDefault="True" Click="Save_Click" />
+            <Button Content="取消" Width="90" Margin="8,0,0,0" IsCancel="True" />
+        </StackPanel>
+    </Grid>
+</Window>

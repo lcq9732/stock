@@ -23,10 +23,7 @@ public class JsonWatchlistStore
     {
         lock (_fileLock)
         {
-            if (!File.Exists(_filePath)) return new List<WatchlistEntry>();
-            var json = File.ReadAllText(_filePath);
-            if (string.IsNullOrWhiteSpace(json)) return new List<WatchlistEntry>();
-            return JsonSerializer.Deserialize<List<WatchlistEntry>>(json) ?? new List<WatchlistEntry>();
+            return LoadUnlocked();
         }
     }
 
@@ -36,20 +33,28 @@ public class JsonWatchlistStore
         File.WriteAllText(_filePath, json);
     }
 
-    /// <summary>Adds the given entries, skipping any that already exist for the same
-    /// (Code, Method, DataDate) — re-checking the same stock/method/day combo shouldn't pile up
-    /// duplicate rows every time the user re-runs the same analysis and re-checks it. Returns how
-    /// many were actually added (for the caller to report back to the user).</summary>
+    /// <summary>
+    /// 加入自选——**一只股票在自选里只留一条记录**：只要这个代码已经在自选里（不管当初是哪个方法、
+    /// 哪一天加进来的），再加就直接跳过。返回真正新增的条数，供调用方回报给用户。
+    ///
+    /// 2026-08-12 从"按 (代码, 方法, 数据日期) 去重"改成"只按代码去重"（用户要求）：原来同一只票被
+    /// 不同方法选中、或同一方法隔天再选中，都会各自多出一行，自选列表里于是出现成片的重复股票
+    /// （中国长城、南天信息、广电运通都曾各占两行）。
+    ///
+    /// ⚠️ 附带影响：自选股页的"各方法准确率"是按记录分组统计的，所以一只票只会计入**第一个**把它
+    /// 加进来的方法；后来也选中它的方法就少一个样本。要让每个方法都留下样本、同时列表里不重复，
+    /// 得改成"已存在就把新方法名并进那条记录"——需要的话再做，当前按用户明确要求走简单跳过。
+    /// </summary>
     public int Add(IEnumerable<WatchlistEntry> newEntries)
     {
         lock (_fileLock)
         {
             var all = LoadUnlocked();
-            var existingKeys = all.Select(EntryKey).ToHashSet();
+            var existingCodes = all.Select(e => e.Code).ToHashSet(StringComparer.Ordinal);
             int added = 0;
             foreach (var entry in newEntries)
             {
-                if (!existingKeys.Add(EntryKey(entry))) continue;
+                if (!existingCodes.Add(entry.Code)) continue;   // 已在自选里（含本批里重复勾选的同一只）
                 all.Add(entry);
                 added++;
             }
@@ -58,21 +63,32 @@ public class JsonWatchlistStore
         }
     }
 
-    /// <summary>更新某条自选的手动交易信息（买入日期/买入价/股数/卖出日期/卖出价，自选股Tab里直接
-    /// 编辑）——按 Id 定位、只改这五个字段后整体保存。加载-修改-保存都在锁内完成，跟 Add/Remove
-    /// 一样保持单写者语义。</summary>
-    public void UpdateTradeInfo(Guid id, DateTime? buyDate, double? buyPrice, int? shares, DateTime? sellDate, double? sellPrice)
+    /// <summary>整体替换某条自选的成交明细（"我的交易"Tab的【交易记录】窗口里录入的多笔买入/卖出）——
+    /// 按 Id 定位，整份覆盖（窗口里本来就是"改完一起保存"，逐笔增删改反而要处理更多中间状态），
+    /// 顺带把汇总写回兼容字段。加载-修改-保存都在锁内完成，跟 Add/Remove 一样保持单写者语义。</summary>
+    public void UpdateLots(Guid id, IEnumerable<TradeLot> lots)
     {
         lock (_fileLock)
         {
             var all = LoadUnlocked();
             var entry = all.FirstOrDefault(e => e.Id == id);
             if (entry == null) return;
-            entry.BuyDate = buyDate;
-            entry.BuyPrice = buyPrice;
-            entry.Shares = shares;
-            entry.SellDate = sellDate;
-            entry.SellPrice = sellPrice;
+            entry.Lots = lots.OrderBy(l => l.Date).ToList();
+            entry.SyncLegacyFromLots();
+            Save(all);
+        }
+    }
+
+    /// <summary>更新手填的财报披露日（2026-08-17新增，"我的交易"页那一列）——按 Id 定位、只改这一个
+    /// 字段。传 null 表示清空。用途见 <see cref="WatchlistEntry.EarningsDate"/>。</summary>
+    public void UpdateEarningsDate(Guid id, DateTime? earningsDate)
+    {
+        lock (_fileLock)
+        {
+            var all = LoadUnlocked();
+            var entry = all.FirstOrDefault(e => e.Id == id);
+            if (entry == null) return;
+            entry.EarningsDate = earningsDate;
             Save(all);
         }
     }
@@ -118,8 +134,13 @@ public class JsonWatchlistStore
         if (!File.Exists(_filePath)) return new List<WatchlistEntry>();
         var json = File.ReadAllText(_filePath);
         if (string.IsNullOrWhiteSpace(json)) return new List<WatchlistEntry>();
-        return JsonSerializer.Deserialize<List<WatchlistEntry>>(json) ?? new List<WatchlistEntry>();
+        var entries = JsonSerializer.Deserialize<List<WatchlistEntry>>(json) ?? new List<WatchlistEntry>();
+        // 老记录（2026-08-11之前只有单笔买卖字段）补成成交明细，之后全程按明细算。幂等，
+        // 不在这里回写文件——下次任何一次保存会顺带把迁移结果落盘。
+        foreach (var e in entries) e.MigrateLegacyLots();
+        return entries;
     }
 
-    private static (string, string, DateTime) EntryKey(WatchlistEntry e) => (e.Code, e.Method, e.DataDate.Date);
+    // 原来这里有个 EntryKey(代码, 方法, 数据日期) 做去重键，2026-08-12 起改成只按代码去重
+    // （见 Add 的注释），这个键就没用了，一并删掉避免留着误导。
 }

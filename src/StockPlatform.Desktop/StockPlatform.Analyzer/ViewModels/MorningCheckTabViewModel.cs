@@ -95,37 +95,67 @@ public class MorningStockRowViewModel
     /// 买点(线下=站上MA60的价位、线上=回踩MA20位置)。机械推导自回测过的纪律，不是预测。</summary>
     public string AdviceText { get; private set; } = "—";
     public string HolderChangeText { get; private set; } = "—";
+
+    /// <summary>MA5 与当前收盘的关系——短线卖出纪律(R1)看的就是这一条。摆成一列是为了让人在
+    /// 触发的**前一天**就看见"快贴上了"，而不是等它变成红字才反应过来。非持仓也算，纯参考。</summary>
+    public string Ma5Text { get; private set; } = "—";
+    public Brush Ma5Color { get; private set; } = Brushes.Gray;
+
+    /// <summary>近60日日均波幅（|当日涨跌|的均值）——决定这只票用几天的时间止损。回测显示
+    /// &gt;4.5% 那一档所有卖出规则都会退化（最优规则的期望只有低波档的 60%），所以超限带 ⚠。</summary>
+    public string VolatilityText { get; private set; } = "—";
+
     public string ActionText { get; private set; } = "数据不足";
     public Brush ActionColor { get; private set; } = Brushes.Gray;
 
-    /// <summary>是否真实持仓中（填过买入价且还没填卖出价）——止损/止盈纪律只对它生效。</summary>
+    /// <summary>是否真实持仓中（买过、还没卖完；**分批卖出后只要还剩仓位就仍算持仓**）——止损/止盈
+    /// 纪律只对它生效。</summary>
     public bool IsHolding { get; }
 
-    /// <summary>是否已平仓（买入价、卖出价都填了）——交易已结束，回到待买语义，但状态列单独标出，
+    /// <summary>是否已平仓（买过且剩余股数已归零）——交易已结束，回到待买语义，但状态列单独标出，
     /// 持仓盈亏列显示最终已实现结果，作为交易留痕。</summary>
     public bool IsClosed { get; }
 
     /// <summary>已平仓交易的已实现收益率文本（如"+0.75%"），供汇总里的交易留痕行使用；非已平仓为空。</summary>
     public string RealizedText { get; private set; } = "";
 
-    /// <summary>排序权重：0=止损 1=止盈 2=筹码警示 3=趋势弱 4=正常，问题最严重的排最前。</summary>
+    /// <summary>排序权重：0=止损 1=止盈/短线卖点 2=筹码警示/时间止损 3=趋势弱 4=正常，最严重的排最前。</summary>
     public int Severity { get; private set; } = 4;
+
+    /// <summary>手填的财报披露日（"我的交易"页那一列）——同一只票的多条记录里取最早填过的那个。</summary>
+    public DateTime? EarningsDate { get; }
+
+    /// <summary>距财报几天（自然日）：正数=还没到，0=今天，负数=已披露。没填为 null。</summary>
+    public int? DaysToEarnings => EarningsDate is { } d ? (int)(d - DateTime.Today).TotalDays : null;
+
+    /// <summary>提前多少天开始提醒财报（自然日）。10天≈两个交易周：够早到还来得及决定要不要减仓，
+    /// 又不会挂太久变成天天无视的背景噪音。</summary>
+    public const int EarningsWarnDays = 10;
+
+    /// <summary>是否处于"财报窗口"（<see cref="EarningsWarnDays"/> 天内要披露）——跨事件持仓的风险
+    /// 提示，汇总里单独列一行。</summary>
+    public bool EarningsNear => DaysToEarnings is >= 0 && DaysToEarnings <= EarningsWarnDays;
+
+    /// <summary>刚披露完（7天内）——提醒去跑一次季度抓取，否则各方法的财务条件还在用上一期数据。</summary>
+    public bool EarningsJustPassed => DaysToEarnings is < 0 and >= -7;
 
     /// <param name="methods">该股的全部来源方法（同一只票可能被多个方法各加过一条自选记录）——显示时
     /// 合并成"耀哥法、阶梯低点法"，同时原样留一份给方法过滤器做包含匹配。体检基准（自选日期/价格）
     /// 用最早那条记录（entry）：最早的峰值最高，止损纪律触发得最保守。</param>
-    public MorningStockRowViewModel(WatchlistEntry entry, IReadOnlyList<string> methods, IBarRepository barRepository, IShareholderRepository shareholderRepository)
+    /// <param name="earningsDate">手填的财报披露日，见 <see cref="EarningsDate"/>。</param>
+    public MorningStockRowViewModel(WatchlistEntry entry, IReadOnlyList<string> methods, IBarRepository barRepository, IShareholderRepository shareholderRepository, DateTime? earningsDate = null)
     {
+        EarningsDate = earningsDate;
         Code = entry.Code;
         Name = entry.Name;
         Methods = methods;
         Method = string.Join("、", methods);
-        IsClosed = entry.BuyPrice is > 0 && entry.SellPrice is > 0;
-        IsHolding = entry.BuyPrice is > 0 && !IsClosed;
+        IsClosed = entry.IsClosedTrade;
+        IsHolding = entry.IsHoldingPosition;   // 分批卖出后只要还剩仓位就仍算持仓
         (StatusText, StatusColor) = IsHolding ? ("持仓", (Brush)Brushes.Firebrick)
                                   : IsClosed ? ("已平仓", Brushes.SteelBlue)
-                                  : ("待买", Brushes.Gray);   // 在交易池里但还没填买入价=打算买、还没买
-        var basisDate = IsHolding ? (entry.BuyDate ?? entry.DataDate) : entry.DataDate;
+                                  : ("待买", Brushes.Gray);   // 在交易池里但还没有买入记录=打算买、还没买
+        var basisDate = IsHolding ? (entry.FirstBuyDate ?? entry.DataDate) : entry.DataDate;
         DataDate = basisDate.ToString("yyyy-MM-dd") + (IsHolding ? "买" : "");
         Compute(entry, basisDate, barRepository, shareholderRepository);
     }
@@ -148,8 +178,29 @@ public class MorningStockRowViewModel
             Ma60Text = above60 == true ? "线上✅" : "线下❌";
         }
 
-        // 涨跌基准：持仓=买入价，观察/已平仓=自选那天的收盘价。
-        double basisPrice = IsHolding ? entry.BuyPrice!.Value : entry.PriceAtPick;
+        // ── 短线卖出纪律 R1 需要的两个量（2026-08-20 新增，回测依据见 ActionText 那段注释）──
+        double ma5 = bars.Count >= 5 ? bars.Skip(bars.Count - 5).Average(b => b.Close) : 0;
+        bool belowMa5 = ma5 > 0 && last.Close < ma5;
+        if (ma5 > 0)
+        {
+            double gap = (last.Close / ma5 - 1) * 100;
+            Ma5Text = $"{ma5:F2}（{(belowMa5 ? "跌破" : "站上")}{gap:+0.0;-0.0}%）";
+            Ma5Color = belowMa5 ? Brushes.Firebrick : Brushes.SeaGreen;
+        }
+
+        // 日均波幅：决定时间止损天数（>4.5% 用15天，其余20天），也提示这票适不适合做。
+        double volatility = 0;
+        if (bars.Count >= 61)
+        {
+            double acc = 0;
+            for (int i = bars.Count - 60; i < bars.Count; i++)
+                if (bars[i - 1].Close > 0) acc += Math.Abs(bars[i].Close / bars[i - 1].Close - 1);
+            volatility = acc / 60;
+            VolatilityText = $"{volatility * 100:F2}%{(volatility > 0.045 ? " ⚠" : "")}";
+        }
+
+        // 涨跌基准：持仓=加权平均买入价（金字塔式建仓的真实成本），观察/已平仓=自选那天的收盘价。
+        double basisPrice = IsHolding ? entry.AvgBuyPrice!.Value : entry.PriceAtPick;
         double? sinceBasisPct = null;
         if (basisPrice > 0)
         {
@@ -162,20 +213,23 @@ public class MorningStockRowViewModel
         if (IsHolding)
         {
             PnlText = SincePickText;
-            if (entry.Shares is > 0 && basisPrice > 0)
+            if (entry.RemainingShares > 0 && basisPrice > 0)
             {
-                var pnl = (last.Close - basisPrice) * entry.Shares.Value;
+                var pnl = (last.Close - basisPrice) * entry.RemainingShares;
                 PnlText = $"{(pnl >= 0 ? "+" : "")}{pnl:N0}元（{SincePickText}）";
             }
+            // 分批卖出的：已经落袋的那部分金额是锁定的，跟剩余仓位的浮盈分开报，别混成一个数。
+            if (entry.RealizedPnl is { } realized)
+                PnlText += $"，已落袋{(realized >= 0 ? "+" : "")}{realized:N0}元";
             PnlColor = SincePickColor;
         }
         else if (IsClosed)
         {
-            // 已平仓：显示按卖出价锁定的最终结果，作为交易留痕。
-            var spct = (entry.SellPrice!.Value - entry.BuyPrice!.Value) / entry.BuyPrice.Value * 100;
+            // 已平仓：显示按加权平均卖出价锁定的最终结果，作为交易留痕。
+            var spct = entry.RealizedPct!.Value;
             RealizedText = $"{(spct >= 0 ? "+" : "")}{spct:F2}%";
-            PnlText = entry.Shares is > 0
-                ? $"已平仓 {(entry.SellPrice.Value - entry.BuyPrice.Value) * entry.Shares.Value:+#,0;-#,0}元（{RealizedText}）"
+            PnlText = entry.RealizedPnl is { } pnl
+                ? $"已平仓 {pnl:+#,0;-#,0}元（{RealizedText}）"
                 : $"已平仓 {RealizedText}";
             PnlColor = spct >= 0 ? Brushes.Red : Brushes.Green;
         }
@@ -228,6 +282,48 @@ public class MorningStockRowViewModel
         // 止损/止盈只对真实持仓生效——待买的票没有可卖的仓位，跌破也只是"这次选中失效"，不发操作指令。
         if (IsHolding && drawdownPct <= -15) { actions.Add($"止损纪律：距买入后高点回撤{-drawdownPct:F0}%，减仓/清仓并复核逻辑"); Severity = Math.Min(Severity, 0); }
         if (IsHolding && sinceBasisPct >= 50) { actions.Add($"止盈纪律：较买入价+{sinceBasisPct:F0}%，减仓1/3锁定利润"); Severity = Math.Min(Severity, 1); }
+
+        // ── 短线卖出纪律 R1（2026-08-20 新增）──────────────────────────────────────────
+        // 规则一句话：**只要账面在赚钱，收盘跌破MA5就走**（+10%止盈 / -10%止损照旧兜底）。
+        //
+        // 为什么是这条而不是"到+5%就卖"：全市场17.3万个短线法信号样本，九种卖法对比下来，
+        //   R1(浮盈>0破MA5)   低波 0.77%/胜率75.6%   中波 0.79%/69.0%   高波 0.96%/63.8%
+        //   +5%就走           低波 0.68%/胜率66.5%   中波 0.44%/65.0%   高波 0.40%/64.6%
+        //   死等+10%          低波 1.58%/胜率57.5%   中波 1.19%/55.9%   高波 0.68%/53.4%
+        // R1 在三组的**期望全面高于"+5%就走"**，胜率在低/中波也更高——是严格占优，没有取舍。
+        // 高波档 R1 更是唯一超过"死等+10%"的规则（0.96% vs 0.68%）。
+        //
+        // 它同时解决两头：上涨途中只要还站在MA5上就不打断（不会像+5%那样提前砍掉行情），
+        // 一转弱立刻兑现（不会像死等+10%那样坐完过山车回到成本价）。
+        //
+        // ⚠ 口径：用**收盘价**判断，所以这是"尾盘/次日"的动作，不是盘中。回测按当天收盘价成交，
+        // 实际次日开盘卖会有低开损耗，所以真实收益略低于上面的数字。
+        // ⚠ 适用范围：对**所有持仓**生效，不按来源方法过滤。
+        // 曾经想只对"短线法/回调法"来源的票生效，但实测 watchlist 里交易池的20只有一多半
+        // Method="查询"（茅台、中国移动、宁德这些手动加的），按方法过滤会把真正在交易的票
+        // 全部漏掉。「我的交易」页按定义就是"我打算买卖、要每天盯"的票，默认全都算短线口径。
+        // 如果将来要长期拿底仓吃分红，需要给条目加一个"底仓"标记再在这里排除——现在没有这个字段。
+        if (IsHolding && belowMa5 && sinceBasisPct > 0)
+        {
+            actions.Add($"短线卖点：浮盈+{sinceBasisPct:F1}% 且收盘跌破MA5({ma5:F2})，按R1纪律次日卖出");
+            Severity = Math.Min(Severity, 1);
+        }
+
+        // 时间止损：死单占坑是收益的最大漏点——加这一条能把年化从 16.5% 提到 27.0%（低波档）。
+        // 天数按波幅分：>4.5% 用15天（那档拖过15天期望从 0.98% 掉到 0.68%），其余20天
+        // （低波20天的期望 1.58% 与不设时限持平，但胜率更高、少占8天，是免费的）。
+        if (IsHolding && entry.FirstBuyDate is { } firstBuy)
+        {
+            int heldBars = bars.Count(x => x.PeriodStart >= firstBuy);
+            int maxHold = volatility > 0.045 ? 15 : 20;
+            if (heldBars >= maxHold)
+            {
+                actions.Add($"时间止损：已持有{heldBars}个交易日（上限{maxHold}天），未达目标就清仓换股");
+                Severity = Math.Min(Severity, 2);
+            }
+        }
+        // ──────────────────────────────────────────────────────────────────────────────
+
         if (holderChgPct > 20) { actions.Add($"筹码警示：户数环比+{holderChgPct:F0}%，散户涌入"); Severity = Math.Min(Severity, 2); }
         if (above60 == false) { actions.Add(IsHolding ? "趋势弱：在60日线下，不加仓" : "趋势弱：在60日线下，暂不买入"); Severity = Math.Min(Severity, 3); }
 
@@ -246,6 +342,22 @@ public class MorningStockRowViewModel
                 2 => Brushes.DarkOrange,
                 _ => Brushes.Gray,
             };
+        }
+
+        // 财报窗口的提醒**附加**在动作后面，故意不进 actions、也不动 Severity：那几档是止损/止盈/筹码/
+        // 趋势的固定含义（汇总按它分组），混进来会把分组意思搞乱；而且这是提醒不是指令——回测参数
+        // 本来就没区分财报日，减不减仓由人定。
+        if (EarningsNear)
+        {
+            ActionText += DaysToEarnings == 0
+                ? $"｜⚠ 今天披露财报（{EarningsDate:MM-dd}）：兑现日双向波动，跨事件持仓风险自担"
+                : $"｜⚠ {DaysToEarnings}天后财报（{EarningsDate:MM-dd}）：回测参数没区分财报窗口，{(IsHolding ? "要不要在披露前减仓自己定" : "临近别追高")}";
+            if (Severity >= 4) ActionColor = Brushes.DarkOrange;   // 其它都正常时，别让这条提醒淹没在绿色里
+        }
+        else if (EarningsJustPassed)
+        {
+            ActionText += $"｜财报已于 {EarningsDate:MM-dd} 披露：记得跑一次\"季度/不定期\"抓取，" +
+                          "否则各方法的财务条件还在用上一期数据";
         }
     }
 }
@@ -414,12 +526,15 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             .GroupBy(e => e.Code)
             .Select(g =>
             {
-                var basis = g.OrderByDescending(e => e.BuyPrice is > 0 && e.SellPrice is not (> 0)) // 持仓中优先
-                             .ThenByDescending(e => e.BuyPrice is > 0)                              // 其次已平仓（留痕）
-                             .ThenBy(e => e.BuyDate ?? DateTime.MaxValue)
+                var basis = g.OrderByDescending(e => e.IsHoldingPosition)   // 持仓中优先
+                             .ThenByDescending(e => e.HasBought)            // 其次已平仓（留痕）
+                             .ThenBy(e => e.FirstBuyDate ?? DateTime.MaxValue)
                              .ThenBy(e => e.DataDate).ThenBy(e => e.AddedAt).First();
                 var methods = g.Select(e => e.Method).Distinct().ToList();
-                return new MorningStockRowViewModel(basis, methods, _barRepository, _shareholderRepository);
+                // 财报披露日是"这只票"的属性，不是"这条自选记录"的——同一只票哪条记录上填了都算，
+                // 取最早的那个（多条填得不一致时，按更早的提醒更保守）。
+                var earnings = g.Select(e => e.EarningsDate).Where(d => d.HasValue).Min();
+                return new MorningStockRowViewModel(basis, methods, _barRepository, _shareholderRepository, earnings);
             })
             .OrderByDescending(r => r.IsHolding)   // 持仓排在待买前面——真金白银的先看
             .ThenBy(r => r.Severity).ThenBy(r => r.Code));
@@ -506,6 +621,20 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
                 sb.AppendLine($"   · {(methodFilter == null ? "全部" : methodFilter)}整体：平均较基准 {(avg >= 0 ? "+" : "")}{avg:F1}%，" +
                               $"上涨 {up} 只 / 下跌 {pcts.Count - up} 只（占比 {(double)up / pcts.Count * 100:F0}%）");
             }
+            // 财报窗口单列一行——它跟止损/止盈那几档是正交的（一只票可以既"正常持有"又"3天后财报"），
+            // 塞进 Severity 分组会互相盖掉，所以单独列，并排在纪律条目最前面：这是今天就要决定的事。
+            var earningsNear = rows.Where(r => r.EarningsNear)
+                                   .OrderBy(r => r.DaysToEarnings)
+                                   .Select(r => $"{r.Name}({r.EarningsDate:MM-dd}，{(r.DaysToEarnings == 0 ? "今天" : $"{r.DaysToEarnings}天后")}{(r.IsHolding ? "，持仓中" : "")})")
+                                   .ToList();
+            if (earningsNear.Count > 0)
+                sb.AppendLine($"   · ⚠ 临近财报（{MorningStockRowViewModel.EarningsWarnDays}天内）：{string.Join("、", earningsNear)}" +
+                              "——回测参数没区分财报窗口，跨事件持仓的风险自己认；预期打得越满，兑现日越容易利好出尽。");
+            var earningsPassed = rows.Where(r => r.EarningsJustPassed).Select(r => $"{r.Name}({r.EarningsDate:MM-dd})").ToList();
+            if (earningsPassed.Count > 0)
+                sb.AppendLine($"   · 财报刚披露：{string.Join("、", earningsPassed)}——记得跑一次\"季度/不定期\"抓取，" +
+                              "否则各方法的财务条件还在用上一期数据。");
+
             if (stop.Count > 0) sb.AppendLine($"   · [持仓]触发15%回撤止损（最优先处理）：{string.Join("、", stop)}");
             if (trim.Count > 0) sb.AppendLine($"   · [持仓]触发+50%止盈减仓：{string.Join("、", trim)}");
             if (chip.Count > 0) sb.AppendLine($"   · 股东户数暴增警示：{string.Join("、", chip)}");
