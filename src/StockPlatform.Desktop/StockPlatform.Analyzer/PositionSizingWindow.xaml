@@ -134,7 +134,7 @@
 
                         <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="当前价格" />
                         <TextBox Grid.Row="0" Grid.Column="1" x:Name="PriceBox"
-                                 ToolTip="用来把金额折成股数、算出分批止盈的目标价。&#10;&#10;从【我的交易】页打开时带的是**本地K线最新一根的收盘价**——盘中打开时今天的K线还没入库，那就是昨天的收盘价（下面会标出是哪天的）。要按盘中实时价算就直接改这个数，下面的目标/止损百分比会自动跟着重算（档位价格不变）。" />
+                                 ToolTip="用来把金额折成股数、算出分批止盈的目标价。&#10;&#10;从【主动仓】页打开时带的是**本地K线最新一根的收盘价**——盘中打开时今天的K线还没入库，那就是昨天的收盘价（下面会标出是哪天的）。要按盘中实时价算就直接改这个数，下面的目标/止损百分比会自动跟着重算（档位价格不变）。" />
 
                         <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="当前持仓股数" />
                         <TextBox Grid.Row="1" Grid.Column="1" x:Name="SharesBox"

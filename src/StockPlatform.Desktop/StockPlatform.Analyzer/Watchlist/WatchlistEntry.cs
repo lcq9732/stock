@@ -18,7 +18,7 @@ public class CriterionSnapshot
 /// <summary>
 /// One user-picked stock, saved so it can be tracked/reviewed later — see
 /// doc/analysis-app-design.md section 3.5 "自选股跟踪". Deliberately NOT stored in the shared
-/// total.sqlite (that file is Fetcher's read-only output, see AnalyzerPaths doc comment) — this
+/// current.sqlite (that file is Fetcher's output, read-only here, see AnalyzerPaths doc comment) — this
 /// is the Analyzer's own local state, in its own JSON file (JsonWatchlistStore).
 /// </summary>
 public class WatchlistEntry
@@ -62,7 +62,7 @@ public class WatchlistEntry
     public DateTime AddedAt { get; set; }
 
     /// <summary>这笔票的全部实际成交（2026-08-11新增）——买入可以有多笔（金字塔式建仓）、卖出也
-    /// 可以有多笔（分批止盈），在"我的交易"Tab点【交易记录】录入。一条都没有=还没买、只是观察中；
+    /// 可以有多笔（分批止盈），在"主动仓"Tab点【交易记录】录入。一条都没有=还没买、只是观察中；
     /// 有买入笔=真实持仓，每日晨检的止损/止盈纪律按**加权平均买入价**和**首次买入日**计算。
     ///
     /// 这里是唯一的事实来源，下面那五个单笔字段（BuyDate/BuyPrice/Shares/SellDate/SellPrice）
@@ -91,7 +91,7 @@ public class WatchlistEntry
     /// 新代码用 <see cref="AvgSellPrice"/>。</summary>
     public double? SellPrice { get; set; }
 
-    /// <summary>下一次财报的披露日期（2026-08-17新增，"我的交易"页手填）——交易所/公司预约的披露日，
+    /// <summary>下一次财报的披露日期（2026-08-17新增，"主动仓"页手填）——交易所/公司预约的披露日，
     /// 本地数据库里没有这个信息（<c>FinancialReport</c> 只有已经披露的报告期），所以只能手工录。
     ///
     /// 用途：**跨财报持仓是短线法/回调法回测里没有的风险**——那些参数是按普通交易日回测出来的，没有
@@ -99,7 +99,7 @@ public class WatchlistEntry
     /// MorningStockRowViewModel 的财报提醒），披露完还会提醒去跑一次季度抓取，把新报告期入库。</summary>
     public DateTime? EarningsDate { get; set; }
 
-    /// <summary>是否放进"我的交易池"（2026-07-31新增）——把两种用途分开：各选股方法丢进自选的票默认
+    /// <summary>是否放进"主动仓池"（2026-07-31新增）——把两种用途分开：各选股方法丢进自选的票默认
     /// 只是**算法验证样本**（用来统计各方法的准确率，见晨检的方法过滤器），不代表我要买；勾上这个才
     /// 表示"这只我打算买/卖、请每天盯着它"。每日晨检默认只体检交易池里的票。
     ///

@@ -57,6 +57,34 @@ public class StockScreenResult
     /// 只写进 Criteria 文字里，是因为它是结果表要直接展示、用户扫一眼就要比较的列（见回调法）。</summary>
     public double? DividendYield { get; set; }
 
+    /// <summary>近5年**平均**股息率（0.05=5%）——只有底仓法算，其它方法 null。
+    /// 跟 <see cref="DividendYield"/> 并排看才有意义：当期股息率明显高于这个均值时，多半是含了
+    /// 一次性大额分红，或者股价刚大跌（分母变小），两种都不该当成"每年都能拿到这么多"。</summary>
+    public double? AvgDividendYield { get; set; }
+
+    /// <summary>连续分红年数（按除权除息日所属年计，算法见 DividendMetrics.ConsecutiveYears）
+    /// ——只有底仓法算，其它方法 null。底仓法的硬条件之一：底仓赌的是"未来还会不会继续分红"，
+    /// 只看近12个月的股息率分不出"连分十年的电力股"和"去年头一回分红"的票。</summary>
+    public int? ConsecutiveDividendYears { get; set; }
+
+    /// <summary>派息趋势的**结论**（递增 / 持平 / 波动 / 中断）——只有底仓法算，其它方法 null。
+    /// **只提示不过滤**：底仓最怕的不是股息率低一点，而是派息一年比一年少。
+    /// 2026-08-20：这里原来装的是"波动｜22年0.510 23年0.430 …"整串，结果表一列放不下、
+    /// 扫一眼也读不出重点；逐年明细改成 <see cref="AnnualDividends"/> 由条件详情里的柱状图呈现。</summary>
+    public string? DividendTrend { get; set; }
+
+    /// <summary>近5年逐年每股派息（升序，元/股）——只有底仓法填，条件详情里画柱状图用。
+    /// 一眼能看出是稳步递增还是某年腰斩，比一行数字快得多。</summary>
+    public List<(int Year, double PerShare)>? AnnualDividends { get; set; }
+
+    /// <summary>近3年逐年归母净利（升序，元）——只有底仓法填，条件详情里画柱状图用。
+    /// 结果表那一列只显示累计值（<see cref="ThreeYearCumProfit"/>），逐年看图。</summary>
+    public List<(int Year, double NetProfit)>? AnnualProfits { get; set; }
+
+    /// <summary>按当前股息率、达成"目标年化股息"所需投入的资金（元）——只有底仓法在用户填了目标
+    /// 时才算，否则 null。这是"全压这一只"的口径，实际要除以计划配置的只数，见引擎里的执行参考。</summary>
+    public double? RequiredCapitalForTarget { get; set; }
+
     /// <summary>近60个交易日 |当日涨跌| 的均值（0.03=3%）；没算的方法为 null。同样是结果表要
     /// 直接展示的列——它决定该配多大仓位（-10%止损在5%日波动下两三天就会被噪音打掉），
     /// 也是回调法区分底仓/主动仓的依据之一。</summary>

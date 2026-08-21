@@ -17,9 +17,10 @@ namespace StockPlatform.Analyzer.ViewModels;
 ///
 /// 界面 Tab 顺序（2026-08-11 按用户要求调整，权威顺序看 MainWindow.xaml 里 TabItem 的排列，这里
 /// 各属性的声明顺序尽量跟它保持一致，方便对照）：
-///   我的交易 / 每日晨检 / 自选股 / 查询 / 短线法  ← 每天真正会点的这几个放最前
-///   然后是其余选股方法与工具，保持原有相对顺序：三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 / 金叉法 /
-///   回调法 / 阶梯低点法 / 因子法 / 板块热度。
+///   主动仓 / 短线法 / 底仓 / 底仓法  ← 2026-08-20 按用户要求提到最前：两层仓位各自
+///   紧跟自己的选股法（主动仓←短线法、底仓←底仓法），日常动线就是这四个来回切
+///   然后是每日晨检 / 自选股 / 查询，再是其余选股方法与工具，保持原有相对顺序：
+///   三角收敛 / 峰哥法 / 耀哥法 / 彬哥法 / 金叉法 / 阶梯低点法 / 因子法 / 板块热度。
 /// 类名仍叫
 /// TriangleConvergence/Foundation/BottomRebound/MidCapPullback/GoldenCross——描述的是算法本身，
 /// 跟人名/Tab 中文名无关。
@@ -42,18 +43,24 @@ public class MainViewModel : INotifyPropertyChanged
 
     /// <summary>本地数据库文件的完整路径——"行情详情"里的"其他数据"要按表直接读十几张表
     /// （见 SqliteStockDossierReader），那些表在这里没有对应仓储被注入，给路径最直接。</summary>
-    public string TotalDbPath => _paths.TotalDb;
+    public string CurrentDbPath => _paths.CurrentDb;
 
     public MorningCheckTabViewModel MorningCheckTab { get; }
-    /// <summary>"我的交易"——打算买卖、每天要盯的那一小撮票（晨检只体检这些）。跟 WatchlistTab
+    /// <summary>"主动仓"——打算买卖、每天要盯的那一小撮票（晨检只体检这些）。跟 WatchlistTab
     /// 共用同一个 watchlist.json，靠 WatchlistEntry.IsInTradePool 区分，见 TradePoolTabViewModel。
     /// 界面上紧跟在"每日晨检"后面：晨检看结论 → 这里执行/录买卖，是日常动线。</summary>
     public TradePoolTabViewModel TradePoolTab { get; }
     public FoundationTabViewModel FoundationTab { get; }
     public GoldenCrossTabViewModel GoldenCrossTab { get; }
-    /// <summary>"回调法"——按用户自述的买股原则（盈利好/不追高/到价卖）建的方法，
-    /// 条件取舍全部有回测依据，见 PullbackAnalysisEngine 的注释。</summary>
-    public PullbackTabViewModel PullbackTab { get; }
+    /// <summary>"底仓法"（2026-08-20 由"回调法"改造而来）——筛选能长期拿着吃分红的股票。
+    /// 原回调法里的主动仓那一路已交给 <see cref="ShortTermTab"/>。⚠ 这个方法没有回测支持，
+    /// 条件是按"拿分红"的目的推的，理由见 CorePositionAnalysisEngine 的注释。</summary>
+    public CorePositionScreenTabViewModel CorePositionScreenTab { get; }
+
+    /// <summary>【底仓】页——记录"用来拿分红、基本不动"的那部分持仓。跟 <see cref="TradePoolTab"/>
+    /// （主动仓、走短线纪律）是两套数据、两个文件，界面上也刻意用不同的列：那边看止亏价和±10%，
+    /// 这边看股息率、连续分红、累计已收股息、免税到期日。**本页不进晨检**（2026-08-20 用户确认）。</summary>
+    public CorePositionTabViewModel CorePositionTab { get; }
     public BottomReboundTabViewModel BottomReboundTab { get; }
     public MidCapPullbackTabViewModel MidCapPullbackTab { get; }
     public TriangleConvergenceTabViewModel TriangleConvergenceTab { get; }
@@ -71,38 +78,36 @@ public class MainViewModel : INotifyPropertyChanged
     private string _dataStatusText = "";
     public string DataStatusText { get => _dataStatusText; set => Set(ref _dataStatusText, value); }
 
-    /// <summary>Where the Analyzer expects the database — no netdisk sync (see
-    /// doc/data-platform-design.md section 6.5.1, automating that turned out not to be workable),
-    /// the user manually copies the Fetcher's output here with this exact name.</summary>
+    /// <summary>分析程序读的那个库在哪——就是 Fetcher 写的 current.sqlite，两个程序装在同一个
+    /// 目录、共用同一个 data/local，所以不用拷贝也不用下载（2026-08-21 起；此前是从 GitHub
+    /// Releases 下载分发，库涨到 7GB 后传不上去也下不下来，那套上传/下载已删除）。</summary>
     public string LocalDbPathText { get; }
 
     public RelayCommand RefreshCommand { get; }
     public RelayCommand OpenDataFolderCommand { get; }
-    public RelayCommand SyncCommand { get; }
 
-    private bool _isSyncing;
-    public bool IsSyncing { get => _isSyncing; private set => Set(ref _isSyncing, value); }
-
-    private string _syncStatusText = "";
-    /// <summary>"从GitHub更新数据"的进度/结果单行提示（会被下载百分比等不断覆盖）。</summary>
-    public string SyncStatusText { get => _syncStatusText; set => Set(ref _syncStatusText, value); }
-
-    public MainViewModel(AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, INetInflowRepository netInflowRepository, IBoardRepository boardRepository, IShareholderRepository shareholderRepository, IMarginRepository marginRepository, IFinancialRepository financialRepository, IDividendRepository dividendRepository)
+    public MainViewModel(AnalyzerPaths paths, IBarRepository barRepository, IFundamentalMetricRepository fundamentalRepository, INetInflowRepository netInflowRepository, IBoardRepository boardRepository, IShareholderRepository shareholderRepository, IMarginRepository marginRepository, IFinancialRepository financialRepository, IDividendRepository dividendRepository, IIndexConsRepository indexConsRepository)
     {
         _paths = paths;
         _barRepository = barRepository;
 
         var watchlistStore = new JsonWatchlistStore(paths.WatchlistPath);
-        // 交易费率（佣金/过户费/印花税）全程序一份，"我的交易"页可改——两个自选相关的页共用同一个实例，
+        // 交易费率（佣金/过户费/印花税）全程序一份，"主动仓"页可改——两个自选相关的页共用同一个实例，
         // 否则改完这页那页还按老费率算盈亏。
         var feeStore = new TradeFeeStore(paths.TradeFeePath);
         // 仓位计算器的账户级参数（可投资总资金/凯利折扣/单票上限）——跟费率同理，全程序一份，
-        // 两个入口（"我的交易"页顶部按钮、每行的【仓位】按钮）打开的是同一份设置。
+        // 两个入口（"主动仓"页顶部按钮、每行的【仓位】按钮）打开的是同一份设置。
         SizingStore = new PositionSizingStore(paths.PositionSizingPath);
-        MorningCheckTab = new MorningCheckTabViewModel(barRepository, shareholderRepository, watchlistStore);
+        MorningCheckTab = new MorningCheckTabViewModel(barRepository, shareholderRepository, watchlistStore, indexConsRepository);
         FoundationTab = new FoundationTabViewModel(paths, barRepository, watchlistStore);
         GoldenCrossTab = new GoldenCrossTabViewModel(paths, barRepository, watchlistStore);
-        PullbackTab = new PullbackTabViewModel(paths, barRepository, financialRepository, dividendRepository, watchlistStore);
+        // 底仓记录存在自己的 core-positions.json 里（不是 watchlist.json 加标记），理由见
+        // AnalyzerPaths.CorePositionPath——最关键的是晨检那套短线纪律绝不能误伤底仓。
+        var corePositionStore = new JsonCorePositionStore(paths.CorePositionPath);
+        CorePositionTab = new CorePositionTabViewModel(corePositionStore, barRepository, dividendRepository, feeStore);
+        CorePositionScreenTab = new CorePositionScreenTabViewModel(paths, barRepository, financialRepository, dividendRepository, watchlistStore, corePositionStore);
+        // 底仓法页"加入底仓"后，底仓页要跟着刷新（同交易池那对页的联动）。
+        CorePositionScreenTab.CorePositionsChanged = () => CorePositionTab.Reload();
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, shareholderRepository, marginRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);
@@ -122,7 +127,7 @@ public class MainViewModel : INotifyPropertyChanged
         TradePoolTab.TradePoolChanged = () => WatchlistTab.Reload();
         QueryTab.TradePoolChanged = () => { TradePoolTab.Reload(); WatchlistTab.Reload(); };
 
-        LocalDbPathText = $"本地数据文件：{_paths.TotalDb}（需要手动把 Fetcher 产出的数据库拷贝到这里，用这个文件名）";
+        LocalDbPathText = $"本地数据文件：{_paths.CurrentDb}（Fetcher 直接写这个文件，分析程序只读它）";
 
         RefreshCommand = new RelayCommand(_ => RefreshDataStatus());
         OpenDataFolderCommand = new RelayCommand(_ =>
@@ -130,29 +135,7 @@ public class MainViewModel : INotifyPropertyChanged
             Directory.CreateDirectory(_paths.LocalDir);
             Process.Start(new ProcessStartInfo(_paths.LocalDir) { UseShellExecute = true });
         });
-        SyncCommand = new RelayCommand(async _ => await RunSyncAsync(), _ => !IsSyncing);
-
         RefreshDataStatus();
-    }
-
-    private async Task RunSyncAsync()
-    {
-        IsSyncing = true;
-        try
-        {
-            var svc = new DataSyncService(_paths);
-            var progress = new Progress<string>(s => SyncStatusText = s);
-            await svc.UpdateAsync(progress);
-            RefreshDataStatus();
-        }
-        catch (Exception ex)
-        {
-            SyncStatusText = $"更新失败：{ex.Message}";
-        }
-        finally
-        {
-            IsSyncing = false;
-        }
     }
 
     /// <summary>
@@ -170,7 +153,7 @@ public class MainViewModel : INotifyPropertyChanged
     /// </summary>
     private void RefreshDataStatus()
     {
-        if (!File.Exists(_paths.TotalDb))
+        if (!File.Exists(_paths.CurrentDb))
         {
             DataStatusText = "本地还没有数据文件，请把 Fetcher 产出的数据库拷贝过来";
             return;

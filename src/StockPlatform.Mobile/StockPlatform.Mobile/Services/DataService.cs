@@ -3,22 +3,30 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using StockPlatform.Data.Sqlite;
-using StockPlatform.Data.Sync;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Mobile.Services;
 
 /// <summary>
-/// 定位/打开本地数据库（从服务端下载来的 total.sqlite），并封装"从服务端更新数据"。手机端不抓数据，
-/// 只下载现成库 + 离线分析。桌面版那套 SQLite 读取仓库直接复用。
+/// 定位/打开本地数据库。手机端不抓数据，只读现成的库做离线分析，桌面版那套 SQLite 读取仓库直接复用。
+///
+/// 库从哪来（2026-08-21 改）：**跟桌面分析程序读同一个 current.sqlite**。原先是从 GitHub Releases
+/// 下载全量基线+每日增量（DataDownloadService），但库长到 7.5GB、压完 1.8GB 贴着 GitHub 单资产 2GB
+/// 上限，传不上去也下不下来，那套下载已整体删除（见 doc/data-platform-design.md 的 2026-08-21 记录）。
+///
+/// 查找顺序：① 逐级向上找 publish/data/local/current.sqlite——桌面变体(StockPlatform.Mobile.Desktop)
+/// 跟 Fetcher/Analyzer 在同一台机器上跑，直接读它们那个库，零拷贝零配置；② 找不到就用 App 私有目录下
+/// 的同名文件——真机(Android/iOS)上没有 publish 目录，只能由用户自己把库拷进去。
 /// </summary>
 public class DataService
 {
-    /// <summary>App 存放已下载数据库的正式位置——各平台"本地应用数据目录"下 StockPlatform/。
+    /// <summary>App 自己的状态目录（自选股等）——各平台"本地应用数据目录"下 StockPlatform/。
     /// Android 落到 App 私有目录，桌面落到 %LOCALAPPDATA%。</summary>
     public string DataDir { get; }
-    public string OfficialDbPath { get; }
+
+    /// <summary>真机上放库的位置（没有 publish 目录时的落点，需用户手动拷贝进来）。</summary>
+    public string LocalDbPath { get; }
 
     public DataService()
     {
@@ -26,19 +34,27 @@ public class DataService
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "StockPlatform");
         Directory.CreateDirectory(DataDir);
-        OfficialDbPath = Path.Combine(DataDir, "total.sqlite");
+        LocalDbPath = Path.Combine(DataDir, "current.sqlite");
     }
 
-    /// <summary>读库用的路径：正式位置有就用它；桌面开发期兜底用电脑上 Fetcher 的库（Android 上不存在、忽略）。</summary>
-    public string DbPath
+    /// <summary>读库用的路径：优先桌面上那份共享库，其次 App 私有目录（见类注释）。</summary>
+    public string DbPath => ProbeSharedDb() ?? LocalDbPath;
+
+    /// <summary>从当前目录和程序目录逐级向上找 publish/data/local/current.sqlite——跟
+    /// FactorLab.ProbeDb 同一套查找。真机上必然找不到（没有这个目录），返回 null 交给
+    /// <see cref="LocalDbPath"/>。</summary>
+    private static string? ProbeSharedDb()
     {
-        get
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
         {
-            const string desktopDev = @"C:\Chingli\Git\stock\publish\data\local\total.sqlite";
-            return File.Exists(OfficialDbPath) ? OfficialDbPath
-                 : File.Exists(desktopDev) ? desktopDev
-                 : OfficialDbPath;
+            var dir = new DirectoryInfo(start);
+            for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
+            {
+                var candidate = Path.Combine(dir.FullName, "publish", "data", "local", "current.sqlite");
+                if (File.Exists(candidate)) return candidate;
+            }
         }
+        return null;
     }
 
     public bool DbExists => File.Exists(DbPath);
@@ -47,6 +63,10 @@ public class DataService
     public INetInflowRepository NetInflowRepository => new SqliteNetInflowRepository(DbPath);
     public IFundamentalMetricRepository FundamentalRepository => new SqliteFundamentalMetricRepository(DbPath);
     public IBoardRepository BoardRepository => new SqliteBoardRepository(DbPath);
+    // 下面三个是彬哥法/短线法要用的（桌面版引擎 2026-08 加了这些依赖，见 ScreeningMethods）。
+    public IShareholderRepository ShareholderRepository => new SqliteShareholderRepository(DbPath);
+    public IMarginRepository MarginRepository => new SqliteMarginRepository(DbPath);
+    public IFinancialRepository FinancialRepository => new SqliteFinancialRepository(DbPath);
 
     public DateTime? LatestDay =>
         DbExists ? BarRepository.GetOverallLatestPeriodStart(Granularity.Day) : null;
@@ -54,8 +74,4 @@ public class DataService
     public Dictionary<string, string> StockNames() =>
         DbExists ? SqliteStockMetaUpsert.GetAll(DbPath).ToDictionary(s => s.Code, s => s.Name)
                  : new Dictionary<string, string>();
-
-    /// <summary>从服务端下载/合并数据到正式位置（复用共享的 DataDownloadService）。</summary>
-    public System.Threading.Tasks.Task UpdateFromServerAsync(IProgress<string> status, System.Threading.CancellationToken ct = default)
-        => new DataDownloadService(OfficialDbPath, DataDir).UpdateAsync(status, ct);
 }

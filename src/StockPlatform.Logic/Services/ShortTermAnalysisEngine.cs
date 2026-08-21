@@ -192,7 +192,7 @@ public class ShortTermAnalysisEngine
         volBase /= VolBaseWindow;
         double volRatio = volBase > 0 ? bars[i].Volume / volBase : 1;
 
-        // ── 质量底线（不做优选：回测显示ROE/增长等重基本面筛选是负贡献，见 PullbackAnalysisEngine）──
+        // ── 质量底线（不做优选：回测显示ROE/增长等重基本面筛选是负贡献（原回调法的回测，见 CorePositionAnalysisEngine 的类注释；⚠ 那结论只在本方法这种短线口径下成立））──
         var fin = _financials.GetValueOrDefault(code);
         double? netProfit = fin?.Get(FinancialKeys.NetProfitParent);
         double? ocf = fin?.Get(FinancialKeys.Ocf);
@@ -403,7 +403,7 @@ public class ShortTermAnalysisEngine
         return "⚠ 超验证范围 / <10";
     }
 
-    /// <summary>低于MA20的幅度落在哪个回测档位——同 PullbackAnalysisEngine.DepthNote，
+    /// <summary>低于MA20的幅度落在哪个回测档位——同原回调法的 DepthNote（该引擎已改造成 CorePositionAnalysisEngine，底仓法不再分档），
     /// 这里的入参是正数（低于多少）。</summary>
     private static string DepthNote(double below)
     {

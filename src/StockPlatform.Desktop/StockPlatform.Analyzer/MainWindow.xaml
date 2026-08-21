@@ -1,4 +1,4 @@
-<Window x:Class="StockPlatform.Analyzer.MainWindow"
+﻿<Window x:Class="StockPlatform.Analyzer.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:StockPlatform.Analyzer"
@@ -40,25 +40,22 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- 顶部"手动拷贝数据库"提示已去掉——数据改成用下面的"从服务端更新数据"按钮自动下载。 -->
+        <!-- 顶部"手动拷贝数据库"提示已去掉——分析程序直接读 Fetcher 写的那个库（同一个 data/local 目录），不再拷贝也不再下载。 -->
 
         <!-- Data status — also shared, both methods read the same local file. -->
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
             <TextBlock Text="{Binding DataStatusText}" VerticalAlignment="Center" FontWeight="Bold" />
             <Button Content="刷新" Command="{Binding RefreshCommand}" Width="80" Margin="12,0,0,0"
-                    ToolTip="重新拷贝了数据库文件之后点这个，不用重启程序" />
-            <Button Content="从服务端更新数据" Command="{Binding SyncCommand}" Width="130" Margin="8,0,0,0"
-                    ToolTip="首次下载全量数据库，之后只下载并合并每日增量（公开下载，无需登录）" />
-            <TextBlock Text="{Binding SyncStatusText}" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="#084298" TextTrimming="CharacterEllipsis" MaxWidth="520" />
+                    ToolTip="Fetcher 抓完新数据之后点这个，不用重启程序" />
         </StackPanel>
 
         <!-- Four independent analysis methods (doc/analysis-app-design.md section 3.2) plus a
              cross-method 自选股 tab — each tab has its own controls/results/log, switching tabs
              doesn't affect the others. -->
         <TabControl Grid.Row="2" SelectionChanged="TabControl_SelectionChanged">
-            <!-- 我的交易（2026-07-31新增）——只放"我打算买卖、要每天盯"的票：买卖信息只在这一页录，
+            <!-- 主动仓（2026-07-31新增）——只放"我打算买卖、要每天盯"的票：买卖信息只在这一页录，
                  每日晨检也只体检这一页。跟"自选股（算法验证）"是两回事，见 TradePoolTabViewModel 注释。 -->
-            <TabItem Header="我的交易">
+            <TabItem Header="主动仓">
                 <Grid DataContext="{Binding TradePoolTab}" Margin="0,10,0,0">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -96,7 +93,7 @@
                                                 SortMemberPath="Method" />
                             <!-- 加入时价格 + 那天的日期，格式跟右边"最新收盘"一致，两列并排直接对比
                                  （2026-08-19 按用户要求从表尾移到这里并补上日期） -->
-                            <DataGridTextColumn Header="加入时价格" Binding="{Binding PriceAtPickText}" Width="130" IsReadOnly="True">
+                            <DataGridTextColumn Header="加入时价格" Binding="{Binding PriceAtPickText}" Width="130" IsReadOnly="True" SortMemberPath="PriceAtPick">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="ToolTip" Value="{Binding PriceAtPickTooltip}" />
@@ -108,10 +105,10 @@
                                     </Style>
                                 </DataGridTextColumn.HeaderStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="最新收盘" Binding="{Binding LatestCloseText}" Width="130" IsReadOnly="True" />
+                            <DataGridTextColumn Header="最新收盘" Binding="{Binding LatestCloseText}" Width="130" IsReadOnly="True" SortMemberPath="LatestClose" />
                             <!-- 财报披露日（2026-08-17新增）：本地库只有"已披露的报告期"，预约披露日拿不到，
                                  所以手填。临近7天标红，晨检也会提醒——跨财报持仓是回测参数里没有的事件风险。 -->
-                            <DataGridTextColumn Header="财报日✎" Binding="{Binding EarningsDateText, UpdateSourceTrigger=LostFocus}" Width="95">
+                            <DataGridTextColumn Header="财报日✎" Binding="{Binding EarningsDateText, UpdateSourceTrigger=LostFocus}" Width="95" SortMemberPath="EarningsDateValue">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="Foreground" Value="{Binding EarningsColor}" />
@@ -151,14 +148,14 @@
                                     </Style>
                                 </DataGridTextColumn.HeaderStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="持仓股数" Binding="{Binding PositionText}" Width="85" IsReadOnly="True">
+                            <DataGridTextColumn Header="持仓股数" Binding="{Binding PositionText}" Width="85" IsReadOnly="True" SortMemberPath="RemainingSharesValue">
                                 <DataGridTextColumn.HeaderStyle>
                                     <Style TargetType="DataGridColumnHeader">
                                         <Setter Property="ToolTip" Value="还拿着多少股 = 买入合计 − 卖出合计（分批卖出后就是剩下的那部分）" />
                                     </Style>
                                 </DataGridTextColumn.HeaderStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="止亏价" Binding="{Binding BreakEvenText}" Width="80" IsReadOnly="True">
+                            <DataGridTextColumn Header="止亏价" Binding="{Binding BreakEvenText}" Width="80" IsReadOnly="True" SortMemberPath="BreakEvenValue">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="Foreground" Value="{Binding BreakEvenColor}" />
@@ -172,7 +169,7 @@
                                     </Style>
                                 </DataGridTextColumn.HeaderStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="持仓盈亏(含费·按现价全卖)" Binding="{Binding HoldingText}" Width="230" IsReadOnly="True">
+                            <DataGridTextColumn Header="持仓盈亏(含费·按现价全卖)" Binding="{Binding HoldingText}" Width="230" IsReadOnly="True" SortMemberPath="HoldingPnlValue">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="Foreground" Value="{Binding HoldingColor}" />
@@ -196,306 +193,6 @@
                                             <Button Content="仓位" Width="52" Margin="2,1" Click="TradePoolSizingButton_Click"
                                                     ToolTip="按凯利公式算这只票该占多大仓位——填上你估的上涨概率、目标涨幅和止损幅度，直接给出该买/该卖多少股。&#10;现价（最新收盘）和当前持仓股数会自动带进去。" />
                                         </StackPanel>
-                                    </DataTemplate>
-                                </DataGridTemplateColumn.CellTemplate>
-                            </DataGridTemplateColumn>
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </Grid>
-            </TabItem>
-
-            <TabItem Header="每日晨检">
-                <Grid DataContext="{Binding MorningCheckTab}" Margin="0,10,0,0">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                        <RowDefinition Height="150" />
-                    </Grid.RowDefinitions>
-
-                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-                        <TextBlock Text="每天早上：先点上方“从服务端更新数据”，再点“刷新”，然后按下面“今日行动建议”执行"
-                                   VerticalAlignment="Center" Foreground="Gray" />
-                        <Button Content="刷新" Command="{Binding RefreshCommand}" Width="90" Margin="16,0,0,0"
-                                ToolTip="用本地最新数据重算红绿灯和自选股体检" />
-                        <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
-                                Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看各条纪律的规则与回测依据" />
-                        <TextBlock Text="{Binding DataDateText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="#084298" FontWeight="SemiBold" />
-                    </StackPanel>
-
-                    <!-- 大盘总开关：先给一句大字结论，下面列6个指数的红绿灯明细 -->
-                    <GroupBox Grid.Row="1" Header="大盘总开关（沪深300 + 创业板指 vs 各自60日线）" Margin="0,0,0,8">
-                        <StackPanel>
-                            <TextBlock Text="{Binding GateText}" Foreground="{Binding GateColor}" FontSize="15" FontWeight="Bold" Margin="4,6,4,6" TextWrapping="Wrap" />
-                            <DataGrid ItemsSource="{Binding IndexRows}" AutoGenerateColumns="False" IsReadOnly="True"
-                                      CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
-                                      AlternatingRowBackground="#F5F5F5" >
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Header="指数" Binding="{Binding Name}" Width="110" />
-                                    <DataGridTextColumn Header="收盘（日期）" Binding="{Binding CloseText}" Width="130" />
-                                    <DataGridTextColumn Header="MA20" Binding="{Binding Ma20Text}" Width="110" />
-                                    <DataGridTextColumn Header="MA60" Binding="{Binding Ma60Text}" Width="80" />
-                                    <DataGridTextColumn Header="vs 60日线" Binding="{Binding StateText}" Width="*">
-                                        <DataGridTextColumn.ElementStyle>
-                                            <Style TargetType="TextBlock">
-                                                <Setter Property="Foreground" Value="{Binding StateColor}" />
-                                                <Setter Property="FontWeight" Value="SemiBold" />
-                                            </Style>
-                                        </DataGridTextColumn.ElementStyle>
-                                    </DataGridTextColumn>
-                                </DataGrid.Columns>
-                            </DataGrid>
-                        </StackPanel>
-                    </GroupBox>
-
-                    <!-- 自选股体检：问题最严重的排最前 -->
-                    <GroupBox Grid.Row="2" Header="自选股体检（短线R1：浮盈+跌破MA5就卖 / 时间止损20天(高波15天) / 15%回撤止损 / +50%止盈减仓 / 户数暴增警示 / 60日线下不加仓）">
-                        <DataGrid ItemsSource="{Binding StockRows}" AutoGenerateColumns="False" IsReadOnly="True"
-                                  CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
-                                  AlternatingRowBackground="#F5F5F5"
-                                  ToolTip="从各选股Tab“加入自选”的股票每天在这里逐只体检；问题最严重的排最前">
-                            <DataGrid.Columns>
-                                <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="70" />
-                                <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="100" />
-                                <DataGridTextColumn Header="状态" Binding="{Binding StatusText}" Width="55">
-                                    <DataGridTextColumn.HeaderStyle>
-                                        <Style TargetType="DataGridColumnHeader">
-                                            <Setter Property="ToolTip" Value="持仓=自选股Tab里填过买入价（止损/止盈按真实成本算）；观察=还没买" />
-                                        </Style>
-                                    </DataGridTextColumn.HeaderStyle>
-                                    <DataGridTextColumn.ElementStyle>
-                                        <Style TargetType="TextBlock">
-                                            <Setter Property="Foreground" Value="{Binding StatusColor}" />
-                                            <Setter Property="FontWeight" Value="SemiBold" />
-                                        </Style>
-                                    </DataGridTextColumn.ElementStyle>
-                                </DataGridTextColumn>
-                                <!-- 方法列表头带下拉过滤器：选某个方法后，表格和下面的"今日行动建议"都只算
-                                     该方法选出的股票（含平均涨跌/上涨占比），用来横向对比各选股方法的表现。
-                                     列头不在行的可视树里、拿不到 Tab 的 DataContext，所以用 RelativeSource
-                                     往上找 DataGrid 再取它的 DataContext（WPF 里列头绑定的标准做法）。
-                                     CanUserSort=False：避免点下拉时顺带触发这一列的排序。 -->
-                                <DataGridTextColumn Binding="{Binding Method}" Width="150" CanUserSort="False">
-                                    <DataGridTextColumn.Header>
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="方法" VerticalAlignment="Center" />
-                                            <ComboBox Width="98" Margin="6,0,0,0" Padding="4,1"
-                                                      ItemsSource="{Binding DataContext.MethodFilters, RelativeSource={RelativeSource AncestorType=DataGrid}}"
-                                                      SelectedItem="{Binding DataContext.SelectedMethodFilter, RelativeSource={RelativeSource AncestorType=DataGrid}, Mode=TwoWay}"
-                                                      DisplayMemberPath="Display"
-                                                      ToolTip="按选股方法过滤：只看某个方法选出的股票，表格和&quot;今日行动建议&quot;（含平均涨跌、上涨占比）都跟着只算这个方法，便于横向对比各方法表现。括号里是该方法的股票只数。切回&quot;全部方法&quot;看全部" />
-                                        </StackPanel>
-                                    </DataGridTextColumn.Header>
-                                </DataGridTextColumn>
-                                <DataGridTextColumn Header="基准日期" Binding="{Binding DataDate}" Width="95">
-                                    <DataGridTextColumn.HeaderStyle>
-                                        <Style TargetType="DataGridColumnHeader">
-                                            <Setter Property="ToolTip" Value="持仓=买入日期（带&quot;买&quot;字）；观察=自选那天。涨跌/回撤都从这天起算" />
-                                        </Style>
-                                    </DataGridTextColumn.HeaderStyle>
-                                </DataGridTextColumn>
-                                <DataGridTextColumn Header="最新收盘" Binding="{Binding LatestCloseText}" Width="110" />
-                                <DataGridTextColumn Header="60日线" Binding="{Binding Ma60Text}" Width="70" />
-                                <!-- MA5：短线卖出纪律R1的触发线（浮盈 + 收盘跌破MA5 = 次日卖）。
-                                     摆成一列是为了在触发的前一天就能看见"快贴上了"，而不是等
-                                     "今日动作"变红才知道。回测：R1 三组期望 0.77/0.79/0.96%，
-                                     胜率 75.6/69.0/63.8%，全面优于"+5%就走"。 -->
-                                <DataGridTextColumn Header="MA5(R1线)" Binding="{Binding Ma5Text}" Width="130">
-                                    <DataGridTextColumn.ElementStyle>
-                                        <Style TargetType="TextBlock">
-                                            <Setter Property="Foreground" Value="{Binding Ma5Color}" />
-                                        </Style>
-                                    </DataGridTextColumn.ElementStyle>
-                                </DataGridTextColumn>
-                                <!-- 日均波幅：决定时间止损用几天（>4.5%→15天，其余→20天），也提示仓位。
-                                     >4.5% 那一档回测里所有卖出规则都会退化，带 ⚠。 -->
-                                <DataGridTextColumn Header="日均波幅" Binding="{Binding VolatilityText}" Width="80" />
-                                <DataGridTextColumn Header="较基准涨跌" Binding="{Binding SincePickText}" Width="90">
-                                    <DataGridTextColumn.HeaderStyle>
-                                        <Style TargetType="DataGridColumnHeader">
-                                            <Setter Property="ToolTip" Value="持仓=较买入价；观察=较自选日收盘价" />
-                                        </Style>
-                                    </DataGridTextColumn.HeaderStyle>
-                                    <DataGridTextColumn.ElementStyle>
-                                        <Style TargetType="TextBlock">
-                                            <Setter Property="Foreground" Value="{Binding SincePickColor}" />
-                                        </Style>
-                                    </DataGridTextColumn.ElementStyle>
-                                </DataGridTextColumn>
-                                <DataGridTextColumn Header="持仓盈亏" Binding="{Binding PnlText}" Width="130">
-                                    <DataGridTextColumn.HeaderStyle>
-                                        <Style TargetType="DataGridColumnHeader">
-                                            <Setter Property="ToolTip" Value="仅持仓显示：填了股数=盈亏金额（涨跌幅），只填买入价=涨跌幅" />
-                                        </Style>
-                                    </DataGridTextColumn.HeaderStyle>
-                                    <DataGridTextColumn.ElementStyle>
-                                        <Style TargetType="TextBlock">
-                                            <Setter Property="Foreground" Value="{Binding PnlColor}" />
-                                            <Setter Property="FontWeight" Value="SemiBold" />
-                                        </Style>
-                                    </DataGridTextColumn.ElementStyle>
-                                </DataGridTextColumn>
-                                <DataGridTextColumn Header="距高点回撤" Binding="{Binding DrawdownText}" Width="90" />
-                                <DataGridTextColumn Header="户数环比" Binding="{Binding HolderChangeText}" Width="120" />
-                                <DataGridTextColumn Header="参考价（纪律换算）" Binding="{Binding AdviceText}" Width="185">
-                                    <DataGridTextColumn.HeaderStyle>
-                                        <Style TargetType="DataGridColumnHeader">
-                                            <Setter Property="ToolTip" Value="持仓=建议卖出价：止损线(买入后最高收盘×0.85)、止盈线(买入价×1.5)；观察=建议买入价：线下为站上60日线的价位、线上为回踩MA20位置。是纪律触发条件的价格换算，不是预测" />
-                                        </Style>
-                                    </DataGridTextColumn.HeaderStyle>
-                                    <DataGridTextColumn.ElementStyle>
-                                        <Style TargetType="TextBlock">
-                                            <Setter Property="Foreground" Value="#0F6674" />
-                                        </Style>
-                                    </DataGridTextColumn.ElementStyle>
-                                </DataGridTextColumn>
-                                <DataGridTextColumn Header="今日动作" Binding="{Binding ActionText}" Width="*">
-                                    <DataGridTextColumn.ElementStyle>
-                                        <Style TargetType="TextBlock">
-                                            <Setter Property="Foreground" Value="{Binding ActionColor}" />
-                                            <Setter Property="FontWeight" Value="SemiBold" />
-                                            <Setter Property="TextWrapping" Value="Wrap" />
-                                        </Style>
-                                    </DataGridTextColumn.ElementStyle>
-                                </DataGridTextColumn>
-                            </DataGrid.Columns>
-                        </DataGrid>
-                    </GroupBox>
-
-                    <GroupBox Grid.Row="3" Header="今日行动建议" Margin="0,8,0,0">
-                        <TextBox Text="{Binding SummaryText, Mode=OneWay}" IsReadOnly="True" FontFamily="Microsoft YaHei" FontSize="13"
-                                 VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" BorderThickness="0"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制" />
-                    </GroupBox>
-                </Grid>
-            </TabItem>
-
-            <TabItem Header="自选股">
-                <Grid DataContext="{Binding WatchlistTab}" Margin="0,10,0,0">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                    </Grid.RowDefinitions>
-
-                    <StackPanel Grid.Row="0" Margin="0,0,0,10">
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="各选股方法丢进来的【算法验证样本】——只用来统计各方法准不准，不代表要买。想买卖的票请勾选后点右边&quot;加入交易池&quot;。"
-                                       VerticalAlignment="Center" Foreground="Gray" TextWrapping="Wrap" MaxWidth="520" />
-                            <Button Content="加入交易池" Command="{Binding AddToTradePoolCommand}" Width="90" Margin="16,0,0,0"
-                                    ToolTip="把勾选的票放进&quot;我的交易&quot;页——买卖信息在那边录，每日晨检也只体检那边的票。&#10;注意：加入后这些票【仍然留在本页】，因为验证样本不能被挑走（只留下自己没看好的那些会让准确率统计失真）。" />
-                            <Button Content="刷新" Command="{Binding RefreshCommand}" Width="70" Margin="8,0,0,0" />
-                            <Button Content="移除勾选" Command="{Binding RemoveSelectedCommand}" Width="80" Margin="8,0,0,0"
-                                    ToolTip="从自选里彻底删除（连同交易池里的同一条记录一起删）" />
-                            <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
-                                    ToolTip="把自选股列表导出成 Excel(.xlsx)" />
-                        </StackPanel>
-                        <TextBlock Text="{Binding MethodStatsText}" Margin="0,6,0,0" Foreground="#084298" FontWeight="SemiBold" TextWrapping="Wrap"
-                                   ToolTip="按来源方法统计&quot;选中后涨跌幅&quot;的平均值与上涨占比——本页的核心产出。口径提醒：各方法的自选日期不同、持有时长不可比，这是粗对比；要严格评测得固定同一时间窗口。" />
-                    </StackPanel>
-
-                    <DataGrid x:Name="WatchlistGrid" Grid.Row="1" ItemsSource="{Binding Entries}" AutoGenerateColumns="False" IsReadOnly="False"
-                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
-                              AlternatingRowBackground="#F5F5F5"
-                              ToolTip="点&quot;条件详情&quot;查看加入时的判断依据（用最新数据重新画图），点&quot;行情详情&quot;查看当前行情">
-                        <DataGrid.Columns>
-                            <!-- 一点即勾（整格可点）——模板见 Window.Resources 里的 SelectCheckBoxCell；
-                                 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
-                            <DataGridTemplateColumn Width="36" CanUserSort="False"
-                                                    CellTemplate="{StaticResource SelectCheckBoxCell}">
-                                <DataGridTemplateColumn.Header>
-                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
-                                </DataGridTemplateColumn.Header>
-                            </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
-                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
-                            <DataGridTextColumn Header="板块(概念)" Binding="{Binding Board}" Width="200" IsReadOnly="True" />
-                            <DataGridTextColumn Header="行业" Binding="{Binding Industry}" Width="120" IsReadOnly="True" />
-                            <DataGridTextColumn Header="方法" Binding="{Binding Method}" Width="80" IsReadOnly="True" />
-                            <DataGridTextColumn Header="数据日期" Binding="{Binding DataDate}" Width="90" IsReadOnly="True" />
-                            <DataGridTextColumn Header="当时价格" Binding="{Binding PriceAtPick, StringFormat=F2}" Width="80" IsReadOnly="True" />
-                            <DataGridTextColumn Header="最新收盘" Binding="{Binding LatestCloseText}" Width="130" IsReadOnly="True" />
-                            <DataGridTextColumn Header="选中后涨跌幅" Binding="{Binding ChangeText}" Width="100" IsReadOnly="True">
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Foreground" Value="{Binding ChangeColor}" />
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
-                            </DataGridTextColumn>
-                            <!-- 买卖信息不在本页录（2026-07-31改）——本页是算法验证样本，只看"选中后涨跌幅"；
-                                 买入/卖出请到"我的交易"页。这里只用一列标出哪些样本已经进了交易池。 -->
-                            <DataGridTextColumn Header="交易池" Binding="{Binding TradePoolText}" Width="70" IsReadOnly="True">
-                                <DataGridTextColumn.HeaderStyle>
-                                    <Style TargetType="DataGridColumnHeader">
-                                        <Setter Property="ToolTip" Value="是否已放进&quot;我的交易&quot;页：✔持仓=已填买入价；✔已加入=打算买、还没填买入价；空=只是算法样本" />
-                                    </Style>
-                                </DataGridTextColumn.HeaderStyle>
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Foreground" Value="{Binding TradePoolColor}" />
-                                        <Setter Property="FontWeight" Value="SemiBold" />
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedText}" Width="70" IsReadOnly="True" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
-                                <DataGridTemplateColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <StackPanel Orientation="Horizontal">
-                                            <Button Content="条件详情" Width="70" Margin="2,1" Click="WatchlistCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="WatchlistQuoteDetailButton_Click" />
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </DataGridTemplateColumn.CellTemplate>
-                            </DataGridTemplateColumn>
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </Grid>
-            </TabItem>
-
-            <TabItem Header="查询">
-                <Grid DataContext="{Binding QueryTab}" Margin="0,10,0,0">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                    </Grid.RowDefinitions>
-
-                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-                        <TextBlock Text="股票代码或名称：" VerticalAlignment="Center" />
-                        <TextBox Width="200" Margin="4,0" VerticalContentAlignment="Center"
-                                 Text="{Binding QueryText, UpdateSourceTrigger=PropertyChanged}"
-                                 ToolTip="支持部分匹配，如输入 000066 或 长城，回车或点查询">
-                            <TextBox.InputBindings>
-                                <KeyBinding Key="Return" Command="{Binding SearchCommand}" />
-                            </TextBox.InputBindings>
-                        </TextBox>
-                        <Button Content="查询" Command="{Binding SearchCommand}" Width="90" Margin="8,0,0,0" />
-                        <Button Content="加入交易池" Command="{Binding AddToWatchlistCommand}" Width="90" Margin="16,0,0,0"
-                                ToolTip="把勾选的个股放进&quot;我的交易&quot;页（记录当天收盘价）——从这里手工搜出来加的，本来就是你看好想买卖的票，所以直接进交易池、纳入每日晨检体检，买卖信息去&quot;我的交易&quot;页录。&#10;指数/ETF/板块不支持。已经在自选里的票会被一并标进交易池。" />
-                        <TextBlock Text="{Binding StatusText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
-                    </StackPanel>
-
-                    <DataGrid x:Name="QueryGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
-                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
-                              AlternatingRowBackground="#F5F5F5"
-                              ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;K线详情&quot;查看该股票的行情K线图">
-                        <DataGrid.Columns>
-                            <!-- 一点即勾（整格可点）——模板见 Window.Resources 里的 SelectCheckBoxCell；
-                                 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
-                            <DataGridTemplateColumn Width="36" CanUserSort="False"
-                                                    CellTemplate="{StaticResource SelectCheckBoxCell}">
-                                <DataGridTemplateColumn.Header>
-                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
-                                </DataGridTemplateColumn.Header>
-                            </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="90" IsReadOnly="True" />
-                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="160" IsReadOnly="True" />
-                            <DataGridTextColumn Header="类型" Binding="{Binding Type}" Width="80" IsReadOnly="True" />
-                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="140" IsReadOnly="True" />
-                            <DataGridTemplateColumn Header="操作" Width="120">
-                                <DataGridTemplateColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <Button Content="K线详情" Width="90" Margin="2,1" Click="QueryQuoteDetailButton_Click" />
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
@@ -583,8 +280,8 @@
                             <DataGridTextColumn Header="日均波幅" Binding="{Binding DailyVolatilityText}" Width="80" IsReadOnly="True"
                                                 SortMemberPath="DailyVolatility" />
                             <DataGridTextColumn Header="现价" Binding="{Binding LastClose, StringFormat={}{0:F2}}" Width="70" IsReadOnly="True" />
-                            <DataGridTextColumn Header="目标+10%" Binding="{Binding BigTargetText}" Width="80" IsReadOnly="True" />
-                            <DataGridTextColumn Header="止损-10%" Binding="{Binding StopPriceText}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="目标+10%" Binding="{Binding BigTargetText}" Width="80" IsReadOnly="True" SortMemberPath="LastClose" />
+                            <DataGridTextColumn Header="止损-10%" Binding="{Binding StopPriceText}" Width="80" IsReadOnly="True" SortMemberPath="LastClose" />
                             <DataGridTemplateColumn Header="操作" Width="160">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
@@ -607,8 +304,117 @@
                 </Grid>
             </TabItem>
 
-            <TabItem Header="回调法">
-                <Grid DataContext="{Binding PullbackTab}" Margin="0,10,0,0">
+            <!-- 【底仓】页（2026-08-20 新增）——"用来拿分红、基本不动"的那部分持仓。
+                 跟【主动仓】页是两套数据、两个文件（那边走短线纪律、每天要盯）：
+                 底仓存 data\core-positions.json，理由见 AnalyzerPaths.CorePositionPath。
+                 列也刻意不同：这里没有止亏价、没有±10%，看的是股息率/连续分红/累计已收股息/免税日。
+                 **本页不进晨检**（2026-08-20 用户确认）：晨检那套"跌破MA5就卖/20天时间止损/
+                 15%回撤止损"对底仓全部不适用，误伤一次就把该拿几年的票砍在坑里了。 -->
+            <TabItem Header="底仓">
+                <Grid DataContext="{Binding CorePositionTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
+                        <Button Content="刷新" Command="{Binding RefreshCommand}" Width="80"
+                                ToolTip="重新读取底仓记录、现价和分红数据" />
+                        <Button Content="移出底仓" Command="{Binding RemoveCommand}" Width="90" Margin="8,0,0,0"
+                                ToolTip="把勾选的记录从底仓删除（成交明细一起删，不影响自选和主动仓）" />
+                        <TextBlock VerticalAlignment="Center" Foreground="Gray" Margin="16,0,0,0"
+                                   Text="底仓不设价格止盈止损，退出条件是分红中断或基本面变坏" />
+                    </StackPanel>
+
+                    <TextBlock Grid.Row="1" Text="{Binding SummaryText}" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Foreground="#8B4513" />
+
+                    <DataGrid Grid.Row="2" ItemsSource="{Binding Entries}" AutoGenerateColumns="False" IsReadOnly="False"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5"
+                              ToolTip="带 ✎ 的列可以直接在表格里改，改完点别处即保存">
+                        <DataGrid.Columns>
+                            <DataGridTemplateColumn Width="36" CanUserSort="False"
+                                                    CellTemplate="{StaticResource SelectCheckBoxCell}">
+                                <DataGridTemplateColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridTemplateColumn.Header>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="110" IsReadOnly="True" />
+                            <!-- 行业：高股息池子行业集中度天然很高（银行/电力/高速/煤炭），
+                                 底仓最该防的就是全压一个行业——同行业的分红能力往往同时变坏 -->
+                            <DataGridTextColumn Header="行业" Binding="{Binding Industry}" Width="100" IsReadOnly="True" />
+                            <!-- 建仓进度：档数按买入笔数算，百分比按股数/目标股数算 -->
+                            <DataGridTextColumn Header="建仓进度" Binding="{Binding ProgressText}" Width="110" IsReadOnly="True" SortMemberPath="ProgressValue" />
+                            <DataGridTextColumn Header="含费均价" Binding="{Binding AvgCostText}" Width="80" IsReadOnly="True" SortMemberPath="AvgCostValue" />
+                            <DataGridTextColumn Header="现价" Binding="{Binding LatestCloseText}" Width="70" IsReadOnly="True" SortMemberPath="LatestCloseValue" />
+                            <!-- 现价股息率回答"现在该不该加仓" -->
+                            <DataGridTextColumn Header="现价股息率" Binding="{Binding CurrentYieldText}" Width="90" IsReadOnly="True"
+                                                SortMemberPath="CurrentYield" />
+                            <!-- 连续分红中断 = 底仓的退出信号（它没有价格止损），标红 -->
+                            <DataGridTextColumn Header="连续分红" Binding="{Binding ConsecutiveYearsText}" Width="75" IsReadOnly="True" SortMemberPath="ConsecutiveYearsValue">
+                                <DataGridTextColumn.CellStyle>
+                                    <Style TargetType="DataGridCell">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsDividendBroken}" Value="True">
+                                                <Setter Property="Foreground" Value="Red" />
+                                                <Setter Property="FontWeight" Value="Bold" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.CellStyle>
+                            </DataGridTextColumn>
+                            <!-- 只放结论（递增/持平/波动/中断）；逐年金额点【分红历史】看柱状图 -->
+                            <DataGridTextColumn Header="派息趋势" Binding="{Binding DividendTrendText}" Width="80" IsReadOnly="True">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="ToolTip" Value="递增/持平/波动/中断（结论只看近5年）。逐年金额点【分红历史】看柱状图" />
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="累计已收股息" Binding="{Binding ReceivedDividendText}" Width="100" IsReadOnly="True" SortMemberPath="ReceivedDividendValue" />
+                            <!-- 免税到期日：看**最晚那笔买入**——分档建仓每档的免税时钟各自独立起算，
+                                 整个底仓全部跨过一年取决于最后补的那档。持股期限算到卖出日前一日、
+                                 且要严格超过1年（1年整仍按10%），所以是买入日+1年+2天。
+                                 ⚠ 先进先出：同一账户同一只票做波段会把这个时钟往后推。 -->
+                            <DataGridTextColumn Header="免税日" Binding="{Binding TaxFreeDateText}" Width="150" IsReadOnly="True" SortMemberPath="TaxFreeDateValue" />
+                            <!-- 总回报 = 价差(含费) + 累计已收股息。必须加上股息：除权当天股价下调、
+                                 账面浮亏自动变深，但那笔钱已经进口袋了，只看价差会系统性低估底仓。 -->
+                            <DataGridTextColumn Header="总回报（价差+股息）" Binding="{Binding TotalReturnText}" Width="230" IsReadOnly="True"
+                                                SortMemberPath="TotalReturn">
+                                <DataGridTextColumn.CellStyle>
+                                    <Style TargetType="DataGridCell">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsTotalReturnPositive}" Value="True">
+                                                <Setter Property="Foreground" Value="#C00000" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.CellStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="建仓理由/退出条件✎" Binding="{Binding Note, UpdateSourceTrigger=LostFocus}" Width="260" />
+                            <DataGridTemplateColumn Header="操作" Width="240">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button Content="录成交" Width="70" Margin="2,1" Click="CorePositionLotsButton_Click"
+                                                    ToolTip="逐档录入买入/卖出（跟主动仓页用同一个窗口和同一份费率）" />
+                                            <Button Content="分红历史" Width="70" Margin="2,1" Click="CorePositionDividendChartButton_Click"
+                                                    ToolTip="历年每股派息柱状图（全部历史）——底仓没有价格止损，分红中断就是它的退出信号" />
+                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="CorePositionQuoteButton_Click" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="底仓法">
+                <Grid DataContext="{Binding CorePositionScreenTab}" Margin="0,10,0,0">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
@@ -617,30 +423,35 @@
                     </Grid.RowDefinitions>
 
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
-                        <TextBlock Text="总资产(元)：" VerticalAlignment="Center" />
-                        <TextBox Text="{Binding CapitalText, UpdateSourceTrigger=PropertyChanged}" Width="90"
+                        <!-- 原来这里还有个"总资产"输入框，2026-08-20 随"一手金额≤总资产15%"那条
+                             条件一起去掉了——它的唯一用途就是推导那条的门槛。 -->
+                        <TextBlock Text="目标年化股息(元)：" VerticalAlignment="Center" />
+                        <TextBox Text="{Binding TargetDividendText, UpdateSourceTrigger=PropertyChanged}" Width="80"
                                  VerticalAlignment="Center"
-                                 ToolTip="只用来推导单票上限(15%)进而限制一手金额——高价股买一手就重仓，没有减仓余地" />
-                        <TextBlock Text="固定日线，6条全满足才入选" VerticalAlignment="Center" Foreground="Gray" Margin="12,0,0,0" />
+                                 ToolTip="想每年收多少分红（税前）。不参与筛选，只用来换算&quot;这只票要投多少钱&quot;=目标÷股息率。可留空" />
                         <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
                         <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
-                                Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件与回测依据" />
-                        <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
-                                ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
+                                Command="{Binding ShowCriteriaInfoCommand}"
+                                ToolTip="查看入选条件、证据等级说明与红利税规则" />
+                        <Button Content="加入底仓" Command="{Binding AddToCorePositionCommand}" Width="80" Margin="16,0,0,0"
+                                ToolTip="把勾选的股票加进【底仓】页（目标年化股息按勾选只数摊分）。只建记录，成交明细到那边逐档录" />
+                        <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="只放进自选跟踪、先不进底仓" />
                         <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
                                 ToolTip="把当前结果列表导出成 Excel(.xlsx)" />
                         <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
                     </StackPanel>
 
-                    <!-- 大盘MA60状态：回测里带止损的打法在跌破MA60时明显变差，所以出手前看一眼；
-                         只提示不过滤（同阶梯低点法的市场环境）。 -->
-                    <TextBlock Grid.Row="1" Text="{Binding MarketStateText}" Foreground="#8B4513" Margin="0,0,0,8"
-                               TextWrapping="Wrap" />
+                    <!-- 证据等级警告：本项目其它方法每个阈值背后都有回测表，底仓法没有（持有期差一个
+                         量级，短线口径的回测结论不适用）。这条必须常驻在页面上，不能只藏在 ℹ 里，
+                         否则它看起来会跟短线法一个可信度。 -->
+                    <TextBlock Grid.Row="1" Foreground="#8B4513" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Text="⚠ 本方法没有回测支持：条件是按&quot;拿分红&quot;的目的推的，不是回测校准的。其它方法的回测口径是 +10%止盈/120日，底仓持有期是数年，那批结论不适用。底仓不设价格止盈止损，退出条件是分红中断或基本面变坏。点 ℹ 看完整说明。" />
 
-                    <DataGrid x:Name="PullbackGrid" Grid.Row="2" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
+                    <DataGrid x:Name="CorePositionGrid" Grid.Row="2" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
                               CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
                               AlternatingRowBackground="#F5F5F5"
-                              ToolTip="按&quot;低于MA20的幅度&quot;降序，跌得越深排越前">
+                              ToolTip="按股息率降序——底仓比的是现金流，不是位置">
                         <DataGrid.Columns>
                             <!-- 一点即勾（整格可点）——模板见 Window.Resources 里的 SelectCheckBoxCell；
                                  点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
@@ -652,34 +463,40 @@
                             </DataGridTemplateColumn>
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
+                            <!-- 行业：4.5%的股息率门槛会让结果高度集中在银行/电力/高速/煤炭，这一列必须看，
+                                 别把底仓全压在一两个行业上（运行日志里也给了分布统计和过度集中的警告） -->
                             <DataGridTextColumn Header="行业" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
-                            <!-- 用途分类：底仓=长期持有吃分红（不看回调），主动仓=位置在验证档位内、到价就走。
-                                 位置判断和用途判断是两回事，见 PullbackAnalysisEngine 的分类注释。 -->
-                            <DataGridTextColumn Header="类型" Binding="{Binding Category}" Width="95" IsReadOnly="True" />
-                            <DataGridTextColumn Header="低于MA20%" Binding="{Binding SortScore, StringFormat={}{0:F2}}" Width="90" IsReadOnly="True" />
-                            <!-- 档位 胜率/样本数：样本数必须一起看，见短线法表里的同名列 -->
-                            <DataGridTextColumn Header="档位 胜率/样本" Binding="{Binding DepthBucket}" Width="130" IsReadOnly="True" />
-                            <!-- 近3年年报净利趋势：连亏或累计为负带 ⚠。只显示不过滤——回测显示做成
-                                 硬条件反而降低收益，但样本排除了ST/退市股、测不出踩雷风险，所以摆出来自己判断。
-                                 按 ThreeYearCumProfit 排序，负的会聚在一起最容易发现。 -->
-                            <DataGridTextColumn Header="近3年净利(亿)" Binding="{Binding ProfitTrend}" Width="210" IsReadOnly="True"
+                            <!-- 股息率：本方法的主排序列，门槛 4.5% -->
+                            <DataGridTextColumn Header="股息率" Binding="{Binding DividendYieldText}" Width="70" IsReadOnly="True"
+                                                SortMemberPath="DividendYield" />
+                            <!-- 近5年平均股息率：跟当期并排看。当期超过均值1.5倍会带 ⚠ ——多半是含了
+                                 一次性大额分红，或者股价刚大跌（分母变小），不是可持续水平。 -->
+                            <DataGridTextColumn Header="近5年均" Binding="{Binding AvgDividendYieldText}" Width="80" IsReadOnly="True"
+                                                SortMemberPath="AvgDividendYield" />
+                            <!-- 连续分红年数：本方法最关键的新增硬条件（≥5年）。底仓赌的是"未来还会不会
+                                 继续分红"，只看近12个月股息率分不出连分十年和去年头一回分。 -->
+                            <DataGridTextColumn Header="连续分红" Binding="{Binding ConsecutiveDividendYearsText}" Width="75" IsReadOnly="True"
+                                                SortMemberPath="ConsecutiveDividendYears" />
+                            <!-- 派息趋势/近3年净利这两列只放**结论**（2026-08-20 用户要求）：
+                                 原来塞的是"波动｜22年0.510 23年0.430 …"和"23年+29.52 24年+21.59 …"
+                                 整串，列宽不够、扫一眼也读不出重点。逐年明细改成【条件详情】里的
+                                 柱状图，画的是**全部**历史（不只近5年/近3年），一眼看出哪年腰斩。
+                                 判定口径没变：趋势结论仍看近5年、条件③仍看近3年。 -->
+                            <DataGridTextColumn Header="派息趋势" Binding="{Binding DividendTrend}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="3年累计净利" Binding="{Binding ThreeYearCumProfitText}" Width="100" IsReadOnly="True"
                                                 SortMemberPath="ThreeYearCumProfit" />
-                            <!-- 股息率：底仓看它够不够3%，主动仓拿它判断该不该改成长期持有 -->
-                            <DataGridTextColumn Header="股息率" Binding="{Binding DividendYieldText}" Width="70" IsReadOnly="True" />
-                            <!-- 日均波幅：底仓门槛≤1.5%、主动仓≤4.5%，是两类分野的直接依据 -->
+                            <!-- 日均波幅：门槛≤1.5%。底仓没有价格止损，低波动是为了分档加仓时拿得住 -->
                             <DataGridTextColumn Header="日均波幅" Binding="{Binding DailyVolatilityText}" Width="80" IsReadOnly="True"
                                                 SortMemberPath="DailyVolatility" />
                             <DataGridTextColumn Header="现价" Binding="{Binding LastClose, StringFormat={}{0:F2}}" Width="70" IsReadOnly="True" />
-                            <!-- 两个止盈目标并列，由用户按当时判断选一个：+2%是他现在的打法(回测期望为负)，
-                                 +10%是本方法条件校准所用的口径。理由见 PullbackAnalysisEngine 注释。 -->
-                            <DataGridTextColumn Header="快目标+2%" Binding="{Binding QuickTargetText}" Width="80" IsReadOnly="True" />
-                            <DataGridTextColumn Header="大目标+10%" Binding="{Binding BigTargetText}" Width="85" IsReadOnly="True" />
-                            <DataGridTextColumn Header="止损-10%" Binding="{Binding StopPriceText}" Width="80" IsReadOnly="True" />
+                            <!-- 需投入 = 目标年化股息 ÷ 股息率，"全压这一只"的口径。实际要除以计划配置的只数 -->
+                            <DataGridTextColumn Header="需投入" Binding="{Binding RequiredCapitalText}" Width="80" IsReadOnly="True"
+                                                SortMemberPath="RequiredCapitalForTarget" />
                             <DataGridTemplateColumn Header="操作" Width="160">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
-                                            <Button Content="条件详情" Width="70" Margin="2,1" Click="PullbackCriteriaButton_Click" />
+                                            <Button Content="条件详情" Width="70" Margin="2,1" Click="CorePositionCriteriaButton_Click" />
                                             <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
                                         </StackPanel>
                                     </DataTemplate>
@@ -694,6 +511,311 @@
                                  IsInactiveSelectionHighlightEnabled="True"
                                  ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
                     </GroupBox>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="每日晨检">
+                <Grid DataContext="{Binding MorningCheckTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="150" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                        <TextBlock Text="每天早上：先用 Fetcher 拓取当天数据，再点“刷新”，然后按下面“今日行动建议”执行"
+                                   VerticalAlignment="Center" Foreground="Gray" />
+                        <Button Content="刷新" Command="{Binding RefreshCommand}" Width="90" Margin="16,0,0,0"
+                                ToolTip="用本地最新数据重算红绿灯和自选股体检" />
+                        <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
+                                Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看各条纪律的规则与回测依据" />
+                        <TextBlock Text="{Binding DataDateText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="#084298" FontWeight="SemiBold" />
+                    </StackPanel>
+
+                    <!-- 大盘总开关：先给一句大字结论，下面列6个指数的红绿灯明细 -->
+                    <GroupBox Grid.Row="1" Header="大盘总开关（沪深300 + 创业板指 vs 各自60日线）" Margin="0,0,0,8">
+                        <StackPanel>
+                            <TextBlock Text="{Binding GateText}" Foreground="{Binding GateColor}" FontSize="15" FontWeight="Bold" Margin="4,6,4,2" TextWrapping="Wrap" />
+                            <!-- 风格温度计（2026-08-20新增）——总开关说"能不能建仓"，这一行说"钱在往哪边躲"。
+                                 由 StyleGauge 算：红利/上证50 成分股等权(后复权) vs 沪深300 的近5日超额。
+                                 缘起：统计过"大盘跌时蓝筹会不会涨"——绝对上涨几乎不发生，但跑赢很稳定。 -->
+                            <TextBlock Text="{Binding StyleText}" Foreground="{Binding StyleColor}" FontSize="13" Margin="4,0,4,6" TextWrapping="Wrap"
+                                       ToolTip="红利/上证50 用的是各自指数成分股的等权近5日收益（个股一律后复权——红利股的除权跳空在前复权序列里会把结论算反），跟沪深300比得出超额。&#10;判定：红利超额比创业板超额高 0.5 个百分点以上=防御占优；反过来=风险偏好回升；差距在门槛内=没有明显偏向。&#10;口径提醒：成分名单是最近一次抓取时的，算最近几天的强弱没问题，别拿它回溯很久以前。&#10;为什么看这个：本地数据统计（2016-2026）显示大盘跌超3%时蓝筹篮子上涨占比是 0%，但跑赢率 92%——有信息量的是相对强弱，而不是蓝筹到底涨不涨。" />
+                            <DataGrid ItemsSource="{Binding IndexRows}" AutoGenerateColumns="False" IsReadOnly="True"
+                                      CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                                      AlternatingRowBackground="#F5F5F5" >
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="指数" Binding="{Binding Name}" Width="110" />
+                                    <DataGridTextColumn Header="收盘（日期）" Binding="{Binding CloseText}" Width="130" SortMemberPath="CloseValue" />
+                                    <DataGridTextColumn Header="MA20" Binding="{Binding Ma20Text}" Width="110" SortMemberPath="Ma20Value" />
+                                    <DataGridTextColumn Header="MA60" Binding="{Binding Ma60Text}" Width="80" SortMemberPath="Ma60Value" />
+                                    <DataGridTextColumn Header="vs 60日线" Binding="{Binding StateText}" Width="*">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="{Binding StateColor}" />
+                                                <Setter Property="FontWeight" Value="SemiBold" />
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <!-- 自选股体检：问题最严重的排最前 -->
+                    <GroupBox Grid.Row="2" Header="自选股体检（短线R1：浮盈+跌破MA5就卖 / 时间止损20天(高波15天) / 15%回撤止损 / +50%止盈减仓 / 户数暴增警示 / 60日线下不加仓）">
+                        <DataGrid ItemsSource="{Binding StockRows}" AutoGenerateColumns="False" IsReadOnly="True"
+                                  CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                                  AlternatingRowBackground="#F5F5F5"
+                                  ToolTip="从各选股Tab“加入自选”的股票每天在这里逐只体检；问题最严重的排最前">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="70" />
+                                <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="100" />
+                                <DataGridTextColumn Header="状态" Binding="{Binding StatusText}" Width="55">
+                                    <DataGridTextColumn.HeaderStyle>
+                                        <Style TargetType="DataGridColumnHeader">
+                                            <Setter Property="ToolTip" Value="持仓=自选股Tab里填过买入价（止损/止盈按真实成本算）；观察=还没买" />
+                                        </Style>
+                                    </DataGridTextColumn.HeaderStyle>
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="{Binding StatusColor}" />
+                                            <Setter Property="FontWeight" Value="SemiBold" />
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <!-- 方法列表头带下拉过滤器：选某个方法后，表格和下面的"今日行动建议"都只算
+                                     该方法选出的股票（含平均涨跌/上涨占比），用来横向对比各选股方法的表现。
+                                     列头不在行的可视树里、拿不到 Tab 的 DataContext，所以用 RelativeSource
+                                     往上找 DataGrid 再取它的 DataContext（WPF 里列头绑定的标准做法）。
+                                     CanUserSort=False：避免点下拉时顺带触发这一列的排序。 -->
+                                <DataGridTextColumn Binding="{Binding Method}" Width="150" CanUserSort="False">
+                                    <DataGridTextColumn.Header>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="方法" VerticalAlignment="Center" />
+                                            <ComboBox Width="98" Margin="6,0,0,0" Padding="4,1"
+                                                      ItemsSource="{Binding DataContext.MethodFilters, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                      SelectedItem="{Binding DataContext.SelectedMethodFilter, RelativeSource={RelativeSource AncestorType=DataGrid}, Mode=TwoWay}"
+                                                      DisplayMemberPath="Display"
+                                                      ToolTip="按选股方法过滤：只看某个方法选出的股票，表格和&quot;今日行动建议&quot;（含平均涨跌、上涨占比）都跟着只算这个方法，便于横向对比各方法表现。括号里是该方法的股票只数。切回&quot;全部方法&quot;看全部" />
+                                        </StackPanel>
+                                    </DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="基准日期" Binding="{Binding DataDate}" Width="95">
+                                    <DataGridTextColumn.HeaderStyle>
+                                        <Style TargetType="DataGridColumnHeader">
+                                            <Setter Property="ToolTip" Value="持仓=买入日期（带&quot;买&quot;字）；观察=自选那天。涨跌/回撤都从这天起算" />
+                                        </Style>
+                                    </DataGridTextColumn.HeaderStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="最新收盘" Binding="{Binding LatestCloseText}" Width="110" SortMemberPath="LatestCloseValue" />
+                                <DataGridTextColumn Header="60日线" Binding="{Binding Ma60Text}" Width="70" SortMemberPath="Ma60Value" />
+                                <!-- MA5：短线卖出纪律R1的触发线（浮盈 + 收盘跌破MA5 = 次日卖）。
+                                     摆成一列是为了在触发的前一天就能看见"快贴上了"，而不是等
+                                     "今日动作"变红才知道。回测：R1 三组期望 0.77/0.79/0.96%，
+                                     胜率 75.6/69.0/63.8%，全面优于"+5%就走"。 -->
+                                <DataGridTextColumn Header="MA5(R1线)" Binding="{Binding Ma5Text}" Width="130" SortMemberPath="Ma5Value">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="{Binding Ma5Color}" />
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <!-- 日均波幅：决定时间止损用几天（>4.5%→15天，其余→20天），也提示仓位。
+                                     >4.5% 那一档回测里所有卖出规则都会退化，带 ⚠。 -->
+                                <DataGridTextColumn Header="日均波幅" Binding="{Binding VolatilityText}" Width="80" SortMemberPath="VolatilityValue" />
+                                <DataGridTextColumn Header="较基准涨跌" Binding="{Binding SincePickText}" Width="90" SortMemberPath="SinceBasisPct">
+                                    <DataGridTextColumn.HeaderStyle>
+                                        <Style TargetType="DataGridColumnHeader">
+                                            <Setter Property="ToolTip" Value="持仓=较买入价；观察=较自选日收盘价" />
+                                        </Style>
+                                    </DataGridTextColumn.HeaderStyle>
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="{Binding SincePickColor}" />
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="持仓盈亏" Binding="{Binding PnlText}" Width="130" SortMemberPath="PnlValue">
+                                    <DataGridTextColumn.HeaderStyle>
+                                        <Style TargetType="DataGridColumnHeader">
+                                            <Setter Property="ToolTip" Value="仅持仓显示：填了股数=盈亏金额（涨跌幅），只填买入价=涨跌幅" />
+                                        </Style>
+                                    </DataGridTextColumn.HeaderStyle>
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="{Binding PnlColor}" />
+                                            <Setter Property="FontWeight" Value="SemiBold" />
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="距高点回撤" Binding="{Binding DrawdownText}" Width="90" SortMemberPath="DrawdownValue" />
+                                <DataGridTextColumn Header="户数环比" Binding="{Binding HolderChangeText}" Width="120" SortMemberPath="HolderChangeValue" />
+                                <DataGridTextColumn Header="参考价（纪律换算）" Binding="{Binding AdviceText}" Width="185">
+                                    <DataGridTextColumn.HeaderStyle>
+                                        <Style TargetType="DataGridColumnHeader">
+                                            <Setter Property="ToolTip" Value="持仓=建议卖出价：止损线(买入后最高收盘×0.85)、止盈线(买入价×1.5)；观察=建议买入价：线下为站上60日线的价位、线上为回踩MA20位置。是纪律触发条件的价格换算，不是预测" />
+                                        </Style>
+                                    </DataGridTextColumn.HeaderStyle>
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="#0F6674" />
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="今日动作" Binding="{Binding ActionText}" Width="*">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="{Binding ActionColor}" />
+                                            <Setter Property="FontWeight" Value="SemiBold" />
+                                            <Setter Property="TextWrapping" Value="Wrap" />
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </GroupBox>
+
+                    <GroupBox Grid.Row="3" Header="今日行动建议" Margin="0,8,0,0">
+                        <TextBox Text="{Binding SummaryText, Mode=OneWay}" IsReadOnly="True" FontFamily="Microsoft YaHei" FontSize="13"
+                                 VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" BorderThickness="0"
+                                 IsInactiveSelectionHighlightEnabled="True"
+                                 ToolTip="可用鼠标拖选、Ctrl+C 复制" />
+                    </GroupBox>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="自选股">
+                <Grid DataContext="{Binding WatchlistTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="0,0,0,10">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="各选股方法丢进来的【算法验证样本】——只用来统计各方法准不准，不代表要买。想买卖的票请勾选后点右边&quot;加入交易池&quot;。"
+                                       VerticalAlignment="Center" Foreground="Gray" TextWrapping="Wrap" MaxWidth="520" />
+                            <Button Content="加入交易池" Command="{Binding AddToTradePoolCommand}" Width="90" Margin="16,0,0,0"
+                                    ToolTip="把勾选的票放进&quot;主动仓&quot;页——买卖信息在那边录，每日晨检也只体检那边的票。&#10;注意：加入后这些票【仍然留在本页】，因为验证样本不能被挑走（只留下自己没看好的那些会让准确率统计失真）。" />
+                            <Button Content="刷新" Command="{Binding RefreshCommand}" Width="70" Margin="8,0,0,0" />
+                            <Button Content="移除勾选" Command="{Binding RemoveSelectedCommand}" Width="80" Margin="8,0,0,0"
+                                    ToolTip="从自选里彻底删除（连同交易池里的同一条记录一起删）" />
+                            <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                    ToolTip="把自选股列表导出成 Excel(.xlsx)" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding MethodStatsText}" Margin="0,6,0,0" Foreground="#084298" FontWeight="SemiBold" TextWrapping="Wrap"
+                                   ToolTip="按来源方法统计&quot;选中后涨跌幅&quot;的平均值与上涨占比——本页的核心产出。口径提醒：各方法的自选日期不同、持有时长不可比，这是粗对比；要严格评测得固定同一时间窗口。" />
+                    </StackPanel>
+
+                    <DataGrid x:Name="WatchlistGrid" Grid.Row="1" ItemsSource="{Binding Entries}" AutoGenerateColumns="False" IsReadOnly="False"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5"
+                              ToolTip="点&quot;条件详情&quot;查看加入时的判断依据（用最新数据重新画图），点&quot;行情详情&quot;查看当前行情">
+                        <DataGrid.Columns>
+                            <!-- 一点即勾（整格可点）——模板见 Window.Resources 里的 SelectCheckBoxCell；
+                                 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
+                            <DataGridTemplateColumn Width="36" CanUserSort="False"
+                                                    CellTemplate="{StaticResource SelectCheckBoxCell}">
+                                <DataGridTemplateColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridTemplateColumn.Header>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
+                            <DataGridTextColumn Header="板块(概念)" Binding="{Binding Board}" Width="200" IsReadOnly="True" />
+                            <DataGridTextColumn Header="行业" Binding="{Binding Industry}" Width="120" IsReadOnly="True" />
+                            <DataGridTextColumn Header="方法" Binding="{Binding Method}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="数据日期" Binding="{Binding DataDate}" Width="90" IsReadOnly="True" />
+                            <DataGridTextColumn Header="当时价格" Binding="{Binding PriceAtPick, StringFormat=F2}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="最新收盘" Binding="{Binding LatestCloseText}" Width="130" IsReadOnly="True" SortMemberPath="LatestClose" />
+                            <DataGridTextColumn Header="选中后涨跌幅" Binding="{Binding ChangeText}" Width="100" IsReadOnly="True" SortMemberPath="SincePickPct">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Foreground" Value="{Binding ChangeColor}" />
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <!-- 买卖信息不在本页录（2026-07-31改）——本页是算法验证样本，只看"选中后涨跌幅"；
+                                 买入/卖出请到"主动仓"页。这里只用一列标出哪些样本已经进了交易池。 -->
+                            <DataGridTextColumn Header="交易池" Binding="{Binding TradePoolText}" Width="70" IsReadOnly="True">
+                                <DataGridTextColumn.HeaderStyle>
+                                    <Style TargetType="DataGridColumnHeader">
+                                        <Setter Property="ToolTip" Value="是否已放进&quot;主动仓&quot;页：✔持仓=已填买入价；✔已加入=打算买、还没填买入价；空=只是算法样本" />
+                                    </Style>
+                                </DataGridTextColumn.HeaderStyle>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Foreground" Value="{Binding TradePoolColor}" />
+                                        <Setter Property="FontWeight" Value="SemiBold" />
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedText}" Width="70" IsReadOnly="True" SortMemberPath="SatisfiedCountValue" />
+                            <DataGridTemplateColumn Header="操作" Width="160">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button Content="条件详情" Width="70" Margin="2,1" Click="WatchlistCriteriaButton_Click" />
+                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="WatchlistQuoteDetailButton_Click" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="查询">
+                <Grid DataContext="{Binding QueryTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <TextBlock Text="股票代码或名称：" VerticalAlignment="Center" />
+                        <TextBox Width="200" Margin="4,0" VerticalContentAlignment="Center"
+                                 Text="{Binding QueryText, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="支持部分匹配，如输入 000066 或 长城，回车或点查询">
+                            <TextBox.InputBindings>
+                                <KeyBinding Key="Return" Command="{Binding SearchCommand}" />
+                            </TextBox.InputBindings>
+                        </TextBox>
+                        <Button Content="查询" Command="{Binding SearchCommand}" Width="90" Margin="8,0,0,0" />
+                        <Button Content="加入交易池" Command="{Binding AddToWatchlistCommand}" Width="90" Margin="16,0,0,0"
+                                ToolTip="把勾选的个股放进&quot;主动仓&quot;页（记录当天收盘价）——从这里手工搜出来加的，本来就是你看好想买卖的票，所以直接进交易池、纳入每日晨检体检，买卖信息去&quot;主动仓&quot;页录。&#10;指数/ETF/板块不支持。已经在自选里的票会被一并标进交易池。" />
+                        <TextBlock Text="{Binding StatusText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="Gray" />
+                    </StackPanel>
+
+                    <DataGrid x:Name="QueryGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="#F5F5F5"
+                              ToolTip="勾选后点&quot;加入自选&quot;可以跟踪；点&quot;K线详情&quot;查看该股票的行情K线图">
+                        <DataGrid.Columns>
+                            <!-- 一点即勾（整格可点）——模板见 Window.Resources 里的 SelectCheckBoxCell；
+                                 点表头的复选框 = 整列全选/全不选（见 MainWindow.SelectAllHeader_Click） -->
+                            <DataGridTemplateColumn Width="36" CanUserSort="False"
+                                                    CellTemplate="{StaticResource SelectCheckBoxCell}">
+                                <DataGridTemplateColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridTemplateColumn.Header>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="90" IsReadOnly="True" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="160" IsReadOnly="True" />
+                            <DataGridTextColumn Header="类型" Binding="{Binding Type}" Width="80" IsReadOnly="True" />
+                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="140" IsReadOnly="True" />
+                            <DataGridTemplateColumn Header="操作" Width="120">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <Button Content="K线详情" Width="90" Margin="2,1" Click="QueryQuoteDetailButton_Click" />
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
                 </Grid>
             </TabItem>
 
@@ -1132,12 +1254,12 @@
                                     <DataGridTextColumn Header="因子" Binding="{Binding Name}" Width="130" />
                                     <DataGridTextColumn Header="类别" Binding="{Binding Category}" Width="55" />
                                     <DataGridTextColumn Header="角色" Binding="{Binding Role}" Width="60" />
-                                    <DataGridTextColumn Header="IC内" Binding="{Binding IcInText}" Width="55" />
-                                    <DataGridTextColumn Header="ICIR内" Binding="{Binding IcirInText}" Width="58" />
-                                    <DataGridTextColumn Header="中性IC内" Binding="{Binding IcNeuInText}" Width="70" />
-                                    <DataGridTextColumn Header="IC外" Binding="{Binding IcOutText}" Width="55" />
-                                    <DataGridTextColumn Header="多空外" Binding="{Binding LsAnnOutText}" Width="62" />
-                                    <DataGridTextColumn Header="换手" Binding="{Binding TurnoverText}" Width="50" />
+                                    <DataGridTextColumn Header="IC内" Binding="{Binding IcInText}" Width="55" SortMemberPath="IcInValue" />
+                                    <DataGridTextColumn Header="ICIR内" Binding="{Binding IcirInText}" Width="58" SortMemberPath="IcirInValue" />
+                                    <DataGridTextColumn Header="中性IC内" Binding="{Binding IcNeuInText}" Width="70" SortMemberPath="IcNeuInValue" />
+                                    <DataGridTextColumn Header="IC外" Binding="{Binding IcOutText}" Width="55" SortMemberPath="IcOutValue" />
+                                    <DataGridTextColumn Header="多空外" Binding="{Binding LsAnnOutText}" Width="62" SortMemberPath="LsAnnOutValue" />
+                                    <DataGridTextColumn Header="换手" Binding="{Binding TurnoverText}" Width="50" SortMemberPath="TurnoverValue" />
                                     <DataGridTextColumn Header="去重" Binding="{Binding DedupText}" Width="140" />
                                     <DataGridTemplateColumn Header="操作" Width="70">
                                         <DataGridTemplateColumn.CellTemplate>
@@ -1182,9 +1304,9 @@
                                     <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                                     <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                                     <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="115" IsReadOnly="True" />
-                                    <DataGridTextColumn Header="收盘" Binding="{Binding CloseText}" Width="65" IsReadOnly="True" />
-                                    <DataGridTextColumn Header="合成得分" Binding="{Binding ScoreText}" Width="72" IsReadOnly="True" />
-                                    <DataGridTextColumn Header="融资占比" Binding="{Binding MarginRatioText}" Width="68" IsReadOnly="True" />
+                                    <DataGridTextColumn Header="收盘" Binding="{Binding CloseText}" Width="65" IsReadOnly="True" SortMemberPath="LatestClose" />
+                                    <DataGridTextColumn Header="合成得分" Binding="{Binding ScoreText}" Width="72" IsReadOnly="True" SortMemberPath="ScoreValue" />
+                                    <DataGridTextColumn Header="融资占比" Binding="{Binding MarginRatioText}" Width="68" IsReadOnly="True" SortMemberPath="MarginRatio" />
                                     <DataGridTextColumn Header="主要贡献因子" Binding="{Binding ContribText}" Width="*" IsReadOnly="True" />
                                     <DataGridTemplateColumn Header="操作" Width="90">
                                         <DataGridTemplateColumn.CellTemplate>

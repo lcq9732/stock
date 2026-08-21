@@ -18,7 +18,7 @@ public static class MetricKeys
     /// **这个 key 已经有真实数据了**（早期注释说"从来是空的、是预留写入点"，那是 2026-07-09 之前
     /// 的状态，已不成立）。写入方是 FetchOrchestrator.FetchMarketCapAsync，"拉取全部"和"拉取当天"
     /// 都会跑一遍，用 Upsert（主键 code+metric_key+as_of_date）。2026-08-04 对
-    /// publish/data/local/total.sqlite 实测：80,515 行 / 5,539 只股票 / 15 个交易日，覆盖
+    /// publish/data/local/current.sqlite 实测：80,515 行 / 5,539 只股票 / 15 个交易日，覆盖
     /// 2026-07-09 ~ 2026-08-03。单位"元"已交叉验证：600036 的 value ÷ 同日日线收盘 = 恒定的
     /// 20,628,944,429（招商银行A股流通股本），量级和单位都对得上。
     ///

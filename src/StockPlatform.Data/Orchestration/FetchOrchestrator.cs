@@ -14,9 +14,10 @@ namespace StockPlatform.Data.Orchestration;
 /// <see cref="FetchPaths.CurrentDb"/> — no separate master/daily output-file production step
 /// (removed 2026-07-09, see class remarks history below): that scheme was a holdover from an
 /// abandoned no-server multi-machine-via-netdisk sharing design that was never actually wired up
-/// on the Analyzer side (it only ever reads a manually-copied `total.sqlite`), so producing those
-/// files served no purpose. The real, current workflow is: run the Fetcher, then manually copy
-/// <see cref="FetchPaths.CurrentDb"/> to the Analyzer's data folder as `total.sqlite`.
+/// on the Analyzer side, so producing those files served no purpose. The real, current workflow
+/// (2026-08-21) has no copy step at all: the Analyzer opens this very same
+/// <see cref="FetchPaths.CurrentDb"/> read-only — both programs live in the same folder and share
+/// one data/local (see AnalyzerPaths). Just run the Fetcher; the Analyzer sees the new data.
 ///
 /// Every run uses exactly one data source, chosen by the caller (see doc/data-platform-design.md
 /// section 3.4) — no automatic mixing or failover between vendors, since different vendors can
@@ -1676,8 +1677,9 @@ public class FetchOrchestrator
     /// 写 <c>DateTime.Today</c>，于是周六跑一次就会凭空多出一行"周六的市值"（值其实是周五收盘），
     /// 盘前跑则把上一交易日的值记到今天名下。实测过的错位样本：2026-07-11(周六)/2026-08-01(周六) 的行
     /// 是 07-10/07-31 的收盘值，2026-07-23 08:02 那行是 07-22 的收盘值。现在改成
-    /// <see cref="ResolveMarketCapAsOfDateAsync"/> 解析出的交易日，DailyIncrementExporter 按
-    /// <c>as_of_date LIKE 'D%'</c> 导出日增量也因此对齐了（以前周末抓的市值行会漏出增量包）。
+    /// <see cref="ResolveMarketCapAsOfDateAsync"/> 解析出的交易日。（当时这么改还顺带修好了按
+    /// <c>as_of_date LIKE 'D%'</c> 导出每日增量时周末市值行漏出增量包的问题；那套 GitHub 分发的
+    /// 增量导出已于 2026-08-21 删除，交易日对齐本身仍然是对的。）
     /// 注意这跟"补指定历史日"的 <c>date</c> 参数无关——接口给不出往年的市值，无论补哪一天，
     /// 市值刷的都是"当下"那个交易日的快照（补往年的 RunFetchYearAsync 干脆整段跳过市值）。
     ///

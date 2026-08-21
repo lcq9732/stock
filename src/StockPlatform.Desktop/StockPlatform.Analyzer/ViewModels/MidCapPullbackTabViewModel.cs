@@ -76,7 +76,7 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
         ShowCriteriaInfoCommand = new RelayCommand(_ =>
-            MessageBox.Show(CriteriaInfoText, "彬哥法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
+            TextDetailWindow.Show("彬哥法 — 分析条件说明", "彬哥法 — 入选条件与依据说明", CriteriaInfoText));
         AddToWatchlistCommand = new RelayCommand(_ =>
         {
             var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "彬哥法", Granularity.Day, lookback: null);
@@ -100,7 +100,7 @@ public class MidCapPullbackTabViewModel : INotifyPropertyChanged
                 return;
             }
 
-            var names = SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
+            var names = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).ToDictionary(s => s.Code, s => s.Name);
 
             var engine = new MidCapPullbackAnalysisEngine(_barRepository, _fundamentalRepository, _shareholderRepository, _marginRepository);
             int passedCount = 0, errorCount = 0;

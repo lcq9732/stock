@@ -21,24 +21,27 @@ public partial class App : Application
         }
 
         var paths = new AnalyzerPaths();
-        var barRepository = new SqliteBarRepository(paths.TotalDb);
+        var barRepository = new SqliteBarRepository(paths.CurrentDb);
         barRepository.EnsureSchema();
-        var fundamentalRepository = new SqliteFundamentalMetricRepository(paths.TotalDb);
+        var fundamentalRepository = new SqliteFundamentalMetricRepository(paths.CurrentDb);
         fundamentalRepository.EnsureSchema();
-        var netInflowRepository = new SqliteNetInflowRepository(paths.TotalDb);
+        var netInflowRepository = new SqliteNetInflowRepository(paths.CurrentDb);
         netInflowRepository.EnsureSchema();
-        var boardRepository = new SqliteBoardRepository(paths.TotalDb);
+        var boardRepository = new SqliteBoardRepository(paths.CurrentDb);
         boardRepository.EnsureSchema();
-        var shareholderRepository = new SqliteShareholderRepository(paths.TotalDb);
+        var shareholderRepository = new SqliteShareholderRepository(paths.CurrentDb);
         shareholderRepository.EnsureSchema();
-        var marginRepository = new SqliteMarginRepository(paths.TotalDb);
+        var marginRepository = new SqliteMarginRepository(paths.CurrentDb);
         marginRepository.EnsureSchema();
-        var financialRepository = new SqliteFinancialRepository(paths.TotalDb);
+        var financialRepository = new SqliteFinancialRepository(paths.CurrentDb);
         financialRepository.EnsureSchema();
-        var dividendRepository = new SqliteDividendRepository(paths.TotalDb);
+        var dividendRepository = new SqliteDividendRepository(paths.CurrentDb);
         dividendRepository.EnsureSchema();
+        // 指数成分——晨检的"风格温度计"要拿红利/上证50的成分股算等权超额（见 StyleGauge）
+        var indexConsRepository = new SqliteIndexRepository(paths.CurrentDb);
+        indexConsRepository.EnsureSchema();
 
-        var viewModel = new MainViewModel(paths, barRepository, fundamentalRepository, netInflowRepository, boardRepository, shareholderRepository, marginRepository, financialRepository, dividendRepository);
+        var viewModel = new MainViewModel(paths, barRepository, fundamentalRepository, netInflowRepository, boardRepository, shareholderRepository, marginRepository, financialRepository, dividendRepository, indexConsRepository);
         var window = new MainWindow { DataContext = viewModel };
         window.Show();
     }

@@ -157,7 +157,7 @@ public class BoardTabViewModel : INotifyPropertyChanged
         Members.Clear();
         if (_selectedBoard == null) { MembersHeader = "点左侧板块查看成分股"; return; }
 
-        _names ??= SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
+        _names ??= SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).ToDictionary(s => s.Code, s => s.Name);
         var codes = _boardRepository.QueryMembers(_selectedBoard.BoardCode);
 
         var rows = new List<BoardMemberRowViewModel>();

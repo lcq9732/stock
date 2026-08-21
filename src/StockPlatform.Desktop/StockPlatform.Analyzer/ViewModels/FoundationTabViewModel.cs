@@ -63,7 +63,7 @@ public class FoundationTabViewModel : INotifyPropertyChanged
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
         ShowCriteriaInfoCommand = new RelayCommand(_ =>
-            MessageBox.Show(CriteriaInfoText, "峰哥法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
+            TextDetailWindow.Show("峰哥法 — 分析条件说明", "峰哥法 — 入选条件与依据说明", CriteriaInfoText));
         AddToWatchlistCommand = new RelayCommand(_ =>
         {
             var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "峰哥法", Granularity.Day, Lookback);
@@ -87,7 +87,7 @@ public class FoundationTabViewModel : INotifyPropertyChanged
                 return;
             }
 
-            var names = SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
+            var names = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).ToDictionary(s => s.Code, s => s.Name);
             var engine = new FoundationAnalysisEngine(_barRepository);
             int n = Lookback;
             int errorCount = 0;

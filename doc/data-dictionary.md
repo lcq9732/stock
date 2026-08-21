@@ -1,7 +1,7 @@
-# 数据字典（current.sqlite / total.sqlite）
+# 数据字典（current.sqlite）
 
 > 本文档描述本地 SQLite 数据库的全部表与字段。**权威 schema 以 `src/StockPlatform.Data/Sqlite/SqliteSchema.cs` 为准**（本文档随它同步维护）。
-> `current.sqlite` 是 Fetcher 抓取写入的库；把它拷成 `total.sqlite` 供 Analyzer 读取。两者表结构相同。
+> `current.sqlite` 是 Fetcher 抓取写入的库，Analyzer 和手机端都只读打开同一个文件（2026-08-21 起不再有 `total.sqlite` 副本，见[数据平台设计](data-platform-design.md)的 2026-08-21 变更记录）。
 > 最后更新：2026-07-30。
 
 ## 通用约定

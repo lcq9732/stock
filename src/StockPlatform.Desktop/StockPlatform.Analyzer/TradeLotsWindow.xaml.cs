@@ -100,13 +100,39 @@ public partial class TradeLotsWindow : Window
     private readonly TradeFeeStore _feeStore;
     private TradeFeeSettings _fees;
 
-    public TradeLotsWindow(string title, IEnumerable<TradeLot> lots, TradeFeeStore feeStore)
+    /// <summary>【底仓】页传进来的每股股息（元/股，税前）——把"目标年化股息"换算成目标股数用。
+    /// 主动仓不传（null），那一行 UI 整个折叠。</summary>
+    private readonly double? _dividendPerShare;
+
+    /// <summary>点【保存】后的目标年化股息——调用方在 DialogResult==true 时取，写回
+    /// core-positions.json。主动仓打开时始终是 null。</summary>
+    public double? TargetAnnualDividendResult { get; private set; }
+
+    /// <summary>
+    /// <paramref name="targetAnnualDividend"/>/<paramref name="dividendPerShare"/> 只有【底仓】页会传：
+    /// 传了就在费率下面多显示一行"目标年化股息 → 目标股数"（2026-08-20 从底仓页表格挪进来的，
+    /// 见 XAML 里 CorePositionPlanPanel 的注释）。主动仓两个都传 null，那一行不出现。
+    /// </summary>
+    public TradeLotsWindow(string title, IEnumerable<TradeLot> lots, TradeFeeStore feeStore,
+        double? targetAnnualDividend = null, double? dividendPerShare = null)
     {
         InitializeComponent();
         _feeStore = feeStore;
         _fees = feeStore.Current;
         TitleText.Text = title;
         ShowFeeInputs();
+
+        _dividendPerShare = dividendPerShare;
+        if (targetAnnualDividend.HasValue)
+        {
+            CorePositionPlanPanel.Visibility = Visibility.Visible;
+            TargetDividendBox.Text = targetAnnualDividend.Value > 0
+                ? targetAnnualDividend.Value.ToString("F0")
+                : "";
+            TargetAnnualDividendResult = targetAnnualDividend;
+            // 不在这里调 ShowTargetShares()——此刻 Rows 还没填，算不出"还差多少股"。
+            // 交给构造末尾的 UpdateSummary() 一起刷，之后每次增删改行也会跟着实时更新。
+        }
         foreach (var lot in lots.OrderBy(l => l.Date))
             Rows.Add(TradeLotEditRow.From(lot, _fees));
         LotsGrid.ItemsSource = Rows;
@@ -140,6 +166,51 @@ public partial class TradeLotsWindow : Window
     }
 
     private void FeeInput_LostFocus(object sender, RoutedEventArgs e) => ApplyFeeInputs();
+
+    // ── 底仓专用：目标年化股息 → 目标股数 ──
+
+    private void TargetDividend_LostFocus(object sender, RoutedEventArgs e) => ApplyTargetDividend();
+
+    /// <summary>解析目标年化股息。填得不对（非数字/负数）就丢弃、回显原值，跟费率框一个做法。</summary>
+    private void ApplyTargetDividend()
+    {
+        var text = (TargetDividendBox.Text ?? "").Trim();
+        if (text.Length == 0)
+        {
+            TargetAnnualDividendResult = 0;
+        }
+        else if (double.TryParse(text, out var parsed) && parsed >= 0)
+        {
+            TargetAnnualDividendResult = parsed;
+        }
+        // 解析不了就保持原值、回显
+        TargetDividendBox.Text = TargetAnnualDividendResult is > 0
+            ? TargetAnnualDividendResult.Value.ToString("F0")
+            : "";
+        ShowTargetShares();
+    }
+
+    /// <summary>目标股数 = 目标年化股息 ÷ 每股股息，向下取整到整手。同时提示还差多少股——
+    /// 底仓是分档建仓的，"还差多少"比"目标多少"更能指导下一笔买多少。</summary>
+    private void ShowTargetShares()
+    {
+        double target = TargetAnnualDividendResult ?? 0;
+        if (target <= 0 || _dividendPerShare is not > 0)
+        {
+            TargetSharesText.Text = _dividendPerShare is > 0
+                ? "（填了目标才算得出目标股数）"
+                : "（本地没有该股分红数据，算不出目标股数）";
+            return;
+        }
+
+        int targetShares = (int)Math.Floor(target / _dividendPerShare.Value / 100) * 100;
+        // 已买股数走 Parse + TradeCostSummary，跟下面的汇总同一个口径（半截输入自动忽略）
+        int held = TradeCostSummary.For(Parse(out _), _fees).RemainingShares;
+        int gap = targetShares - held;
+        TargetSharesText.Text =
+            $"→ 目标 {targetShares:N0} 股（每股股息 {_dividendPerShare.Value:F3} 元）" +
+            (gap > 0 ? $"，还差 {gap:N0} 股" : gap < 0 ? $"，已超出 {-gap:N0} 股" : "，已建满");
+    }
 
     /// <summary>把四个输入框的值收进设置里并保存。返回是否真的改动了（调用方据此决定要不要刷新列表）。</summary>
     private bool ApplyFeeInputs()
@@ -239,6 +310,9 @@ public partial class TradeLotsWindow : Window
     /// 录入时先对一眼。跟列表用的是同一个计算器（TradeCostSummary），不会出现两处口径不一致。</summary>
     private void UpdateSummary()
     {
+        // 底仓那一行的"还差多少股"跟着成交明细实时变（主动仓时这行是折叠的，方法内部会直接返回）
+        if (CorePositionPlanPanel.Visibility == Visibility.Visible) ShowTargetShares();
+
         var cost = TradeCostSummary.For(Parse(out _), _fees);
         if (cost.BuyShares == 0)
         {
@@ -273,6 +347,7 @@ public partial class TradeLotsWindow : Window
         // 正在编辑的单元格先提交，否则最后改的那格会丢（点按钮不算失焦提交）。费率框同理。
         LotsGrid.CommitEdit(DataGridEditingUnit.Row, true);
         ApplyFeeInputs();
+        if (CorePositionPlanPanel.Visibility == Visibility.Visible) ApplyTargetDividend();
 
         var lots = Parse(out int badRow);
         if (badRow > 0)

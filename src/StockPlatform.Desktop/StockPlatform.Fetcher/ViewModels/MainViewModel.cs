@@ -124,8 +124,6 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand StopCommand { get; }
     public RelayCommand RetryFailedCommand { get; }
     public RelayCommand FetchBoardsCommand { get; }
-    public RelayCommand UploadBaselineCommand { get; }
-    public RelayCommand UploadDailyCommand { get; }
     public RelayCommand BackfillDailyCommand { get; }
     public RelayCommand FetchPeriodicCommand { get; }
     public RelayCommand FetchFinancialsCommand { get; }
@@ -163,8 +161,6 @@ public class MainViewModel : INotifyPropertyChanged
         StopCommand = new RelayCommand(_ => _cts?.Cancel(), _ => IsBusy);
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && HasFailed);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
-        UploadBaselineCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: true), _ => !IsBusy);
-        UploadDailyCommand = new RelayCommand(async _ => await RunUploadAsync(baseline: false), _ => !IsBusy);
         BackfillDailyCommand = new RelayCommand(async _ => await RunBackfillDailyHistoryAsync(), _ => !IsBusy);
         FetchPeriodicCommand = new RelayCommand(async _ => await RunFetchPeriodicAsync(), _ => !IsBusy);
         FetchFinancialsCommand = new RelayCommand(async _ => await RunFetchFinancialsAsync(), _ => !IsBusy);
@@ -176,50 +172,6 @@ public class MainViewModel : INotifyPropertyChanged
 
         RefreshDataStatus();
         RefreshFailedCodeCount();
-    }
-
-    /// <summary>把数据上传到 GitHub Releases（见 GitHubUploadService）——baseline=true 传全量基线
-    /// （偶尔一次），false 传当天增量（每天）。上传日期用本地库最新的那一天。token 缺失时给出明确
-    /// 提示，不弹异常。</summary>
-    private async Task RunUploadAsync(bool baseline)
-    {
-        var name = baseline ? "上传全量基线" : "上传当天增量";
-        var svc = new GitHubUploadService(_paths);
-        var token = svc.ReadToken();
-        if (token == null)
-        {
-            Log($"没有配置 GitHub token，无法上传。请在 {_paths.GitHubTokenPath} 里放一行 PAT（需要对本仓库有 Contents 写权限），再点上传。");
-            return;
-        }
-        var latest = _orchestrator.GetDataStatus().LatestDay;
-        if (latest == null)
-        {
-            Log("本地还没有数据，无法上传。");
-            return;
-        }
-
-        IsBusy = true;
-        StartHeartbeat();
-        _cts = new CancellationTokenSource();
-        Log($"===== 【{name}】开始 =====");
-        try
-        {
-            var progress = new Progress<string>(Log);
-            if (baseline)
-                await svc.UploadBaselineAsync(token, latest.Value, progress, _cts.Token);
-            else
-                await svc.UploadDailyAsync(token, latest.Value, progress, _cts.Token);
-        }
-        catch (OperationCanceledException) { Log($"【{name}】已停止（用户手动取消）"); }
-        catch (Exception ex) { Log($"【{name}】失败：{ex.Message}"); }
-        finally
-        {
-            StopHeartbeat();
-            _cts?.Dispose();
-            _cts = null;
-            IsBusy = false;
-            Log($"===== 【{name}】结束，不会自动继续，需要再次操作请重新点击按钮 =====");
-        }
     }
 
     private List<string> ParseAnnouncementKeywords() =>

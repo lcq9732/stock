@@ -5,7 +5,7 @@ using StockPlatform.FactorLab.Factors;
 
 namespace StockPlatform.FactorLab;
 
-/// <summary>用法：FactorLab [数据库路径] [输出目录]。缺省时向上查找 publish/data/local/total.sqlite。</summary>
+/// <summary>用法：FactorLab [数据库路径] [输出目录]。缺省时向上查找 publish/data/local/current.sqlite。</summary>
 public static class Program
 {
     /// <summary>因子清单在 <see cref="FactorRegistry"/> 登记（与 Analyzer 因子Tab共用）。</summary>
@@ -17,7 +17,7 @@ public static class Program
         string? dbPath = args.Length > 0 ? args[0] : ProbeDb();
         if (dbPath is null || !File.Exists(dbPath))
         {
-            Console.Error.WriteLine("找不到数据库。用法：FactorLab <total.sqlite路径> [输出目录]");
+            Console.Error.WriteLine("找不到数据库。用法：FactorLab <current.sqlite路径> [输出目录]");
             return 1;
         }
         // 运行时结果统一放 publish 目录下（跟数据库一样，见 doc/data-platform-design.md）。默认
@@ -84,7 +84,8 @@ public static class Program
         return 0;
     }
 
-    /// <summary>从当前目录和程序目录逐级向上找 publish/data/local/total.sqlite。</summary>
+    /// <summary>从当前目录和程序目录逐级向上找 publish/data/local/current.sqlite（Fetcher 写的那个库，
+    /// 2026-08-21 起分析侧不再有 total.sqlite 副本，见 AnalyzerPaths）。</summary>
     static string? ProbeDb()
     {
         foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
@@ -92,7 +93,7 @@ public static class Program
             var dir = new DirectoryInfo(start);
             for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
             {
-                var candidate = Path.Combine(dir.FullName, "publish", "data", "local", "total.sqlite");
+                var candidate = Path.Combine(dir.FullName, "publish", "data", "local", "current.sqlite");
                 if (File.Exists(candidate)) return candidate;
             }
         }
@@ -100,7 +101,7 @@ public static class Program
     }
 
     /// <summary>从当前目录和程序目录逐级向上找 publish 目录——运行时结果数据（数据库、因子实验输出等）
-    /// 都放这里，跟 ProbeDb 找 total.sqlite 同一套向上查找。找不到返回 null（退回当前目录）。</summary>
+    /// 都放这里，跟 ProbeDb 找 current.sqlite 同一套向上查找。找不到返回 null（退回当前目录）。</summary>
     static string? ProbePublishDir()
     {
         foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })

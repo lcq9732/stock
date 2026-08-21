@@ -87,7 +87,7 @@ public partial class MainWindow : Window
         if (DataContext is not MainViewModel vm) return;
         if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "自选股" })
             vm.WatchlistTab.Reload(); // picks up anything added from another tab this session
-        if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "我的交易" })
+        if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "主动仓" })
             vm.TradePoolTab.Reload(); // 同上——刚从"自选股"/"查询"页加进交易池的票，切过来就能看到
         // 每日晨检不在切Tab时自动体检（读全库+逐只算、会顿一下）——改成纯手动，用户点该Tab里的"刷新"按钮才算，
         // 这样开程序秒开、切Tab也不卡（2026-07-31 按用户要求从"启动/切Tab自动跑"改为全手动）。
@@ -97,7 +97,7 @@ public partial class MainWindow : Window
     // 让单元格在鼠标按下的 Tunneling 阶段就获得焦点。原本是为了解决"勾选框要点两下"，但那条路走不通
     // （DataGridCheckBoxColumn 显示态的复选框 IsHitTestVisible=false，只让单元格获得焦点并不会进入
     // 编辑态）——2026-08-12 改成用模板列里的普通 CheckBox 才真正一点即勾，见 MainWindow.xaml 里的
-    // SelectCheckBoxCell。这个处理器保留下来仍有用：可编辑的文本单元格（"我的交易"页录买卖信息那几列）
+    // SelectCheckBoxCell。这个处理器保留下来仍有用：可编辑的文本单元格（"主动仓"页录买卖信息那几列）
     // 也受益于"一下点进去就能改"，不用先点一次选中行。隐式 DataGridCell 样式，本窗口所有表通用。
     private void DataGridCell_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
@@ -183,7 +183,7 @@ public partial class MainWindow : Window
     // （净利润/经营现金流），两条是可操作性（成交额/一手金额），现有的详情图都画不出来；
     // 硬套一张图会让"图上指标"和"判断依据文字"对不上（见 GoldenCrossCriteriaButton_Click 的教训）。
     // 想看K线走势点旁边的"行情详情"即可。
-    private void PullbackCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void CorePositionCriteriaButton_Click(object sender, RoutedEventArgs e)
     {
         if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
 
@@ -193,13 +193,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        var r = row.Result;
-        var text = $"{r.Code} {r.Name}\n" +
-                   $"数据日期 {r.DataDate:yyyy-MM-dd}　收盘 {r.LastClose:F2}\n" +
-                   $"低于MA20 {r.SortScore:F2}%（列表按这个降序排）\n\n" +
-                   string.Join("\n\n", r.Criteria.Select(c =>
-                       $"{(c.DataMissing ? "⚠" : c.Satisfied ? "✓" : "✗")} {c.Name}\n    {c.Basis}"));
-        MessageBox.Show(this, text, "回调法 — 条件详情", MessageBoxButton.OK, MessageBoxImage.Information);
+        // 用带图的专用窗口：历年派息/净利画成柱状图，条件文字在下半部分。
+        // 这两项原来是结果表里的两串文字，列宽不够也读不出重点，见 CorePositionChartBuilder。
+        new CorePositionCriteriaWindow(row.Result) { Owner = this }.ShowDialog();
     }
 
     private void TriangleConvergenceCriteriaButton_Click(object sender, RoutedEventArgs e)
@@ -234,12 +230,11 @@ public partial class MainWindow : Window
         }
 
         var r = row.Result;
-        var text = $"{r.Code} {r.Name}\n" +
-                   $"数据日期 {r.DataDate:yyyy-MM-dd}　收盘 {r.LastClose:F2}\n" +
-                   $"低于MA20 {r.SortScore:F2}%（列表按这个降序排）\n\n" +
-                   string.Join("\n\n", r.Criteria.Select(c =>
-                       $"{(c.DataMissing ? "⚠" : c.Satisfied ? "✓" : "✗")} {c.Name}\n    {c.Basis}"));
-        MessageBox.Show(this, text, "短线法 — 条件详情", MessageBoxButton.OK, MessageBoxImage.Information);
+        var header = $"{r.Code} {r.Name}　　数据日期 {r.DataDate:yyyy-MM-dd}　收盘 {r.LastClose:F2}\n" +
+                     $"低于MA20 {r.SortScore:F2}%（列表按这个降序排）";
+        var text = string.Join("\n\n", r.Criteria.Select(c =>
+            $"{(c.DataMissing ? "⚠" : c.Satisfied ? "✓" : "✗")} {c.Name}\n    {c.Basis}"));
+        TextDetailWindow.Show("短线法 — 条件详情", header, text, this);
     }
 
     private void WatchlistCriteriaButton_Click(object sender, RoutedEventArgs e)
@@ -348,7 +343,7 @@ public partial class MainWindow : Window
             OpenQuoteDetail(row.Code, row.Name);
     }
 
-    // "我的交易"页的行情详情——行类型跟自选股页是同一个 WatchlistRowViewModel（两页读同一份
+    // "主动仓"页的行情详情——行类型跟自选股页是同一个 WatchlistRowViewModel（两页读同一份
     // watchlist.json，只是筛选不同），所以直接复用同一套打开逻辑。
     private void TradePoolQuoteDetailButton_Click(object sender, RoutedEventArgs e)
     {
@@ -356,9 +351,9 @@ public partial class MainWindow : Window
             OpenQuoteDetail(row.Code, row.Name);
     }
 
-    // "我的交易"Tab的【交易记录】——录这只票的每一笔买入/卖出（金字塔式建仓、分批止盈）。窗口里改的是
+    // "主动仓"Tab的【交易记录】——录这只票的每一笔买入/卖出（金字塔式建仓、分批止盈）。窗口里改的是
     // 拷贝，点保存才整份写回 watchlist.json；取消什么都不动。存完刷新两个列表：持仓状态变了会影响
-    // "我的交易"的排序（持仓优先）和"自选股"页的"在交易池"标记。晨检不在这里自动重算——跟交易池成员
+    // "主动仓"的排序（持仓优先）和"自选股"页的"在交易池"标记。晨检不在这里自动重算——跟交易池成员
     // 变动一样，要等用户主动点【刷新】（见本文件上方的接线说明）。
     private void TradeLotsButton_Click(object sender, RoutedEventArgs e)
     {
@@ -376,7 +371,49 @@ public partial class MainWindow : Window
         vm.WatchlistTab.Reload();
     }
 
-    // 【仓位计算器】——"我的交易"页顶部那个按钮：不针对具体某只票，纯算"这样一笔机会该下多少注"。
+    // 【底仓】页的【录成交】——逐档录入这只票的买入/卖出。窗口和费率跟"主动仓"页完全共用
+    // （TradeLotsWindow 本来就只接 IEnumerable<TradeLot>，不绑定具体哪种记录）。存完写回的是
+    // core-positions.json 而不是 watchlist.json——两套持仓分开存，理由见 AnalyzerPaths.CorePositionPath。
+    private void CorePositionLotsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if (((FrameworkElement)sender).DataContext is not CorePositionRowViewModel row) return;
+
+        // 多传两个参数就会多出"目标年化股息 → 目标股数"那一行（2026-08-20 从底仓页表格挪进来的，
+        // 见 TradeLotsWindow 构造函数的注释）。主动仓那边不传，那一行不出现。
+        var dialog = new TradeLotsWindow(
+            $"{row.Name}（{row.Code}）底仓成交记录", row.Entry.Lots, vm.CorePositionTab.FeeStore,
+            targetAnnualDividend: row.Entry.TargetAnnualDividend,
+            dividendPerShare: row.DividendPerShare) { Owner = this };
+        bool saved = dialog.ShowDialog() == true;
+
+        // 同"主动仓"页：费率是账户级全局设置，在这个窗口里改过就得刷新，哪怕用户点了取消。
+        if (!saved && !dialog.FeesChanged) return;
+        if (saved)
+        {
+            vm.CorePositionTab.Store.UpdateLots(row.Entry.Id, dialog.Result);
+            if (dialog.TargetAnnualDividendResult is { } target)
+                vm.CorePositionTab.Store.UpdateTargetDividend(row.Entry.Id, target);
+        }
+        vm.CorePositionTab.Reload();
+    }
+
+    // 【底仓】页的【分红历史】——这只票的历年每股派息柱状图（全部历史）。持仓页没有"条件详情"
+    // （它不是筛选结果），但"这家公司分红是一贯的还是最近才开始的"对底仓同样是核心判断，
+    // 所以单独给一个按钮，复用筛选页那张图。
+    private void CorePositionDividendChartButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is not CorePositionRowViewModel row) return;
+        new DividendHistoryWindow(row.Code, row.Name, row.AnnualDividends) { Owner = this }.ShowDialog();
+    }
+
+    private void CorePositionQuoteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is CorePositionRowViewModel row)
+            OpenQuoteDetail(row.Code, row.Name);
+    }
+
+    // 【仓位计算器】——"主动仓"页顶部那个按钮：不针对具体某只票，纯算"这样一笔机会该下多少注"。
     private void PositionSizingButton_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not MainViewModel vm) return;
@@ -443,7 +480,7 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "没有找到该标的的日线数据。\n（若是板块指数，请先在 Fetcher 里\"合成板块指数\"并把数据库拷贝过来）", "无法显示行情", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        new QuoteDetailWindow(code, name, vm.BarRepository, vm.TotalDbPath) { Owner = this }.ShowDialog();
+        new QuoteDetailWindow(code, name, vm.BarRepository, vm.CurrentDbPath) { Owner = this }.ShowDialog();
     }
 
     /// <param name="cutoffDate">非空时把K线截到这一天(含)——阶梯低点法的"按历史截止日期验证"

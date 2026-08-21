@@ -13,19 +13,20 @@
 ## 2. 总体架构：两个独立程序
 
 ```
-┌─────────────┐  本地抓取  ┌──────────────┐  手动拷贝  ┌─────────────┐
-│ 数据获取程序  │ ────────▶ │ 本地 SQLite   │ ────────▶ │  分析程序     │
-│ (Fetcher)   │           │(current.sqlite)│(total.sqlite)│ (Analyzer)  │
-└─────────────┘           └──────────────┘           └─────────────┘
+┌─────────────┐  本地抓取  ┌────────────────┐   只读    ┌─────────────┐
+│ 数据获取程序  │ ────────▶ │  本地 SQLite    │ ◀──────── │  分析程序     │
+│ (Fetcher)   │   (写)    │ (current.sqlite)│           │ (Analyzer)  │
+└─────────────┘           └────────────────┘           └─────────────┘
+        两个 exe 装在同一个目录，共用同一个 data/local，没有拷贝也没有下载
 ```
 
 - **数据获取程序**：独立运行，抓取写入本地 SQLite（`current.sqlite`）。**抓取动作必须由用户手动点击触发，不会自动静默运行**（不挂定时任务自动跑，见6.7）。
-- **分析程序**：独立的程序，只读查询用户手动拷贝过去的数据库文件（约定文件名 `total.sqlite`）做分析。
+- **分析程序**：独立的程序，**只读打开同一个 `current.sqlite`** 做分析（2026-08-21 起，此前经历过网盘同步/手动拷贝/GitHub 分发三种方案，见下面的状态变更记录）。库跑 WAL 模式，所以抓取和分析可以同时进行、互不阻塞。
 - 两者之间**只通过 SQLite 文件的表结构**耦合，互不依赖对方的代码。
 
 **状态变更记录（2026-07-09）**：最初设计（见第6节）是"本地生成 master/daily 文件 → 手动上传网盘 → 分析程序从网盘拉取合并"，用来支持没有服务器时的多机共享。实际开发下来，分析程序从来没有读取过 master/daily 文件或 manifest.json，一直都是直接读一份手动拷贝来的数据库文件；`SqliteMerger`（合并算法）在代码里也一直没有被调用过。第6节描述的整套方案被确认为**从未真正投入使用的历史设计**，相关代码（`RunMergeAsync`/`SqliteMerger`/`FileNaming`/Fetcher界面的"合并"按钮及 `Manifest` 里的 `CurrentMaster`/`PreviousMaster`/`DailyFiles` 字段）已删除。第6节整节保留仅作为设计过程记录，不代表现状。
 
-**状态变更记录（2026-07-14）：改用 GitHub Releases 分发数据库**。为了把程序发给其他人用、又不用每次手动拷贝几百MB的库，新增了一套基于 **GitHub Releases** 的分发机制（取代"手动拷贝"这一步；手动拷贝仍可用作兜底）：
+**状态变更记录（2026-07-14）：改用 GitHub Releases 分发数据库**（⚠️ **已于 2026-08-21 整套删除，见下一条**；本段保留作设计过程记录）。为了把程序发给其他人用、又不用每次手动拷贝几百MB的库，新增了一套基于 **GitHub Releases** 的分发机制（取代"手动拷贝"这一步；手动拷贝仍可用作兜底）：
 
 ```
 Fetcher ──压缩上传──▶ GitHub Releases(tag=data, 公开仓库) ──匿名下载+合并──▶ Analyzer
@@ -38,7 +39,24 @@ Fetcher ──压缩上传──▶ GitHub Releases(tag=data, 公开仓库) ─�
 - **Analyzer 端（下载）**：顶栏"从GitHub更新数据"按钮（`DataSyncService`）。本地没有库→下最新 `baseline` 解压成 `total.sqlite`；之后→只下比本地新的 `daily` 增量、用**重新引入的 `SqliteMerger`**（ATTACH + INSERT OR REPLACE）并进本地库。**本地"数据到哪天"直接用库里最新日线日期推断，不另存状态文件**；发布了更新的全量基线（baseline 日期 > 本地）时会重下全量（等于重基线），其余时候只下增量、省流量。用户端下载公开 release 不需要 token。
 - 注意 `SqliteMerger` 在此重新引入（2026-07-09 曾随废弃的网盘方案删除），但这次是真的被 Analyzer 调用的，数据来源是 release 资产而非网盘。
 
-本节开头那张"手动拷贝"的图仍然成立（作为不联网时的兜底路径）；有网络时推荐走上面这套 GitHub Releases 流程。
+**状态变更记录（2026-08-21）：删除 GitHub Releases 分发，分析程序改为直读 Fetcher 的库**。
+
+上面那套分发机制**被数据库体积压死了**——它成立的前提是"库几百MB、压完塞得进 release 资产"，而库实际长到了 **7.57GB**：
+
+- 实测压缩率 4.13:1，`baseline` zip 约 **1.83GB**，紧贴 GitHub Releases 单资产 **2GB** 上限，再涨两三个月就传不上去；即使传上去，用户端首次要下 1.8GB，实际也下不动。
+- 更根本的结构问题：每日增量只覆盖 5 张表（`Bar`/`NetInflow`/`FundamentalMetric`/`OrderWinAnnouncement`/`StockMeta`），而 `MarginDetail`（每天都变，590万行）、`Lhb`、`FinancialReport`、`TopShareholder`、`ShareholderCount`、`IndexCons`/`IndexWeight`/`Dividend`/`Board*` 全都不在增量里，唯一下行通道是重传全量基线。于是"想让用户拿到新的融资余额"就必须重传那个 1.83GB 的包、用户端还要整库重下——死结。
+
+结论是**放弃分发**（本机自用为主，不再往外发），改成最简单的形态：
+
+```
+Fetcher 写 publish/data/local/current.sqlite ◀── Analyzer 只读同一个文件
+```
+
+- 两个 exe 就在同一个目录，`AppContext.BaseDirectory\data` 算出来是同一个文件夹，所以 `AnalyzerPaths.CurrentDb` 和 `FetchPaths.CurrentDb` 指向同一个文件。不拷贝、不下载、不可能出现两份数据不一致。
+- 配套把库切到 **WAL**（`SqliteSchema.EnsureSchema` 里一句 `PRAGMA journal_mode=WAL`）：默认的 delete 模式下 Fetcher 的写事务加排他锁、Analyzer 会吃 `SQLITE_BUSY`，早上"一边抓一边看盘"必然报 `database is locked`。`journal_mode` 是写进文件头的持久属性，设一次永久生效，但切换需要独占访问——**升级后第一次要单独开 Fetcher 跑一遍**，否则 PRAGMA 会静默返回旧模式。
+- 已删除的代码：`GitHubUploadService`（Fetcher 上传）、`DataSyncService`（Analyzer 下载）、`DailyIncrementExporter`（增量导出）、`FetchPaths.GitHubTokenPath`，以及两端界面上的"上传全量基线"/"上传当天增量"/"从服务端更新数据"三个按钮。`AnalyzerPaths.TotalDb`（`total.sqlite`）改名成 `CurrentDb` 并指向 `current.sqlite`；`total.sqlite` 这个文件名从此不再使用。
+- **保留**：`GitHubReleaseClient` + `StockPlatform.Data/Sync/DataDownloadService` + `SqliteMerger`——手机端（`StockPlatform.Mobile`）目前只有这一条取数通道，暂时留着。桌面端已不再调用它们。
+- **顺带**：`FactorLab` 的默认库探测路径也从 `total.sqlite` 改成 `current.sqlite`。
 
 ## 3. 数据范围与数据分级
 
@@ -223,7 +241,7 @@ Fetcher ──压缩上传──▶ GitHub Releases(tag=data, 公开仓库) ─�
   - `GetAllInstruments()` 返回**全部**（含 type），仅"查询"页用。
   - 各选股页的扫描全集仍是 `SqliteBarRepository.GetAllCodes()`（只认6位纯数字=个股），所以分析天然只跑个股，加不加非个股进 StockMeta 都不影响。
 - **查询页**：搜索范围从"只个股"扩成 `GetAllInstruments()`，结果表加"类型"列（个股/大盘指数/ETF/板块）；点"K线详情"对指数/ETF/板块同样能看（`QuoteDetailWindow` 按 code 查 Bar，各类型的K线都存在各自 code 下）。
-- **数据流**：`type` 列随全量基线/每日增量的 `StockMeta` 整表同步到分析程序（`DailyIncrementExporter` 本来就是 `SELECT * FROM StockMeta` 整表带）。所以要让查询页出现这些，得先跑一次带本改动的 Fetcher（"拉取全部"会顺带写好指数/ETF 名称、"合成板块指数"写板块名称）再上传。
+- **数据流**：分析程序读的就是 Fetcher 写的那个库（2026-08-21 起无分发步骤），所以要让查询页出现这些，只要跑一次带本改动的 Fetcher（"拉取全部"会顺带写好指数/ETF 名称、"合成板块指数"写板块名称）即可。
 
 ## 4. 数据库表结构设计
 

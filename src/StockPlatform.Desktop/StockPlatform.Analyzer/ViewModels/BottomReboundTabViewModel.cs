@@ -76,7 +76,7 @@ public class BottomReboundTabViewModel : INotifyPropertyChanged
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
         ShowCriteriaInfoCommand = new RelayCommand(_ =>
-            MessageBox.Show(CriteriaInfoText, "耀哥法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
+            TextDetailWindow.Show("耀哥法 — 分析条件说明", "耀哥法 — 入选条件与依据说明", CriteriaInfoText));
         AddToWatchlistCommand = new RelayCommand(_ =>
         {
             var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "耀哥法", Granularity.Day, difThreshold: DifThreshold);
@@ -100,7 +100,7 @@ public class BottomReboundTabViewModel : INotifyPropertyChanged
                 return;
             }
 
-            var names = SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
+            var names = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).ToDictionary(s => s.Code, s => s.Name);
 
             var engine = new BottomReboundAnalysisEngine(_barRepository, _netInflowRepository);
             var threshold = DifThreshold;

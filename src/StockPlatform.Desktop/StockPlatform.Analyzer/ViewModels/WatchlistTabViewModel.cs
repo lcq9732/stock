@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Media;
@@ -87,7 +87,37 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     /// 【仓位计算器】只把它当**参考信息**显示，不参与仓位计算（成本是沉没成本，见那个窗口的说明）。</summary>
     public double? NetAvgCost => _cost.NetAvgCost;
 
-    /// <summary>是否在"我的交易"池里（显式勾入，或已填买入价）——"自选股"页用一列标出来，让人一眼看出
+    // ── 供表格排序用的数值形式（2026-08-19新增）──
+    // 那几列显示的是拼好的字符串（"12.34（08-14）"、"1,500股"、"+1,234元（+5.6%）"），DataGrid 默认
+    // 就按字符串比大小，于是 13.44% 会排在 2.00% 后面（用户 2026-08-19 报的股息率排序问题）。
+    // 每个这样的列都用 SortMemberPath 指到下面对应的数值属性上。
+
+    /// <summary>止亏价的数值形式（没买/已清仓/算不出为 null）。</summary>
+    public double? BreakEvenValue => !Entry.HasBought || Entry.IsClosedTrade ? null : _cost.BreakEvenPrice();
+
+    /// <summary>持仓盈亏的数值形式（元，含费口径，跟 <see cref="HoldingText"/> 同源）——
+    /// 已平仓给已实现，持仓中给"按现价全卖"的结果，没买过为 null。</summary>
+    public double? HoldingPnlValue
+    {
+        get
+        {
+            if (!Entry.HasBought) return null;
+            if (Entry.IsClosedTrade) return _cost.RealizedNet;
+            if (_latestClose is not (> 0)) return null;
+            return _cost.TotalPnlIfLiquidated(_latestClose.Value);
+        }
+    }
+
+    /// <summary>财报日的数值(日期)形式——排序要按时间先后，不能按 "2026-08-26" 这个字符串。</summary>
+    public DateTime? EarningsDateValue => Entry.EarningsDate;
+
+    /// <summary>剩余持仓股数的数值形式。</summary>
+    public int RemainingSharesValue => Entry.RemainingShares;
+
+    /// <summary>满足条件数的数值形式（"11/12" 按字符串排会把 9/12 排在 11/12 后面）。</summary>
+    public int SatisfiedCountValue => Entry.SatisfiedCount;
+
+    /// <summary>是否在"主动仓"池里（显式勾入，或已填买入价）——"自选股"页用一列标出来，让人一眼看出
     /// 哪些样本自己真的下手了。</summary>
     public string TradePoolText => Entry.IsInTradePool ? (Entry.HasBought ? "✔持仓" : "✔已加入") : "";
     public Brush TradePoolColor => Entry.HasBought ? Brushes.Firebrick : Brushes.SeaGreen;
@@ -107,7 +137,7 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
         ChangeColor = pct >= 0 ? Brushes.Red : Brushes.Green; // 国内看盘习惯：涨红跌绿
     }
 
-    // ── 持仓信息（2026-08-11起支持多笔买入/卖出，见 TradeLot）——买卖明细在"我的交易"Tab点
+    // ── 持仓信息（2026-08-11起支持多笔买入/卖出，见 TradeLot）——买卖明细在"主动仓"Tab点
     //    【交易记录】录入，这里只显示汇总：总股数 + 加权均价。一笔都没有=观察中、还没买。 ──
 
     /// <summary>买入汇总："3笔 1,500股 均12.34"；没买过显示"—"。老数据没填股数时只显示均价。</summary>
@@ -305,14 +335,14 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
 
 /// <summary>
 /// "自选股（算法验证）" tab — 各选股方法丢进来的**样本池**，用途只有一个：跟踪这些票后来涨跌如何，
-/// 统计各方法的准确率（见下方 MethodStatsText）。2026-07-31 起这里**不再录买卖信息**——那是"我的交易"
+/// 统计各方法的准确率（见下方 MethodStatsText）。2026-07-31 起这里**不再录买卖信息**——那是"主动仓"
 /// Tab 的事（<see cref="TradePoolTabViewModel"/>）；本页只看"选中后涨跌幅"。
 ///
 /// 关键设计：一只票加入交易池后**仍然留在本页**。否则"你挑走的正好是自己看好的那些"，剩下的样本
 /// 就有了选择偏差，方法准确率会被系统性低估/高估——验证样本必须包含方法选出的全部票。本页因此显示
 /// 的是全部自选记录，交易池只是叠加在上面的一个标记（"在交易池"列）。
 ///
-/// Reads/writes JsonWatchlistStore, not total.sqlite — this is the Analyzer's own state, not
+/// Reads/writes JsonWatchlistStore, not the market database — this is the Analyzer's own state, not
 /// Fetcher's shared read-only data.
 /// </summary>
 public class WatchlistTabViewModel : INotifyPropertyChanged
@@ -339,7 +369,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
     public RelayCommand ExportCommand { get; }
     public RelayCommand AddToTradePoolCommand { get; }
 
-    /// <summary>加入交易池后要通知"我的交易"页和晨检页重新加载——由 MainViewModel 注入。</summary>
+    /// <summary>加入交易池后要通知"主动仓"页和晨检页重新加载——由 MainViewModel 注入。</summary>
     public Action? TradePoolChanged { get; set; }
 
     public WatchlistTabViewModel(JsonWatchlistStore store, IBarRepository barRepository, IBoardRepository boardRepository, TradeFeeStore fees)
@@ -411,7 +441,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
         TradePoolChanged?.Invoke();   // 删掉的可能正在交易池里
     }
 
-    /// <summary>把勾选的票加进"我的交易"页——买卖信息去那边录。本页仍然保留这些票（验证样本不能被挑走，
+    /// <summary>把勾选的票加进"主动仓"页——买卖信息去那边录。本页仍然保留这些票（验证样本不能被挑走，
     /// 理由见类注释）。</summary>
     private void AddSelectedToTradePool()
     {
@@ -425,7 +455,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
 }
 
 /// <summary>
-/// "我的交易" tab（2026-07-31新增）——**我打算买卖、要每天盯的那一小撮票**，跟"自选股（算法验证）"
+/// "主动仓" tab（2026-07-31新增）——**我打算买卖、要每天盯的那一小撮票**，跟"自选股（算法验证）"
 /// 分开：买入/卖出只在这里录（2026-08-11起支持多笔，金字塔式建仓+分批止盈，见 <see cref="TradeLot"/>；
 /// 列表显示的是汇总的总股数和加权均价），每日晨检也只体检这里的票。
 ///

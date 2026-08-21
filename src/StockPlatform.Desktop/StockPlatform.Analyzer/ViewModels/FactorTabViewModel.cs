@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -27,6 +27,17 @@ public class FactorRowViewModel
     public string LsAnnOutText { get; init; } = "—";
     public string TurnoverText { get; init; } = "—";
     public string YearlyIcText { get; init; } = "";
+
+    // ── 供表格排序用的数值形式（2026-08-19新增）──
+    // 上面那些是格式化好的字符串（"0.012"、"+3.4%"、"25%"），DataGrid 默认按字符串排会排错
+    // （负号、百分号、位数都会干扰）。XAML 里这几列用 SortMemberPath 指到下面。
+    // NaN 的行在 WPF 排序里会聚在一端，跟显示成"—"是一致的。
+    public double IcInValue { get; init; } = double.NaN;
+    public double IcirInValue { get; init; } = double.NaN;
+    public double IcNeuInValue { get; init; } = double.NaN;
+    public double IcOutValue { get; init; } = double.NaN;
+    public double LsAnnOutValue { get; init; } = double.NaN;
+    public double TurnoverValue { get; init; } = double.NaN;
     /// <summary>点"说明"按钮时弹窗显示的完整文本（见 FactorDetailWindow）。标题行由窗口单独渲染，
     /// 这里不再重复因子名。IC 等数字表格里都有列，弹窗只补表格放不下的：逐年IC，以及"中性IC 该怎么读"。</summary>
     public string DetailText =>
@@ -50,6 +61,8 @@ public class FactorPickRowViewModel : ISelectableRow
     /// <summary>来自 FactorLab 的证监会行业名（库里没抓过行业分类时为空）。</summary>
     public string Industry { get; init; } = "";
     public string ScoreText { get; init; } = "";
+    /// <summary>合成得分的数值形式——表格按它排序（见上面 FactorRowViewModel 里同类注释）。</summary>
+    public double ScoreValue { get; init; } = double.NaN;
     public string ContribText { get; init; } = "";
     public string CloseText { get; init; } = "";
     public DateTime DataDate { get; init; }
@@ -137,7 +150,7 @@ public class FactorTabViewModel : INotifyPropertyChanged
 
     private async Task RunAsync()
     {
-        if (!File.Exists(_paths.TotalDb))
+        if (!File.Exists(_paths.CurrentDb))
         {
             StatusText = "本地还没有数据文件，先把 Fetcher 产出的数据库拷贝过来";
             return;
@@ -147,7 +160,7 @@ public class FactorTabViewModel : INotifyPropertyChanged
         var progress = new Progress<string>(s => StatusText = s);
         try
         {
-            var outcome = await Task.Run(() => Evaluate(_paths.TotalDb, progress));
+            var outcome = await Task.Run(() => Evaluate(_paths.CurrentDb, progress));
 
             FactorRows.Clear();
             foreach (var row in outcome.Factors) FactorRows.Add(row);
@@ -243,6 +256,8 @@ public class FactorTabViewModel : INotifyPropertyChanged
                 LsAnnOutText = double.IsNaN(r.LsAnnOut) ? "—" : r.LsAnnOut.ToString("+0.0%;-0.0%"),
                 TurnoverText = double.IsNaN(r.AvgTurnover) ? "—" : r.AvgTurnover.ToString("0%"),
                 YearlyIcText = string.Join("，", r.YearlyIc.Select(kv => $"{kv.Key}={kv.Value:0.000}")),
+                IcInValue = r.IcIn.Mean, IcirInValue = r.IcIn.Icir, IcNeuInValue = r.IcNeuIn.Mean,
+                IcOutValue = r.IcOut.Mean, LsAnnOutValue = r.LsAnnOut, TurnoverValue = r.AvgTurnover,
             });
         }
 
@@ -252,6 +267,7 @@ public class FactorTabViewModel : INotifyPropertyChanged
             Code = p.Code,
             Name = p.Name,
             ScoreText = p.Score.ToString("0.000"),
+            ScoreValue = p.Score,
             ContribText = p.TopContribsText,
             CloseText = double.IsNaN(p.LatestClose) ? "—" : p.LatestClose.ToString("0.00"),
             DataDate = p.DataDate.ToDateTime(TimeOnly.MinValue),

@@ -12,7 +12,7 @@ namespace StockPlatform.Logic.Services;
 /// Rule 4 (流通市值) reads FundamentalMetric / MetricKeys.CirculatingMarketCap. **这条现在是真的在
 /// 判了**——早期注释说"没有任何 fetcher 写过这个 key，所以 rule4 恒不满足"，那已经不成立：
 /// FetchOrchestrator.FetchMarketCapAsync 从 2026-07-09 起每次"拉取全部"/"拉取当天"都写，2026-08-04
-/// 实测 publish/data/local/total.sqlite 有 80,515 行 / 5,539 只股票。按最新 as_of_date 的值分档：
+/// 实测 publish/data/local/current.sqlite 有 80,515 行 / 5,539 只股票。按最新 as_of_date 的值分档：
 /// 1,328 只（24%）落在 (80亿, 300亿) 区间内 → rule4 满足；3,660 只 ≤80亿、551 只 ≥300亿 → 不满足。
 /// 也就是说 rule4 已经是一条实际起筛选作用的硬条件，不再是"恒 false 的占位"——改这个阈值会真的
 /// 改变彬哥法的选股结果。阈值本身经核对无误：库里存的是"元"（600036 的 value ÷ 同日收盘 = 恒定

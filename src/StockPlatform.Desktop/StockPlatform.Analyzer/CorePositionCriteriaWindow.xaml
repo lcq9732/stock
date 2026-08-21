@@ -1,0 +1,76 @@
+<Window x:Class="StockPlatform.Analyzer.CorePositionCriteriaWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:oxy="http://oxyplot.org/wpf"
+        Title="底仓法 — 条件详情" MinHeight="500" MinWidth="900"
+        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei">
+    <!-- 底仓法的"条件详情"（2026-08-20 新增）。
+         原来这里是 MessageBox：宽度和字体都改不了，几十行带缩进对齐的文字挤在系统对话框里
+         既看不全也对不齐（用户反馈"太窄、字体小"）。而历年派息/净利这两串数字本来就该画成图，
+         柱子高低一眼看出"哪年腰斩了"，比读一行数字快得多。
+
+         布局按用户 2026-08-20 要求：**两张图放左边上下排，文字放右边**，窗口开到屏幕九成大，
+         字号自动挑一个能装下不出滚动条的最大值（见 TextFitter）。 -->
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="HeaderText" Grid.Row="0" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"
+                   TextWrapping="Wrap" />
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <!-- 图列略窄于文字列：柱状图看的是相对高低，不需要很宽；文字里有整句说明，窄了
+                     就得折行，折多了缩进对齐的效果反而乱。 -->
+                <ColumnDefinition Width="0.85*" MinWidth="300" />
+                <ColumnDefinition Width="6" />
+                <ColumnDefinition Width="1.15*" MinWidth="360" />
+            </Grid.ColumnDefinitions>
+
+            <!-- 左：两张图上下排。上=历年每股派息（近5年深蓝、更早浅蓝标出判定窗口），
+                 下=历年归母净利（盈利红柱、亏损绿柱 + 零轴）。都画全部历史。 -->
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="6" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" BorderBrush="#DDDDDD" BorderThickness="1">
+                    <oxy:PlotView x:Name="DividendPlot" Background="White" />
+                </Border>
+                <GridSplitter Grid.Row="1" Height="6" HorizontalAlignment="Stretch" Background="Transparent"
+                              ResizeBehavior="PreviousAndNext" ResizeDirection="Rows"
+                              ToolTip="上下拖动可调整两张图的比例" />
+                <Border Grid.Row="2" BorderBrush="#DDDDDD" BorderThickness="1">
+                    <oxy:PlotView x:Name="ProfitPlot" Background="White" />
+                </Border>
+            </Grid>
+
+            <GridSplitter Grid.Column="1" Width="6" VerticalAlignment="Stretch" Background="Transparent"
+                          ResizeBehavior="PreviousAndNext" ResizeDirection="Columns"
+                          ToolTip="左右拖动可调整图和文字的比例" />
+
+            <!-- 右：条件文字。等宽字体——Basis 里有靠空格和 ├└ 对齐的多行说明。
+                 这里开了自动折行（横向不出滚动条）：文字列只占窗口一半宽，长句子放不下，
+                 而底仓法的 ├└ 那几行都很短、不会被折到，对齐效果保得住。 -->
+            <Border Grid.Column="2" BorderBrush="#DDDDDD" BorderThickness="1" Background="#FCFCFC">
+                <TextBox x:Name="BodyText" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                         FontFamily="Consolas, Microsoft YaHei" FontSize="15" Padding="10"
+                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                         TextWrapping="Wrap" IsInactiveSelectionHighlightEnabled="True"
+                         ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+            </Border>
+        </Grid>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+            <TextBlock Text="字号" VerticalAlignment="Center" Foreground="Gray" Margin="0,0,6,0" />
+            <Button Content="&#8722;" Width="32" Click="SmallerFont_Click" ToolTip="缩小字号" />
+            <Button Content="&#43;" Width="32" Margin="4,0,0,0" Click="LargerFont_Click" ToolTip="放大字号" />
+            <Button Content="复制文字" Width="90" Margin="12,0,0,0" Click="CopyAll_Click" />
+            <Button Content="关闭" Width="90" Margin="8,0,0,0" IsDefault="True" IsCancel="True" Click="Close_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

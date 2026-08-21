@@ -127,6 +127,18 @@ public class SqliteIndexRepository : IIndexConsRepository
         tx.Commit();
     }
 
+    public List<string> GetConsByIndex(string indexCode)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT stock_code FROM IndexCons WHERE index_code = $code ORDER BY stock_code;";
+        cmd.Parameters.AddWithValue("$code", indexCode);
+        var result = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) result.Add(reader.GetString(0));
+        return result;
+    }
+
     public List<string> GetIndexesByStock(string stockCode)
     {
         using var conn = Open();

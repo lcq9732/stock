@@ -130,6 +130,37 @@ public class SqliteDividendRepository : IDividendRepository
         return result;
     }
 
+    public Dictionary<string, List<(int Year, double PerShare)>> GetAnnualCashDividendPerShare(DateTime since)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        // 按除权除息日所属年分组（钱到账那年），同年多次派息合并；/10 换成每股，同
+        // GetTrailingCashDividendPerShare。ex_date 是 'yyyy-MM-dd' 文本，取前4位当年份比
+        // strftime 快且不依赖 SQLite 的日期函数。
+        cmd.CommandText = """
+            SELECT code, CAST(substr(ex_date, 1, 4) AS INTEGER) AS y, SUM(dividend_yuan) / 10.0
+            FROM Dividend
+            WHERE progress = '实施' AND dividend_yuan > 0 AND ex_date IS NOT NULL AND ex_date >= $since
+            GROUP BY code, y
+            ORDER BY code, y;
+            """;
+        cmd.Parameters.AddWithValue("$since", since.ToString(DateFormat, CultureInfo.InvariantCulture));
+        var result = new Dictionary<string, List<(int Year, double PerShare)>>(StringComparer.Ordinal);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(1) || reader.IsDBNull(2)) continue;
+            var code = reader.GetString(0);
+            if (!result.TryGetValue(code, out var list))
+            {
+                list = new List<(int Year, double PerShare)>();
+                result[code] = list;
+            }
+            list.Add((reader.GetInt32(1), reader.GetDouble(2)));
+        }
+        return result;
+    }
+
     public int GetCodeCount()
     {
         using var conn = Open();

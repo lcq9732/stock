@@ -17,16 +17,15 @@ public record BoardListRow(string BoardCode, string Name, string ChangeText, int
 public record BoardMemberRow(string Code, string Name, string ChangeText) : IStockRow;
 public record WatchRow(string Code, string Name, string DataDate, string PickPrice, string Latest, string Change) : IStockRow;
 
-/// <summary>手机端主视图：数据更新 + 选股(7种方法) + 板块热度 + 查询 + K线图。整个 App 一个壳，
-/// 没在看K线时显示三个 Tab；点某只股票的『K线』切到图，返回回来。</summary>
+/// <summary>手机端主视图：选股(7种方法) + 板块热度 + 查询 + K线图。整个 App 一个壳，没在看K线时
+/// 显示三个 Tab；点某只股票的『K线』切到图，返回回来。数据是只读的、库由 Fetcher 写（见
+/// DataService），所以这里只有"刷新"、没有"更新数据"。</summary>
 public partial class MainViewModel : ViewModelBase
 {
     private readonly DataService _data = new();
 
-    // ── 数据状态 / 更新 ──
+    // ── 数据状态 ──
     [ObservableProperty] private string _dbStatus = "";
-    [ObservableProperty] private string _updateStatus = "";
-    [ObservableProperty] private bool _isUpdating;
 
     // ── 选股（7种方法） ──
     public IReadOnlyList<ScreeningMethod> Methods { get; } = ScreeningMethods.All;
@@ -86,24 +85,18 @@ public partial class MainViewModel : ViewModelBase
     private void RefreshDbStatus() =>
         DbStatus = _data.DbExists
             ? $"数据：已就绪（最新到 {_data.LatestDay:yyyy-MM-dd}）"
-            : "数据：本地还没有，请点『从服务端更新数据』。";
+            : $"数据：找不到数据库。桌面上先用 Fetcher 抓一次；真机请把 current.sqlite 拷到 {_data.LocalDbPath}";
 
+    /// <summary>重新读一遍库的状态——Fetcher 抓完新数据后点一下，不用重启 App（跟桌面分析程序那个
+    /// "刷新"按钮同理：仓库每次查询都重开连接、不持有长连接，所以能读到最新写入的内容）。</summary>
     [RelayCommand]
-    private async Task UpdateAsync()
-    {
-        if (IsUpdating) return;
-        IsUpdating = true;
-        var progress = new Progress<string>(s => UpdateStatus = s);
-        try { await _data.UpdateFromServerAsync(progress); }
-        catch (Exception ex) { UpdateStatus = "更新失败：" + ex.Message; }
-        finally { IsUpdating = false; RefreshDbStatus(); }
-    }
+    private void RefreshDb() => RefreshDbStatus();
 
     // ── 选股 ──
     [RelayCommand]
     private async Task RunScreenAsync()
     {
-        if (!_data.DbExists) { ScreenSummary = "没有本地数据库，请先更新数据。"; return; }
+        if (!_data.DbExists) { ScreenSummary = "没有本地数据库，见上方提示。"; return; }
         var method = SelectedMethod;
         var values = CurrentParams.Select(x => x.AsDouble).ToList();
         IsBusy = true;
@@ -146,7 +139,7 @@ public partial class MainViewModel : ViewModelBase
         Boards.Clear();
         BoardMembers.Clear();
         BoardMembersHeader = "点某个板块看成分股";
-        if (!_data.DbExists) { BoardSummary = "没有本地数据库，请先更新数据。"; return; }
+        if (!_data.DbExists) { BoardSummary = "没有本地数据库，见选股页提示。"; return; }
 
         var asOf = _data.BoardRepository.GetLatestAsOf();
         if (asOf == null) { BoardSummary = "本地没有板块数据（需要电脑端 Fetcher 先『拉取板块』并上传）。"; return; }
@@ -184,7 +177,7 @@ public partial class MainViewModel : ViewModelBase
     private void Search()
     {
         QueryResults.Clear();
-        if (!_data.DbExists) { QuerySummary = "没有本地数据库，请先更新数据。"; return; }
+        if (!_data.DbExists) { QuerySummary = "没有本地数据库，见选股页提示。"; return; }
         var q = (QueryText ?? "").Trim();
         if (q.Length == 0) { QuerySummary = "请输入代码或名称"; return; }
 

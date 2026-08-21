@@ -22,8 +22,7 @@
                 <Grid RowDefinitions="Auto,Auto,Auto,Auto,*" Margin="10">
                     <TextBlock Grid.Row="0" Text="{Binding DbStatus}" TextWrapping="Wrap" Margin="0,0,0,6" />
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
-                        <Button Content="从服务端更新数据" Command="{Binding UpdateCommand}" IsEnabled="{Binding !IsUpdating}" />
-                        <TextBlock Text="{Binding UpdateStatus}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                        <Button Content="刷新" Command="{Binding RefreshDbCommand}" />
                     </StackPanel>
 
                     <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Margin="0,0,0,6">

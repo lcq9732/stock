@@ -24,14 +24,39 @@ public class ResultRowViewModel : ISelectableRow
     /// 直接列出两个止盈目标价和止损价，省得每只都点开"条件详情"看。</summary>
     public double? LastClose { get; init; }
 
-    /// <summary>回调法的用途分类："底仓"/"主动仓"/"底仓+主动仓"；其它方法为空。
-    /// 见 StockScreenResult.Category。</summary>
+    /// <summary>可选的用途分类；目前没有方法在用（原回调法的"底仓/主动仓"分类随该方法改造成
+    /// 底仓法一起去掉了——底仓法的结果全是底仓，分类列没有意义）。见 StockScreenResult.Category。</summary>
     public string Category { get; init; } = "";
-    public bool IsBaseHolding => Category.Contains(PullbackAnalysisEngine.CategoryBase);
 
     /// <summary>股息率（近12个月已实施派息 ÷ 现价）；没算的方法显示空。</summary>
     public double? DividendYield { get; init; }
     public string DividendYieldText => DividendYield.HasValue ? $"{DividendYield.Value * 100:F2}%" : "";
+
+    // ── 以下四个是底仓法专用（跟 SortScore 一样，方法专属字段挂在共享行模型上）──
+
+    /// <summary>近5年平均股息率。跟 <see cref="DividendYieldText"/> 并排显示：当期明显高出一截
+    /// 时（这里超过均值1.5倍就标 ⚠），多半含一次性大额分红或股价刚大跌，不是可持续的水平。</summary>
+    public double? AvgDividendYield { get; init; }
+    public string AvgDividendYieldText => AvgDividendYield.HasValue
+        ? $"{AvgDividendYield.Value * 100:F2}%" +
+          (DividendYield.HasValue && AvgDividendYield.Value > 0 &&
+           DividendYield.Value > AvgDividendYield.Value * 1.5 ? " ⚠" : "")
+        : "";
+
+    /// <summary>连续分红年数——底仓法的硬条件之一（≥5年）。</summary>
+    public int? ConsecutiveDividendYears { get; init; }
+    public string ConsecutiveDividendYearsText => ConsecutiveDividendYears.HasValue
+        ? $"{ConsecutiveDividendYears.Value} 年"
+        : "";
+
+    /// <summary>派息趋势（"递增｜22年0.320 23年0.350 …"）。只展示不过滤。</summary>
+    public string DividendTrend { get; init; } = "";
+
+    /// <summary>达成目标年化股息所需投入（万元）——"全压这一只"的口径，用户没填目标时为空。</summary>
+    public double? RequiredCapitalForTarget { get; init; }
+    public string RequiredCapitalText => RequiredCapitalForTarget is > 0
+        ? $"{RequiredCapitalForTarget.Value / 1e4:F1} 万"
+        : "";
 
     /// <summary>档位标签："档位名 胜率% / 样本数"，见 StockScreenResult.DepthBucket。
     /// 样本数一起显示是有意的——超跌档78%的胜率只建立在319个样本上，别只看胜率。</summary>
@@ -54,6 +79,13 @@ public class ResultRowViewModel : ISelectableRow
     /// <summary>三年累计净利（元）——给表格按它排序用，负值那些排在一起最容易被看见。</summary>
     public double? ThreeYearCumProfit { get; init; }
 
+    /// <summary>三年累计净利的显示文本（如 <c>+72.77亿</c>，累计为负带 ⚠）——底仓法的结果表只显示
+    /// 这个累计值，逐年明细在【条件详情】里画成柱状图（2026-08-20 用户要求：Grid 里塞
+    /// "23年+29.52 24年+21.59 25年+21.66｜累计+72.77亿" 整串，列宽不够也读不出重点）。</summary>
+    public string ThreeYearCumProfitText => ThreeYearCumProfit is { } cum
+        ? $"{cum / 1e8:+0.00;-0.00}亿{(cum <= 0 ? " ⚠" : "")}"
+        : "";
+
     /// <summary>日均波幅（近60日）；没算的方法显示空。超过4.5%时加 ⚠ ——那一档回测只有
     /// 0.03%/胜率50.2%（等于随机），且-10%止损在这种波动下两三天就会被噪音打掉。</summary>
     public double? DailyVolatility { get; init; }
@@ -61,11 +93,11 @@ public class ResultRowViewModel : ISelectableRow
         ? $"{DailyVolatility.Value * 100:F2}%{(DailyVolatility.Value > 0.045 ? " ⚠" : "")}"
         : "";
 
-    // 回调法结果表专用的三个参考价（跟 SortScore 一样，是方法专属字段挂在共享行模型上）。
-    // 两个目标各有依据、由用户自己选，理由见 PullbackAnalysisEngine 里 QuickTargetPct 的注释。
-    public string QuickTargetText => Fmt(PullbackAnalysisEngine.DefaultQuickTargetPct);
-    public string BigTargetText => Fmt(PullbackAnalysisEngine.DefaultTargetPct);
-    public string StopPriceText => Fmt(-PullbackAnalysisEngine.DefaultStopPct);
+    // 主动仓的三个参考价（短线法结果表在用）。两个目标各有依据、由用户自己选，理由见
+    // TradeDiscipline 的注释。**底仓法不用这组价**——底仓靠持有时间和分红，没有价格止盈止损。
+    public string QuickTargetText => Fmt(TradeDiscipline.QuickTargetPct);
+    public string BigTargetText => Fmt(TradeDiscipline.TargetPct);
+    public string StopPriceText => Fmt(-TradeDiscipline.StopPct);
 
     private string Fmt(double pct) =>
         LastClose is > 0 ? (LastClose.Value * (1 + pct)).ToString("F2") : "";
@@ -89,6 +121,10 @@ public class ResultRowViewModel : ISelectableRow
         LastClose = r.LastClose,
         Category = r.Category ?? "",
         DividendYield = r.DividendYield,
+        AvgDividendYield = r.AvgDividendYield,
+        ConsecutiveDividendYears = r.ConsecutiveDividendYears,
+        DividendTrend = r.DividendTrend ?? "",
+        RequiredCapitalForTarget = r.RequiredCapitalForTarget,
         DailyVolatility = r.DailyVolatility,
         DepthBucket = r.DepthBucket ?? "",
         KdjState = r.KdjState ?? "",

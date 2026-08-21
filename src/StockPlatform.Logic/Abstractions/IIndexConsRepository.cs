@@ -18,6 +18,13 @@ public interface IIndexConsRepository
     /// <summary>整体替换 ETF→指数映射表（清空再写）。indexCode 为 null 表示该 ETF 未匹配到指数。</summary>
     void ReplaceEtfIndexMap(IEnumerable<(string EtfCode, string? IndexCode, string MatchType)> rows);
 
+    /// <summary>某个指数当前的成分股代码（6 位）——正查，跟 <see cref="GetIndexesByStock"/> 反向。
+    /// 给"风格温度计"用（晨检里拿红利/蓝筹指数的成分股等权算近期超额，见 StyleGauge）。
+    ///
+    /// 注意口径：返回的是**最近一次抓取时**的成分名单，不是历史上某天的名单。拿它回溯很久以前
+    /// 会有成分变迁/幸存者偏差；算最近几天的风格强弱没问题。</summary>
+    List<string> GetConsByIndex(string indexCode);
+
     /// <summary>反查：某只股票（6 位）所属的指数代码列表。</summary>
     List<string> GetIndexesByStock(string stockCode);
 

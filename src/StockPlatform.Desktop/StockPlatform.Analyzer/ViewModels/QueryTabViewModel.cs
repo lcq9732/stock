@@ -59,7 +59,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
     public RelayCommand SearchCommand { get; }
     public RelayCommand AddToWatchlistCommand { get; }
 
-    /// <summary>加进交易池后要通知"我的交易"/"自选股"/晨检三页刷新——由 MainViewModel 注入。</summary>
+    /// <summary>加进交易池后要通知"主动仓"/"自选股"/晨检三页刷新——由 MainViewModel 注入。</summary>
     public Action? TradePoolChanged { get; set; }
 
     public QueryTabViewModel(AnalyzerPaths paths, IBarRepository barRepository, Watchlist.JsonWatchlistStore watchlistStore)
@@ -76,7 +76,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
     /// Criteria 为空。只放行个股；指数/ETF/板块没有股东户数等跟踪数据、也不是"选股"，直接跳过并提示。
     ///
     /// 2026-07-31起直接标记 InTradePool=true：从这里手工搜出来加进去的票，本来就是"我看好、想买卖"的
-    /// （不像各选股方法丢进来的那些只是算法验证样本），所以直接进"我的交易"页、纳入每日晨检体检。</summary>
+    /// （不像各选股方法丢进来的那些只是算法验证样本），所以直接进"主动仓"页、纳入每日晨检体检。</summary>
     private void AddSelectedToWatchlist()
     {
         var selected = Results.Where(r => r.IsSelected).ToList();
@@ -103,7 +103,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
                 DataDate = last.PeriodStart,
                 PriceAtPick = last.Close,
                 AddedAt = DateTime.Now,
-                InTradePool = true,   // 手工搜出来加的 = 我看好想买卖的，直接进"我的交易"
+                InTradePool = true,   // 手工搜出来加的 = 我看好想买卖的，直接进"主动仓"
                 SatisfiedCount = 0,
                 TotalCount = 0,
             });
@@ -147,7 +147,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
         List<(string Code, string Name, string Type)> universe;
         try
         {
-            universe = SqliteStockMetaUpsert.GetAllInstruments(_paths.TotalDb);
+            universe = SqliteStockMetaUpsert.GetAllInstruments(_paths.CurrentDb);
             if (universe.Count == 0)
                 universe = _barRepository.GetAllCodes().Select(c => (c, c, SqliteStockMetaUpsert.TypeStock)).ToList();
         }

@@ -12,7 +12,7 @@ namespace StockPlatform.Analyzer;
 /// 算法在 <see cref="KellyPositionSizer"/>（凯利公式＋半凯利折扣＋单票上限），这里只负责取值、
 /// 实时重算和把结论讲清楚。
 ///
-/// 两个入口共用这一个窗口：【我的交易】页顶部的按钮（空手起算），以及每行的【仓位】按钮（带上
+/// 两个入口共用这一个窗口：【主动仓】页顶部的按钮（空手起算），以及每行的【仓位】按钮（带上
 /// 该股现价和当前持仓，直接给出"该减多少股"）。账户级参数（资金/折扣/上限）存
 /// <c>data\position-sizing.json</c>，关窗时落盘。
 /// </summary>
@@ -21,7 +21,7 @@ public partial class PositionSizingWindow : Window
     private readonly PositionSizingStore _store;
     private readonly double? _price;
     private readonly int _holdingShares;
-    /// <summary>【从K线取值】要读这只票的日线来找波段——从"我的交易"某一行打开时才有；
+    /// <summary>【从K线取值】要读这只票的日线来找波段——从"主动仓"某一行打开时才有；
     /// 顶部那个通用入口没有具体股票，按钮会禁用。</summary>
     private readonly IBarRepository? _barRepository;
     private readonly string? _code;
@@ -73,7 +73,7 @@ public partial class PositionSizingWindow : Window
         if (_barRepository == null || string.IsNullOrEmpty(_code))
         {
             FromChartButton.IsEnabled = false;
-            FromChartInfoText.Text = "从【我的交易】某一行的【仓位】按钮打开，才能按那只票的K线自动取值。";
+            FromChartInfoText.Text = "从【主动仓】某一行的【仓位】按钮打开，才能按那只票的K线自动取值。";
         }
 
         ShowPriceDateHint();

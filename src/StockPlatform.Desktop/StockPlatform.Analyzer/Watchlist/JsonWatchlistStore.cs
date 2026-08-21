@@ -6,7 +6,7 @@ namespace StockPlatform.Analyzer.Watchlist;
 /// <summary>
 /// Reads/writes the user's watchlist as a flat JSON array — plenty for what's realistically a few
 /// dozen-to-hundred hand-picked entries, not worth a SQLite table (and keeping it out of
-/// total.sqlite matters more than the storage format — see AnalyzerPaths.WatchlistPath).
+/// the market database matters more than the storage format — see AnalyzerPaths.WatchlistPath).
 /// </summary>
 public class JsonWatchlistStore
 {
@@ -63,7 +63,7 @@ public class JsonWatchlistStore
         }
     }
 
-    /// <summary>整体替换某条自选的成交明细（"我的交易"Tab的【交易记录】窗口里录入的多笔买入/卖出）——
+    /// <summary>整体替换某条自选的成交明细（"主动仓"Tab的【交易记录】窗口里录入的多笔买入/卖出）——
     /// 按 Id 定位，整份覆盖（窗口里本来就是"改完一起保存"，逐笔增删改反而要处理更多中间状态），
     /// 顺带把汇总写回兼容字段。加载-修改-保存都在锁内完成，跟 Add/Remove 一样保持单写者语义。</summary>
     public void UpdateLots(Guid id, IEnumerable<TradeLot> lots)
@@ -79,7 +79,7 @@ public class JsonWatchlistStore
         }
     }
 
-    /// <summary>更新手填的财报披露日（2026-08-17新增，"我的交易"页那一列）——按 Id 定位、只改这一个
+    /// <summary>更新手填的财报披露日（2026-08-17新增，"主动仓"页那一列）——按 Id 定位、只改这一个
     /// 字段。传 null 表示清空。用途见 <see cref="WatchlistEntry.EarningsDate"/>。</summary>
     public void UpdateEarningsDate(Guid id, DateTime? earningsDate)
     {
@@ -93,7 +93,7 @@ public class JsonWatchlistStore
         }
     }
 
-    /// <summary>把若干条自选加入/移出"我的交易池"（2026-07-31新增）——交易池是"我打算买卖、要每天盯"的
+    /// <summary>把若干条自选加入/移出"主动仓池"（2026-07-31新增）——交易池是"我打算买卖、要每天盯"的
     /// 那一小撮，跟"算法验证样本"分开（见 <see cref="WatchlistEntry.InTradePool"/>）。返回实际改动的条数。
     /// 移出时不清空买卖信息（交易记录要留痕）：**未平仓的持仓**移不出去（<see cref="WatchlistEntry.IsInTradePool"/>
     /// 恒为真），要移出得先清掉买入信息；已平仓的可以正常移出。</summary>

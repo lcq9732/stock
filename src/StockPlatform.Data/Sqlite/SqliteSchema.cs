@@ -7,6 +7,19 @@ public static class SqliteSchema
 {
     public static void EnsureSchema(SqliteConnection conn)
     {
+        // WAL（2026-08-21）：分析程序不再拿"拷过来/下载来的副本"，而是直接读 Fetcher 正在写的
+        // 那个库（见 AnalyzerPaths 类注释）。默认的 delete 模式下写事务要加排他锁、读方直接吃
+        // SQLITE_BUSY，早上"一边抓一边看盘"必然报 database is locked；WAL 下读写互不阻塞。
+        //
+        // journal_mode 是**写进数据库文件头的持久属性**，设一次就永久生效，所以这里每次调用实际
+        // 只有第一次起作用。但切换需要独占访问：若此刻另一个程序正开着这个库，这条 PRAGMA 不报错、
+        // 只是返回旧模式，下次无人占用时再切——所以升级后第一次请单独开 Fetcher 跑一遍。
+        using (var wal = conn.CreateCommand())
+        {
+            wal.CommandText = "PRAGMA journal_mode=WAL;";
+            wal.ExecuteScalar();
+        }
+
         // 迁移：IndexWeight 2026-07-16 改为按 as_of_date 版本化（PK 加 as_of_date 保留历史各期权重）。
         // 旧表(PK不含 as_of_date)先删掉、由下面 CREATE 重建——权重数据可随时重拉，改造前基本为空。
         DropTableIfPkMismatch(conn, "IndexWeight", "as_of_date");

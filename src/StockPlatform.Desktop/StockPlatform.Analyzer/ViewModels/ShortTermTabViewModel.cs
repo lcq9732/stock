@@ -134,7 +134,7 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
         ShowCriteriaInfoCommand = new RelayCommand(_ =>
-            MessageBox.Show(CriteriaInfoText, "短线法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
+            TextDetailWindow.Show("短线法 — 分析条件说明", "短线法 — 入选条件与依据说明", CriteriaInfoText));
         AddToWatchlistCommand = new RelayCommand(_ =>
         {
             var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "短线法", Granularity.Day);
@@ -188,7 +188,7 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
             var annualProfits = await Task.Run(() => _financialRepository.GetRecentAnnualNetProfitByCode(3));
             Log($"已载入 {financials.Count} 只股票的财务快照、{annualProfits.Count} 只的近3年年报净利");
 
-            var names = SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
+            var names = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).ToDictionary(s => s.Code, s => s.Name);
             var engine = new ShortTermAnalysisEngine(_barRepository, financials, annualProfits, aboveMa60);
             int errorCount = 0, noFinancialCount = 0;
             var passed = new List<StockScreenResult>();

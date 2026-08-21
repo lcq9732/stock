@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -25,6 +25,14 @@ public class IndexLightRowViewModel
     /// <summary>收盘是否站上MA60；数据不足60根时为 null（总开关判定时按"线下"保守处理）。</summary>
     public bool? AboveMa60 { get; }
 
+    // ── 供表格排序用的数值形式（2026-08-19新增）──
+    // 上面那些列显示的是拼好的字符串（"12.34（08-14）"、"+5.6%"），DataGrid 默认按字符串排序，
+    // 会出现 13.44% 排在 2.00% 后面这种错（见用户 2026-08-19 报的股息率问题）。XAML 里对应的列
+    // 用 SortMemberPath 指到这些数值属性上。
+    public double? CloseValue { get; private set; }
+    public double? Ma20Value { get; private set; }
+    public double? Ma60Value { get; private set; }
+
     public IndexLightRowViewModel(string name, List<Bar> bars)
     {
         Name = name;
@@ -32,12 +40,15 @@ public class IndexLightRowViewModel
 
         var last = bars[^1];
         CloseText = $"{last.Close:F0}（{last.PeriodStart:MM-dd}）";
+        CloseValue = last.Close;
         if (bars.Count < 60) return;
 
         double ma20 = bars.Skip(bars.Count - 20).Average(b => b.Close);
         double ma60 = bars.Skip(bars.Count - 60).Average(b => b.Close);
         Ma20Text = $"{ma20:F0} {(last.Close > ma20 ? "线上" : "线下")}";
         Ma60Text = $"{ma60:F0}";
+        Ma20Value = ma20;
+        Ma60Value = ma60;
         AboveMa60 = last.Close > ma60;
 
         // 从最后一根往前找"收盘 vs 自身MA60"状态翻转的那天，得到当前趋势段的起点/长度。
@@ -88,6 +99,20 @@ public class MorningStockRowViewModel
     /// <summary>"较基准涨跌"的数值形式（持仓=较买入价，待买=较自选日收盘）——给汇总里"该方法整体
     /// 平均涨跌/胜率"用，方法过滤后这几个数字就是各选股方法的横向对比口径。</summary>
     public double? SinceBasisPct { get; private set; }
+
+    // ── 供表格排序用的数值形式（2026-08-19新增）──
+    // 上面那些列显示的是拼好的字符串（"12.34（08-14）"、"+5.6%"），DataGrid 默认按字符串排序，
+    // 会出现 13.44% 排在 2.00% 后面这种错（见用户 2026-08-19 报的股息率问题）。XAML 里对应的列
+    // 用 SortMemberPath 指到这些数值属性上。
+    public double? LatestCloseValue { get; private set; }
+    public double? Ma5Value { get; private set; }
+    public double? VolatilityValue { get; private set; }
+    public double? DrawdownValue { get; private set; }
+    public double? HolderChangeValue { get; private set; }
+
+    /// <summary>持仓盈亏的数值形式——已平仓用已实现金额，持仓中用浮动金额；只填了价格没填股数的
+    /// 老记录退回百分比口径（<see cref="PnlText"/> 显示的也是百分比，两者一致）。</summary>
+    public double? PnlValue { get; private set; }
     public string DrawdownText { get; private set; } = "—";
     public string PnlText { get; private set; } = "—";
     public Brush PnlColor { get; private set; } = Brushes.Gray;
@@ -122,7 +147,7 @@ public class MorningStockRowViewModel
     /// <summary>排序权重：0=止损 1=止盈/短线卖点 2=筹码警示/时间止损 3=趋势弱 4=正常，最严重的排最前。</summary>
     public int Severity { get; private set; } = 4;
 
-    /// <summary>手填的财报披露日（"我的交易"页那一列）——同一只票的多条记录里取最早填过的那个。</summary>
+    /// <summary>手填的财报披露日（"主动仓"页那一列）——同一只票的多条记录里取最早填过的那个。</summary>
     public DateTime? EarningsDate { get; }
 
     /// <summary>距财报几天（自然日）：正数=还没到，0=今天，负数=已披露。没填为 null。</summary>
@@ -167,6 +192,7 @@ public class MorningStockRowViewModel
 
         var last = bars[^1];
         LatestCloseText = $"{last.Close:F2}（{last.PeriodStart:MM-dd}）";
+        LatestCloseValue = last.Close;
 
         bool? above60 = null;
         double ma60 = 0, ma20 = 0;
@@ -185,6 +211,7 @@ public class MorningStockRowViewModel
         {
             double gap = (last.Close / ma5 - 1) * 100;
             Ma5Text = $"{ma5:F2}（{(belowMa5 ? "跌破" : "站上")}{gap:+0.0;-0.0}%）";
+            Ma5Value = ma5;
             Ma5Color = belowMa5 ? Brushes.Firebrick : Brushes.SeaGreen;
         }
 
@@ -197,6 +224,7 @@ public class MorningStockRowViewModel
                 if (bars[i - 1].Close > 0) acc += Math.Abs(bars[i].Close / bars[i - 1].Close - 1);
             volatility = acc / 60;
             VolatilityText = $"{volatility * 100:F2}%{(volatility > 0.045 ? " ⚠" : "")}";
+            VolatilityValue = volatility;
         }
 
         // 涨跌基准：持仓=加权平均买入价（金字塔式建仓的真实成本），观察/已平仓=自选那天的收盘价。
@@ -213,10 +241,14 @@ public class MorningStockRowViewModel
         if (IsHolding)
         {
             PnlText = SincePickText;
+            // 排序用的数值：有股数就用金额，没股数（老记录）只能退回百分比——两种量纲混在一列里
+            // 没法比较，但显示的文本本来就是这样，排序跟着显示走是最不容易误解的选择。
+            PnlValue = SinceBasisPct;
             if (entry.RemainingShares > 0 && basisPrice > 0)
             {
                 var pnl = (last.Close - basisPrice) * entry.RemainingShares;
                 PnlText = $"{(pnl >= 0 ? "+" : "")}{pnl:N0}元（{SincePickText}）";
+                PnlValue = pnl;
             }
             // 分批卖出的：已经落袋的那部分金额是锁定的，跟剩余仓位的浮盈分开报，别混成一个数。
             if (entry.RealizedPnl is { } realized)
@@ -231,6 +263,7 @@ public class MorningStockRowViewModel
             PnlText = entry.RealizedPnl is { } pnl
                 ? $"已平仓 {pnl:+#,0;-#,0}元（{RealizedText}）"
                 : $"已平仓 {RealizedText}";
+            PnlValue = entry.RealizedPnl ?? spct;
             PnlColor = spct >= 0 ? Brushes.Red : Brushes.Green;
         }
 
@@ -245,6 +278,7 @@ public class MorningStockRowViewModel
             {
                 drawdownPct = (last.Close - peakSinceBasis) / peakSinceBasis * 100;
                 DrawdownText = $"{drawdownPct:F1}%";
+                DrawdownValue = drawdownPct;
             }
         }
 
@@ -274,6 +308,7 @@ public class MorningStockRowViewModel
                 if ((cur.ReportDate - counts[i].ReportDate).TotalDays < 55 || counts[i].HolderNum <= 0) continue;
                 holderChgPct = (double)(cur.HolderNum - counts[i].HolderNum) / counts[i].HolderNum * 100;
                 HolderChangeText = $"{(holderChgPct >= 0 ? "+" : "")}{holderChgPct:F1}%（{cur.ReportDate:MM-dd}期）";
+                HolderChangeValue = holderChgPct;
                 break;
             }
         }
@@ -301,7 +336,7 @@ public class MorningStockRowViewModel
         // ⚠ 适用范围：对**所有持仓**生效，不按来源方法过滤。
         // 曾经想只对"短线法/回调法"来源的票生效，但实测 watchlist 里交易池的20只有一多半
         // Method="查询"（茅台、中国移动、宁德这些手动加的），按方法过滤会把真正在交易的票
-        // 全部漏掉。「我的交易」页按定义就是"我打算买卖、要每天盯"的票，默认全都算短线口径。
+        // 全部漏掉。「主动仓」页按定义就是"我打算买卖、要每天盯"的票，默认全都算短线口径。
         // 如果将来要长期拿底仓吃分红，需要给条目加一个"底仓"标记再在这里排除——现在没有这个字段。
         if (IsHolding && belowMa5 && sinceBasisPct > 0)
         {
@@ -397,6 +432,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
     private readonly IBarRepository _barRepository;
     private readonly IShareholderRepository _shareholderRepository;
     private readonly JsonWatchlistStore _watchlistStore;
+    private readonly IIndexConsRepository _indexConsRepository;
 
     public ObservableCollection<IndexLightRowViewModel> IndexRows { get; } = new();
     /// <summary>表格实际显示的行——= <see cref="_allRows"/> 按当前方法过滤后的结果。</summary>
@@ -436,17 +472,26 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
     private Brush _gateColor = Brushes.Gray;
     public Brush GateColor { get => _gateColor; set => Set(ref _gateColor, value); }
 
+    private string _styleText = "";
+    /// <summary>风格温度计（2026-08-20新增）——总开关底下那一行"这几天钱在往红利/低波躲还是往成长跑"。
+    /// 由 <see cref="StyleGauge"/> 算，缘起和口径见那个类的注释。</summary>
+    public string StyleText { get => _styleText; set => Set(ref _styleText, value); }
+
+    private Brush _styleColor = Brushes.Gray;
+    public Brush StyleColor { get => _styleColor; set => Set(ref _styleColor, value); }
+
     private string _summaryText = "";
     public string SummaryText { get => _summaryText; set => Set(ref _summaryText, value); }
 
     public RelayCommand RefreshCommand { get; }
     public RelayCommand ShowCriteriaInfoCommand { get; }
 
-    public MorningCheckTabViewModel(IBarRepository barRepository, IShareholderRepository shareholderRepository, JsonWatchlistStore watchlistStore)
+    public MorningCheckTabViewModel(IBarRepository barRepository, IShareholderRepository shareholderRepository, JsonWatchlistStore watchlistStore, IIndexConsRepository indexConsRepository)
     {
         _barRepository = barRepository;
         _shareholderRepository = shareholderRepository;
         _watchlistStore = watchlistStore;
+        _indexConsRepository = indexConsRepository;
 
         RefreshCommand = new RelayCommand(_ => Reload());
         ShowCriteriaInfoCommand = new RelayCommand(_ => System.Windows.MessageBox.Show(
@@ -459,9 +504,9 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             "   · 都线下 → 关闭：不建新仓、逐步降仓，等重新站上再回来\n" +
             "   回测：创业板指3年 +82% vs 买入持有 +50%，最大回撤 -20% vs -32%\n\n" +
             "二、交易池逐只体检（按严重度排序；持仓排在待买前面）\n" +
-            "   ★ 只体检\"我的交易\"页里的票——各选股方法丢进\"自选股\"的只是算法验证样本、不会进这里。\n" +
+            "   ★ 只体检\"主动仓\"页里的票——各选股方法丢进\"自选股\"的只是算法验证样本、不会进这里。\n" +
             "     要盯某只票：\"自选股\"页勾选→\"加入交易池\"，或\"查询\"页搜到→\"加入交易池\"。\n" +
-            "   持仓 / 待买 / 已平仓：在\"我的交易\"页给某只票填了\"买入价\"就算真实持仓（基准=买入价/买入日，\n" +
+            "   持仓 / 待买 / 已平仓：在\"主动仓\"页给某只票填了\"买入价\"就算真实持仓（基准=买入价/买入日，\n" +
             "   有股数还显示盈亏金额）；没填=待买（基准=自选价/自选日，止损止盈不触发）；\n" +
             "   买入价+卖出价都填了=已平仓（显示最终已实现盈亏，作为交易留痕沉淀，供复盘纪律执行情况）。\n" +
             "   参考价列：持仓给建议卖出价=止损线(买入后最高收盘×0.85)和止盈线(买入价×1.5)；\n" +
@@ -513,12 +558,14 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             _ => ("🔴 总开关：关闭——沪深300、创业板指均跌破60日线，不建新仓、逐步降仓", Brushes.Firebrick),
         };
 
+        BuildStyleGauge();
+
         // ── 自选股体检（问题最严重的排最前） ──
         // 同一只票可能被多个方法各加过一条自选记录——按股票去重，一只票只体检/列出一次：
         // 填过买入价（真实持仓）的记录优先作基准（止损/止盈要按真实成本算），否则用最早那条
         // 记录（最早的峰值最高，止损触发最保守）；方法列合并展示所有来源。
-        // 只体检"我的交易"池里的票（2026-07-31起）——各选股方法丢进自选的是"算法验证样本"，不代表
-        // 我要买；每天早上要盯的只是打算买卖的那一小撮。交易池的维护在"我的交易"Tab。
+        // 只体检"主动仓"池里的票（2026-07-31起）——各选股方法丢进自选的是"算法验证样本"，不代表
+        // 我要买；每天早上要盯的只是打算买卖的那一小撮。交易池的维护在"主动仓"Tab。
         var entries = _watchlistStore.Load().Where(e => e.IsInTradePool).ToList();
         _entryCount = entries.Count;
         _allRows.Clear();
@@ -541,6 +588,43 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
 
         RebuildMethodFilters();
         ApplyMethodFilter();
+    }
+
+    /// <summary>算"风格温度计"那一行——这几天钱在往红利/低波躲，还是往成长跑。
+    ///
+    /// 为什么要有这一行：统计过"大盘跌时蓝筹会不会涨"（2016-2026本地数据），**绝对上涨几乎不发生**
+    /// （沪深300跌超3%的37天里蓝筹篮子上涨占比0%），**但跑赢很稳定**（跑赢率92%）。所以真正有信息量
+    /// 的不是"蓝筹涨没涨"，而是"钱此刻在往防御还是成长跑"——总开关告诉你能不能建仓，这一行告诉你
+    /// 市场在偏向哪一边。
+    ///
+    /// 成分股只取最近60个自然日的K线（够算5日收益，不用把十年历史全捞出来），**一律用后复权**：
+    /// 红利篮子全是高分红股，前复权序列的除权跳空会被算成日收益，实测能把结论算反（见 StyleGauge）。</summary>
+    private void BuildStyleGauge()
+    {
+        var market = _barRepository.Query(MarketIndexCatalog.All.First(i => i.Symbol == "sh000300").Symbol, Granularity.Day);
+        if (market.Count == 0) { StyleText = ""; return; }
+
+        var start = market[^1].PeriodStart.AddDays(-60);
+        List<List<Bar>> Members(string indexCode) => _indexConsRepository
+            .GetConsByIndex(indexCode)
+            .Select(code => _barRepository.Query(code, Granularity.DayHfq, start))
+            .Where(bars => bars.Count > 0)
+            .ToList();
+
+        var result = StyleGauge.Build(
+            market,
+            Members(StyleGauge.DividendIndex),
+            Members(StyleGauge.BlueChipIndex),
+            _barRepository.Query("sz399006", Granularity.Day));
+
+        if (result == null) { StyleText = ""; return; }
+        StyleText = result.Text;
+        StyleColor = result.Mood switch
+        {
+            StyleMood.Defensive => Brushes.SteelBlue,   // 防御占优：跟"总开关关闭"的红区分开，它本身不是坏消息
+            StyleMood.RiskOn => Brushes.Firebrick,      // 成长占优（涨红跌绿的习惯，红=进攻）
+            _ => Brushes.Gray,
+        };
     }
 
     /// <summary>重建方法列表头的过滤下拉项（"全部方法" + 本轮出现过的各方法，都带只数）——刷新后
@@ -592,7 +676,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         if (rows.Count == 0)
         {
             sb.AppendLine(methodFilter == null
-                ? "2) 交易池为空——晨检只体检\"我的交易\"页里的票（打算买卖的那些）。去\"自选股\"页勾选后点\"加入交易池\"，" +
+                ? "2) 交易池为空——晨检只体检\"主动仓\"页里的票（打算买卖的那些）。去\"自选股\"页勾选后点\"加入交易池\"，" +
                   "或在\"查询\"页搜到后点\"加入交易池\"；各方法丢进自选的票只是算法验证样本，不会自动进来。"
                 : $"2) 【仅方法：{methodFilter}】交易池里没有该方法来源的票——把方法列表头的下拉切回\"全部方法\"看全部。");
         }
@@ -643,7 +727,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             if (okHold.Count > 0) sb.AppendLine($"   · [持仓]正常继续持有：{string.Join("、", okHold)}");
             if (okWatch.Count > 0) sb.AppendLine($"   · [待买]正常（开关重开后优先下手）：{string.Join("、", okWatch)}");
             if (closed.Count > 0) sb.AppendLine($"   · 已平仓交易留痕：{string.Join("、", closed)}");
-            if (holding == 0) sb.AppendLine("   （提示：买入后到“我的交易”页把买入日期/买入价/股数填上，止损止盈就按你的真实成本盯）");
+            if (holding == 0) sb.AppendLine("   （提示：买入后到“主动仓”页把买入日期/买入价/股数填上，止损止盈就按你的真实成本盯）");
         }
 
         sb.Append("3) 纪律提醒：止损/止盈今天就执行，不等\"再看一天\"；参数不微调；每季度重新回测一次规则。");

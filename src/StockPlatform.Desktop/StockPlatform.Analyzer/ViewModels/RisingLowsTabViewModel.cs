@@ -86,7 +86,7 @@ public class RisingLowsTabViewModel : INotifyPropertyChanged
 
         AnalyzeCommand = new RelayCommand(async _ => await RunAnalyzeAsync(), _ => !IsBusy);
         ShowCriteriaInfoCommand = new RelayCommand(_ =>
-            MessageBox.Show(CriteriaInfoText, "阶梯低点法 — 分析条件说明", MessageBoxButton.OK, MessageBoxImage.Information));
+            TextDetailWindow.Show("阶梯低点法 — 分析条件说明", "阶梯低点法 — 入选条件与依据说明", CriteriaInfoText));
         AddToWatchlistCommand = new RelayCommand(_ =>
         {
             var added = WatchlistAdder.AddSelected(_watchlistStore, Results, "阶梯低点法", Granularity.Day, lookback: null);
@@ -133,7 +133,7 @@ public class RisingLowsTabViewModel : INotifyPropertyChanged
             AppliedCutoffDate = cutoff;
             IBarRepository repo = cutoff.HasValue ? new CutoffBarRepository(_barRepository, cutoff.Value) : _barRepository;
 
-            var names = SqliteStockMetaUpsert.GetAll(_paths.TotalDb).ToDictionary(s => s.Code, s => s.Name);
+            var names = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).ToDictionary(s => s.Code, s => s.Name);
             var engine = new RisingLowsAnalysisEngine(repo);
             int passedCount = 0, errorCount = 0;
             await Task.Run(() =>
