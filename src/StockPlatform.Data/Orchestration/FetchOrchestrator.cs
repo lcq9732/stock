@@ -488,7 +488,7 @@ public class FetchOrchestrator
             .Concat(MarketIndexCatalog.All.Select(i => i.Symbol))
             .Concat(etfCodes)
             .Concat(delistedCodes).ToList();
-        return FinishFetchRun(errors, "拉取全部", attempted, failedCodes);
+        return FinishFetchRun(errors, "拉取全部", attempted, failedCodes, progress, checkDayCoverage: true);
     }
 
     private async Task<FetchResult> RunFetchDayInternalAsync(
@@ -593,7 +593,7 @@ public class FetchOrchestrator
             .Concat(MarketIndexCatalog.All.Select(i => i.Symbol))
             .Concat(etfCodes)
             .Concat(delistedCodes).ToList();
-        return FinishFetchRun(errors, "补指定历史日", attempted, failedCodes);
+        return FinishFetchRun(errors, "补指定历史日", attempted, failedCodes, progress, checkDayCoverage: true);
     }
 
     /// <summary>
@@ -1274,12 +1274,16 @@ public class FetchOrchestrator
         var failedIndexWeightCodes = manifest.FailedIndexWeightCodes;
         var failedShareholderCodes = manifest.FailedShareholderCodes;
         var failedDividendCodes = manifest.FailedDividendCodes;
+        // 这一份不是"失败"名单，是体检出来的"当天日线还缺着"名单（见 CheckLatestDayCoverage）——
+        // 用户角度它跟失败一样都是"数据没到位、要再抓一次"，所以并进同一个按钮里重试。
+        var missingDayCodes = manifest.MissingDayCodes;
+        var missingDayDate = manifest.MissingDayDate;
 
         if (failedCodesList.Count == 0 && failedMarketCapCodes.Count == 0 && failedNetInflowCodes.Count == 0
             && failedIndexConsCodes.Count == 0 && failedIndexWeightCodes.Count == 0 && failedShareholderCodes.Count == 0
-            && failedDividendCodes.Count == 0)
+            && failedDividendCodes.Count == 0 && missingDayCodes.Count == 0)
         {
-            progress?.Report("目前没有记录到抓取失败的股票，不需要重试");
+            progress?.Report("目前没有记录到抓取失败或缺当天数据的股票，不需要重试");
             return new FetchResult();
         }
 
@@ -1327,23 +1331,48 @@ public class FetchOrchestrator
             done.Add($"分红送配 {failedDividendCodes.Count} 只");
         }
 
-        if (failedCodesList.Count == 0)
-        {
-            // K线名单是空的，但上面几类可能已经重试完了——只报"K线没有失败"会让人以为整轮什么都没干。
-            done.Add("K线 0 只（名单本来就是空的）");
-            ReportRetrySummary(done, progress);
-            return new FetchResult();
-        }
-
         var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
         currentRepo.EnsureSchema();
         var today = DateTime.Today;
         var sw = Stopwatch.StartNew();
-        progress?.Report($"重新拉取上次失败的K线，共 {failedCodesList.Count} 只，数据源：{source.Name}");
 
         var errors = new ConcurrentBag<string>();
         var failedCodes = new ConcurrentBag<string>();
         var stats = new FetchStats();
+
+        // ── 当天日线缺失的重补（2026-08-21新增）──
+        // 这批股票的请求上一轮**根本没失败**，是数据源盘后还没更新到它们（见 Manifest.MissingDayCodes）。
+        // 窗口取"缺的那个交易日 → 今天"；前复权走 ProcessOneStockAsync，后复权走 FetchHfqBarsAsync
+        // （它自己按 day_hfq 的水位线算缺口）——已经补齐的那条线会在水位线判定里跳过、不发请求。
+        if (missingDayCodes.Count > 0 && missingDayDate.HasValue)
+        {
+            var missStats = new FetchStats();
+            int missDone = 0;
+            progress?.Report($"补 {missingDayDate.Value:yyyy-MM-dd} 还缺的个股日线，共 {missingDayCodes.Count} 只"
+                           + $"（上一轮不是失败，是数据源当时还没出这些股票的当天数据），数据源：{source.Name}");
+            await Task.WhenAll(missingDayCodes.Select(code =>
+                ProcessOneStockAsync(code, source, missingDayDate.Value, today, currentRepo,
+                    errors, failedCodes, missStats, progress, missingDayCodes.Count,
+                    () => Interlocked.Increment(ref missDone), sw, ct)));
+            await FetchHfqBarsAsync(source, missingDayCodes,
+                code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears),
+                currentRepo, errors, failedCodes, missStats, progress, sw, ct);
+            progress?.Report($"当天日线重补汇总：{missStats.Summarize()}");
+            done.Add($"{missingDayDate.Value:MM-dd}日线 {missingDayCodes.Count} 只");
+        }
+
+        if (failedCodesList.Count == 0)
+        {
+            // K线名单是空的，但上面几类可能已经重试完了——只报"K线没有失败"会让人以为整轮什么都没干。
+            done.Add("K线 0 只（名单本来就是空的）");
+            // 体检要跑：上面刚补过的话名单得重建，没补过也顺手确认一次当天覆盖情况。
+            var emptyBarResult = FinishFetchRun(errors, "重新拉取失败股票", missingDayCodes, failedCodes,
+                progress, checkDayCoverage: true);
+            ReportRetrySummary(done, progress);
+            return emptyBarResult;
+        }
+
+        progress?.Report($"重新拉取上次失败的K线，共 {failedCodesList.Count} 只，数据源：{source.Name}");
         int completed = 0;
         var tasks = failedCodesList.Select(code =>
         {
@@ -1367,7 +1396,10 @@ public class FetchOrchestrator
 
         progress?.Report($"K线本轮汇总：{stats.Summarize()}");
         done.Add($"K线 {failedCodesList.Count} 只（其中 {failedCodes.Count} 只仍失败）");
-        var retryResult = FinishFetchRun(errors, "重新拉取失败股票", failedCodesList, failedCodes);
+        // attempted 要把"当天缺失"那批也算上——它们这轮也真的抓过了，成功的就该从失败名单里移出。
+        var attemptedThisRetry = failedCodesList.Concat(missingDayCodes).Distinct(StringComparer.Ordinal).ToList();
+        var retryResult = FinishFetchRun(errors, "重新拉取失败股票", attemptedThisRetry, failedCodes,
+            progress, checkDayCoverage: true);
         ReportRetrySummary(done, progress);
         return retryResult;
     }
@@ -1928,7 +1960,8 @@ public class FetchOrchestrator
     /// </summary>
     private FetchResult FinishFetchRun(
         ConcurrentBag<string> errors, string fetchKind,
-        IReadOnlyCollection<string> attemptedCodes, ConcurrentBag<string> failedCodesThisRun)
+        IReadOnlyCollection<string> attemptedCodes, ConcurrentBag<string> failedCodesThisRun,
+        IProgress<string>? progress = null, bool checkDayCoverage = false)
     {
         var manifest = _manifestStore.Load();
         manifest.LastFetchAt = DateTime.Now;
@@ -1936,9 +1969,74 @@ public class FetchOrchestrator
         manifest.FailedCodes = ComputeUpdatedFailedCodes(manifest.FailedCodes, attemptedCodes, failedCodesThisRun);
         _manifestStore.Save(manifest);
 
+        // 体检要在上面存完 manifest 之后跑——它自己会再读一次 manifest 写入缺失名单。
+        if (checkDayCoverage) CheckLatestDayCoverage(progress);
+
         var result = new FetchResult();
         result.Errors.AddRange(errors);
         return result;
+    }
+
+    /// <summary>
+    /// 一轮抓取跑完之后的"当天覆盖率体检"（2026-08-21新增）：把本该有最新交易日日线、库里却还是
+    /// 没有的个股记进 <see cref="Manifest.MissingDayCodes"/>，交给"重新拉取失败股票"一并重试。
+    ///
+    /// 起因：数据源盘后是**逐步**更新的，请求发过去时那只股票的当天K线可能还没出来——接口正常返回、
+    /// 只是里面没有那一天，代码算作"请求成功但无新数据"（<see cref="FetchStats.FetchedButEmpty"/>），
+    /// 既不报错也不进任何失败名单、更不会重试。2026-08-20 那轮 19:00 开跑的"拉取全部"，个股前复权
+    /// 只拿到 1773/5539 只（21:00 之后才抓的后复权和 ETF 一个不缺），而界面上一切正常、失败名单是
+    /// 空的，用户第二天看盘才发现一半股票的"最新收盘"还停在前一天。
+    ///
+    /// 判定不看抓取过程中的统计，而是**直接查库**：以上证指数最新一根日线当"最近一个已收盘交易日"
+    /// 的锚（<see cref="MarketIndexCatalog.ShanghaiCompositeSymbol"/> 就是为此存在的，指数不停牌、
+    /// 不退市），取"上一个交易日有、这一天没有"的个股当作漏抓（见
+    /// <see cref="SqliteBarRepository.GetCodesMissingDay"/>，用"上一个交易日有"过滤掉长期停牌和已
+    /// 退市的票）。这样不管漏抓的原因是数据源没出、请求失败还是被跳过，都能一网打尽。
+    ///
+    /// 前复权(day)和后复权(day_hfq)各查一次、并成一份名单：两条线水位线独立，缺一个不代表另一个也缺，
+    /// 而重补时已经齐了的那条会在水位线判定里直接跳过、不发请求。名单每次体检都**重建**，不累加。
+    /// </summary>
+    public (DateTime? TradingDay, int MissingCount) CheckLatestDayCoverage(IProgress<string>? progress = null)
+    {
+        if (!File.Exists(_paths.CurrentDb)) return (null, 0);
+        var repo = new SqliteBarRepository(_paths.CurrentDb);
+
+        List<Bar> anchorBars;
+        lock (_dbLock)
+        {
+            // 近两个月足够拿到最后两根交易日（含长假）。
+            anchorBars = repo.Query(MarketIndexCatalog.ShanghaiCompositeSymbol, Granularity.Day,
+                DateTime.Today.AddDays(-60), null);
+        }
+        if (anchorBars.Count < 2)
+        {
+            progress?.Report("（跳过当天覆盖率体检：本地上证指数日线不足两根，没有交易日锚可用）");
+            return (null, 0);
+        }
+
+        var latest = anchorBars[^1].PeriodStart.Date;
+        var previous = anchorBars[^2].PeriodStart.Date;
+
+        progress?.Report($"正在体检 {latest:yyyy-MM-dd} 的个股日线覆盖率...");
+        List<string> missing;
+        lock (_dbLock)
+        {
+            missing = repo.GetCodesMissingDay(Granularity.Day, latest, previous)
+                .Union(repo.GetCodesMissingDay(Granularity.DayHfq, latest, previous))
+                .OrderBy(c => c, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        var manifest = _manifestStore.Load();
+        manifest.MissingDayCodes = missing;
+        manifest.MissingDayDate = missing.Count > 0 ? latest : null;
+        _manifestStore.Save(manifest);
+
+        progress?.Report(missing.Count == 0
+            ? $"当天覆盖率体检：{latest:yyyy-MM-dd} 的个股日线是齐的"
+            : $"当天覆盖率体检：{latest:yyyy-MM-dd} 还有 {missing.Count} 只个股没有日线——多半是数据源盘后"
+              + "还没更新到它们（不是抓取失败），已记入待重试名单，可点\"重新拉取失败股票\"补上");
+        return (latest, missing.Count);
     }
 
     /// <summary>
@@ -1979,6 +2077,8 @@ public class FetchOrchestrator
         return new FailedRetrySummary
         {
             BarCodes = manifest.FailedCodes.Count,
+            MissingDayCodes = manifest.MissingDayCodes.Count,
+            MissingDayDate = manifest.MissingDayDate,
             MarketCapCodes = manifest.FailedMarketCapCodes.Count,
             NetInflowCodes = manifest.FailedNetInflowCodes.Count,
             IndexConsCodes = manifest.FailedIndexConsCodes.Count,

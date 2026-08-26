@@ -20,6 +20,13 @@ public class FailedRetrySummary
     /// 扫描，失败时整批代码都会进名单，所以它只表示"有一轮市值待重试"（见类注释）。</summary>
     public int MarketCapCodes { get; init; }
 
+    /// <summary>本该有最新交易日日线、却还是缺着的股票数（见 Manifest.MissingDayCodes）——注意
+    /// 这些**不是抓取失败**，是数据源当时还没出当天数据，所以量可能很大（实测有过 3766 只）。</summary>
+    public int MissingDayCodes { get; init; }
+
+    /// <summary>那批缺的是哪个交易日——按钮文字里带上它，"当天日线"才不至于含义模糊。</summary>
+    public DateTime? MissingDayDate { get; init; }
+
     public int NetInflowCodes { get; init; }
     public int IndexConsCodes { get; init; }
     public int IndexWeightCodes { get; init; }
@@ -31,7 +38,7 @@ public class FailedRetrySummary
 
     /// <summary>逐只重试的那几类加起来的股票数——这个数才是"多少只股票的数据确实缺着"。</summary>
     public int PerStockTotal =>
-        BarCodes + NetInflowCodes + IndexConsCodes + IndexWeightCodes + ShareholderCodes + DividendCodes;
+        BarCodes + MissingDayCodes + NetInflowCodes + IndexConsCodes + IndexWeightCodes + ShareholderCodes + DividendCodes;
 
     /// <summary>有没有任何东西需要重试（决定"重新拉取失败股票"按钮能不能点）。</summary>
     public bool Any => PerStockTotal > 0 || MarketCapPending;
@@ -44,6 +51,11 @@ public class FailedRetrySummary
 
         var parts = new List<string>();
         if (BarCodes > 0) parts.Add($"K线 {BarCodes} 只");
+        // 跟"K线失败"分开报：这批不是失败，是数据源当时还没出当天数据（见 Manifest.MissingDayCodes）。
+        if (MissingDayCodes > 0)
+            parts.Add(MissingDayDate.HasValue
+                ? $"{MissingDayDate.Value:MM-dd}日线 {MissingDayCodes} 只"
+                : $"当天日线 {MissingDayCodes} 只");
         // 市值：整轮扫描，说"1轮"而不是把整批代码数报出来（那个数字没有"多少只票缺数据"的含义）
         if (MarketCapPending) parts.Add("市值 1 轮");
         if (NetInflowCodes > 0) parts.Add($"净流入 {NetInflowCodes} 只");

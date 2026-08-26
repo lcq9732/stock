@@ -127,6 +127,14 @@
             <TextBlock Text="{Binding IsBusy, StringFormat='运行中：{0}'}" VerticalAlignment="Center" />
             <TextBlock Text="{Binding ElapsedText}" Margin="10,0,0,0" VerticalAlignment="Center" Foreground="Gray" FontWeight="Bold" />
             <TextBlock Text="{Binding DataStatusText}" Margin="24,0,0,0" VerticalAlignment="Center" Foreground="Gray" FontWeight="Bold" />
+
+            <!-- 自动重试的排定提示（2026-08-21新增，见 MainViewModel.ScheduleAutoRetry）：没排定时
+                 AutoRetryText 是空串、这块自然不占地方，按钮灰着。 -->
+            <TextBlock Text="{Binding AutoRetryText}" Margin="24,0,0,0" VerticalAlignment="Center"
+                       Foreground="#B36B00" FontWeight="Bold" />
+            <Button Content="取消自动重试" Command="{Binding CancelAutoRetryCommand}"
+                    IsEnabled="{Binding HasAutoRetry}" Margin="8,0,0,0" Padding="8,0"
+                    ToolTip="一轮抓取跑完后如果还有没补齐的数据，程序会自动排一次重试，时间取【跑完+1小时】和【当天21:00】里较晚的那个——盘后数据源是逐步更新的，等一会儿再抓才补得到。&#10;&#10;等待期间界面照常能用（不占用），到点如果正在跑别的会自动顺延10分钟再看。最多连做3轮；名单清零、或者某一轮之后待重试数量不再减少（剩下的多半是当天停牌、数据源确实没有的票）就会自动停下。&#10;&#10;点这个按钮取消本次排定；点【停止】也会一并取消。" />
         </StackPanel>
 
         <!-- 运行日志 -->

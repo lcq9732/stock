@@ -267,6 +267,40 @@ public class SqliteBarRepository : IBarRepository
         return result;
     }
 
+    /// <summary>
+    /// "上一个交易日有这一根、最新交易日却没有"的个股代码（2026-08-21新增，给
+    /// FetchOrchestrator.CheckLatestDayCoverage 做一轮抓完之后的体检用）。
+    ///
+    /// 为什么要用"上一个交易日有"来过滤，而不是直接拿全部代码去减：长期停牌股、早已退市的票，
+    /// 本地最后一根可能停在几个月前，它们缺最新交易日是**正常的**，混进名单只会让重试永远做无用功。
+    /// 只有"昨天还在交易、今天却没有"的才是真正值得重试的漏抓。
+    ///
+    /// 只认6位纯数字代码（跟 <see cref="GetAllCodes"/> 同一条线）——指数/ETF/板块合成各有自己的
+    /// 抓取路径和覆盖情况，不该混在个股这份名单里。
+    /// </summary>
+    public List<string> GetCodesMissingDay(string granularity, DateTime latest, DateTime previous)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT b.code FROM Bar b
+            WHERE b.granularity = $g AND b.period_start = $prev
+              AND b.code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'
+              AND NOT EXISTS (
+                    SELECT 1 FROM Bar x
+                    WHERE x.code = b.code AND x.granularity = $g AND x.period_start = $latest)
+            ORDER BY b.code;
+            """;
+        cmd.Parameters.AddWithValue("$g", granularity);
+        cmd.Parameters.AddWithValue("$latest", latest.ToString(DateFormat, CultureInfo.InvariantCulture));
+        cmd.Parameters.AddWithValue("$prev", previous.ToString(DateFormat, CultureInfo.InvariantCulture));
+
+        var result = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) result.Add(reader.GetString(0));
+        return result;
+    }
+
     /// <summary>日线里还有成交额缺失（amount=0）的代码及其缺失区间——"回填成交额/换手率"
     /// （见 FetchOrchestrator.RunBackfillAmountTurnoverAsync）用它决定每个代码要重抓哪段日期。
     /// 判定只看 amount：turnover 跟着同一次UPDATE顺带补，某些标的（如B股）接口天生不给换手率，

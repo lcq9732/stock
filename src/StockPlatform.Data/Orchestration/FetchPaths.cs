@@ -12,6 +12,10 @@ public class FetchPaths
     /// 什么，不需要依赖还开着的界面窗口。</summary>
     public string LogFilePath => Path.Combine(BaseDir, "local", "fetch.log");
 
+    /// <summary>历次运行的日志归档目录（2026-08-21新增，见 Fetcher 的 MainViewModel.ArchivePreviousLog）——
+    /// 上一轮的 fetch.log 在下次启动时挪到这里，不再被直接冲掉。</summary>
+    public string LogArchiveDir => Path.Combine(BaseDir, "local", "logs");
+
     public FetchPaths(string? baseDir = null)
     {
         BaseDir = baseDir ?? Path.Combine(AppContext.BaseDirectory, "data");

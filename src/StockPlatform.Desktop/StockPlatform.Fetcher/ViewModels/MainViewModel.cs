@@ -71,6 +71,17 @@ public class MainViewModel : INotifyPropertyChanged
 
     public bool HasFailed => _failedRetry.Any;
 
+    /// <summary>自动重试的状态文字（"将于 21:00 自动重试（…）"），空=当前没有排定。</summary>
+    private string _autoRetryText = "";
+    public string AutoRetryText
+    {
+        get => _autoRetryText;
+        private set { Set(ref _autoRetryText, value); Raise(nameof(HasAutoRetry)); }
+    }
+
+    /// <summary>有没有排定中的自动重试（决定那行提示和"取消自动重试"按钮是否显示）。</summary>
+    public bool HasAutoRetry => !string.IsNullOrEmpty(_autoRetryText);
+
     /// <summary>本地数据覆盖范围 + 上次实际抓取时间（见 FetchOrchestrator.GetDataStatus）——帮用户
     /// 判断该不该再点一次抓取，不用凭感觉重复点或者担心漏了哪天。</summary>
     private string _dataStatusText = "";
@@ -132,6 +143,7 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand FetchIndustryCommand { get; }
     public RelayCommand ScheduledFetchAllCommand { get; }
     public RelayCommand ScheduledFetchDayCommand { get; }
+    public RelayCommand CancelAutoRetryCommand { get; }
 
     public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources)
     {
@@ -143,9 +155,9 @@ public class MainViewModel : INotifyPropertyChanged
         // stable in practice. Falls back to the first source if "Tencent" isn't in the list.
         _selectedSource = availableSources.FirstOrDefault(s => s.Name == "Tencent") ?? availableSources[0];
 
-        // 每次程序启动清空重写（不是追加/不是按天滚动）——这只是给"程序意外退出时还能看到发生了
-        // 什么"用的诊断日志，不是长期审计记录，保持单文件+每次重开清零最简单。AutoFlush让每行
-        // 一写完就落盘，崩溃/被强制结束也不会丢失最后那几行。
+        // 每次程序启动开一份新的 fetch.log，但**上一轮那份先归档、不直接冲掉**（见
+        // ArchivePreviousLog）。AutoFlush 让每行一写完就落盘，崩溃/被强制结束也不会丢最后那几行。
+        ArchivePreviousLog(paths);
         try
         {
             _logFileWriter = new StreamWriter(paths.LogFilePath, append: false) { AutoFlush = true };
@@ -158,7 +170,8 @@ public class MainViewModel : INotifyPropertyChanged
         FetchCommand = new RelayCommand(async _ => await RunFetchAsync(), _ => !IsBusy);
         FetchDayCommand = new RelayCommand(async _ => await RunFetchDayAsync(), _ => !IsBusy);
         FetchYearCommand = new RelayCommand(async _ => await RunFetchYearAsync(), _ => !IsBusy);
-        StopCommand = new RelayCommand(_ => _cts?.Cancel(), _ => IsBusy);
+        // "停止"表达的是"别再跑了"，所以连排定中的自动重试一起取消，不然点了停止过一小时它又自己跑起来。
+        StopCommand = new RelayCommand(_ => { _cts?.Cancel(); CancelAutoRetry("用户点了停止"); }, _ => IsBusy);
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && HasFailed);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
         BackfillDailyCommand = new RelayCommand(async _ => await RunBackfillDailyHistoryAsync(), _ => !IsBusy);
@@ -169,9 +182,47 @@ public class MainViewModel : INotifyPropertyChanged
         FetchIndustryCommand = new RelayCommand(async _ => await RunFetchIndustryAsync(), _ => !IsBusy);
         ScheduledFetchAllCommand = new RelayCommand(async _ => await RunScheduledFetchAllAsync(), _ => !IsBusy);
         ScheduledFetchDayCommand = new RelayCommand(async _ => await RunScheduledFetchDayAsync(), _ => !IsBusy);
+        CancelAutoRetryCommand = new RelayCommand(_ => CancelAutoRetry("用户手动取消"), _ => HasAutoRetry);
 
         RefreshDataStatus();
         RefreshFailedCodeCount();
+    }
+
+    /// <summary>归档日志保留份数——每天抓一轮的话约两个月。</summary>
+    private const int LogArchiveKeep = 60;
+
+    /// <summary>把上一次运行留下的 fetch.log 挪到 <see cref="FetchPaths.LogArchiveDir"/> 下，
+    /// 文件名用它自己的最后写入时间（也就是上次那轮跑完的时刻），然后才让新的一轮从空文件开始。
+    ///
+    /// 为什么改成保留（2026-08-21）：原先是每次启动直接清空重写，理由是"这只是崩溃时看现场用的
+    /// 临时日志"。但真正要查的恰恰是**上一轮**——2026-08-20 那轮"拉取全部"有 3766 只个股没拿到
+    /// 当天的前复权日线（数据源盘后更新有先后，请求时那些股票还没出当天数据，代码把这种情况算
+    /// "抓到但为空"、不记失败），第二天早上一开程序，唯一能看出发生了什么的日志就被冲掉了。
+    /// 空文件不归档；只保留最近 <see cref="LogArchiveKeep"/> 份，免得无限堆积。</summary>
+    private static void ArchivePreviousLog(FetchPaths paths)
+    {
+        try
+        {
+            var log = paths.LogFilePath;
+            if (!File.Exists(log) || new FileInfo(log).Length == 0) return;
+
+            Directory.CreateDirectory(paths.LogArchiveDir);
+            var stamp = File.GetLastWriteTime(log).ToString("yyyyMMdd-HHmmss");
+            var dest = Path.Combine(paths.LogArchiveDir, $"fetch-{stamp}.log");
+            // 同名（同一秒）已经有了就不动，让旧的那份留着、这份被下面的新日志覆盖掉即可。
+            if (!File.Exists(dest)) File.Move(log, dest);
+
+            // 文件名本身就是时间戳，按名倒序=按时间倒序，留最近的 N 份。
+            foreach (var old in new DirectoryInfo(paths.LogArchiveDir)
+                         .GetFiles("fetch-*.log")
+                         .OrderByDescending(f => f.Name)
+                         .Skip(LogArchiveKeep))
+                old.Delete();
+        }
+        catch
+        {
+            // 归档失败（占用/权限）不该阻止程序启动，照常开新日志就行。
+        }
     }
 
     private List<string> ParseAnnouncementKeywords() =>
@@ -254,6 +305,131 @@ public class MainViewModel : INotifyPropertyChanged
         ElapsedText = "";
     }
 
+    /// <summary>自动重试最多连着做几轮——够把"数据源晚点才更新"这种情况磨平，又不会没完没了。</summary>
+    private const int AutoRetryMaxRounds = 3;
+
+    /// <summary>一轮跑完之后至少再等这么久才自动重试：数据源盘后是逐步更新的，立刻重抓大概率还是拿不到。</summary>
+    private static readonly TimeSpan AutoRetryDelayAfterRun = TimeSpan.FromHours(1);
+
+    /// <summary>自动重试不早于当天这个时刻——实测 19:00 开抓时个股当天前复权只到位约 1/3，21:00 之后才齐。</summary>
+    private static readonly TimeOnly AutoRetryNotBefore = new(21, 0);
+
+    /// <summary>到点时如果正忙（用户在手动跑别的），推迟这么久再看，不抢占。</summary>
+    private static readonly TimeSpan AutoRetryBusyRecheck = TimeSpan.FromMinutes(10);
+
+    private CancellationTokenSource? _autoRetryCts;
+    private int _autoRetryRound;
+    private int _autoRetryLastPending;
+
+    /// <summary>待重试的总量（逐只那几类的股票数 + 市值那一轮算 1）——用来判断自动重试有没有进展。</summary>
+    private int PendingRetryCount() => _failedRetry.PerStockTotal + (_failedRetry.MarketCapPending ? 1 : 0);
+
+    /// <summary>
+    /// 每个操作跑完后决定要不要排一次自动重试（2026-08-21新增）。
+    ///
+    /// 为什么要有它：待重试的东西以前只能靠人看见按钮上的数字、然后手动点。而最需要重试的那一类
+    /// （数据源盘后还没更新到的当天日线，见 FetchOrchestrator.CheckLatestDayCoverage）恰恰是
+    /// "现在重试也没用、过一会儿才有"——2026-08-20 那轮 19:00 开抓，个股当天前复权只到位 1773/5539，
+    /// 而 21:00 之后才抓的后复权和 ETF 一个不缺。所以自动重试的时机取
+    /// <c>max(跑完 + 1小时, 当天 21:00)</c>：前者给数据源留出更新时间，后者保证不会在傍晚白跑一轮。
+    ///
+    /// 等待期间**不占用界面**（不置 IsBusy），用户照常能手动操作；到点如果正忙就顺延，不抢占。
+    /// 停止条件三个：名单清零、连做满 AutoRetryMaxRounds 轮、或某一轮之后待重试数量没有减少
+    /// （剩下的多半是当天停牌、数据源确实没有那天数据的票，再试也是白试）。
+    /// </summary>
+    private void ScheduleAutoRetry()
+    {
+        CancelAutoRetryTimer();
+
+        if (!HasFailed)
+        {
+            if (_autoRetryRound > 0) Log("自动重试：待重试名单已清零，不再继续。");
+            _autoRetryRound = 0;
+            AutoRetryText = "";
+            return;
+        }
+
+        int pending = PendingRetryCount();
+        if (_autoRetryRound > 0 && pending >= _autoRetryLastPending)
+        {
+            Log($"自动重试：这一轮之后待重试数量没有减少（{_autoRetryLastPending} → {pending}），停止自动重试"
+              + "——剩下的多半是当天停牌、或数据源确实没有那天数据的票，需要人工判断。");
+            _autoRetryRound = 0;
+            AutoRetryText = "";
+            return;
+        }
+
+        if (_autoRetryRound >= AutoRetryMaxRounds)
+        {
+            Log($"自动重试：已经连着自动重试 {_autoRetryRound} 轮，仍有 {FailedRetryText} 没补齐，不再自动继续"
+              + "——需要的话请手动点\"重新拉取失败股票\"。");
+            _autoRetryRound = 0;
+            AutoRetryText = "";
+            return;
+        }
+
+        _autoRetryLastPending = pending;
+        var at = ComputeAutoRetryTime();
+        _autoRetryCts = new CancellationTokenSource();
+        AutoRetryText = $"将于 {at:HH:mm} 自动重试（{FailedRetryText}）";
+        Log($"已排定自动重试：{at:MM-dd HH:mm}（{FailedRetryText}）——数据源盘后是逐步更新的，"
+          + "隔一会儿再抓才补得到；不想等可以点\"取消自动重试\"。");
+        _ = RunAutoRetryWhenDueAsync(at, _autoRetryCts.Token);
+    }
+
+    /// <summary>自动重试的触发时刻：<c>max(现在 + 1小时, 当天 21:00)</c>（见 ScheduleAutoRetry）。</summary>
+    private static DateTime ComputeAutoRetryTime()
+    {
+        var earliest = DateTime.Now + AutoRetryDelayAfterRun;
+        var notBefore = DateTime.Today.Add(AutoRetryNotBefore.ToTimeSpan());
+        return earliest > notBefore ? earliest : notBefore;
+    }
+
+    private async Task RunAutoRetryWhenDueAsync(DateTime at, CancellationToken ct)
+    {
+        try
+        {
+            while (true)
+            {
+                var wait = at - DateTime.Now;
+                if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
+                ct.ThrowIfCancellationRequested();
+                if (!IsBusy) break;
+
+                // 用户正在手动跑别的操作，不抢——往后挪一点再看。
+                at = DateTime.Now + AutoRetryBusyRecheck;
+                AutoRetryText = $"正忙，改到 {at:HH:mm} 再自动重试（{FailedRetryText}）";
+            }
+
+            _autoRetryRound++;
+            AutoRetryText = "";
+            Log($"===== 自动重试（第 {_autoRetryRound}/{AutoRetryMaxRounds} 轮）到点，开始 =====");
+            // 跑完之后 RunOperationAsync 的收尾会再调一次 ScheduleAutoRetry，由它决定要不要续下一轮。
+            await RunRetryFailedAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            // 被取消（用户点了停止/取消自动重试，或程序退出）——什么都不用做。
+        }
+    }
+
+    /// <summary>取消排定中的自动重试并说明原因；<paramref name="reason"/> 为 null 时不写日志。</summary>
+    private void CancelAutoRetry(string? reason)
+    {
+        if (!HasAutoRetry && _autoRetryCts == null) return;
+        CancelAutoRetryTimer();
+        AutoRetryText = "";
+        _autoRetryRound = 0;
+        if (reason != null) Log($"已取消排定中的自动重试（{reason}）。");
+    }
+
+    private void CancelAutoRetryTimer()
+    {
+        _autoRetryCts?.Cancel();
+        _autoRetryCts?.Dispose();
+        _autoRetryCts = null;
+    }
+
     /// <summary>所有"点按钮跑一个操作"的统一外壳——置忙/心跳、**开始与结束都打印带功能名的醒目标记**、
     /// 取消与异常处理、收尾刷新。<paramref name="name"/> 是功能名（如"拉取全部"）；action 返回的
     /// FetchResult 里的错误逐条记日志。这样每个功能开始/结束在日志里都能一眼看出是哪个。</summary>
@@ -285,7 +461,9 @@ public class MainViewModel : INotifyPropertyChanged
             RefreshDataStatus();
             RefreshFailedCodeCount();
             IsBusy = false;
-            Log($"===== 【{name}】结束，不会自动继续，需要再次操作请重新点击按钮 =====");
+            Log($"===== 【{name}】结束 =====");
+            // 还有没补齐的东西就排一次自动重试（时机与停止条件见 ScheduleAutoRetry）。
+            ScheduleAutoRetry();
         }
     }
 
@@ -461,7 +639,8 @@ public class MainViewModel : INotifyPropertyChanged
             RefreshDataStatus();
             RefreshFailedCodeCount();
             IsBusy = false;
-            Log($"===== 【{label}】结束，不会自动继续，需要再次操作请重新点击按钮 =====");
+            Log($"===== 【{label}】结束 =====");
+            ScheduleAutoRetry();
         }
     }
 }
