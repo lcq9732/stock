@@ -51,22 +51,74 @@ public class SinaFinancialProvider : IFinancialProvider
     /// 行名先去掉"一、二、…"的序号前缀再比对）。</summary>
     private static readonly (string Statement, (string Key, string[] Names)[] Items)[] Statements =
     [
+        // 2026-08-27 从 8 个科目扩到 40 个。行名是当天用 603501 实测下载三张表、逐行打印出来的，
+        // 不是猜的。注意几处反直觉的地方：
+        //   · 新准则的"合同负债"在 TSV 里仍叫"预收款项"（网页版才显示合同负债）
+        //   · 所得税那行带"减："前缀，而 StripOrdinalPrefix 只剥"一、二、"，所以全名和两种冒号都列上
+        //   · 现金流量表附注里的"公允价值变动损失"跟利润表"公允价值变动收益"符号相反，是两个 key
         ("ProfitStatement",
         [
             (FinancialKeys.Revenue, ["营业总收入", "营业收入"]),
+            (FinancialKeys.TotalCost, ["营业总成本"]),
             (FinancialKeys.OperCost, ["营业成本"]),
+            (FinancialKeys.TaxSurcharge, ["营业税金及附加"]),
+            (FinancialKeys.SellExpense, ["销售费用"]),
+            (FinancialKeys.AdminExpense, ["管理费用"]),
+            (FinancialKeys.FinanceExpense, ["财务费用"]),
+            (FinancialKeys.RdExpense, ["研发费用"]),
+            (FinancialKeys.ImpairmentLoss, ["资产减值损失"]),
+            (FinancialKeys.FvChangeGain, ["公允价值变动收益"]),
+            (FinancialKeys.InvestIncome, ["投资收益"]),
+            (FinancialKeys.OperProfit, ["营业利润"]),
+            (FinancialKeys.TotalProfit, ["利润总额"]),
+            (FinancialKeys.IncomeTax, ["所得税费用", "减：所得税费用", "减:所得税费用"]),
             (FinancialKeys.NetProfit, ["净利润"]),
             (FinancialKeys.NetProfitParent, ["归属于母公司所有者的净利润", "归属于母公司的净利润", "归属于母公司股东的净利润"]),
+            (FinancialKeys.MinorityPl, ["少数股东损益"]),
+            (FinancialKeys.EpsBasic, ["基本每股收益(元/股)", "基本每股收益"]),
         ]),
         ("BalanceSheet",
         [
+            (FinancialKeys.Cash, ["货币资金"]),
+            (FinancialKeys.NoteReceivable, ["应收票据"]),
+            (FinancialKeys.AccountsReceivable, ["应收账款"]),
+            (FinancialKeys.Prepayment, ["预付款项"]),
+            (FinancialKeys.Inventory, ["存货"]),
+            (FinancialKeys.CurrentAssets, ["流动资产合计"]),
             (FinancialKeys.TotalAssets, ["资产总计"]),
+            (FinancialKeys.ShortLoan, ["短期借款"]),
+            (FinancialKeys.NotePayable, ["应付票据"]),
+            (FinancialKeys.AccountsPayable, ["应付账款"]),
+            (FinancialKeys.AdvanceReceipts, ["预收款项", "合同负债"]),
+            (FinancialKeys.CurrentLiabilities, ["流动负债合计"]),
+            (FinancialKeys.LongLoan, ["长期借款"]),
+            (FinancialKeys.BondPayable, ["应付债券"]),
             (FinancialKeys.TotalLiabilities, ["负债合计"]),
+            (FinancialKeys.ShareCapital, ["实收资本(或股本)", "实收资本", "股本"]),
             (FinancialKeys.EquityParent, ["归属于母公司股东权益合计", "归属于母公司股东的权益", "归属于母公司所有者权益合计", "所有者权益(或股东权益)合计"]),
+            (FinancialKeys.MinorityEquity, ["少数股东权益"]),
+            (FinancialKeys.EquityTotal, ["所有者权益(或股东权益)合计", "所有者权益合计"]),
+            (FinancialKeys.UndistributedProfit, ["未分配利润"]),
         ]),
         ("CashFlow",
         [
+            // 正表
+            (FinancialKeys.SalesCash, ["销售商品、提供劳务收到的现金"]),
             (FinancialKeys.Ocf, ["经营活动产生的现金流量净额"]),
+            (FinancialKeys.Icf, ["投资活动产生的现金流量净额"]),
+            (FinancialKeys.Fcf, ["筹资活动产生的现金流量净额"]),
+            (FinancialKeys.Capex, ["购建固定资产、无形资产和其他长期资产所支付的现金"]),
+            (FinancialKeys.CashEnd, ["期末现金及现金等价物余额"]),
+            // 附注（间接法补充资料）——行名都唯一，不会跟正表/利润表撞。
+            // ⚠ 附注里的"净利润""财务费用""少数股东权益"跟别处同名，一律不在这里取。
+            (FinancialKeys.ImpairmentProvision, ["资产减值准备"]),
+            (FinancialKeys.Depreciation, ["固定资产折旧、油气资产折耗、生产性物资折旧"]),
+            (FinancialKeys.AmortIntangible, ["无形资产摊销"]),
+            (FinancialKeys.AmortLongPrepaid, ["长期待摊费用摊销"]),
+            (FinancialKeys.FvChangeLoss, ["公允价值变动损失"]),
+            (FinancialKeys.InventoryDecrease, ["存货的减少"]),
+            (FinancialKeys.ReceivableDecrease, ["经营性应收项目的减少"]),
+            (FinancialKeys.PayableIncrease, ["经营性应付项目的增加"]),
         ]),
     ];
 

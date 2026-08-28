@@ -46,6 +46,22 @@ public class AnalyzerPaths
     /// 早上跳出来叫你把底仓砍掉。分开文件从物理上不会漏。</summary>
     public string CorePositionPath => Path.Combine(BaseDir, "core-positions.json");
 
+    /// <summary>
+    /// 个股分析笔记的目录（2026-08-27 新增），一票一个 <c>{code}.md</c>。
+    ///
+    /// 为什么要跟数据库分开存：**数据能重算，判断不能**。财务科目扩到 52 个之后，营运资金拆解、
+    /// 净利率归因、收现比这些都能从 <c>FinancialReport</c> 直接算出来，不必留档；但"这次利润下滑
+    /// 里哪部分可逆"、"负债率改善其实来自转债转股而非经营"、"下次要盯什么"这类结论是推理产物，
+    /// 算不出来，只能写下来。所以库存数据、这里存判断。
+    ///
+    /// 用 markdown 纯文本而不是数据库表：笔记是给人读写的，要能直接拿编辑器打开、能进 git、
+    /// 能贴表格和链接；而且几十只票几十个小文件，上 SQLite 没有任何好处。
+    /// </summary>
+    public string NotesDir => Path.Combine(BaseDir, "notes");
+
+    /// <summary>某只票的笔记文件路径。</summary>
+    public string NotePath(string code) => Path.Combine(NotesDir, $"{code}.md");
+
     public AnalyzerPaths(string? baseDir = null)
     {
         BaseDir = baseDir ?? Path.Combine(AppContext.BaseDirectory, "data");

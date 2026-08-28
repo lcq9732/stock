@@ -16,6 +16,10 @@ public class FetchPaths
     /// 上一轮的 fetch.log 在下次启动时挪到这里，不再被直接冲掉。</summary>
     public string LogArchiveDir => Path.Combine(BaseDir, "local", "logs");
 
+    /// <summary>抓取程序自己的界面设置（2026-08-27新增）——目前只有"空闲时自动补财务数据"这个
+    /// 开关。跟 manifest.json 分开：那个是数据状态（抓到哪天了），这个是用户偏好。</summary>
+    public string SettingsPath => Path.Combine(BaseDir, "fetcher-settings.json");
+
     public FetchPaths(string? baseDir = null)
     {
         BaseDir = baseDir ?? Path.Combine(AppContext.BaseDirectory, "data");

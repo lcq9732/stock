@@ -75,6 +75,17 @@ public class MainViewModel : INotifyPropertyChanged
     /// 打开，参数在这里持有，两个入口共用同一份（见 PositionSizingWindow）。</summary>
     public Watchlist.PositionSizingStore SizingStore { get; }
 
+    /// <summary>个股分析笔记（2026-08-27 新增）——**库里存数据、笔记存判断**，见
+    /// AnalyzerPaths.NotesDir。入口在【行情详情】窗口顶部的"分析笔记"按钮。</summary>
+    public Watchlist.StockNoteStore NoteStore { get; }
+
+    /// <summary>财务数据仓储——【财务分析】窗口要读某只票的全部报告期全部科目
+    /// （GetAllByCode），在这里暴露出来给 MainWindow 用。</summary>
+    public IFinancialRepository FinancialRepository { get; }
+
+    /// <summary>分红数据仓储——【财务分析】算股息率要用。</summary>
+    public IDividendRepository DividendRepository { get; }
+
     private string _dataStatusText = "";
     public string DataStatusText { get => _dataStatusText; set => Set(ref _dataStatusText, value); }
 
@@ -90,6 +101,8 @@ public class MainViewModel : INotifyPropertyChanged
     {
         _paths = paths;
         _barRepository = barRepository;
+        FinancialRepository = financialRepository;
+        DividendRepository = dividendRepository;
 
         var watchlistStore = new JsonWatchlistStore(paths.WatchlistPath);
         // 交易费率（佣金/过户费/印花税）全程序一份，"主动仓"页可改——两个自选相关的页共用同一个实例，
@@ -98,6 +111,7 @@ public class MainViewModel : INotifyPropertyChanged
         // 仓位计算器的账户级参数（可投资总资金/凯利折扣/单票上限）——跟费率同理，全程序一份，
         // 两个入口（"主动仓"页顶部按钮、每行的【仓位】按钮）打开的是同一份设置。
         SizingStore = new PositionSizingStore(paths.PositionSizingPath);
+        NoteStore = new StockNoteStore(paths.NotesDir);
         MorningCheckTab = new MorningCheckTabViewModel(barRepository, shareholderRepository, watchlistStore, indexConsRepository);
         FoundationTab = new FoundationTabViewModel(paths, barRepository, watchlistStore);
         GoldenCrossTab = new GoldenCrossTabViewModel(paths, barRepository, watchlistStore);

@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
@@ -50,8 +51,12 @@ public class SqliteFinancialRepository : IFinancialRepository
         var pFetched = cmd.CreateParameter(); pFetched.ParameterName = "$fetched"; cmd.Parameters.Add(pFetched);
 
         var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        // 顺便记下最新报告期给 FinancialFetchState 用。**不能事后 rows.Max()**——rows 是
+        // IEnumerable，二次遍历对延迟求值的序列可能重算甚至取不到值。
+        DateTime? maxDate = null;
         foreach (var r in rows)
         {
+            if (maxDate == null || r.ReportDate > maxDate.Value) maxDate = r.ReportDate;
             pCode.Value = code;
             pDate.Value = r.ReportDate.ToString("yyyy-MM-dd");
             pKey.Value = r.Key;
@@ -59,7 +64,77 @@ public class SqliteFinancialRepository : IFinancialRepository
             pFetched.Value = now;
             cmd.ExecuteNonQuery();
         }
+
+        // 抓取状态跟数据在**同一个事务**里写——否则中途崩了会出现"数据是新版、状态还是旧版"
+        // （下次白重抓一遍，不致命）或者更糟的"状态是新版、数据没写进去"（新科目永远补不上）。
+        using (var st = conn.CreateCommand())
+        {
+            st.Transaction = tx;
+            st.CommandText = """
+                INSERT OR REPLACE INTO FinancialFetchState (code, keys_version, report_date, fetched_at)
+                VALUES ($code, $ver, $date, $fetched);
+                """;
+            st.Parameters.AddWithValue("$code", code);
+            st.Parameters.AddWithValue("$ver", FinancialKeys.Version);
+            st.Parameters.AddWithValue("$date",
+                maxDate.HasValue ? maxDate.Value.ToString("yyyy-MM-dd") : (object)DBNull.Value);
+            st.Parameters.AddWithValue("$fetched", now);
+            st.ExecuteNonQuery();
+        }
+
         tx.Commit();
+    }
+
+    public List<FinancialSnapshot> GetAllByCode(string code)
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT report_date, metric_key, value FROM FinancialReport
+            WHERE code = $code AND value IS NOT NULL
+            ORDER BY report_date DESC;
+            """;
+        cmd.Parameters.AddWithValue("$code", code);
+
+        var byDate = new Dictionary<DateTime, FinancialSnapshot>();
+        var order = new List<DateTime>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (!DateTime.TryParseExact(reader.GetString(0), "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
+            if (!byDate.TryGetValue(d, out var snap))
+            {
+                snap = new FinancialSnapshot { ReportDate = d };
+                byDate[d] = snap;
+                order.Add(d);
+            }
+            snap.Values[reader.GetString(1)] = reader.GetDouble(2);
+        }
+        return order.Select(d => byDate[d]).ToList();
+    }
+
+    public Dictionary<string, (DateTime ReportDate, int KeysVersion)> GetFetchStateByCode()
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, keys_version, report_date FROM FinancialFetchState WHERE report_date IS NOT NULL;";
+        var result = new Dictionary<string, (DateTime, int)>(StringComparer.Ordinal);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(2)) continue;
+            if (!DateTime.TryParseExact(reader.GetString(2), "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
+            result[reader.GetString(0)] = (d, reader.IsDBNull(1) ? 0 : reader.GetInt32(1));
+        }
+        return result;
     }
 
     public Dictionary<string, FinancialSnapshot> GetLatestSnapshotByCode()

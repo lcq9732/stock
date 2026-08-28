@@ -21,4 +21,24 @@ public interface IFinancialRepository
     /// 但回测样本已排除 ST/退市股，测不出"踩雷退市"这类尾部风险，所以这个信息仍然要摆在用户眼前
     /// 让人自己判断。详见 doc/analysis-app-design.md 3.2.8。</summary>
     Dictionary<string, List<(int Year, double NetProfitParent)>> GetRecentAnnualNetProfitByCode(int count);
+
+    /// <summary>
+    /// 每只股票的财务抓取状态（最新报告期 + 抓取时的科目集版本），供抓取端做增量判断。
+    ///
+    /// 为什么不能只看报告期：科目集扩充后，老数据的 report_date 仍然是"最新"的，但里面只有旧版
+    /// 那几个科目。2026-08-27 实测 5780 只里 5552 只因此被跳过、44 个新科目一条没进库。
+    /// 版本落后就必须重抓，见 <see cref="Models.FinancialKeys.Version"/>。
+    ///
+    /// 没有状态记录的票（旧库里抓过但那时还没这张表）返回 version=0，一律视为需要重抓。
+    /// </summary>
+    Dictionary<string, (DateTime ReportDate, int KeysVersion)> GetFetchStateByCode();
+
+    /// <summary>
+    /// 单只股票的**全部报告期、全部科目**，按报告期降序（最新在前）。给"财务分析"用——它要同期
+    /// 对比（本期 vs 去年同期）、单季拆解（本期累计 − 上期累计）和多期趋势，一次全取最省事。
+    ///
+    /// 这里可以逐只查，跟类注释里"不做逐只查询"的限制不冲突：那条针对的是**扫全市场**的场景
+    /// （5000+ 次查询会把一次扫描拖到分钟级），而财务分析是用户点开某一只票时才跑，一次一只。
+    /// </summary>
+    List<FinancialSnapshot> GetAllByCode(string code);
 }

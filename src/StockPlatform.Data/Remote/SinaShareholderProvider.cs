@@ -54,6 +54,14 @@ public class SinaShareholderProvider : IShareholderProvider
         var data = new ShareholderData();
         var now = DateTime.Now;
 
+        // ⚠ 注意：这里一只票要发**两个**请求，而每个请求各自去抢限速器的信号量。调用方是
+        // Task.WhenAll(全部股票)，所以实际执行顺序是"所有票的第1个请求 → 所有票的第2个请求"，
+        // 前半程谁都不完成、一条都写不进库。现在没暴露成问题，只因为股东用的是 3并发/1秒、
+        // 轮一圈快；**一旦这个接口也需要降速（像财务那样降到单并发+4秒），就会立刻变成
+        // "跑几百个请求、零写入、零进度"**——财务 2026-08-27 就是这么踩的坑，见
+        // FetchOrchestrator.RunFetchFinancialsAsync 里那段注释。
+        // 届时的修法有两个：① 像财务那样改成顺序 foreach（牺牲并发）；
+        // ② 把两个请求合进**一次** RunAsync 调用，让它们共占一个信号量名额（保留并发，更优）。
         var shUrl = $"https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_StockHolder/stockid/{code}.phtml";
         var shHtml = await _rateLimiter.RunAsync(() => GetGbkAsync(shUrl, "股东", ct), ct);
         ParseMainHolder(code, shHtml, now, data);

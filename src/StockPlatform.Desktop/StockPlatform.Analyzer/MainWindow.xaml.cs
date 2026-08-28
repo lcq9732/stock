@@ -331,24 +331,59 @@ public partial class MainWindow : Window
 
     // "行情详情"——典型股票APP样式的纯行情图（见QuoteDetailWindow），跟方法/条件无关，固定看
     // 日线，四个方法的结果表共用同一个处理逻辑。
-    private void QuoteDetailButton_Click(object sender, RoutedEventArgs e)
+    // ── 分裂按钮【财务分析 ▾】（2026-08-27 按用户要求加到各列表页）──
+    //
+    // 阅读动线：列表里看到一只票，最常做的是看它的财务，其次才是看 K线。所以主按钮给财务分析、
+    // K线收进下拉。WPF 没有内置 SplitButton（那是 WinUI 的控件），用"主按钮 + 窄箭头按钮弹
+    // ContextMenu"拼出来，定义在 MainWindow.xaml 的 DetailSplitButtonCell 模板里，13 个列表页共用。
+
+    /// <summary>
+    /// 从按钮的 DataContext 取出股票代码和名称。各列表页的行类型不同
+    /// （ResultRowViewModel / WatchlistRowViewModel / CorePositionRowViewModel），
+    /// 但都有 Code/Name，所以在这里统一拆一次，省得每个页各写一个 handler。
+    /// </summary>
+    private static bool TryGetCodeName(object sender, out string code, out string name)
     {
-        if (((FrameworkElement)sender).DataContext is ResultRowViewModel row)
-            OpenQuoteDetail(row.Code, row.Name);
+        code = name = "";
+        var ctx = (sender as FrameworkElement)?.DataContext;
+        switch (ctx)
+        {
+            case ResultRowViewModel r: code = r.Code; name = r.Name; return true;
+            case WatchlistRowViewModel w: code = w.Code; name = w.Name; return true;
+            case CorePositionRowViewModel c: code = c.Code; name = c.Name; return true;
+            default: return false;
+        }
     }
 
-    private void WatchlistQuoteDetailButton_Click(object sender, RoutedEventArgs e)
+    /// <summary>分裂按钮的主体：直接打开财务分析。</summary>
+    private void FinancialAnalysisButton_Click(object sender, RoutedEventArgs e)
     {
-        if (((FrameworkElement)sender).DataContext is WatchlistRowViewModel row)
-            OpenQuoteDetail(row.Code, row.Name);
+        if (DataContext is not MainViewModel vm) return;
+        if (!TryGetCodeName(sender, out var code, out var name))
+        {
+            MessageBox.Show(this, "这一行不是个股，没有财务数据。", "财务分析",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        FinancialAnalysisWindow.Open(this, vm, code, name);
     }
 
-    // "主动仓"页的行情详情——行类型跟自选股页是同一个 WatchlistRowViewModel（两页读同一份
-    // watchlist.json，只是筛选不同），所以直接复用同一套打开逻辑。
-    private void TradePoolQuoteDetailButton_Click(object sender, RoutedEventArgs e)
+    /// <summary>分裂按钮的箭头：弹出下拉菜单。
+    /// ContextMenu 是独立的 popup，DataContext 不会自动跟着 PlacementTarget，必须手动传，
+    /// 否则菜单项里 TryGetCodeName 拿不到行。</summary>
+    private void DetailDropdown_Click(object sender, RoutedEventArgs e)
     {
-        if (((FrameworkElement)sender).DataContext is WatchlistRowViewModel row)
-            OpenQuoteDetail(row.Code, row.Name);
+        if (sender is not Button b || b.ContextMenu == null) return;
+        b.ContextMenu.PlacementTarget = b;
+        b.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        b.ContextMenu.DataContext = b.DataContext;
+        b.ContextMenu.IsOpen = true;
+    }
+
+    /// <summary>下拉里的【行情详情】。</summary>
+    private void QuoteDetailMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (TryGetCodeName(sender, out var code, out var name)) OpenQuoteDetail(code, name);
     }
 
     // "主动仓"Tab的【交易记录】——录这只票的每一笔买入/卖出（金字塔式建仓、分批止盈）。窗口里改的是
@@ -407,11 +442,9 @@ public partial class MainWindow : Window
         new DividendHistoryWindow(row.Code, row.Name, row.AnnualDividends) { Owner = this }.ShowDialog();
     }
 
-    private void CorePositionQuoteButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (((FrameworkElement)sender).DataContext is CorePositionRowViewModel row)
-            OpenQuoteDetail(row.Code, row.Name);
-    }
+    // 【代码规则】——顶部数据状态那一行：跟具体页签、具体票都无关的公共查询表，所以不带任何参数。
+    private void CodeRuleButton_Click(object sender, RoutedEventArgs e)
+        => new CodeRuleWindow { Owner = this }.ShowDialog();
 
     // 【仓位计算器】——"主动仓"页顶部那个按钮：不针对具体某只票，纯算"这样一笔机会该下多少注"。
     private void PositionSizingButton_Click(object sender, RoutedEventArgs e)
@@ -434,24 +467,10 @@ public partial class MainWindow : Window
             vm.TradePoolTab.FeeStore.Current) { Owner = this }.ShowDialog();
     }
 
-    // 查询Tab的"K线详情"——跟"行情详情"是同一个纯行情窗口（QuoteDetailWindow），只是入口在查询结果里。
-    private void QueryQuoteDetailButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (((FrameworkElement)sender).DataContext is QueryRowViewModel row)
-            OpenQuoteDetail(row.Code, row.Name);
-    }
-
     // 板块热度Tab里成分股的"K线详情"——同一个纯行情窗口。
     private void BoardMemberQuoteDetailButton_Click(object sender, RoutedEventArgs e)
     {
         if (((FrameworkElement)sender).DataContext is BoardMemberRowViewModel row)
-            OpenQuoteDetail(row.Code, row.Name);
-    }
-
-    // 因子法Tab最新名单的"K线详情"——同一个纯行情窗口。
-    private void FactorQuoteDetailButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (((FrameworkElement)sender).DataContext is FactorPickRowViewModel row)
             OpenQuoteDetail(row.Code, row.Name);
     }
 
@@ -480,7 +499,7 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "没有找到该标的的日线数据。\n（若是板块指数，请先在 Fetcher 里\"合成板块指数\"并把数据库拷贝过来）", "无法显示行情", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        new QuoteDetailWindow(code, name, vm.BarRepository, vm.CurrentDbPath) { Owner = this }.ShowDialog();
+        new QuoteDetailWindow(code, name, vm.BarRepository, vm.CurrentDbPath, vm.NoteStore) { Owner = this }.ShowDialog();
     }
 
     /// <param name="cutoffDate">非空时把K线截到这一天(含)——阶梯低点法的"按历史截止日期验证"

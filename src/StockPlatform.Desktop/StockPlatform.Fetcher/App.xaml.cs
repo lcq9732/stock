@@ -115,7 +115,18 @@ public partial class App : Application
         var delistedListProvider = new ExchangeDelistedListProvider();
 
         // 财务报表(新浪，三张表全历史)——基本面因子的数据基础，并入"一键拉取定期数据"，也有独立按钮。
-        var financialProvider = new SinaFinancialProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        // 财务报表**单独用一套保守得多的限速**（2026-08-27）——不能跟其它抓取共用 3并发/1秒。
+        // 原因：vDOWN 报表下载接口一次返回整张表（几十KB、几十个报告期），新浪对它的配额比行情
+        // 查询严得多。实测 2026-08-27：按 3并发/1秒（实际约 1.1 请求/秒）跑到第 100 多个请求就被
+        // 返回 HTTP 456（新浪的反爬码），整轮 350 个请求零成功、一条数据都没写进库；而同样的
+        // 3并发/1秒 用在 K线/板块/股东/龙虎榜上天天全市场 5000+ 只都没事。
+        // 单并发 + 4 秒间隔 + 每 30 个请求歇 60 秒 ≈ 10 请求/分钟，配合下面的每轮上限和
+        // FinancialKeys.Version 的断点续传，分多天补齐。
+        var financialProvider = new SinaFinancialProvider(new RateLimiter(
+            maxConcurrency: 1,
+            delayBetweenRequests: TimeSpan.FromSeconds(4),
+            batchSize: 30,
+            restDuration: TimeSpan.FromSeconds(60)));
 
         // 分红送配(新浪分红派息页 vISSUE_ShareBonus)——库里原本没有分红明细,做股息率因子/核对除权除息日的数据
         // 基础。逐只抓全历史,并入"一键拉取定期数据",也有独立按钮。写 Dividend 表。

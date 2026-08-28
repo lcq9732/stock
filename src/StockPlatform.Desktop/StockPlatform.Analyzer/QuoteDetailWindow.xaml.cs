@@ -37,9 +37,16 @@ public partial class QuoteDetailWindow : Window
     private DateTime? _fibManualA;
     private DateTime? _fibManualB;
 
-    public QuoteDetailWindow(string code, string name, IBarRepository barRepository, string dbPath)
+    /// <summary>分析笔记的存取——顶部"分析笔记"按钮用（2026-08-27 新增）。</summary>
+    private readonly Watchlist.StockNoteStore? _noteStore;
+
+    public QuoteDetailWindow(string code, string name, IBarRepository barRepository, string dbPath,
+        Watchlist.StockNoteStore? noteStore = null)
     {
         InitializeComponent();
+        _noteStore = noteStore;
+        NoteButton.IsEnabled = noteStore != null;
+        SetNoteButtonMark();   // 已有笔记的票，一打开就带 ● 标记
         Loaded += (_, _) => WindowState = WindowState.Maximized;
 
         _code = code;
@@ -132,6 +139,37 @@ public partial class QuoteDetailWindow : Window
     /// <see cref="StockDossierWindow"/>）。放到后台线程读：要扫十几张表，其中 MarginDetail /
     /// BoardMember / Lhb 的主键最左列都不是股票代码（分别是 trade_date / board_code / trade_date），
     /// 按代码查是全表扫，在几 GB 的库上可能要一两秒，卡在UI线程上会让窗口假死。</summary>
+    /// <summary>打开【财务分析】——实现在 FinancialAnalysisWindow.Open，列表页的按钮跟这里共用。</summary>
+    private void FinancialButton_Click(object sender, RoutedEventArgs e)
+    {
+        // 本窗口的 DataContext 是自己（绑 MainPlotModel 那些），主窗口的 VM 从 Owner 拿
+        var vm = (Owner as MainWindow)?.DataContext as ViewModels.MainViewModel
+                 ?? Application.Current?.MainWindow?.DataContext as ViewModels.MainViewModel;
+        if (vm == null)
+        {
+            MessageBox.Show(this, "拿不到数据源，无法做财务分析。", "财务分析",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        FinancialAnalysisWindow.Open(this, vm, _code, _name);
+    }
+
+    /// <summary>打开这只票的分析笔记。有笔记时按钮文字带个 ● 标记（见 SetNoteButtonMark），
+    /// 所以关窗后要刷新一次。</summary>
+    private void NoteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_noteStore == null) return;
+        new StockNoteWindow(_noteStore, _code, _name) { Owner = this }.ShowDialog();
+        SetNoteButtonMark();
+    }
+
+    /// <summary>已经记过东西的票，按钮上加个 ● ——不点开就知道这只票有没有笔记。</summary>
+    private void SetNoteButtonMark()
+    {
+        if (_noteStore == null) return;
+        NoteButton.Content = _noteStore.Exists(_code) ? "分析笔记 ●" : "分析笔记";
+    }
+
     private async void OtherDataButton_Click(object sender, RoutedEventArgs e)
     {
         OtherDataButton.IsEnabled = false;

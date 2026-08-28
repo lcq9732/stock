@@ -174,6 +174,17 @@ public static class SqliteSchema
                 PRIMARY KEY (code, report_date, metric_key)
             );
 
+            -- 财务数据的抓取状态（2026-08-27新增）。单独一张表而不是塞进 FinancialReport：
+            -- GetLatestSnapshotByCode 是全取 metric_key 的，混一个假科目进去会进财务快照。
+            -- keys_version 见 FinancialKeys.Version——增量判断要靠它识别"数据是旧版代码抓的、
+            -- 科目不全"，只看 report_date 是不够的。
+            CREATE TABLE IF NOT EXISTS FinancialFetchState (
+                code TEXT PRIMARY KEY,      -- 6位股票代码
+                keys_version INTEGER,       -- 抓这份数据时的 FinancialKeys.Version
+                report_date TEXT,           -- 抓到的最新报告期（跟 FinancialReport 里的 MAX 一致，冗余但省一次聚合）
+                fetched_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS StockIndustry (
                 code TEXT PRIMARY KEY,      -- 6位股票代码
                 class_code TEXT,            -- 证监会门类代码 A~S（两所官网，覆盖沪深全部）

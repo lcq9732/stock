@@ -27,6 +27,8 @@
 |  | `ShareholderCount` | 股东户数（按报告期） |
 |  | `TopShareholder` | 十大股东 / 十大流通股东 |
 |  | `Dividend` | 分红送配（历年方案，每10股口径） |
+|  | `FinancialReport` | **财务三表关键科目（52个，长表）** |
+|  | `FinancialFetchState` | 财务抓取状态（报告期+科目集版本，供增量判断） |
 | 资金 | `NetInflow` | 主力/资金净流入（日频） |
 |  | `MarginDetail` | 融资融券明细（融资余额，仅两融标的） |
 | 龙虎榜 | `Lhb` | 每日龙虎榜上榜记录 |
@@ -114,6 +116,119 @@
 | ex_date | TEXT | 除权除息日（未实施时为空） |
 | fetched_at | TEXT | 抓取时刻 |
 | | | **主键** (code, announce_date) |
+
+### FinancialReport — 财务报表关键科目
+
+**数据源**：新浪财经的报表下载接口 `money.finance.sina.com.cn/corp/go.php/vDOWN_{ProfitStatement|BalanceSheet|CashFlow}/displaytype/4/stockid/{code}/ctrl/all.phtml`（GBK 编码 TSV）。**一个请求返回该股上市以来所有报告期的整张报表**（603501 实测 46 个报告期），所以"只抓最新一期"既没必要也没收益——抓一次就是全历史。**更新**：一键拉取定期数据 / 独立的"拉取财务报表"按钮 / "空闲时自动补财务"开关，按 code 删旧写新。退市股同样有数据（乐视网退市后仍在老三板披露）。
+
+⚠ **这个接口的配额比其它接口严得多**，用常规的 3并发/1秒 跑到 100 多个请求就会被返回 HTTP 456（封约 40 分钟）。已单独降速到约 10 请求/分钟、每轮上限 300 只、靠 `FinancialFetchState` 断点续传，全市场要分几天补齐。详见[数据平台设计 6.9](data-platform-design.md#69-财务报表接口的特殊限速与空闲自动补已实现-2026-08-27)。
+
+**增量判断看两个条件**（任一落后就重抓）：`report_date` 是否够新、`keys_version` 是否落后于 `FinancialKeys.Version`。后者是 2026-08-27 加的——只看报告期的话，扩充科目后老数据的 `report_date` 仍是"最新"，新科目永远补不上。状态记在 `FinancialFetchState` 表：
+
+| 列 | 说明 |
+|---|---|
+| code | 6位股票代码（主键） |
+| keys_version | 抓这份数据时的 `FinancialKeys.Version`；没有记录的按 0 算，一律重抓 |
+| report_date | 抓到的最新报告期 |
+| fetched_at | 抓取时刻 |
+
+**结构是长表**——加科目不用改表、不用迁移：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| code | TEXT | 6位股票代码 |
+| report_date | TEXT | 报告期（季度末 0331/0630/0930/1231）。**不是公告日**，数据源没有公告日；消费端按法定披露截止日估计可用时点（见 FactorLab） |
+| metric_key | TEXT | 规范化科目键，见下表 |
+| value | REAL | 单位**元**。利润表/现金流量表为**年内累计**口径，TTM/单季由消费端换算。例外见下方"单位例外" |
+| fetched_at | TEXT | 抓取时刻 |
+| | | **主键** (code, report_date, metric_key) |
+
+**科目 2026-08-27 从 8 个扩到 52 个**。原来读完整张表只留 8 行、其余全扔，导致每次做深入分析都得上网查——而网页抓取踩过的坑包括公司名张冠李戴、资产负债表两列标签互换、网页"合同负债"与报表"预收款项"科目混淆、净利率分子口径搞错。扩充只是多留几行，不多发一个请求。
+
+**单位例外**（做单位换算时要跳过这两个）：
+- `eps_basic` 是**元/股**
+- `share_capital` 数值上是**股数**（A股面值1元）
+
+**三个反直觉的点**（行名是实测下载三张表逐行打印确认的，不是猜的）：
+- 新准则的"合同负债"在 TSV 里仍归到**预收款项**这一行（只有网页版显示"合同负债"）
+- 所得税那行带"减："前缀，而解析器的 `StripOrdinalPrefix` 只剥"一、二、"，所以备选名里全名和两种冒号都列上了
+- 现金流量表**附注**里的"公允价值变动损失"跟利润表"公允价值变动收益"**符号相反**，是两个不同的 key；附注里的"净利润""财务费用""少数股东权益"跟别处同名，而解析器对同名行取第一次出现的，所以这几个一律不从现金流量表取
+
+**为什么附注那 8 个科目值得单独抓**：它们把"净利润 → 经营现金流"的每一步差异都列了出来，实测能对平（603501 2026H1：净利 12.03 + 折旧摊销 6.28 + 减值 1.89 + … − 存货 9.25 − 经营性应收 13.72 + 经营性应付 0.53 + … = 4.08 = 表内直接法数字）。用资产负债表两个时点相减**还原不出来**——实测存货差 5.89 vs 9.25、应收差 7.12 vs 13.72，因为附注口径含合并范围变动、且"经营性应收项目"覆盖应收账款+票据+预付+其他应收。
+
+**利润表**（18 个）
+
+| metric_key | 科目 | 说明 |
+|---|---|---|
+| `revenue` | Revenue | 营业(总)收入（银行=一、营业收入）。 |
+| `total_cost` | TotalCost | 营业总成本（含四费和税金附加，跟 OperCost 不是一回事）。 |
+| `oper_cost` | OperCost | 营业成本（银行/券商没有，毛利率因子对它们为空）。 |
+| `tax_surcharge` | TaxSurcharge | 营业税金及附加。 |
+| `sell_exp` | SellExpense | 销售费用。 |
+| `admin_exp` | AdminExpense | 管理费用。 |
+| `fin_exp` | FinanceExpense | 财务费用（含汇兑损益，汇率大幅波动时是利润的重要扰动项）。 |
+| `rd_exp` | RdExpense | 研发费用。 |
+| `impair_loss` | ImpairmentLoss | 资产减值损失。 |
+| `fv_gain` | FvChangeGain | 公允价值变动**收益**（利润表口径，赚钱为正）。 |
+| `invest_income` | InvestIncome | 投资收益。 |
+| `oper_profit` | OperProfit | 营业利润。 |
+| `total_profit` | TotalProfit | 利润总额。 |
+| `income_tax` | IncomeTax | 所得税费用。 |
+| `net_profit` | NetProfit | 净利润（利润表"五、净利润"，含少数股东损益；现金流量表附注里同名行不取，见类注释）。 |
+| `np_parent` | NetProfitParent | 归属于母公司所有者的净利润（银行叫"归属于母公司的净利润"）。 |
+| `minority_pl` | MinorityPl | 少数股东损益。 |
+| `eps_basic` | EpsBasic | 基本每股收益（元/股）。 |
+
+**资产负债表**（20 个）
+
+| metric_key | 科目 | 说明 |
+|---|---|---|
+| `cash` | Cash | 货币资金。 |
+| `note_recv` | NoteReceivable | 应收票据。 |
+| `ar` | AccountsReceivable | 应收账款。 |
+| `prepay` | Prepayment | 预付款项。 |
+| `inventory` | Inventory | 存货。 |
+| `cur_assets` | CurrentAssets | 流动资产合计。 |
+| `assets` | TotalAssets | — |
+| `st_loan` | ShortLoan | 短期借款。 |
+| `note_pay` | NotePayable | 应付票据。 |
+| `ap` | AccountsPayable | 应付账款。 |
+| `advance_recv` | AdvanceReceipts | 预收款项。 |
+| `cur_liab` | CurrentLiabilities | 流动负债合计。 |
+| `lt_loan` | LongLoan | 长期借款。 |
+| `bond_pay` | BondPayable | 应付债券（可转债在转股前挂这里，转股后归零——净资产、股本、资产负债率会同时跳变）。 |
+| `liab` | TotalLiabilities | — |
+| `share_capital` | ShareCapital | 实收资本(或股本)——**股数**不是金额（A股面值1元，所以数值上等于股本股数）。 |
+| `equity_parent` | EquityParent | 归属于母公司股东权益（一般/银行叫法不同，取不到时退回所有者权益合计）。 |
+| `minority_equity` | MinorityEquity | 少数股东权益。 |
+| `equity_total` | EquityTotal | 所有者权益(或股东权益)合计。 |
+| `undist_profit` | UndistributedProfit | 未分配利润（分红能力的上限之一）。 |
+
+**现金流量表（正表）**（6 个）
+
+| metric_key | 科目 | 说明 |
+|---|---|---|
+| `sales_cash` | SalesCash | 销售商品、提供劳务收到的现金。 |
+| `ocf` | Ocf | 经营活动产生的现金流量净额。 |
+| `icf` | Icf | 投资活动产生的现金流量净额。 |
+| `fcf` | Fcf | 筹资活动产生的现金流量净额。 |
+| `capex` | Capex | 购建固定资产、无形资产和其他长期资产所支付的现金（资本开支）。 |
+| `cash_end` | CashEnd | 期末现金及现金等价物余额。 |
+
+**现金流量表（附注 / 间接法补充资料）**（8 个）
+
+| metric_key | 科目 | 说明 |
+|---|---|---|
+| `impair_provision` | ImpairmentProvision | 资产减值准备（附注加回项）。 |
+| `depreciation` | Depreciation | 固定资产折旧、油气资产折耗、生产性物资折旧。 |
+| `amort_intangible` | AmortIntangible | 无形资产摊销。 |
+| `amort_lt_prepaid` | AmortLongPrepaid | 长期待摊费用摊销。 |
+| `fv_loss` | FvChangeLoss | 公允价值变动**损失**（附注口径，亏钱为正——跟利润表的 FvChangeGain 符号相反）。 |
+| `inv_decrease` | InventoryDecrease | 存货的减少（**负数=存货增加=占用现金**）。 |
+| `recv_decrease` | ReceivableDecrease | 经营性应收项目的减少（**负数=应收增加=占用现金**）。 |
+| `pay_increase` | PayableIncrease | 经营性应付项目的增加（**正数=占用上游资金=释放现金**）。 |
+
+---
 
 ## 资金
 

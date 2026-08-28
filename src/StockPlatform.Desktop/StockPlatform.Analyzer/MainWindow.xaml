@@ -4,6 +4,29 @@
         xmlns:local="clr-namespace:StockPlatform.Analyzer"
         Title="A股批量分析" Height="700" Width="1100" MinWidth="900" MinHeight="500" WindowState="Maximized">
     <Window.Resources>
+        <!-- 分裂按钮【财务分析 ▾】（2026-08-27 按用户要求）——13 个个股列表页的"操作"列共用。
+             主按钮打开财务分析（列表里最常做的动作），K线收进下拉。
+             WPF 没有内置 SplitButton（WinUI 才有），这里用"主按钮 + 窄箭头按钮弹 ContextMenu"拼。
+             板块页那两处不用它：板块指数没有财务数据。 -->
+        <DataTemplate x:Key="DetailSplitButtonCell">
+            <Grid Margin="2,1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Button Grid.Column="0" Content="财务分析" Width="72" Click="FinancialAnalysisButton_Click"
+                        ToolTip="把这只票的财务科目算成看得懂的结论：营收/利润/毛利率的同比与单季拆解、净利率掉在哪、利润有没有变成现金、扩张的钱从哪来、ROE与估值。每行都带&quot;这意味着什么&quot;，最上面汇总需要留意的项。&#10;&#10;需要本地已抓到该股财务数据（Fetcher 的【拉取财务报表】或【空闲时自动补财务】）。" />
+                <Button Grid.Column="1" Content="▾" Width="20" Click="DetailDropdown_Click"
+                        ToolTip="更多：行情详情（K线）">
+                    <Button.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="行情详情（K线）" Click="QuoteDetailMenuItem_Click" />
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
+            </Grid>
+        </DataTemplate>
+
         <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter" />
 
         <!-- 各结果表"选"那一列的单元格模板（2026-08-12新增）——**点单元格任意位置就能勾选**。
@@ -47,6 +70,10 @@
             <TextBlock Text="{Binding DataStatusText}" VerticalAlignment="Center" FontWeight="Bold" />
             <Button Content="刷新" Command="{Binding RefreshCommand}" Width="80" Margin="12,0,0,0"
                     ToolTip="Fetcher 抓完新数据之后点这个，不用重启程序" />
+            <!-- 【代码规则】（2026-08-28 按用户要求）——放在顶部而不是某个页签里：13 个页签的票都是
+                 裸 6 位代码，任何一页看到不认识的段位（605/689/920…）都想查，属于跨页签的公共查询。 -->
+            <Button Content="代码规则" Click="CodeRuleButton_Click" Width="90" Margin="8,0,0,0"
+                    ToolTip="A股代码前三位对照表：哪一段是哪个交易所/板块，涨跌幅是 10% / 20% / 30%，以及哪些段位根本不是股票（ETF、可转债、指数）。" />
         </StackPanel>
 
         <!-- Four independent analysis methods (doc/analysis-app-design.md section 3.2) plus a
@@ -183,13 +210,13 @@
                                     </Style>
                                 </DataGridTextColumn.HeaderStyle>
                             </DataGridTextColumn>
-                            <DataGridTemplateColumn Header="操作" Width="230">
+                            <DataGridTemplateColumn Header="操作" Width="256">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="交易记录" Width="70" Margin="2,1" Click="TradeLotsButton_Click"
                                                     ToolTip="录入这只票的每一笔买入/卖出（金字塔式建仓、分批止盈都在这里录），保存后列表显示汇总的总股数和均价" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="TradePoolQuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                             <Button Content="仓位" Width="52" Margin="2,1" Click="TradePoolSizingButton_Click"
                                                     ToolTip="按凯利公式算这只票该占多大仓位——填上你估的上涨概率、目标涨幅和止损幅度，直接给出该买/该卖多少股。&#10;现价（最新收盘）和当前持仓股数会自动带进去。" />
                                         </StackPanel>
@@ -282,12 +309,12 @@
                             <DataGridTextColumn Header="现价" Binding="{Binding LastClose, StringFormat={}{0:F2}}" Width="70" IsReadOnly="True" />
                             <DataGridTextColumn Header="目标+10%" Binding="{Binding BigTargetText}" Width="80" IsReadOnly="True" SortMemberPath="LastClose" />
                             <DataGridTextColumn Header="止损-10%" Binding="{Binding StopPriceText}" Width="80" IsReadOnly="True" SortMemberPath="LastClose" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
+                            <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="ShortTermCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -395,7 +422,7 @@
                                 </DataGridTextColumn.CellStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="建仓理由/退出条件✎" Binding="{Binding Note, UpdateSourceTrigger=LostFocus}" Width="260" />
-                            <DataGridTemplateColumn Header="操作" Width="240">
+                            <DataGridTemplateColumn Header="操作" Width="266">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
@@ -403,7 +430,7 @@
                                                     ToolTip="逐档录入买入/卖出（跟主动仓页用同一个窗口和同一份费率）" />
                                             <Button Content="分红历史" Width="70" Margin="2,1" Click="CorePositionDividendChartButton_Click"
                                                     ToolTip="历年每股派息柱状图（全部历史）——底仓没有价格止损，分红中断就是它的退出信号" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="CorePositionQuoteButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -492,12 +519,12 @@
                             <!-- 需投入 = 目标年化股息 ÷ 股息率，"全压这一只"的口径。实际要除以计划配置的只数 -->
                             <DataGridTextColumn Header="需投入" Binding="{Binding RequiredCapitalText}" Width="80" IsReadOnly="True"
                                                 SortMemberPath="RequiredCapitalForTarget" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
+                            <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="CorePositionCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -753,12 +780,12 @@
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedText}" Width="70" IsReadOnly="True" SortMemberPath="SatisfiedCountValue" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
+                            <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="WatchlistCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="WatchlistQuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -807,10 +834,10 @@
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="160" IsReadOnly="True" />
                             <DataGridTextColumn Header="类型" Binding="{Binding Type}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="140" IsReadOnly="True" />
-                            <DataGridTemplateColumn Header="操作" Width="120">
+                            <DataGridTemplateColumn Header="操作" Width="146">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <Button Content="K线详情" Width="90" Margin="2,1" Click="QueryQuoteDetailButton_Click" />
+                                        <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
@@ -872,12 +899,12 @@
                             <DataGridTextColumn Header="收敛质量" Binding="{Binding ConvergenceQualityText}" Width="80" IsReadOnly="True"
                                                 SortMemberPath="SortScore" />
                             <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
+                            <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="TriangleConvergenceCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -937,12 +964,12 @@
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
                             <DataGridTextColumn Header="近N日涨停次数" Binding="{Binding SortScore}" Width="110" IsReadOnly="True" SortMemberPath="SortScore" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
+                            <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="FoundationCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -1002,12 +1029,12 @@
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
                             <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
+                            <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="BottomReboundCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -1063,12 +1090,12 @@
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
                             <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
+                            <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="MidCapPullbackCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -1125,12 +1152,12 @@
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
                             <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
                             <DataGridTextColumn Header="共几条" Binding="{Binding TotalCount}" Width="60" IsReadOnly="True" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
+                            <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="GoldenCrossCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -1192,12 +1219,12 @@
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
                             <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" />
-                            <DataGridTemplateColumn Header="操作" Width="160">
+                            <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <StackPanel Orientation="Horizontal">
                                             <Button Content="条件详情" Width="70" Margin="2,1" Click="RisingLowsCriteriaButton_Click" />
-                                            <Button Content="行情详情" Width="70" Margin="2,1" Click="QuoteDetailButton_Click" />
+                                            <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                         </StackPanel>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -1308,10 +1335,10 @@
                                     <DataGridTextColumn Header="合成得分" Binding="{Binding ScoreText}" Width="72" IsReadOnly="True" SortMemberPath="ScoreValue" />
                                     <DataGridTextColumn Header="融资占比" Binding="{Binding MarginRatioText}" Width="68" IsReadOnly="True" SortMemberPath="MarginRatio" />
                                     <DataGridTextColumn Header="主要贡献因子" Binding="{Binding ContribText}" Width="*" IsReadOnly="True" />
-                                    <DataGridTemplateColumn Header="操作" Width="90">
+                                    <DataGridTemplateColumn Header="操作" Width="116">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <Button Content="K线详情" Width="76" Margin="2,1" Click="FactorQuoteDetailButton_Click" />
+                                                <ContentPresenter ContentTemplate="{StaticResource DetailSplitButtonCell}" Content="{Binding}" />
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>

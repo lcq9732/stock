@@ -77,7 +77,18 @@
 
             <!-- 图上看不到的那些数据（融资融券/股东/分红/财报/龙虎榜/所属板块指数/公告…）另开窗口
                  摊开看，见 StockDossierWindow。放在粒度按钮右边、隔开一段距离——它不是粒度切换。 -->
-            <Button x:Name="OtherDataButton" Content="其他数据" Width="80" Margin="24,0,0,0" Click="OtherDataButton_Click"
+            <!-- 财务分析：把 52 个财务科目翻译成人能一眼看懂的判断（见 FinancialAnalyzer）。
+                 放在最左边——它是这三个按钮里最常用的，看完 K线接着看财务是自然动线。 -->
+            <Button x:Name="FinancialButton" Content="财务分析" Width="90" Margin="24,0,4,0"
+                    Click="FinancialButton_Click"
+                    ToolTip="把本地库里这只票的财务科目算成看得懂的结论：营收/利润/毛利率的同比与单季拆解、净利率掉在哪（毛利率 vs 四费/公允价值）、利润有没有变成现金（覆盖率/收现比/营运资金占用）、扩张的钱从哪来（经营造血占比/有息负债）、ROE与估值。&#10;&#10;每一行都带&quot;这意味着什么&quot;，每节末尾给结论，最后汇总需要留意的项，右侧配同期趋势图。&#10;&#10;前置：需要本地已抓到该股财务数据（Fetcher 的【拉取财务报表】或【空闲时自动补财务】）。" />
+
+            <!-- 分析笔记：库里存数据、笔记存判断（见 AnalyzerPaths.NotesDir）。
+                 有笔记时按钮会显示"分析笔记 ●"。 -->
+            <Button x:Name="NoteButton" Content="分析笔记" Width="96" Margin="0,0,4,0" Click="NoteButton_Click"
+                    ToolTip="记这只票的判断、疑点、下次要盯什么。数据类结论不用记（库里能重算）。存成 data
+otes\{代码}.md，可直接用编辑器改、可进 git" />
+            <Button x:Name="OtherDataButton" Content="其他数据" Width="80" Margin="0,0,0,0" Click="OtherDataButton_Click"
                     ToolTip="本地库里这只标的除K线之外的全部数据：融资融券（含融资/融券余额占流通市值、融资买入占成交额）、股东户数、十大股东、分红送配、财务报表、主力净流入、龙虎榜、所属板块/指数、中标公告等" />
             </StackPanel>
         </Grid>

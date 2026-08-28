@@ -1,0 +1,101 @@
+﻿<Window x:Class="StockPlatform.Analyzer.CodeRuleWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="代码规则 — A股代码段对照表" Height="720" Width="1040" MinHeight="420" MinWidth="720"
+        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei">
+    <!-- A股代码段对照表（2026-08-28 新增）——纯静态参考表，不读库也不联网。
+         为什么值得占一个顶部按钮：本程序 13 个页签里的票全是裸 6 位代码，看到 605/689/920
+         这种少见段位时判断不出是哪个板块，而板块直接决定能不能买（科创板/北交所有权限门槛）、
+         涨跌幅限制是 10% 还是 20%（影响止盈止损的设定）。表本身几年才变一次，所以写死在代码里，
+         不进数据库、不做维护入口。 -->
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Margin="0,0,0,8" TextWrapping="Wrap" Foreground="#444444">
+            代码的前三位决定了它属于哪个交易所、哪个板块——也就决定了涨跌幅限制和开户权限。灰底那几行不是股票，
+            是基金/可转债/指数，混进自选股名单里会让筛选结果失真。
+        </TextBlock>
+
+        <DataGrid Grid.Row="1" x:Name="RuleGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                  CanUserAddRows="False" CanUserDeleteRows="False" CanUserReorderColumns="False"
+                  HeadersVisibility="Column" GridLinesVisibility="All"
+                  HorizontalGridLinesBrush="#E8E8E8" VerticalGridLinesBrush="#E8E8E8"
+                  RowHeaderWidth="0" VerticalScrollBarVisibility="Auto"
+                  SelectionMode="Single" SelectionUnit="Cell">
+            <DataGrid.RowStyle>
+                <Style TargetType="DataGridRow">
+                    <!-- 非股票行压成浅灰底：这张表最容易被误用的地方就是把 159/110/399 当股票，
+                         视觉上先分开比在说明里写一句更管用。 -->
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsStock}" Value="False">
+                            <Setter Property="Background" Value="#F6F6F6" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </DataGrid.RowStyle>
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="代码前缀" Binding="{Binding Prefix}" Width="185">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="TextWrapping" Value="Wrap" />
+                            <Setter Property="FontFamily" Value="Consolas, Microsoft YaHei" />
+                            <Setter Property="FontWeight" Value="Bold" />
+                            <Setter Property="Padding" Value="4,3" />
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+                <DataGridTextColumn Header="板块 / 类型" Binding="{Binding Market}" Width="140">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="TextWrapping" Value="Wrap" />
+                            <Setter Property="Padding" Value="4,3" />
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+                <DataGridTextColumn Header="涨跌幅" Binding="{Binding Limit}" Width="72">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="HorizontalAlignment" Value="Center" />
+                            <Setter Property="Padding" Value="4,3" />
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+                <DataGridTextColumn Header="说明" Binding="{Binding Note}" Width="*">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="TextWrapping" Value="Wrap" />
+                            <Setter Property="Padding" Value="4,3" />
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+                <DataGridTextColumn Header="例子" Binding="{Binding Sample}" Width="215">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="TextWrapping" Value="Wrap" />
+                            <Setter Property="Foreground" Value="#555555" />
+                            <Setter Property="Padding" Value="4,3" />
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <!-- 000001 那个歧义是本程序里真会踩到的坑（库里 code 是裸 6 位），单独拎出来提醒。 -->
+        <Border Grid.Row="2" Margin="0,10,0,0" Padding="10,8" Background="#FFF8E1" BorderBrush="#FFE0A3" BorderThickness="1">
+            <TextBlock TextWrapping="Wrap" Foreground="#6B4E00">
+                <Bold>一个坑：</Bold>000001 既是「上证指数」也是「平安银行」，000300 既是「沪深300指数」也是一只深市主板股票的段位。
+                本地库里 code 存的是裸 6 位，靠 StockMeta.type 区分股票 / 指数 / ETF——自己写查询取指数时，
+                别只按 code 过滤。
+            </TextBlock>
+        </Border>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+            <Button Content="关闭" Width="90" IsCancel="True" IsDefault="True" Click="Close_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

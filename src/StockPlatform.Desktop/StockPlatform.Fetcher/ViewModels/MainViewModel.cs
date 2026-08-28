@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Text.Json;
 using System.Runtime.CompilerServices;
 using System.Windows.Threading;
 using StockPlatform.Data.Orchestration;
@@ -117,6 +118,84 @@ public class MainViewModel : INotifyPropertyChanged
     private bool _overwriteQfq;
     public bool OverwriteQfq { get => _overwriteQfq; set => Set(ref _overwriteQfq, value); }
 
+    // ── 空闲时自动补财务数据（2026-08-27 按用户要求）──
+    //
+    // 为什么需要它：新浪的 vDOWN 报表接口配额很严（实测 1.1 请求/秒跑到 100 多个就被 HTTP 456
+    // 封约 40 分钟），降速到约 10 请求/分钟后，全市场 5780 只 × 3 请求要跨天才能补完。让程序在
+    // 空着的时候自己一轮一轮往下补，比人守着点按钮现实得多。
+    // 断点续传由 FinancialFetchState 保证（记了报告期和科目集版本），所以中间随便停、随便关程序。
+
+    private DispatcherTimer? _idleTimer;
+
+    /// <summary>
+    /// 定时任务正在等待的触发时刻（<see cref="RunScheduledAsync"/> 排定后设，开跑或取消时清）。
+    ///
+    /// 为什么需要它：等定时触发的那段时间里 <see cref="IsBusy"/> 是 true（那个方法一进来就设了，
+    /// 等待和执行共用同一个标记），但那段时间**一个网络请求都没发，是真空闲**。
+    /// 2026-08-27 实测就因为这个，挂着"18:00 自动拉取全部"时【空闲时自动补财务】永远不触发。
+    /// </summary>
+    private DateTime? _scheduledStartAt;
+
+    /// <summary>空闲补正在跑。它**不动 IsBusy**——那个标记可能正被定时任务持有，
+    /// 抢过来会让定时任务失控（RunOperationAsync 的 finally 会把它清成 false）。</summary>
+    private bool _idleFetchRunning;
+
+    /// <summary>空闲补自己的取消源，跟 <see cref="_cts"/> 分开。【停止】按钮会一起取消两个。</summary>
+    private CancellationTokenSource? _idleCts;
+
+    /// <summary>到定时时刻之前要留的余量——本轮必须在这之前收尾。</summary>
+    private static readonly TimeSpan ScheduleSafetyMargin = TimeSpan.FromMinutes(5);
+
+    /// <summary>一只票大约要多久（实测约 18 秒：3 个请求 × 4 秒 + 每 30 请求歇 60 秒）。
+    /// 按剩余时间估算本轮能抓几只时用。</summary>
+    private static readonly TimeSpan PerStockEstimate = TimeSpan.FromSeconds(18);
+
+    /// <summary>上一轮自动补跑完的时刻——两轮之间要隔一段，避免连续撞配额。</summary>
+    private DateTime _lastAutoFinancialRun = DateTime.MinValue;
+
+    /// <summary>空闲检查的间隔。</summary>
+    private static readonly TimeSpan IdleCheckInterval = TimeSpan.FromMinutes(2);
+
+    /// <summary>两轮自动补之间的最小间隔——一轮 300 只约 90 分钟，跑完歇 20 分钟再继续，
+    /// 给新浪的配额留出恢复余量。</summary>
+    private static readonly TimeSpan AutoFinancialCooldown = TimeSpan.FromMinutes(20);
+
+    private bool _autoFillFinancialsWhenIdle;
+    /// <summary>勾上以后：程序空着（没有任何抓取在跑）且距上一轮够久时，自动补一轮财务数据。
+    /// 全部补齐后会自己停下并在日志里说明，不会空转。</summary>
+    public bool AutoFillFinancialsWhenIdle
+    {
+        get => _autoFillFinancialsWhenIdle;
+        set
+        {
+            if (_autoFillFinancialsWhenIdle == value) return;
+            Set(ref _autoFillFinancialsWhenIdle, value);
+            SaveSettings();
+            if (value)
+            {
+                Log($"已开启【空闲时自动补财务数据】：每 {IdleCheckInterval.TotalMinutes:F0} 分钟检查一次，" +
+                    $"空闲就补一轮（每轮最多 300 只，两轮间隔 {AutoFinancialCooldown.TotalMinutes:F0} 分钟）。" +
+                    "手动点任何抓取按钮时不会插队；全部补齐后自动停。");
+                RefreshAutoFinancialStatus();
+                StartIdleTimer();
+            }
+            else
+            {
+                Log("已关闭【空闲时自动补财务数据】。");
+                StopIdleTimer();
+                AutoFinancialStatusText = "";
+            }
+        }
+    }
+
+    private string _autoFinancialStatusText = "";
+    /// <summary>复选框旁边那行小字：还剩多少只没补。</summary>
+    public string AutoFinancialStatusText
+    {
+        get => _autoFinancialStatusText;
+        private set => Set(ref _autoFinancialStatusText, value);
+    }
+
     /// <summary>Comma-separated keywords for the 中标/订单公告 keyword sweep — see
     /// AnnouncementFetchOrchestrator. Defaults to the two most common order-win announcement
     /// phrasings. Used automatically by both "拉取全部" and "补指定历史日" now (see
@@ -171,7 +250,11 @@ public class MainViewModel : INotifyPropertyChanged
         FetchDayCommand = new RelayCommand(async _ => await RunFetchDayAsync(), _ => !IsBusy);
         FetchYearCommand = new RelayCommand(async _ => await RunFetchYearAsync(), _ => !IsBusy);
         // "停止"表达的是"别再跑了"，所以连排定中的自动重试一起取消，不然点了停止过一小时它又自己跑起来。
-        StopCommand = new RelayCommand(_ => { _cts?.Cancel(); CancelAutoRetry("用户点了停止"); }, _ => IsBusy);
+        // 【停止】同时取消定时/常规抓取和空闲自动补——后者用的是自己的 CTS（不动 IsBusy），
+        // 所以必须显式取消，否则点了停止它还在后台跑。CanExecute 也要把它算进去。
+        StopCommand = new RelayCommand(
+            _ => { _cts?.Cancel(); _idleCts?.Cancel(); CancelAutoRetry("用户点了停止"); },
+            _ => IsBusy || _idleFetchRunning);
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && HasFailed);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
         BackfillDailyCommand = new RelayCommand(async _ => await RunBackfillDailyHistoryAsync(), _ => !IsBusy);
@@ -186,6 +269,7 @@ public class MainViewModel : INotifyPropertyChanged
 
         RefreshDataStatus();
         RefreshFailedCodeCount();
+        LoadSettings();
     }
 
     /// <summary>归档日志保留份数——每天抓一轮的话约两个月。</summary>
@@ -296,6 +380,154 @@ public class MainViewModel : INotifyPropertyChanged
                     : $"已运行 {elapsed.Seconds} 秒";
         };
         _heartbeat.Start();
+    }
+
+    // ── 空闲自动补的定时器 ──
+
+    private void StartIdleTimer()
+    {
+        if (_idleTimer != null) return;
+        _idleTimer = new DispatcherTimer { Interval = IdleCheckInterval };
+        _idleTimer.Tick += async (_, _) => await IdleTickAsync();
+        _idleTimer.Start();
+    }
+
+    private void StopIdleTimer()
+    {
+        _idleTimer?.Stop();
+        _idleTimer = null;
+    }
+
+    /// <summary>
+    /// 空闲检查：只在**真的空着**的时候才动手，绝不跟用户手动发起的抓取抢。
+    /// 全部补齐就自动关掉开关——留着空转没有意义，而且每次检查都要查一遍库。
+    /// </summary>
+    private async Task IdleTickAsync()
+    {
+        if (!AutoFillFinancialsWhenIdle) { StopIdleTimer(); return; }
+        if (_idleFetchRunning) return;                                 // 自己上一轮还没跑完
+        if (DateTime.Now - _lastAutoFinancialRun < AutoFinancialCooldown) return;
+
+        // "在等定时任务触发"不算忙——那段时间没有任何网络请求。除此之外 IsBusy=true 就让路。
+        bool waitingSchedule = _scheduledStartAt is { } at && at > DateTime.Now;
+        if (IsBusy && !waitingSchedule) return;
+
+        // 本轮能抓几只：等定时的话，必须在触发时刻前收尾（留 5 分钟余量）
+        int? cap = null;
+        if (waitingSchedule)
+        {
+            var usable = _scheduledStartAt!.Value - DateTime.Now - ScheduleSafetyMargin;
+            if (usable < TimeSpan.FromMinutes(10)) return;             // 剩的时间不够抓几只，等下次
+            cap = (int)(usable.TotalSeconds / PerStockEstimate.TotalSeconds);
+        }
+
+        int remaining;
+        try
+        {
+            remaining = _orchestrator.GetFinancialFetchPlan().AllPending.Count;
+        }
+        catch (Exception ex)
+        {
+            Log($"空闲自动补：查待抓清单失败（{ex.Message}），本次跳过。");
+            return;
+        }
+
+        if (remaining == 0)
+        {
+            Log("空闲自动补：财务数据已全部补齐（报告期和科目集版本都是最新），自动关闭该开关。");
+            AutoFillFinancialsWhenIdle = false;
+            return;
+        }
+
+        Log($"空闲自动补：还有 {remaining} 只待补，开始一轮"
+            + (cap.HasValue
+                ? $"（本轮限 {cap} 只——{_scheduledStartAt:HH:mm} 有定时任务，要在那之前收尾）"
+                : "")
+            + "…（手动点【停止】可中断，已抓的不会白费）");
+
+        _lastAutoFinancialRun = DateTime.Now;      // 先记时刻，跑失败也要等冷却，避免疯狂重试
+        _idleFetchRunning = true;
+        _idleCts = new CancellationTokenSource();
+        try
+        {
+            // **刻意不走 RunOperationAsync**：那个会设 IsBusy，而 IsBusy 可能正被定时任务持有，
+            // 它的 finally 会把标记清成 false，定时任务就失去保护了。这里自己管状态。
+            var progress = new Progress<string>(Log);
+            var result = await _orchestrator.RunFetchFinancialsAsync(progress, _idleCts.Token, cap);
+            foreach (var err in result.Errors) Log($"错误：{err}");
+        }
+        catch (OperationCanceledException)
+        {
+            Log("空闲自动补：已中断（已抓的都已入库，下次自动接着）。");
+        }
+        catch (Exception ex)
+        {
+            Log($"空闲自动补失败：{ex.Message}");
+        }
+        finally
+        {
+            _idleCts?.Dispose();
+            _idleCts = null;
+            _idleFetchRunning = false;
+            _lastAutoFinancialRun = DateTime.Now;
+            RefreshDataStatus();
+            RefreshAutoFinancialStatus();
+        }
+    }
+
+    /// <summary>刷新"还剩多少只"那行小字。</summary>
+    private void RefreshAutoFinancialStatus()
+    {
+        try
+        {
+            var plan = _orchestrator.GetFinancialFetchPlan();
+            AutoFinancialStatusText = plan.AllPending.Count == 0
+                ? "财务数据已全部最新"
+                : $"还有 {plan.AllPending.Count} 只待补" +
+                  (plan.WatchedCount > 0 ? $"（含你关注的 {plan.WatchedCount} 只，会先抓）" : "");
+        }
+        catch (Exception)
+        {
+            AutoFinancialStatusText = "";
+        }
+    }
+
+    // ── 界面设置的持久化 ──
+
+    private void LoadSettings()
+    {
+        try
+        {
+            if (!File.Exists(_paths.SettingsPath)) return;
+            using var doc = JsonDocument.Parse(File.ReadAllText(_paths.SettingsPath));
+            if (doc.RootElement.TryGetProperty(nameof(AutoFillFinancialsWhenIdle), out var v)
+                && v.ValueKind is JsonValueKind.True or JsonValueKind.False && v.GetBoolean())
+            {
+                // 直接设字段再启动定时器，不走属性 setter（避免启动时写一遍盘、刷一堆日志）
+                _autoFillFinancialsWhenIdle = true;
+                RefreshAutoFinancialStatus();
+                StartIdleTimer();
+            }
+        }
+        catch (Exception)
+        {
+            // 设置文件坏了不影响程序启动
+        }
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            var json = JsonSerializer.Serialize(
+                new Dictionary<string, object> { [nameof(AutoFillFinancialsWhenIdle)] = AutoFillFinancialsWhenIdle },
+                new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(_paths.SettingsPath, json);
+        }
+        catch (Exception)
+        {
+            // 存不下来只影响下次启动的默认值，不值得打扰用户
+        }
     }
 
     private void StopHeartbeat()
@@ -455,6 +687,7 @@ public class MainViewModel : INotifyPropertyChanged
         }
         finally
         {
+            _scheduledStartAt = null;
             StopHeartbeat();
             _cts?.Dispose();
             _cts = null;
@@ -611,13 +844,29 @@ public class MainViewModel : INotifyPropertyChanged
             if (target > DateTime.Now)
             {
                 var wait = target - DateTime.Now;
-                Log($"已排定：等到 {target:HH:mm} 再开始【{label}】（还有约 {wait.TotalMinutes:F0} 分钟；等待期间可随时点\"停止\"取消）");
+                // 把触发时刻记下来：等待期间【空闲时自动补财务】要靠它判断"现在是真空闲"以及
+                // "本轮最多能抓几只才不会撞上定时任务"（见 _scheduledStartAt 的注释）。
+                _scheduledStartAt = target;
+                Log($"已排定：等到 {target:HH:mm} 再开始【{label}】（还有约 {wait.TotalMinutes:F0} 分钟；等待期间可随时点\"停止\"取消）"
+                    + (AutoFillFinancialsWhenIdle ? "。等待期间【空闲时自动补财务】会利用这段时间补数据，到点前自动收尾。" : ""));
                 await Task.Delay(wait, _cts.Token);
             }
             else
             {
                 Log($"当前已过 {ScheduleTimeText}，立即开始【{label}】");
             }
+            _scheduledStartAt = null;
+
+            // 到点了。空闲补按剩余时间估算过只数，正常情况这时已经收尾；万一估偏了（某只票特别慢），
+            // 先取消它并等一下，避免两个抓取并发（会同时争限速器、日志也会混在一起）。
+            if (_idleFetchRunning)
+            {
+                Log("到点前【空闲时自动补财务】还在跑，先让它停下…");
+                _idleCts?.Cancel();
+                for (int i = 0; i < 60 && _idleFetchRunning; i++)
+                    await Task.Delay(500, CancellationToken.None);
+            }
+
             Log($"到点，开始【{label}】...");
             var progress = new Progress<string>(Log);
             var result = await action(progress, _cts.Token);

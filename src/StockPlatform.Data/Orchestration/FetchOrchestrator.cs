@@ -125,6 +125,12 @@ public class FetchOrchestrator
     /// 没修完的下一轮还会被检测到（库里仍是旧值），检测本身是自愈的，所以可以安全地限量。</summary>
     private const int MaxDriftRepairPerRun = 200;
 
+    /// <summary>财务报表每轮最多抓多少只（2026-08-27）。新浪的 vDOWN 报表接口配额很严（见
+    /// Fetcher/App.xaml.cs 里那段限速注释），降速后约 10 请求/分钟、每只 3 个请求，所以 300 只
+    /// 差不多要 1.5 小时。没抓完的下轮自动继续——靠 FinancialFetchState 记录的报告期和科目集
+    /// 版本断点续传，抓过的不会重抓。全市场 5780 只分几天补齐，而不是一次跑 24 小时。</summary>
+    private const int MaxFinancialFetchPerRun = 300;
+
     /// <summary>
     /// 判定某根K线是否发生了复权基准漂移：库里存的值与数据源当前给出的值不一致。
     /// 阈值取"相对 0.2% 与绝对 0.005 元的较大者"——足够小以捕捉几分钱的现金分红调整，
@@ -2698,7 +2704,20 @@ public class FetchOrchestrator
             catch (Exception ex) { errors.Add($"分红送配整体失败：{ex.Message}"); }
         }
 
-        progress?.Report("行业分类、指数成分/权重、股东数据、财务报表、分红送配全部处理完毕。");
+        // 财务那一段可能是几小时前跑的，它自己那句剩余提示早被后面的日志刷走了，这里在最终
+        // 汇总里再说一遍——否则用户看到"全部处理完毕"会以为财务也补齐了，实际可能只补了一轮。
+        string financialTail = "";
+        try
+        {
+            int stillPending = GetFinancialFetchPlan().AllPending.Count;
+            if (stillPending > 0)
+                financialTail = $" ⚠ 注意：财务报表还有 {stillPending} 只未补" +
+                                $"（该接口配额严、每轮上限 {MaxFinancialFetchPerRun} 只，见运行日志里财务那一段）——" +
+                                "建议勾选界面上的【空闲时自动补财务】，程序空着时会自己补完。";
+        }
+        catch (Exception) { /* 只是提示 */ }
+
+        progress?.Report("行业分类、指数成分/权重、股东数据、财务报表、分红送配全部处理完毕。" + financialTail);
         return new FetchResult { Errors = errors };
     }
 
@@ -2754,7 +2773,11 @@ public class FetchOrchestrator
     /// 整只跳过、不发请求——首次全量约 5500 只 × 3 请求 ≈ 1.5~2 小时，之后每季度财报季各跑一次即可，
     /// 平时重复点几乎零成本。失败的股票本地报告期停在旧值，下次运行自动重试（自愈，无需失败名单）。
     /// </summary>
-    public async Task<FetchResult> RunFetchFinancialsAsync(IProgress<string>? progress, CancellationToken ct = default)
+    /// <param name="maxCount">本轮最多抓多少只，覆盖 <see cref="MaxFinancialFetchPerRun"/>。
+    /// 给"空闲时自动补"用：它可能只有到下一个定时任务之前的一小段时间，得按剩余时间压低只数，
+    /// 保证在定时时刻前收尾，不跟定时任务撞车。null=用默认上限。</param>
+    public async Task<FetchResult> RunFetchFinancialsAsync(IProgress<string>? progress,
+        CancellationToken ct = default, int? maxCount = null)
     {
         if (_financialProvider == null)
             throw new InvalidOperationException("未配置财务报表数据源（IFinancialProvider）");
@@ -2767,34 +2790,43 @@ public class FetchOrchestrator
             var repo = new SqliteFinancialRepository(_paths.CurrentDb);
             repo.EnsureSchema();
 
-            // 目标：在市个股 + 2016年后退市的（回测池同款；更早退市的没有K线、抓了也用不上）
-            var codes = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).Select(s => s.Code).ToList();
-            var delisted = new SqliteDelistedRepository(_paths.CurrentDb).GetAll()
-                .Where(r => r.DelistDate == null || r.DelistDate.Value.Year >= 2016)
-                .Select(r => r.Code);
-            codes = codes.Concat(delisted).Distinct(StringComparer.Ordinal).OrderBy(c => c, StringComparer.Ordinal).ToList();
-
-            var latestByCode = repo.GetLatestReportDateByCode();
-            var expected = LatestExpectedReportPeriod(DateTime.Today);
-            var targets = codes
-                .Where(c => !latestByCode.TryGetValue(c, out var have) || have.Date < expected)
-                .ToList();
-            progress?.Report($"财务报表：目标 {codes.Count} 只，其中 {codes.Count - targets.Count} 只本地已有最新报告期" +
-                             $"（{expected:yyyy-MM-dd}）无需重抓，待抓 {targets.Count} 只（每只3个请求）...");
+            int cap = maxCount is > 0 ? Math.Min(maxCount.Value, MaxFinancialFetchPerRun) : MaxFinancialFetchPerRun;
+            var plan = GetFinancialFetchPlan(cap);
+            var targets = plan.ThisRun;
+            progress?.Report(plan.Describe(cap));
             if (targets.Count == 0) return new FetchResult();
 
-            var errors = new ConcurrentBag<string>();
-            var failedCodes = new ConcurrentBag<string>();
-            int done = 0, wrote = 0;
-            await Task.WhenAll(targets.Select(async code =>
+            var errors = new List<string>();
+            var failedCodes = new List<string>();
+            int done = 0, wrote = 0, emptyCount = 0;
+
+            // ⚠ **必须顺序处理，不能用 Task.WhenAll**（2026-08-27 修，这是个实打实踩过的坑）
+            //
+            // 每只票要抓 3 张报表，而每张表都要重新抢限速器的信号量。原来的写法是同时启动
+            // 300 个任务，信号量只有 1 个名额且队列 FIFO，于是变成：
+            //     票A表1 → 票B表1 → … → 票300表1 → 才轮到 票A表2 → …
+            // 300 只票齐头并进、谁都差一张表，所以**谁都写不进库**。实测发出 420 个请求、
+            // 零条写入、零错误、连进度都报不出来（done 一直是 0），看起来像卡死但其实在正常跑。
+            // 要等三圈轮完（60 分钟）才会一次性全部写入。
+            //
+            // 顺序处理之后：一只票连续抓完 3 张表（约 12 秒）立刻落库，进度实时、随时可停、
+            // 已抓的都算数。反正 maxConcurrency=1 已经把请求串行化了，并发写法只剩坏处。
+            foreach (var code in targets)
             {
+                ct.ThrowIfCancellationRequested();
                 try
                 {
                     var rows = await _financialProvider.GetAllAsync(code, ct);
                     if (rows.Count > 0)
                     {
-                        lock (_dbLock) { repo.ReplaceByCode(code, rows); }
-                        Interlocked.Add(ref wrote, rows.Count);
+                        repo.ReplaceByCode(code, rows);
+                        wrote += rows.Count;
+                    }
+                    else
+                    {
+                        // 请求成功但一行都没解析出来——多半是该股没有这些报表（新上市/特殊标的），
+                        // 单独计数：如果这个数很大，说明行名映射出问题了，不能静默混在"成功"里
+                        emptyCount++;
                     }
                 }
                 catch (OperationCanceledException) { throw; }
@@ -2803,13 +2835,36 @@ public class FetchOrchestrator
                     errors.Add($"财报 {code}: {ex.Message}");
                     failedCodes.Add(code);
                 }
-                int n = Interlocked.Increment(ref done);
-                if (n % 50 == 0 || n == targets.Count)
-                    progress?.Report($"财务报表进度 ({n}/{targets.Count})，已写入 {Volatile.Read(ref wrote):N0} 条，已用时 {FormatElapsed(sw.Elapsed)}");
-            }));
+
+                done++;
+                // 每 20 只报一次（顺序处理下单只约 12 秒，20 只≈4 分钟）。原来是 50 只，
+                // 降速后那是 10 分钟一报，太稀疏，看着像卡住了。
+                if (done % 20 == 0 || done == targets.Count)
+                {
+                    var per = sw.Elapsed.TotalSeconds / done;
+                    var left = TimeSpan.FromSeconds(per * (targets.Count - done));
+                    progress?.Report($"财务报表进度 ({done}/{targets.Count})，已写入 {wrote:N0} 条"
+                                     + (failedCodes.Count > 0 ? $"，失败 {failedCodes.Count} 只" : "")
+                                     + (emptyCount > 0 ? $"，{emptyCount} 只无报表数据" : "")
+                                     + $"，已用时 {FormatElapsed(sw.Elapsed)}"
+                                     + (done < targets.Count ? $"，预计还需 {FormatElapsed(left)}" : ""));
+                }
+            }
+
+            // 本轮跑完后还剩多少——必须显式报出来。这个接口有每轮 300 只的上限（见
+            // MaxFinancialFetchPerRun），"完成"两个字很容易被读成"全部补齐了"，实际可能只补了 5%。
+            int stillPending = 0;
+            try { stillPending = GetFinancialFetchPlan().AllPending.Count; }
+            catch (Exception) { /* 只是提示，查不到就不提 */ }
 
             progress?.Report($"财务报表完成：抓取 {targets.Count} 只、写入 {wrote:N0} 条、失败 {failedCodes.Count} 只" +
-                             (failedCodes.Count > 0 ? "（失败的下次运行会自动重试）" : "") + $"，用时 {FormatElapsed(sw.Elapsed)}。");
+                             (emptyCount > 0 ? $"、{emptyCount} 只无报表数据" : "") +
+                             (failedCodes.Count > 0 ? "（失败的下次运行会自动重试）" : "") + $"，用时 {FormatElapsed(sw.Elapsed)}。" +
+                             (stillPending > 0
+                                 ? $"⚠ 还有 {stillPending} 只没补（本轮上限 {MaxFinancialFetchPerRun} 只）——" +
+                                   "勾选界面上的【空闲时自动补财务】可以让它在程序空着时自己一轮一轮补完，" +
+                                   "或者再点一次本按钮。已抓的不会重抓。"
+                                 : "全部已补齐（报告期和科目集版本都是最新）。"));
             var result = new FetchResult();
             result.Errors.AddRange(errors);
             return result;
@@ -2818,6 +2873,126 @@ public class FetchOrchestrator
         {
             _financialProvider.OnStatus -= ForwardStatus;
         }
+    }
+
+    /// <summary>
+    /// 财务抓取的待抓清单（2026-08-27 抽出来公开）——界面要靠它回答"还剩多少没补"，
+    /// 从而决定"空闲时自动补"要不要继续跑、什么时候可以停。
+    /// </summary>
+    public record FinancialFetchPlan(
+        int TotalCodes,
+        List<string> AllPending,
+        List<string> ThisRun,
+        int OutdatedPeriod,
+        int StaleVersion,
+        int WatchedCount,
+        DateTime ExpectedPeriod)
+    {
+        /// <summary>还剩多少只没补（本轮之外的）。</summary>
+        public int Remaining => AllPending.Count - ThisRun.Count;
+
+        public string Describe(int cap) =>
+            $"财务报表：目标 {TotalCodes} 只，需要抓 {AllPending.Count} 只" +
+            $"——其中 {OutdatedPeriod} 只报告期落后（本地未到 {ExpectedPeriod:yyyy-MM-dd}）、" +
+            $"{StaleVersion} 只科目集版本落后（本地数据是旧版代码抓的、科目不全，当前 v{FinancialKeys.Version}）；" +
+            $"{TotalCodes - AllPending.Count} 只已是最新、跳过。" +
+            (WatchedCount > 0 ? $"你关注的 {WatchedCount} 只（自选/底仓/主动仓）已排到最前。" : "") +
+            (Remaining > 0 ? $"⚠ 本轮上限 {cap} 只，其余 {Remaining} 只下轮自动继续（抓过的不会重抓）。" : "") +
+            (ThisRun.Count > 0
+                ? $"本轮 {ThisRun.Count} 只 × 3 个请求，该接口已降速到约 10 请求/分钟，预计 {ThisRun.Count * 3 / 10} 分钟..."
+                : "全部已是最新，无需抓取。");
+    }
+
+    /// <summary>
+    /// 算出财务数据还有哪些票要抓。**不发任何网络请求**，只查本地库，所以界面可以随时调用
+    /// （"空闲时自动补"每隔几分钟问一次也没有负担）。
+    ///
+    /// 增量判断有**两个**条件，缺一不可（2026-08-27 修）：
+    ///   ① 报告期不够新 → 要抓
+    ///   ② 科目集版本落后 → 也要抓
+    /// 只看①的话，扩充科目后老数据的 report_date 仍是"最新"，新科目永远补不上：那天科目从 8 个
+    /// 扩到 52 个之后跑全量拉取，5780 只里 5552 只被判定无需重抓，44 个新科目一条都没进库。
+    /// 见 <see cref="FinancialKeys.Version"/>。
+    /// </summary>
+    public FinancialFetchPlan GetFinancialFetchPlan(int? cap = null)
+    {
+        var repo = new SqliteFinancialRepository(_paths.CurrentDb);
+        repo.EnsureSchema();
+
+        // 目标：在市个股 + 2016年后退市的（回测池同款；更早退市的没有K线、抓了也用不上）
+        var codes = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).Select(s => s.Code).ToList();
+        var delisted = new SqliteDelistedRepository(_paths.CurrentDb).GetAll()
+            .Where(r => r.DelistDate == null || r.DelistDate.Value.Year >= 2016)
+            .Select(r => r.Code);
+        codes = codes.Concat(delisted).Distinct(StringComparer.Ordinal).OrderBy(c => c, StringComparer.Ordinal).ToList();
+
+        var stateByCode = repo.GetFetchStateByCode();
+        var expected = LatestExpectedReportPeriod(DateTime.Today);
+        int stale = 0, outdatedPeriod = 0;
+        var pending = new List<string>();
+        foreach (var c in codes)
+        {
+            if (!stateByCode.TryGetValue(c, out var st))
+            {
+                // 没有状态记录：要么从没抓过，要么是这张表出现之前抓的（版本按 0 算）
+                pending.Add(c);
+                stale++;
+                continue;
+            }
+            bool periodOld = st.ReportDate.Date < expected;
+            bool versionOld = st.KeysVersion < FinancialKeys.Version;
+            if (!periodOld && !versionOld) continue;
+            pending.Add(c);
+            if (versionOld) stale++; else outdatedPeriod++;
+        }
+
+        // 自选/底仓/主动仓里的票排最前——它们是真正会被拿来分析的，先补上就能立刻用；
+        // 剩下几千只不看的票慢慢磨。
+        var watched = ReadWatchedCodes();
+        int watchedCount = pending.Count(watched.Contains);
+        if (watchedCount > 0)
+            pending = pending
+                .OrderByDescending(watched.Contains)
+                .ThenBy(c => c, StringComparer.Ordinal)
+                .ToList();
+
+        var thisRun = pending.Take(cap is > 0 ? cap.Value : MaxFinancialFetchPerRun).ToList();
+        return new FinancialFetchPlan(codes.Count, pending, thisRun, outdatedPeriod, stale, watchedCount, expected);
+    }
+
+    /// <summary>
+    /// 读出"用户真正关注的票"——自选股 + 底仓 + 主动仓（2026-08-27）。财务抓取拿它做优先级排序。
+    ///
+    /// 为什么 Fetcher 能读到 Analyzer 的状态文件：两个 exe 装在同一个目录，<see cref="FetchPaths.BaseDir"/>
+    /// 和 AnalyzerPaths.BaseDir 算出来是同一个 data 文件夹。这里只读 code 字段、不反序列化成完整
+    /// 模型（那些模型在 Analyzer 项目里，Data 层引用不到，也没必要）。
+    ///
+    /// 文件不存在（Fetcher 单独部署、或用户还没建过自选）就返回空集合，排序退化成纯代码序。
+    /// </summary>
+    private HashSet<string> ReadWatchedCodes()
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in new[] { "watchlist.json", "core-positions.json" })
+        {
+            var path = Path.Combine(_paths.BaseDir, file);
+            try
+            {
+                if (!File.Exists(path)) continue;
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+                if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) continue;
+                foreach (var el in doc.RootElement.EnumerateArray())
+                    if (el.TryGetProperty("Code", out var c) || el.TryGetProperty("code", out c))
+                    {
+                        var code = c.GetString();
+                        if (!string.IsNullOrWhiteSpace(code)) result.Add(code);
+                    }
+            }
+            catch (Exception)
+            {
+                // 读不了/格式坏了不影响抓取，只是失去优先级排序
+            }
+        }
+        return result;
     }
 
     /// <summary>
