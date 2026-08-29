@@ -220,6 +220,8 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand FetchDividendCommand { get; }
     public RelayCommand FetchShareholderCommand { get; }
     public RelayCommand FetchIndustryCommand { get; }
+    public RelayCommand OptimizeDatabaseCommand { get; }
+    public RelayCommand FetchBankRegulatoryCommand { get; }
     public RelayCommand ScheduledFetchAllCommand { get; }
     public RelayCommand ScheduledFetchDayCommand { get; }
     public RelayCommand CancelAutoRetryCommand { get; }
@@ -263,6 +265,8 @@ public class MainViewModel : INotifyPropertyChanged
         FetchDividendCommand = new RelayCommand(async _ => await RunFetchDividendAsync(), _ => !IsBusy);
         FetchShareholderCommand = new RelayCommand(async _ => await RunFetchShareholderAsync(), _ => !IsBusy);
         FetchIndustryCommand = new RelayCommand(async _ => await RunFetchIndustryAsync(), _ => !IsBusy);
+        OptimizeDatabaseCommand = new RelayCommand(async _ => await RunOptimizeDatabaseAsync(), _ => !IsBusy);
+        FetchBankRegulatoryCommand = new RelayCommand(async _ => await RunFetchBankRegulatoryAsync(), _ => !IsBusy);
         ScheduledFetchAllCommand = new RelayCommand(async _ => await RunScheduledFetchAllAsync(), _ => !IsBusy);
         ScheduledFetchDayCommand = new RelayCommand(async _ => await RunScheduledFetchDayAsync(), _ => !IsBusy);
         CancelAutoRetryCommand = new RelayCommand(_ => CancelAutoRetry("用户手动取消"), _ => HasAutoRetry);
@@ -798,6 +802,17 @@ public class MainViewModel : INotifyPropertyChanged
     /// 独立按钮给单独刷新用。只要一两分钟。</summary>
     private Task RunFetchIndustryAsync() =>
         RunOperationAsync("拉取行业分类", (progress, ct) => _orchestrator.RunFetchIndustryAsync(progress, ct));
+
+    /// <summary>优化数据库（见 FetchOrchestrator.RunOptimizeDatabaseAsync）——纯本地维护、不联网，
+    /// 给大表补建二级索引。一次性动作，建完就不用再点。</summary>
+    private Task RunOptimizeDatabaseAsync() =>
+        RunOperationAsync("优化数据库", (progress, ct) => _orchestrator.RunOptimizeDatabaseAsync(progress, ct));
+
+    /// <summary>抓银行监管指标（见 FetchOrchestrator.RunFetchBankRegulatoryAsync）——下载年报/中报
+    /// PDF 并解析不良率、拨备覆盖率、核心一级资本充足率等。前置：先跑过【拉取财务报表】。</summary>
+    private Task RunFetchBankRegulatoryAsync() =>
+        RunOperationAsync("银行监管指标",
+            (progress, ct) => _orchestrator.RunFetchBankRegulatoryAsync(progress, refetchAll: false, ct));
 
     /// <summary>定时拉取全部：点后等到"触发时间"再跑"拉取全部"（已过则立即）。参数在点击时先校验。</summary>
     private async Task RunScheduledFetchAllAsync()

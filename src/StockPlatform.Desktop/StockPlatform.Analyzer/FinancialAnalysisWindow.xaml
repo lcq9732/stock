@@ -70,28 +70,43 @@
                                     <ItemsControl ItemsSource="{Binding Lines}">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
+                                                <!-- 七列。首列"条目号"和第六列"参考值"只有银行体检表用得上
+                                                     （2026-08-29）；其它节这两个绑定为空、TextBlock 走 Collapsed，
+                                                     Auto 列宽收缩到 0，所以原有五节的排版跟以前一模一样。 -->
                                                 <Grid Margin="0,3">
                                                     <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
                                                         <ColumnDefinition Width="22" />
-                                                        <ColumnDefinition Width="140" />
+                                                        <ColumnDefinition Width="150" />
                                                         <ColumnDefinition Width="Auto" MinWidth="92" />
-                                                        <ColumnDefinition Width="Auto" MinWidth="150" />
+                                                        <ColumnDefinition Width="Auto" MinWidth="130" />
+                                                        <ColumnDefinition Width="Auto" />
                                                         <ColumnDefinition Width="*" />
                                                     </Grid.ColumnDefinitions>
-                                                    <TextBlock Grid.Column="0" Text="{Binding Mark}"
+                                                    <TextBlock Grid.Column="0" Text="{Binding Clause}"
+                                                               Visibility="{Binding ClauseVisibility}"
+                                                               FontFamily="Consolas" FontSize="11"
+                                                               Foreground="#9AA5B1" Margin="0,1,6,0" />
+                                                    <TextBlock Grid.Column="1" Text="{Binding Mark}"
                                                                Foreground="{Binding Brush}" FontWeight="Bold"
                                                                FontFamily="Segoe UI Symbol" />
-                                                    <TextBlock Grid.Column="1" Text="{Binding Label}"
+                                                    <TextBlock Grid.Column="2" Text="{Binding Label}"
                                                                TextWrapping="Wrap" />
-                                                    <TextBlock Grid.Column="2" Text="{Binding Value}"
+                                                    <TextBlock Grid.Column="3" Text="{Binding Value}"
                                                                FontFamily="Consolas" FontSize="13"
                                                                HorizontalAlignment="Right" Margin="0,0,10,0"
                                                                Foreground="{Binding Brush}"
                                                                FontWeight="{Binding Weight}" />
-                                                    <TextBlock Grid.Column="3" Text="{Binding Change}"
+                                                    <TextBlock Grid.Column="4" Text="{Binding Change}"
                                                                FontFamily="Consolas" FontSize="12"
                                                                Foreground="#555555" Margin="0,0,10,0" />
-                                                    <TextBlock Grid.Column="4" Text="{Binding Note}"
+                                                    <!-- 参考值：体检报告里的"正常范围"那一列 -->
+                                                    <TextBlock Grid.Column="5" Text="{Binding Reference}"
+                                                               Visibility="{Binding ReferenceVisibility}"
+                                                               MaxWidth="230" TextWrapping="Wrap"
+                                                               FontSize="11.5" Foreground="#3A6EA5"
+                                                               Margin="0,0,12,0" />
+                                                    <TextBlock Grid.Column="6" Text="{Binding Note}"
                                                                TextWrapping="Wrap" FontSize="12"
                                                                Foreground="#666666" />
                                                 </Grid>

@@ -35,8 +35,14 @@ public static class FinancialKeys
     /// 版本历史：
     ///   1 = 最初的 8 个科目（revenue/oper_cost/net_profit/np_parent/assets/liab/equity_parent/ocf）
     ///   2 = 2026-08-27 扩到 52 个（利润表18 + 资产负债表20 + 现金流量表正表6 + 附注8）
+    ///   3 = 2026-08-29 扩到 55 个：补银行专属的利息净收入/手续费及佣金净收入/其他业务支出，
+    ///       同时给已有科目补上银行叫法的备选名（见 SinaFinancialProvider.Statements）。
+    ///   4 = 2026-08-29 扩到 60 个：补券商（代理买卖/承销/资管净收入）和保险（已赚保费、赔付支出）
+    ///       的特征科目，用来把"金融机构"细分成银行/券商/保险三类。
+    ///       ⚠ 金融机构需要按此版本重抓一次才认得出类型；【券商保险监管指标】按钮会自动补抓
+    ///         这一百来只，不必等全市场。
     /// </summary>
-    public const int Version = 2;
+    public const int Version = 4;
 
     // ══════════ 利润表 ══════════
 
@@ -68,6 +74,48 @@ public static class FinancialKeys
     public const string FvChangeGain = "fv_gain";
     /// <summary>投资收益。</summary>
     public const string InvestIncome = "invest_income";
+
+    // ── 银行专属三项（2026-08-29 新增）──────────────────────────────────────────────
+    // 银行利润表的结构跟工商企业完全不同：没有"营业成本"，收入由"利息净收入 + 手续费及佣金净
+    // 收入 + 投资净收益 + 公允价值变动"构成，支出侧是"业务及管理费用 + 信用减值"。原来这几行
+    // 的名字在映射表里一个都没配（配的是"管理费用""投资收益"等工商企业叫法），导致 42 家银行
+    // 只抓到 24/52 个科目，成本收入比、非息收入拆分这些银行核心指标全都算不出来。
+    //
+    // 有了这三项 + 已有的 TotalCost/TaxSurcharge/AdminExpense，就能推出：
+    //   · 成本收入比 = 业务及管理费用 ÷ 营业收入
+    //   · 信用减值损失 = 营业支出 − 营业税金及附加 − 业务及管理费用 − 其他业务支出
+    //     （新浪的银行利润表没有单列"信用减值损失"行，"资产减值损失"那行恒为 0，只能倒推。
+    //      招行 2026H1 倒推得 291.91 亿，与年报披露的信用成本口径一致。）
+    //   · 非息收入拆分：手续费净收入=可持续，投资净收益+公允价值变动=靠行情、不可持续
+    // 这几个都是派生值，按"派生值不入库、读取时现算"的原则（见 doc §9.5）不单独存 key。
+
+    /// <summary>利息净收入（银行）。= 利息收入 − 利息支出，银行的主营收入。
+    /// ÷ 平均总资产可近似净息差（真实口径的分母是生息资产、会略小，所以算出来偏低约 0.15pct，
+    /// 只能自比趋势、不能跟年报披露的净利息收益率直接对齐）。</summary>
+    public const string InterestNet = "interest_net";
+    /// <summary>手续费及佣金净收入（银行）。非息收入里**可持续**的那部分——代表真实客户经营能力，
+    /// 跟靠债市行情吃饭的投资收益要分开看（这正是"非息收入看可持续来源"那条的落点）。</summary>
+    public const string FeeCommissionNet = "fee_net";
+    /// <summary>其他业务支出。倒推银行信用减值损失时要从营业支出里扣掉它，见上面的注释。</summary>
+    public const string OtherOperExpense = "other_oper_exp";
+
+    // ── 券商 / 保险专属（2026-08-29 新增）──────────────────────────────────────────
+    // 三类金融机构的利润表结构互不相同，光靠"没有营业成本"只能认出"是金融机构"，认不出是哪一类。
+    // 这几个科目是各自的**身份特征**（实测中信证券/中国平安/中国太保的报表）：
+    //   券商：代理买卖证券 98.56亿、证券承销 30.23亿、资管 71.82亿；利息净收入只占营收 3.5%
+    //   保险：已赚保费 平安 2792.55亿(占营收48.6%)、太保 1432.96亿(占67.5%)
+    // 对比银行的利息净收入占营收 60%+，三者靠这几项能干净地分开。
+
+    /// <summary>已赚保费（保险）。保险公司的主营收入，也是判定"这是保险公司"的特征科目。</summary>
+    public const string PremiumEarned = "premium_earned";
+    /// <summary>赔付支出（保险）。跟已赚保费一起看赔付率。</summary>
+    public const string ClaimExpense = "claim_expense";
+    /// <summary>代理买卖证券业务净收入（券商）。经纪业务，最靠天吃饭的一块。</summary>
+    public const string BrokerageNet = "brokerage_net";
+    /// <summary>证券承销业务净收入（券商）。投行业务。</summary>
+    public const string UnderwritingNet = "underwriting_net";
+    /// <summary>受托客户资产管理业务净收入（券商）。资管业务，收入最稳的一块。</summary>
+    public const string AssetMgmtNet = "asset_mgmt_net";
     /// <summary>营业利润。</summary>
     public const string OperProfit = "oper_profit";
     /// <summary>利润总额。</summary>

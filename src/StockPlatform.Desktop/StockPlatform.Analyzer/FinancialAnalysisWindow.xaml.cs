@@ -16,6 +16,15 @@ public class AnalysisLineVm
     public string Note { get; init; } = "";
     public Brush Brush { get; init; } = Brushes.Black;
     public FontWeight Weight { get; init; } = FontWeights.Normal;
+
+    /// <summary>参考值/正常范围（2026-08-29，银行体检表用）——像体检报告那样"一列值、一列正常范围"。</summary>
+    public string Reference { get; init; } = "";
+    /// <summary>条目编号文本（"01"~"12"）；非体检表为空。</summary>
+    public string Clause { get; init; } = "";
+    public Visibility ReferenceVisibility =>
+        Reference.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ClauseVisibility =>
+        Clause.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 }
 
 /// <summary>
@@ -77,8 +86,19 @@ public partial class FinancialAnalysisWindow : Window
         if (report.ReportDate != default)
             HeaderText.Inlines.Add(new System.Windows.Documents.Run($"　·　{report.PeriodName}")
                 { FontSize = 14 });
-        if (report.IsFinancialInstitution)
-            HeaderText.Inlines.Add(new System.Windows.Documents.Run("　·　金融机构（简版指标）")
+        // 机构类型标注（2026-08-29 细分）：三类金融机构各有一张体检表——银行看资产质量与资本，
+        // 券商看净资本与自营敞口，保险看偿付能力与承保盈利，指标体系互不通用。
+        // 认不出类型的（老数据缺 v4 特征科目）退回通用简版。
+        string? kindTag = report.Kind switch
+        {
+            FinancialInstitutionKind.Bank => "　·　银行（十二条体检表）",
+            FinancialInstitutionKind.Broker => "　·　券商（体检表）",
+            FinancialInstitutionKind.Insurer => "　·　保险（体检表）",
+            FinancialInstitutionKind.OtherFinancial => "　·　金融机构（简版指标）",
+            _ => null,
+        };
+        if (kindTag != null)
+            HeaderText.Inlines.Add(new System.Windows.Documents.Run(kindTag)
                 { FontSize = 13, Foreground = new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x88)) });
         if (report.Headline.Length > 0)
             HeaderText.Inlines.Add(new System.Windows.Documents.Run($"　·　{report.Headline}")
@@ -143,6 +163,8 @@ public partial class FinancialAnalysisWindow : Window
             Brush = BrushOf(l.Verdict),
             // 明确负面的加粗——扫一眼就能定位到问题所在
             Weight = l.Verdict == Verdict.Bad ? FontWeights.Bold : FontWeights.Normal,
+            Reference = l.Reference,
+            Clause = l.ClauseNo > 0 ? l.ClauseNo.ToString("D2") : "",
         }).ToList(),
     };
 
@@ -226,14 +248,86 @@ public partial class FinancialAnalysisWindow : Window
             var trailing = vm.DividendRepository.GetTrailingCashDividendPerShare(DateTime.Today.AddYears(-1));
             if (trailing.TryGetValue(code, out var d) && d > 0) dps = d;
 
-            var report = new StockPlatform.Logic.Services.FinancialAnalyzer()
-                .Analyze(code, name, history, price, dps);
+            // 银行才需要行业分位（体检表的"参考值"列）。先用最新一期判一下类型，不是银行就
+            // 别去扫全市场——那一趟不便宜。
+            StockPlatform.Logic.Models.BankPeerStats? peers = null;
+            List<StockPlatform.Logic.Models.BankRegulatoryMetric>? regulatory = null;
+            var kind = history.Count > 0
+                ? StockPlatform.Logic.Services.BankHealthCheckBuilder.ClassifyInstitution(history[0])
+                : StockPlatform.Logic.Models.FinancialInstitutionKind.NonFinancial;
+            if (kind is StockPlatform.Logic.Models.FinancialInstitutionKind.Bank
+                     or StockPlatform.Logic.Models.FinancialInstitutionKind.Broker
+                     or StockPlatform.Logic.Models.FinancialInstitutionKind.Insurer)
+            {
+                // 行业分位只有银行用得上——券商/保险的参考值是监管红线，不需要分位。
+                if (kind == StockPlatform.Logic.Models.FinancialInstitutionKind.Bank)
+                    peers = LoadBankPeers(vm);
+                // 从财报 PDF 解析出的监管指标（不良率/拨备覆盖率/核心一级/客户集中度）。
+                // 没跑过 Fetcher 的【银行监管指标】时这里是空的，体检表会如实显示"待接入"。
+                try
+                {
+                    regulatory = new StockPlatform.Data.Sqlite.SqliteBankRegulatoryRepository(
+                        vm.CurrentDbPath).GetByCode(code);
+                }
+                catch { /* 这张表是可选增强，取不到不该拦住整份财务分析 */ }
+            }
+
+            var report = new StockPlatform.Logic.Services.FinancialAnalyzer(peers)
+                .Analyze(code, name, history, price, dps, regulatory);
             new FinancialAnalysisWindow(report) { Owner = owner }.ShowDialog();
         }
         catch (Exception ex)
         {
             MessageBox.Show(owner, $"财务分析失败：{ex.Message}", "财务分析",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    // ── 银行行业分位的会话内缓存 ──────────────────────────────────────────────
+    // 算一次要扫一遍全市场最新快照 + 逐只取 42 家银行的历史，几秒级。连着看好几只银行时不该
+    // 每次都重算——分位是季度级别的量，一个会话里根本不会变。30 分钟够覆盖一次连续查看，
+    // 又不至于在用户中途跑完抓取后还拿着旧的。
+    private static StockPlatform.Logic.Models.BankPeerStats? _cachedPeers;
+    private static DateTime _cachedPeersAt;
+
+    /// <summary>
+    /// 从本地库实算银行行业分位。算不出来（数据不足）就返回 null，由 FinancialAnalyzer 退回
+    /// <see cref="StockPlatform.Logic.Models.BankPeerStats.Builtin"/> 那份带日期的内置基准。
+    ///
+    /// 银行还没按新科目集重抓时，库里没有 interest_net，<c>ClassifyInstitution</c> 一家银行都
+    /// 认不出来 → 样本为空 → 用内置基准。这是有意的安全降级，不是 bug。
+    /// </summary>
+    private static StockPlatform.Logic.Models.BankPeerStats? LoadBankPeers(ViewModels.MainViewModel vm)
+    {
+        if (_cachedPeers != null && DateTime.Now - _cachedPeersAt < TimeSpan.FromMinutes(30))
+            return _cachedPeers;
+        try
+        {
+            var latest = vm.FinancialRepository.GetLatestSnapshotByCode();
+            var bankCodes = latest
+                .Where(kv => StockPlatform.Logic.Services.BankHealthCheckBuilder
+                                 .ClassifyInstitution(kv.Value)
+                             == StockPlatform.Logic.Models.FinancialInstitutionKind.Bank)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            var samples = new List<(FinancialSnapshot Cur, FinancialSnapshot? Prev)>();
+            foreach (var c in bankCodes)
+            {
+                // 逐只取（约 42 次）——每次走 (code, report_date) 主键前缀，很快。
+                // ROE/ROA 的分母要期初期末均值，所以必须拿到上一期，批量快照接口只给最新一期。
+                var h = vm.FinancialRepository.GetAllByCode(c);
+                if (h.Count > 0) samples.Add((h[0], h.Count > 1 ? h[1] : null));
+            }
+
+            _cachedPeers = StockPlatform.Logic.Services.BankPeerStatsBuilder.Build(samples);
+            _cachedPeersAt = DateTime.Now;
+            return _cachedPeers;
+        }
+        catch
+        {
+            // 分位只是"参考值"那一列，算不出来不该让整个财务分析打不开。
+            return null;
         }
     }
 }

@@ -2728,6 +2728,258 @@ public class FetchOrchestrator
     /// 44% 覆盖、其余全挤在一个"未知"组里，中性IC 一直不够准。
     /// 行业极少变动，属定期数据，季度跟财报一起跑一次即可；整体覆盖写入，反复跑无副作用。
     /// </summary>
+    /// <summary>
+    /// 抓指定股票列表的财务报表（2026-08-29 新增）。跟 <see cref="RunFetchFinancialsAsync"/> 的区别：
+    /// 那个按增量计划抓全市场、有每轮上限；这个直接抓给定的一小批，供【银行监管指标】做前置补数。
+    ///
+    /// 同样**必须顺序处理**，原因见 RunFetchFinancialsAsync 里那段关于信号量 FIFO 的注释。
+    /// </summary>
+    private async Task FetchFinancialsForCodesAsync(
+        List<string> codes, IProgress<string>? progress, CancellationToken ct)
+    {
+        if (_financialProvider == null || codes.Count == 0) return;
+
+        var repo = new SqliteFinancialRepository(_paths.CurrentDb);
+        repo.EnsureSchema();
+        var sw = Stopwatch.StartNew();
+        int done = 0, failed = 0;
+
+        foreach (var code in codes)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var rows = await _financialProvider.GetAllAsync(code, ct);
+                if (rows.Count > 0) lock (_dbLock) { repo.ReplaceByCode(code, rows); }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { failed++; }   // 单只失败不影响整批，后面认不出它就是了
+
+            if (++done % 20 == 0 || done == codes.Count)
+                progress?.Report($"  补抓财务 {done}/{codes.Count}（失败 {failed}），"
+                               + $"用时 {FormatElapsed(sw.Elapsed)}");
+        }
+    }
+
+    /// <summary>
+    /// 抓银行监管指标（2026-08-29 新增）——不良率、拨备覆盖率、核心一级资本充足率、客户集中度、
+    /// 迁徙率。这些**三张报表里一个都没有**，只在财报正文的"会计数据和财务指标摘要"那两三页，
+    /// 所以是下载 PDF + 解析，见 <see cref="BankReportFetcher"/> / <see cref="BankReportParser"/>。
+    ///
+    /// 银行名单靠**科目特征**认（利息净收入占营业收入四成以上），不查行业表——行业表覆盖率不满。
+    /// 前置：银行得先按 v3 科目集抓过财务报表，否则库里没有 interest_net，一家都认不出来。
+    ///
+    /// 只抓年报和中报：一季报/三季报是简版，没有那几张监管指标表。
+    /// </summary>
+    public async Task<FetchResult> RunFetchBankRegulatoryAsync(
+        IProgress<string>? progress, bool refetchAll = false, CancellationToken ct = default)
+    {
+        var result = new FetchResult();
+        var repo = new SqliteBankRegulatoryRepository(_paths.CurrentDb);
+        repo.EnsureSchema();
+
+        var finRepo = new SqliteFinancialRepository(_paths.CurrentDb);
+        var latest = finRepo.GetLatestSnapshotByCode();
+
+        // ── 前置：自己把需要的财务数据补齐，不必等全市场 ──────────────────────────────
+        // 银行是靠"利息净收入占营收四成以上"认出来的，而那个科目是 v3 才加的。如果要求用户先跑完
+        // 全市场【拉取财务报表】（5000+ 只 × 3 张报表）才能用这个按钮，等待时间完全不成比例——
+        // 真正需要的只有 40 来家银行。
+        //
+        // 鸡生蛋的地方在于：没抓 v3 之前认不出谁是银行。解法是用**老数据也判得出**的特征先粗筛：
+        // 银行/券商/保险的利润表都没有"营业成本"。金融机构总共一百来只，全抓一遍也就几分钟，
+        // 之后再用 interest_net 精确挑出银行。
+        // ⚠ 判据必须是**科目集版本号**，不能是"某个科目在不在"。
+        //   踩过的坑：原来写的是"缺 interest_net 就补抓"，可库里有 562 只已经抓到 v3（有
+        //   interest_net、但没有 v4 才加的已赚保费/代理买卖证券业务净收入），于是券商和保险
+        //   全部被跳过、永远识别不出来。版本号才是"科目齐不齐"的唯一可靠依据。
+        var fetchState = finRepo.GetFetchStateByCode();
+        var needFinancial = latest
+            .Where(kv => kv.Value.Get(FinancialKeys.OperCost) is null or 0)       // 金融机构
+            .Where(kv => !fetchState.TryGetValue(kv.Key, out var st)
+                         || st.KeysVersion < FinancialKeys.Version)               // 科目集落后
+            .Select(kv => kv.Key)
+            .OrderBy(c => c, StringComparer.Ordinal)
+            .ToList();
+
+        if (needFinancial.Count > 0)
+        {
+            progress?.Report($"检测到 {needFinancial.Count} 只金融股的科目集低于 v{FinancialKeys.Version}"
+                           + "（缺银行/券商/保险的特征科目，认不出机构类型），"
+                           + "先补抓它们的财务报表——只抓这一批，不用等全市场。");
+            await FetchFinancialsForCodesAsync(needFinancial, progress, ct);
+            latest = finRepo.GetLatestSnapshotByCode();   // 重新读，这次才认得出银行
+        }
+
+        // 三类金融机构各有一套监管指标，解析时按类型选标签集（见 BankReportParser.LabelsFor）。
+        var targets = latest
+            .Select(kv => (Code: kv.Key,
+                           Kind: Logic.Services.BankHealthCheckBuilder.ClassifyInstitution(kv.Value)))
+            .Where(x => x.Kind is Logic.Models.FinancialInstitutionKind.Bank
+                             or Logic.Models.FinancialInstitutionKind.Broker
+                             or Logic.Models.FinancialInstitutionKind.Insurer)
+            .OrderBy(x => x.Code, StringComparer.Ordinal)
+            .ToList();
+
+        if (targets.Count == 0)
+        {
+            var msg = "没有识别出任何银行/券商/保险。若本地库从没抓过财务报表，请先跑一次"
+                    + "【拉取财务报表】再回来点这个。";
+            progress?.Report("⚠ " + msg);
+            result.Errors.Add(msg);
+            return result;
+        }
+        int nBank = targets.Count(t => t.Kind == Logic.Models.FinancialInstitutionKind.Bank);
+        int nBroker = targets.Count(t => t.Kind == Logic.Models.FinancialInstitutionKind.Broker);
+        int nInsurer = targets.Count(t => t.Kind == Logic.Models.FinancialInstitutionKind.Insurer);
+        progress?.Report($"识别出 银行 {nBank} 家、券商 {nBroker} 家、保险 {nInsurer} 家，"
+                       + "开始抓取监管指标（只抓年报和中报）...");
+
+        // ── 先把本地已有的 PDF 全部重新解析一遍（不联网、几分钟）──────────────────────
+        // 这一步是幂等自愈：解析规则改进后（各行版式差异会不断暴露新问题），已经下载过的报告
+        // 不需要重新下载就能用新规则重跑，旧的错值被 INSERT OR REPLACE 覆盖掉。
+        // 这正是"PDF 要留在本地"的意义所在——真实修过的坑：注释角标「（注3）」没清干净，
+        // 平安银行的拨备覆盖率被存成了 3.0；目录页"七、资本充足率分析 42"的页码被当成资本充足率。
+        int reparsed = 0, reparseFixed = 0;
+        if (Directory.Exists(_paths.ReportsDir))
+        {
+            progress?.Report("正在用当前解析规则重跑本地已缓存的 PDF（不联网）...");
+            foreach (var dir in Directory.GetDirectories(_paths.ReportsDir))
+            {
+                ct.ThrowIfCancellationRequested();
+                var code = Path.GetFileName(dir);
+                foreach (var pdf in Directory.GetFiles(dir, "*.pdf"))
+                {
+                    if (!DateTime.TryParse(Path.GetFileNameWithoutExtension(pdf), out var d)) continue;
+                    try
+                    {
+                        // 重解析也要按机构类型选标签集，否则会拿银行的标签去解析券商的报表。
+                        var kind = latest.TryGetValue(code, out var snap)
+                            ? Logic.Services.BankHealthCheckBuilder.ClassifyInstitution(snap)
+                            : Logic.Models.FinancialInstitutionKind.Bank;
+                        var ms = BankReportParser.Parse(pdf, code, d, kind);
+                        if (ms.Count == 0) continue;
+                        lock (_dbLock)
+                        {
+                            repo.Upsert(ms);
+                            repo.UpsertState(new Logic.Models.BankReportFetchState
+                            {
+                                Code = code, ReportDate = d, Status = "ok",
+                                MetricCount = ms.Count, PdfPath = pdf,
+                            });
+                        }
+                        reparsed++; reparseFixed += ms.Count;
+                    }
+                    catch { /* 解析不了的下面会当成没抓过重新处理 */ }
+                }
+            }
+            if (reparsed > 0)
+                progress?.Report($"  本地重解析完成：{reparsed} 份报告、{reparseFixed} 个指标已按新规则刷新。");
+        }
+
+        var done = refetchAll ? new HashSet<(string, DateTime)>() : repo.GetSucceeded();
+        // 限流分两套，理由见 BankReportFetcher 的构造函数注释。
+        // 页面侧参数参照 App.xaml.cs 里 financialProvider 那段血泪教训（3并发/1秒 → HTTP 456、
+        // 整轮零成功）取保守值：单并发 + 3 秒 + 每 40 个歇 45 秒 ≈ 17 请求/分钟。
+        // 文件侧打的是静态服务器、配额独立，但单个 PDF 几 MB，也不并发。
+        var fetcher = new BankReportFetcher(
+            pageLimiter: new RateLimiter(
+                maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(3),
+                batchSize: 40, restDuration: TimeSpan.FromSeconds(45)),
+            fileLimiter: new RateLimiter(
+                maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
+                batchSize: 30, restDuration: TimeSpan.FromSeconds(30)),
+            cacheDir: _paths.ReportsDir);
+        void Forward(string s) => progress?.Report(s);
+        fetcher.OnStatus += Forward;
+
+        var sw = Stopwatch.StartNew();
+        int okCount = 0, failCount = 0, skipCount = 0, metricTotal = 0;
+        try
+        {
+            for (int i = 0; i < targets.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var (code, kind) = targets[i];
+                string kindName = kind switch
+                {
+                    Logic.Models.FinancialInstitutionKind.Bank => "银行",
+                    Logic.Models.FinancialInstitutionKind.Broker => "券商",
+                    _ => "保险",
+                };
+                progress?.Report($"[{i + 1}/{targets.Count}] {code}（{kindName}）查找年报/中报...");
+
+                List<BankReportFetcher.ReportRef> refs;
+                try { refs = await fetcher.ListReportsAsync(code, maxPerKind: 2, ct); }
+                catch (Exception ex)
+                {
+                    failCount++;
+                    result.Errors.Add($"{code} 取公告列表失败：{ex.Message}");
+                    continue;
+                }
+
+                foreach (var r in refs)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (done.Contains((r.Code, r.ReportDate))) { skipCount++; continue; }
+
+                    var (state, metrics) = await fetcher.FetchOneAsync(r, kind, ct);
+                    // 成功失败都写状态——静默跳过会让界面分不清"没抓"和"抓失败"。
+                    lock (_dbLock)
+                    {
+                        if (metrics.Count > 0) repo.Upsert(metrics);
+                        repo.UpsertState(state);
+                    }
+                    if (state.Status == "ok")
+                    {
+                        okCount++; metricTotal += state.MetricCount;
+                        progress?.Report($"    {r.ReportDate:yyyy-MM-dd} {r.Title} → {state.MetricCount} 个指标");
+                    }
+                    else
+                    {
+                        failCount++;
+                        progress?.Report($"    ⚠ {r.ReportDate:yyyy-MM-dd} {state.Status}：{state.Message}");
+                    }
+                }
+            }
+        }
+        finally { fetcher.OnStatus -= Forward; }
+
+        progress?.Report($"银行监管指标完成：成功 {okCount} 份（共 {metricTotal} 个指标）、"
+                       + $"失败 {failCount} 份、跳过已有 {skipCount} 份，用时 {FormatElapsed(sw.Elapsed)}。"
+                       + $"PDF 缓存在 {_paths.ReportsDir}。");
+        return result;
+    }
+
+    /// <summary>
+    /// 优化数据库（2026-08-29 新增）——给几张大表补建二级索引并更新统计信息，见
+    /// <see cref="SqliteMaintenance"/> 和 <see cref="SqliteSchema.BigTableIndexes"/>。
+    ///
+    /// 不联网、不抓任何数据，纯本地维护。一次性动作：建成后是持久对象，之后由 SQLite 自动维护，
+    /// 不用再点（重复点会检测到已存在、秒返回）。
+    /// </summary>
+    public Task<FetchResult> RunOptimizeDatabaseAsync(IProgress<string>? progress, CancellationToken ct = default)
+        // 整段是同步的阻塞 IO（CREATE INDEX），扔到线程池跑，别占着 UI 线程。
+        => Task.Run(() =>
+        {
+            var result = new FetchResult();
+            try
+            {
+                new SqliteMaintenance(_paths.CurrentDb).BuildIndexes(s => progress?.Report(s), ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // 中断是安全的：每条索引各自独立事务，已建好的保留，下次点会跳过继续。
+                progress?.Report("已停止；已建好的索引保留，下次点【优化数据库】会跳过它们继续建。");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                result.Errors.Add($"优化数据库失败：{ex.Message}");
+            }
+            return result;
+        }, ct);
+
     public async Task<FetchResult> RunFetchIndustryAsync(IProgress<string>? progress, CancellationToken ct = default)
     {
         if (_industryProvider == null)

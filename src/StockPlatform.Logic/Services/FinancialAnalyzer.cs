@@ -58,13 +58,25 @@ public class FinancialAnalyzer
     private const double Yi = 1e8;
 
     /// <summary>
+    /// 银行体检表的行业参考分位（2026-08-29）。为 null 时用 <see cref="BankPeerStats.Builtin"/>
+    /// 那份带日期的实测快照。调用方拿得到全行业数据时应该注入实算值——ROE/ROA/净息差这些
+    /// 相对性指标钉死阈值就会随时代失效（见 <see cref="BankPeerStats"/> 的类注释）。
+    /// </summary>
+    private readonly BankPeerStats? _bankPeers;
+
+    public FinancialAnalyzer(BankPeerStats? bankPeers = null) => _bankPeers = bankPeers;
+
+    /// <summary>
     /// 生成分析报告。
     /// <paramref name="history"/> 是该股全部报告期的科目（<see cref="Abstractions.IFinancialRepository.GetAllByCode"/>，
     /// 降序）；<paramref name="latestClose"/>/<paramref name="dividendPerShare"/> 用于估值和股息率，
     /// 传 null 就跳过那几行。
     /// </summary>
+    /// <param name="regulatory">银行监管指标（从财报 PDF 解析，见 BankReportParser）。只有银行用得上，
+    /// 传 null 时体检表的 01/02/03/08 显示"待接入"。</param>
     public FinancialAnalysisReport Analyze(string code, string name, List<FinancialSnapshot> history,
-        double? latestClose = null, double? dividendPerShare = null)
+        double? latestClose = null, double? dividendPerShare = null,
+        List<BankRegulatoryMetric>? regulatory = null)
     {
         if (history == null || history.Count == 0)
             return new FinancialAnalysisReport
@@ -91,7 +103,12 @@ public class FinancialAnalyzer
         var prevPeriod = history.FirstOrDefault(h => h.ReportDate < cur.ReportDate);
 
         double? G(FinancialSnapshot? s, string key) => s?.Get(key);
-        bool isFin = G(cur, FinancialKeys.OperCost) is null or 0;
+
+        // 2026-08-29：原来只有一个 isFin 布尔，把银行/券商/保险混成一类。现在细分——银行有一套
+        // 自己的监管指标体系（十二条体检表），券商看净资本/风险覆盖率、保险看内含价值/偿付能力，
+        // 三者互不通用，不拆开就会把银行那套套到券商保险上。判定见 ClassifyInstitution。
+        var kind = BankHealthCheckBuilder.ClassifyInstitution(cur);
+        bool isFin = kind != FinancialInstitutionKind.NonFinancial;
 
         var sections = new List<AnalysisSection>();
         var alerts = new List<string>();
@@ -103,6 +120,16 @@ public class FinancialAnalyzer
                 alerts.Add($"{l.Label} {l.Value}{(l.Change.Length > 0 ? $"（{l.Change}）" : "")}"
                            + (l.Note.Length > 0 ? $" —— {l.Note}" : ""));
         }
+
+        // 体检表排在最前面：它是这类标的真正要看的东西，通用几节只是补充。
+        // 三类金融机构各一张表——银行看资产质量、券商看净资本、保险看偿付能力，互不通用。
+        if (kind == FinancialInstitutionKind.Bank)
+            Collect(BankHealthCheckBuilder.Build(cur, prior, history, _bankPeers ?? BankPeerStats.Builtin,
+                latestClose, dividendPerShare, regulatory));
+        else if (kind == FinancialInstitutionKind.Broker)
+            Collect(BrokerInsurerHealthCheckBuilder.BuildBroker(cur, prior, history, latestClose, regulatory));
+        else if (kind == FinancialInstitutionKind.Insurer)
+            Collect(BrokerInsurerHealthCheckBuilder.BuildInsurer(cur, prior, history, latestClose, regulatory));
 
         Collect(BuildScaleVsEfficiency(cur, prior, prevInYear, priorPrevInYear, isFin));
         if (!isFin) Collect(BuildMarginAttribution(cur, prior));
@@ -117,7 +144,7 @@ public class FinancialAnalyzer
             ReportDate = cur.ReportDate,
             PriorYearDate = prior?.ReportDate,
             PeriodName = PeriodName(cur.ReportDate),
-            IsFinancialInstitution = isFin,
+            Kind = kind,
             Headline = BuildHeadline(cur, prior, isFin),
             Sections = sections,
             Alerts = alerts,

@@ -222,6 +222,45 @@ public static class SqliteSchema
                 PRIMARY KEY (code, announce_date)
             );
 
+            -- 银行监管指标（2026-08-29）——不良率/拨备覆盖率/核心一级资本充足率/客户集中度等。
+            -- 这些**不在三张报表里**，只在财报正文"会计数据和财务指标摘要"那两三页，所以单独
+            -- 一张表、单独的抓取路径（下载 PDF + 解析），见 BankRegulatoryFetcher。
+            --
+            -- 为什么不并进 FinancialReport：① 数据源不同（PDF vs 新浪三表接口），抓取状态和重试
+            -- 逻辑要独立，混进 FinancialFetchState 会互相干扰；② 那张表存的是金额（元），这里全是
+            -- 比率（%），混存极易出单位 bug，而且比率的"同比"是百分点差不是百分比变化；
+            -- ③ 只有 42 家银行有，塞进 5000+ 只股票的表里是噪音。
+            --
+            -- basis：口径。核心一级资本充足率同时披露"高级法"和"权重法"两个数（招行 2026H1 分别
+            -- 是 14.07% 和 11.84%），只有六大行+招行等少数获批高级法。**横向比较必须用权重法**，
+            -- 否则行业分位会被算歪。其它指标 basis 为空串（不能用 NULL，它是主键的一部分）。
+            CREATE TABLE IF NOT EXISTS BankRegulatoryMetric (
+                code TEXT NOT NULL,
+                report_date TEXT NOT NULL,
+                metric_key TEXT NOT NULL,
+                basis TEXT NOT NULL DEFAULT '',  -- '' | 'weighted'(权重法) | 'advanced'(高级法)
+                value REAL,
+                standard_value TEXT,             -- 监管标准值，报表自带（"≥25" / "≤10"）
+                source_page INTEGER,             -- 取自 PDF 第几页，便于人工回查
+                fetched_at TEXT,
+                PRIMARY KEY (code, report_date, metric_key, basis)
+            );
+
+            -- 每份财报 PDF 的解析状态（2026-08-29）。**解析失败必须留痕**：某家银行改了版式、
+            -- 或者是没有文本层的扫描件时，如果静默跳过，界面上"无数据"就分不清是【没抓】还是
+            -- 【抓失败】——而这跟"这一项本来就取不到"是完全不同的三件事。
+            CREATE TABLE IF NOT EXISTS BankReportFetchState (
+                code TEXT NOT NULL,
+                report_date TEXT NOT NULL,
+                status TEXT,                     -- ok | no_pdf | no_text | no_match | error
+                metric_count INTEGER,            -- 成功解析出几个指标
+                message TEXT,                    -- 失败原因
+                pdf_url TEXT,                    -- 来源 URL，PDF 缓存被清理后可重新下载
+                pdf_path TEXT,                   -- 本地缓存路径（相对 data/reports）
+                fetched_at TEXT,
+                PRIMARY KEY (code, report_date)
+            );
+
             -- 反查热点列索引（2026-07-16）：这两条反查用的不是主键最左前缀，无索引会全表扫。
             CREATE INDEX IF NOT EXISTS ix_indexcons_stock ON IndexCons(stock_code);
             CREATE INDEX IF NOT EXISTS ix_etfindexmap_index ON EtfIndexMap(index_code);
@@ -253,6 +292,45 @@ public static class SqliteSchema
         // SinaShareholderProvider.ParseD）；修复时把这个方向本身也存下来——机构调仓方向是有用信息。
         // 老库的历史行这一列为 NULL，等用户重新"拉取股东数据"时按 code 覆盖写入。
         AddColumnIfMissing(conn, "TopShareholder", "change_direction", "TEXT");
+    }
+
+    /// <summary>
+    /// 大表的二级索引（2026-08-29 新增）——**故意不放进 <see cref="EnsureSchema"/>**，由
+    /// Fetcher 的【优化数据库】按钮显式触发，见 <see cref="SqliteMaintenance"/>。
+    ///
+    /// 为什么需要：这几张表的主键分别是 (code, granularity, period_start) / (code, report_date,
+    /// metric_key) / (trade_date, code)，**按 code 查走最左前缀很快，按日期/报告期查只能全表扫**。
+    /// 7.5GB 库上实测：单只股票日线 54ms，而"按日期取全市场收盘"要 25.2 秒、"按报告期取 42 家
+    /// 银行财务"要 6.2 秒（EXPLAIN 都是 SCAN）。所有跨股票的批量比较——因子、选股扫描、板块热度、
+    /// 行业分位——吃的都是这个亏。
+    ///
+    /// 为什么不放进 EnsureSchema：那个方法被 10 处抓取入口调用，而首次在 7.5GB 库上建 Bar 索引
+    /// 要数分钟且期间阻塞写入。混进日常抓取路径 = 某天早上"拉取当天"莫名卡住十分钟。做成独立
+    /// 按钮，用户自己挑空闲时间跑一次；建成后是持久对象，之后的写入由 SQLite 自动维护。
+    ///
+    /// 代价：索引本身占空间（Bar 那条约 600MB~1GB）。换来的是上面两个查询降到毫秒级。
+    /// </summary>
+    public static readonly (string Name, string Table, string Sql)[] BigTableIndexes =
+    [
+        ("ix_bar_gran_date", "Bar",
+            "CREATE INDEX IF NOT EXISTS ix_bar_gran_date ON Bar(granularity, period_start);"),
+        ("ix_fr_date_key", "FinancialReport",
+            "CREATE INDEX IF NOT EXISTS ix_fr_date_key ON FinancialReport(report_date, metric_key);"),
+        ("ix_margin_date", "MarginDetail",
+            "CREATE INDEX IF NOT EXISTS ix_margin_date ON MarginDetail(trade_date);"),
+    ];
+
+    /// <summary>返回 <see cref="BigTableIndexes"/> 里当前库还没建的那些。</summary>
+    public static List<string> GetMissingIndexes(SqliteConnection conn)
+    {
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var q = conn.CreateCommand())
+        {
+            q.CommandText = "SELECT name FROM sqlite_master WHERE type='index';";
+            using var r = q.ExecuteReader();
+            while (r.Read()) existing.Add(r.GetString(0));
+        }
+        return BigTableIndexes.Where(i => !existing.Contains(i.Name)).Select(i => i.Name).ToList();
     }
 
     /// <summary>若 <paramref name="table"/> 已存在、但其建表 SQL 的主键里不含 <paramref name="pkColumn"/>，

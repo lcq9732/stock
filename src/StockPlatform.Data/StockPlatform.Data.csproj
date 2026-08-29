@@ -14,6 +14,11 @@
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
     <!-- 解析中证指数官网的 closeweight.xls（真 OLE2/BIFF）——读取需注册 CodePages（上面已引用） -->
     <PackageReference Include="ExcelDataReader" Version="3.7.0" />
+    <!-- 银行监管指标（不良率/拨备覆盖率/核心一级资本充足率/客户集中度）只在财报 PDF 正文的
+         "会计数据和财务指标摘要"那两三页里，三表接口一个都取不到——只能解析 PDF。
+         选 PdfPig：MIT 协议、纯托管无原生依赖（单文件发布不会出幺蛾子）、能按坐标取词，
+         正好用来把表格还原成行。见 BankReportParser。 -->
+    <PackageReference Include="PdfPig" Version="0.1.2" />
   </ItemGroup>
 
   <ItemGroup>

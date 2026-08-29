@@ -59,23 +59,43 @@ public class SinaFinancialProvider : IFinancialProvider
         ("ProfitStatement",
         [
             (FinancialKeys.Revenue, ["营业总收入", "营业收入"]),
-            (FinancialKeys.TotalCost, ["营业总成本"]),
+            // 银行没有"营业总成本"，对应的是"二、营业支出"（前缀被 StripOrdinalPrefix 剥掉）。
+            (FinancialKeys.TotalCost, ["营业总成本", "营业支出"]),
             (FinancialKeys.OperCost, ["营业成本"]),
             (FinancialKeys.TaxSurcharge, ["营业税金及附加"]),
             (FinancialKeys.SellExpense, ["销售费用"]),
-            (FinancialKeys.AdminExpense, ["管理费用"]),
+            // 银行叫"业务及管理费用"——成本收入比的分子就是它，原来没配导致 42 家银行全算不出。
+            (FinancialKeys.AdminExpense, ["管理费用", "业务及管理费用"]),
             (FinancialKeys.FinanceExpense, ["财务费用"]),
             (FinancialKeys.RdExpense, ["研发费用"]),
             (FinancialKeys.ImpairmentLoss, ["资产减值损失"]),
-            (FinancialKeys.FvChangeGain, ["公允价值变动收益"]),
-            (FinancialKeys.InvestIncome, ["投资收益"]),
+            (FinancialKeys.FvChangeGain, ["公允价值变动收益", "公允价值变动净收益"]),
+            (FinancialKeys.InvestIncome, ["投资收益", "投资净收益"]),
             (FinancialKeys.OperProfit, ["营业利润"]),
             (FinancialKeys.TotalProfit, ["利润总额"]),
-            (FinancialKeys.IncomeTax, ["所得税费用", "减：所得税费用", "减:所得税费用"]),
+            // 银行的这一行没有"费用"二字（招行是"减:所得税"）。
+            (FinancialKeys.IncomeTax, ["所得税费用", "减：所得税费用", "减:所得税费用", "减：所得税", "减:所得税"]),
             (FinancialKeys.NetProfit, ["净利润"]),
             (FinancialKeys.NetProfitParent, ["归属于母公司所有者的净利润", "归属于母公司的净利润", "归属于母公司股东的净利润"]),
-            (FinancialKeys.MinorityPl, ["少数股东损益"]),
+            // ⚠ 银行**利润表**里少数股东损益那行写作"少数股东权益"，跟资产负债表的同名科目撞名。
+            //   Statements 是按报表分组解析的，这个备选名只在 ProfitStatement 里生效，不会串到
+            //   资产负债表的 MinorityEquity 上。
+            (FinancialKeys.MinorityPl, ["少数股东损益", "少数股东权益"]),
             (FinancialKeys.EpsBasic, ["基本每股收益(元/股)", "基本每股收益"]),
+
+            // ── 银行专属（2026-08-29）：见 FinancialKeys.InterestNet 那段注释 ──
+            (FinancialKeys.InterestNet, ["利息净收入"]),
+            (FinancialKeys.FeeCommissionNet, ["手续费及佣金净收入"]),
+            // 银行叫"其他业务支出"、券商叫"其他业务成本"，都是倒推时要从营业支出里扣掉的那一项。
+            (FinancialKeys.OtherOperExpense, ["其他业务支出", "其他业务成本"]),
+
+            // ── 券商 / 保险专属（2026-08-29）：三类金融机构的身份特征科目，
+            //    用来把"金融机构"细分成银行/券商/保险，见 FinancialKeys.PremiumEarned 那段注释 ──
+            (FinancialKeys.PremiumEarned, ["已赚保费"]),
+            (FinancialKeys.ClaimExpense, ["赔付支出"]),
+            (FinancialKeys.BrokerageNet, ["代理买卖证券业务净收入"]),
+            (FinancialKeys.UnderwritingNet, ["证券承销业务净收入"]),
+            (FinancialKeys.AssetMgmtNet, ["受托客户资产管理业务净收入"]),
         ]),
         ("BalanceSheet",
         [
@@ -95,9 +115,15 @@ public class SinaFinancialProvider : IFinancialProvider
             (FinancialKeys.BondPayable, ["应付债券"]),
             (FinancialKeys.TotalLiabilities, ["负债合计"]),
             (FinancialKeys.ShareCapital, ["实收资本(或股本)", "实收资本", "股本"]),
-            (FinancialKeys.EquityParent, ["归属于母公司股东权益合计", "归属于母公司股东的权益", "归属于母公司所有者权益合计", "所有者权益(或股东权益)合计"]),
+            // 归母权益这一行各家叫法差异最大，实测到的写法：一般企业"归属于母公司股东权益合计"、
+            // 招行"归属于母公司股东的权益"、中国平安"归属于母公司的股东权益合计"（多一个"的"）。
+            // 少一个变体就会让那家公司的 ROE/PB 整个算不出来，所以宁可多列几个。
+            (FinancialKeys.EquityParent, ["归属于母公司股东权益合计", "归属于母公司的股东权益合计",
+                                          "归属于母公司股东的权益", "归属于母公司股东的权益合计",
+                                          "归属于母公司所有者权益合计", "归属于母公司所有者的权益合计",
+                                          "所有者权益(或股东权益)合计"]),
             (FinancialKeys.MinorityEquity, ["少数股东权益"]),
-            (FinancialKeys.EquityTotal, ["所有者权益(或股东权益)合计", "所有者权益合计"]),
+            (FinancialKeys.EquityTotal, ["所有者权益(或股东权益)合计", "所有者权益合计", "股东权益合计"]),
             (FinancialKeys.UndistributedProfit, ["未分配利润"]),
         ]),
         ("CashFlow",
