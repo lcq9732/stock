@@ -93,6 +93,29 @@ public class BankReportFetcher
     private static readonly Regex TitleYear = new(@"(\d{4})\s*年", RegexOptions.Compiled);
 
     /// <summary>
+    /// 标题必须**以"XXXX年年度报告"/"XXXX年半年度报告"结尾**才算正式报告正文。
+    ///
+    /// 早先只用 <c>title.Contains("年度报告")</c> 筛，结果把一堆同样含这四个字的公告当成年报下了下来：
+    ///     「关于**落实**2024**年度报告**问询函的回复公告」
+    ///     「2026**半年度报告**募集资金存放与实际使用情况的**专项报告**」
+    /// 这些文件里根本没有监管指标表，翻遍了也找不到数——实测 353 份里有 9 份是这么下错的
+    /// （国泰海通、东吴证券、招商证券等），白白进了手工回填清单让人去翻。
+    ///
+    /// 结尾允许跟一个括号后缀（"（A股）""（修订版）"这类是同一份报告的不同版本，要留），
+    /// 但摘要版和英文版要排除——前者没有完整表格，后者标签是英文、匹配不上。
+    /// </summary>
+    private static bool IsRealReport(string title, string kind)
+    {
+        if (title.Contains("摘要") || title.Contains("英文") ||
+            title.Contains("English", StringComparison.OrdinalIgnoreCase)) return false;
+
+        var pattern = kind == "中报"
+            ? @"\d{4}\s*年\s*半年度报告\s*(（[^）]*）|\([^)]*\))?\s*$"
+            : @"\d{4}\s*年\s*年度报告\s*(（[^）]*）|\([^)]*\))?\s*$";
+        return Regex.IsMatch(title, pattern);
+    }
+
+    /// <summary>
     /// 列出某只银行最近若干期的年报/中报。<paramref name="maxPerKind"/> 控制每类取几期。
     ///
     /// 默认 2 期是有讲究的：体检表只需要**当期 + 去年同期**（算同比和百分点差），2 期年报 +
@@ -112,11 +135,7 @@ public class BankReportFetcher
             foreach (Match m in DetailLink.Matches(html))
             {
                 var title = WebUtility.HtmlDecode(m.Groups[2].Value).Trim();
-                // 只要正式的年报/中报，排除"摘要""更正公告""英文版"这些
-                bool wanted = kind == "中报"
-                    ? title.Contains("半年度报告") && !title.Contains("摘要")
-                    : title.Contains("年度报告") && !title.Contains("半年") && !title.Contains("摘要");
-                if (!wanted) continue;
+                if (!IsRealReport(title, kind)) continue;
 
                 var ym = TitleYear.Match(title);
                 if (!ym.Success || !int.TryParse(ym.Groups[1].Value, out var year)) continue;
@@ -135,7 +154,7 @@ public class BankReportFetcher
     /// </summary>
     public async Task<(BankReportFetchState State, List<BankRegulatoryMetric> Metrics)> FetchOneAsync(
         ReportRef r, FinancialInstitutionKind kind = FinancialInstitutionKind.Bank,
-        CancellationToken ct = default)
+        Action<string>? progress = null, CancellationToken ct = default)
     {
         var metrics = new List<BankRegulatoryMetric>();
         string? pdfUrl = null, pdfPath = null;
@@ -161,7 +180,8 @@ public class BankReportFetcher
                 await File.WriteAllBytesAsync(pdfPath, bytes, ct);
             }
 
-            metrics = BankReportParser.Parse(pdfPath, r.Code, r.ReportDate, kind);
+            // 传进度进去：数字被转曲的 PDF 会走 OCR，一页 4~5 秒，不报会像卡死。
+            metrics = BankReportParser.Parse(pdfPath, r.Code, r.ReportDate, kind, progress, ct);
             if (metrics.Count == 0)
                 return (State(r, "no_match", 0, "PDF 有文本但没匹配到任何指标（版式可能变了）", pdfUrl, pdfPath), metrics);
 

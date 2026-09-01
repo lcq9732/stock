@@ -1,0 +1,559 @@
+﻿<!--
+    深色主题专属的控件样式/模板。**只在深色下合并**，浅色不加载这份，所以切回浅色时控件
+    完全是 WPF 原生 Aero2 外观、跟做主题之前一字不差（零回归）。
+
+    为什么非重写模板不可：WPF 内置控件模板把浅色渐变、悬停高亮、边框色**写死在模板里**，
+    只设 Background/Foreground 属性是压不住的——按钮鼠标移上去会闪回浅蓝渐变、ComboBox 的
+    下拉箭头区和弹出列表仍是白底、TabItem 未选中页签仍是浅灰。所以这里给每个"自带背景绘制"
+    的控件换一套极简模板（纯色 + Trigger 换色），配色全部走 DynamicResource 读 Colors.Dark.xaml。
+
+    没重写模板的控件（TextBlock/Label 等）只需要改 Foreground，属性 Setter 就够。
+
+    注意：隐式 Style 按元素的**实际类型**匹配，所以 TargetType="Window" 对 MainWindow 这种
+    派生类无效——窗口背景是各窗口 XAML 上直接写 Background="{DynamicResource Theme.Window.Background}"。
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ============ 文字类：只换颜色 ============ -->
+    <Style TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+    </Style>
+
+    <Style TargetType="Label">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+    </Style>
+
+    <!-- ============ Button ============ -->
+    <Style TargetType="Button">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Control.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <!-- 跟 WPF 原生一致的 1px。别加大：表格"操作"列里有 Width=20 的分裂按钮（那个 ▾），
+             左右各留 8px 内边距会把箭头整个挤出可视区，按钮看着就是一个空框。 -->
+        <Setter Property="Padding" Value="1" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" CornerRadius="2"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}">
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          Margin="{TemplateBinding Padding}" RecognizesAccessKey="True" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Control.Background.Hover}" />
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Theme.Control.Border.Hover}" />
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Control.Background.Pressed}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Control.Background.Disabled}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ TextBox ============ -->
+    <Style TargetType="TextBox">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Control.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CaretBrush" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="SelectionBrush" Value="{DynamicResource Theme.Selection.Background}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TextBox">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}">
+                        <ScrollViewer x:Name="PART_ContentHost" Focusable="False"
+                                      HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Theme.Control.Border.Hover}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Control.Background.Disabled}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ CheckBox / RadioButton ============
+         勾选标记用 Path 画，避免拖进整套 Aero2 的浅色位图资源。 -->
+    <Style TargetType="CheckBox">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Control.Border}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="CheckBox">
+                    <Grid Background="Transparent">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border x:Name="Box" Grid.Column="0" Width="14" Height="14" CornerRadius="2"
+                                VerticalAlignment="Center" HorizontalAlignment="Center"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
+                            <Path x:Name="Check" Visibility="Collapsed" Stretch="Uniform" Margin="2"
+                                  Stroke="{DynamicResource Theme.Foreground}" StrokeThickness="1.6"
+                                  Data="M 0,4 L 3,7 L 9,0" />
+                        </Border>
+                        <ContentPresenter Grid.Column="1" Margin="5,0,0,0"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          RecognizesAccessKey="True" />
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Check" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource Theme.Control.Border.Hover}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                            <Setter TargetName="Box" Property="Background" Value="{DynamicResource Theme.Control.Background.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Control.Border}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Grid Background="Transparent">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid Grid.Column="0" Width="14" Height="14" VerticalAlignment="Center">
+                            <Ellipse x:Name="Box" Fill="{TemplateBinding Background}"
+                                     Stroke="{TemplateBinding BorderBrush}" StrokeThickness="1" />
+                            <Ellipse x:Name="Dot" Width="6" Height="6" Visibility="Collapsed"
+                                     Fill="{DynamicResource Theme.Foreground}" />
+                        </Grid>
+                        <ContentPresenter Grid.Column="1" Margin="5,0,0,0"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          RecognizesAccessKey="True" />
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Dot" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Box" Property="Stroke" Value="{DynamicResource Theme.Control.Border.Hover}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ ScrollBar ============
+         原生滚动条是浅灰底+浅色箭头按钮，深色下白得晃眼。这里去掉两端的箭头按钮，
+         只留轨道和滑块（跟现在多数深色 IDE 一致）。 -->
+    <Style x:Key="Theme.ScrollBar.Thumb" TargetType="Thumb">
+        <Setter Property="OverridesDefaultStyle" Value="True" />
+        <Setter Property="IsTabStop" Value="False" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Thumb">
+                    <Border x:Name="Bd" CornerRadius="4" Margin="2"
+                            Background="{DynamicResource Theme.Control.Border}" />
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                        </Trigger>
+                        <Trigger Property="IsDragging" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Foreground.Muted}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="ScrollBar">
+        <Setter Property="Background" Value="{DynamicResource Theme.Panel.Background}" />
+        <Setter Property="Width" Value="12" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ScrollBar">
+                    <Grid Background="{TemplateBinding Background}">
+                        <Track x:Name="PART_Track" IsDirectionReversed="True">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False" />
+                            </Track.DecreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb Style="{StaticResource Theme.ScrollBar.Thumb}" />
+                            </Track.Thumb>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Command="ScrollBar.PageDownCommand" Opacity="0" Focusable="False" />
+                            </Track.IncreaseRepeatButton>
+                        </Track>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="Orientation" Value="Horizontal">
+                            <Setter Property="Width" Value="Auto" />
+                            <Setter Property="Height" Value="12" />
+                            <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ ComboBox ============
+         本项目的下拉全是不可编辑的（只选不输），模板按这一种情况写；哪天真要 IsEditable=True
+         得回来补 PART_EditableTextBox，否则那个下拉会变成只读的。 -->
+    <Style TargetType="ComboBoxItem">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Padding" Value="6,3" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ComboBoxItem">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Selection.Background}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Selection.Foreground}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="ComboBox">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Control.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="6,2" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ComboBox">
+                    <Grid>
+                        <ToggleButton x:Name="Toggle" Focusable="False" ClickMode="Press"
+                                      IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                            <ToggleButton.Template>
+                                <ControlTemplate TargetType="ToggleButton">
+                                    <Border x:Name="Bd" CornerRadius="2"
+                                            Background="{DynamicResource Theme.Control.Background}"
+                                            BorderBrush="{DynamicResource Theme.Control.Border}" BorderThickness="1">
+                                        <Path x:Name="Arrow" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                              Margin="0,0,7,0" Data="M 0,0 L 8,0 L 4,5 Z"
+                                              Fill="{DynamicResource Theme.Foreground.Muted}" />
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Control.Background.Hover}" />
+                                            <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Theme.Control.Border.Hover}" />
+                                        </Trigger>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Control.Background.Disabled}" />
+                                            <Setter TargetName="Arrow" Property="Fill" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </ToggleButton.Template>
+                        </ToggleButton>
+                        <!-- 这四个 TemplateBinding 一个都不能少：SelectionBoxItem 只是选中的**数据对象**，
+                             真正决定它怎么显示的是后面三个。少了 ContentTemplateSelector 那一条，
+                             用 DisplayMemberPath 的下拉（Fetcher 的"数据源"）会退化成显示对象的
+                             ToString()——实测显示成了"NamedBarSource { … }"而不是"Tencent"。 -->
+                        <ContentPresenter Margin="{TemplateBinding Padding}" IsHitTestVisible="False"
+                                          HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          Content="{TemplateBinding SelectionBoxItem}"
+                                          ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                          ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                          ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}" />
+                        <Popup x:Name="PART_Popup" Placement="Bottom" AllowsTransparency="True" Focusable="False"
+                               IsOpen="{TemplateBinding IsDropDownOpen}" PopupAnimation="Slide">
+                            <Border Background="{DynamicResource Theme.Control.Background}"
+                                    BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1"
+                                    MinWidth="{TemplateBinding ActualWidth}"
+                                    MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                <ScrollViewer>
+                                    <ItemsPresenter />
+                                </ScrollViewer>
+                            </Border>
+                        </Popup>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ TabControl / TabItem ============ -->
+    <Style TargetType="TabControl">
+        <Setter Property="Background" Value="{DynamicResource Theme.Window.Background}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TabControl">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <!-- 页签多到一行放不下时原生是可以换行的（IsItemsHost 的 TabPanel 自带换行），保持 -->
+                        <TabPanel Grid.Row="0" IsItemsHost="True" Panel.ZIndex="1" Margin="0,0,0,-1"
+                                  Background="Transparent" />
+                        <Border Grid.Row="1" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}">
+                            <!-- 名字必须是 PART_SelectedContentHost：TabControl 的 AutomationPeer 靠它
+                                 找当前页的内容，漏了的话整个页签里的控件都不会出现在 UI 自动化树里
+                                 （辅助工具/自动化脚本会看到一个空窗口。实测漏名时窗口里只剩 2 个按钮可见）。 -->
+                            <ContentPresenter x:Name="PART_SelectedContentHost"
+                                              ContentSource="SelectedContent" Margin="{TemplateBinding Padding}" />
+                        </Border>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="TabItem">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Muted}" />
+        <Setter Property="Padding" Value="10,4" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TabItem">
+                    <Border x:Name="Bd" Margin="0,0,2,0" CornerRadius="3,3,0,0"
+                            Background="{DynamicResource Theme.Panel.Background}"
+                            BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1,1,1,0">
+                        <ContentPresenter ContentSource="Header" Margin="{TemplateBinding Padding}"
+                                          HorizontalAlignment="Center" VerticalAlignment="Center"
+                                          RecognizesAccessKey="True" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsSelected" Value="True">
+                            <!-- 选中页签跟内容区连成一片：底色相同 -->
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Window.Background}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+                            <Setter Property="FontWeight" Value="SemiBold" />
+                            <Setter Property="Panel.ZIndex" Value="2" />
+                        </Trigger>
+                        <MultiTrigger>
+                            <MultiTrigger.Conditions>
+                                <Condition Property="IsSelected" Value="False" />
+                                <Condition Property="IsMouseOver" Value="True" />
+                            </MultiTrigger.Conditions>
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Control.Background.Hover}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+                        </MultiTrigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ GroupBox ============ -->
+    <Style TargetType="GroupBox">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border}" />
+        <Setter Property="Padding" Value="6" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="GroupBox">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <ContentPresenter Grid.Row="0" ContentSource="Header" Margin="6,0,0,3"
+                                          TextBlock.Foreground="{DynamicResource Theme.Foreground}"
+                                          TextBlock.FontWeight="SemiBold" />
+                        <Border Grid.Row="1" CornerRadius="3"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
+                            <ContentPresenter Margin="{TemplateBinding Padding}" />
+                        </Border>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ DataGrid ============
+         各窗口的 DataGrid 上直接写了 RowBackground/AlternatingRowBackground 等属性（本地值优先级
+         高于样式 Setter），那些已经换成 DynamicResource 了；这里的 Setter 是给没写的兜底。 -->
+    <Style TargetType="DataGrid">
+        <Setter Property="Background" Value="{DynamicResource Theme.Grid.Row.Background}" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border}" />
+        <Setter Property="RowBackground" Value="{DynamicResource Theme.Grid.Row.Background}" />
+        <Setter Property="AlternatingRowBackground" Value="{DynamicResource Theme.Grid.Row.Alternate}" />
+        <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource Theme.Grid.Line}" />
+        <Setter Property="VerticalGridLinesBrush" Value="{DynamicResource Theme.Grid.Line}" />
+    </Style>
+
+    <!-- 列头和单元格的样式在 Controls.Common.xaml（两个主题共用）——列级 HeaderStyle/CellStyle
+         要用 BasedOn 继承它们，而 BasedOn 只认加载时就存在、之后不被替换的那份字典。 -->
+
+    <Style TargetType="DataGridRowHeader">
+        <Setter Property="Background" Value="{DynamicResource Theme.Grid.Header.Background}" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Grid.Header.Foreground}" />
+        <Setter Property="Width" Value="0" />
+    </Style>
+
+    <Style TargetType="DataGridRow">
+        <Setter Property="Background" Value="{DynamicResource Theme.Grid.Row.Background}" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+    </Style>
+
+    <!-- ============ 菜单 / 提示 / 分隔 ============ -->
+    <!-- ⚠ 这里必须连 Template 一起换（2026-09-01 修）——只设 Background 是没用的：Aero2 的
+         ContextMenu 默认模板把底色和左边那条图标栏写成了 StaticResource 硬编码，不走
+         TemplateBinding，所以深色主题下弹出来仍是浅底 + 一条白色图标栏，配上浅色前景就成了
+         "浅底浅字看不清"。换成自己的模板后底色和边框才真正生效，顺带去掉用不上的图标栏。 -->
+    <Style TargetType="ContextMenu">
+        <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ContextMenu">
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            Padding="2" SnapsToDevicePixels="True">
+                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle" />
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="MenuItem">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="MenuItem">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" Padding="10,4">
+                        <ContentPresenter ContentSource="Header" RecognizesAccessKey="True" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Selection.Background}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Selection.Foreground}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 悬停提示——这个程序的 ToolTip 很多是整段说明文字，浅底黑字在深色界面里跳得厉害 -->
+    <Style TargetType="ToolTip">
+        <Setter Property="Background" Value="{DynamicResource Theme.Panel.Background}" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToolTip">
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1"
+                            CornerRadius="3" Padding="8,5">
+                        <ContentPresenter />
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="Separator">
+        <Setter Property="Background" Value="{DynamicResource Theme.Border}" />
+    </Style>
+
+    <Style TargetType="GridSplitter">
+        <Setter Property="Background" Value="{DynamicResource Theme.Border}" />
+    </Style>
+
+    <Style TargetType="ProgressBar">
+        <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Control.Border}" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Accent}" />
+    </Style>
+
+    <Style TargetType="ListBox">
+        <Setter Property="Background" Value="{DynamicResource Theme.Control.Background}" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border}" />
+    </Style>
+
+    <Style TargetType="ListBoxItem">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+        <Setter Property="Padding" Value="4,2" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ListBoxItem">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Selection.Background}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Theme.Selection.Foreground}" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Control.Background.Hover}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+</ResourceDictionary>

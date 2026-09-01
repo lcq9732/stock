@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -175,7 +175,7 @@ public static class ChartBuilder
         HideAxisVisually(mainDayAxis);
         HideAxisVisually(mainMonthAxis);
 
-        var main = new PlotModel { PlotMargins = new OxyThickness(FixedLeftMargin, double.NaN, FixedRightMargin, double.NaN) };
+        var main = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(FixedLeftMargin, double.NaN, FixedRightMargin, double.NaN) });
         main.Axes.Add(mainDayAxis);
         main.Axes.Add(mainMonthAxis);
         var mainYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
@@ -236,7 +236,7 @@ public static class ChartBuilder
         // 不靠坐标轴刻度；IsAxisVisible=false 只关渲染，不影响 IsPanEnabled/IsZoomEnabled。
         HideAxisVisually(macdDayAxis);
         HideAxisVisually(macdMonthAxis);
-        var macd = new PlotModel { PlotMargins = new OxyThickness(FixedLeftMargin, double.NaN, FixedRightMargin, double.NaN) };
+        var macd = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(FixedLeftMargin, double.NaN, FixedRightMargin, double.NaN) });
         macd.Axes.Add(macdDayAxis);
         macd.Axes.Add(macdMonthAxis);
         var macdYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };

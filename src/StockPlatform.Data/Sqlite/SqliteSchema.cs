@@ -292,6 +292,11 @@ public static class SqliteSchema
         // SinaShareholderProvider.ParseD）；修复时把这个方向本身也存下来——机构调仓方向是有用信息。
         // 老库的历史行这一列为 NULL，等用户重新"拉取股东数据"时按 code 覆盖写入。
         AddColumnIfMissing(conn, "TopShareholder", "change_direction", "TEXT");
+        // 2026-08-29：监管指标区分来源——pdf / ocr / ocr_confirmed / manual，取值和含义见
+        // Logic.Models.MetricSources。有它才能保证**重解析不会覆盖掉人拍板过的数据**
+        // （见 SqliteBankRegulatoryRepository.Upsert 的 ON CONFLICT … WHERE），
+        // 也才能把"这个数是 OCR 认的、还没核对"如实告诉看的人。老行为 NULL，按 'pdf' 处理。
+        AddColumnIfMissing(conn, "BankRegulatoryMetric", "source", "TEXT");
     }
 
     /// <summary>

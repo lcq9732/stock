@@ -1,8 +1,9 @@
-using System.Text;
+﻿using System.Text;
 using System.Windows;
 using System.Windows.Media;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Abstractions;
+using StockPlatform.Desktop.Shared.Theme;
 
 namespace StockPlatform.Analyzer;
 
@@ -14,7 +15,7 @@ public class AnalysisLineVm
     public string Value { get; init; } = "";
     public string Change { get; init; } = "";
     public string Note { get; init; } = "";
-    public Brush Brush { get; init; } = Brushes.Black;
+    public Brush Brush { get; init; } = ThemeBrushes.Foreground;
     public FontWeight Weight { get; init; } = FontWeights.Normal;
 
     /// <summary>参考值/正常范围（2026-08-29，银行体检表用）——像体检报告那样"一列值、一列正常范围"。</summary>
@@ -71,7 +72,8 @@ public partial class FinancialAnalysisWindow : Window
         {
             HeaderText.Text = $"{report.Code} {report.Name}".TrimEnd();
             HeadlineText.Text = report.Error;
-            HeadlineBorder.Background = new SolidColorBrush(Color.FromRgb(0xFD, 0xF2, 0xF2));
+            // SetResourceReference 等于代码里的 DynamicResource：换主题时这块底色会自己跟着变
+            HeadlineBorder.SetResourceReference(BackgroundProperty, "Theme.Danger.Background");
             FooterText.Text = "";
             // 出错时只是一句提示，不最大化——一屏小窗口就够，最大化反而突兀
             TextFitter.SizeToScreen(this, 0.5);
@@ -98,15 +100,21 @@ public partial class FinancialAnalysisWindow : Window
             _ => null,
         };
         if (kindTag != null)
-            HeaderText.Inlines.Add(new System.Windows.Documents.Run(kindTag)
-                { FontSize = 13, Foreground = new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x88)) });
+        {
+            var kindRun = new System.Windows.Documents.Run(kindTag) { FontSize = 13 };
+            kindRun.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Theme.Foreground.Muted");
+            HeaderText.Inlines.Add(kindRun);
+        }
         if (report.Headline.Length > 0)
-            HeaderText.Inlines.Add(new System.Windows.Documents.Run($"　·　{report.Headline}")
+        {
+            var headlineRun = new System.Windows.Documents.Run($"　·　{report.Headline}")
             {
                 FontSize = 13,
                 FontWeight = FontWeights.Normal,
-                Foreground = new SolidColorBrush(Color.FromRgb(0x8B, 0x45, 0x13)),
-            });
+            };
+            headlineRun.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Theme.Accent.Warm");
+            HeaderText.Inlines.Add(headlineRun);
+        }
 
         SectionList.ItemsSource = report.Sections.Select(ToVm).ToList();
 
@@ -181,11 +189,12 @@ public partial class FinancialAnalysisWindow : Window
     /// 会引起歧义，所以这里的红取深一点的暗红，跟行情涨跌的亮红区分开）。</summary>
     private static Brush BrushOf(Verdict v) => v switch
     {
-        Verdict.Good => new SolidColorBrush(Color.FromRgb(0x1E, 0x7A, 0x33)),
-        Verdict.Warn => new SolidColorBrush(Color.FromRgb(0xB8, 0x6E, 0x00)),
-        Verdict.Bad => new SolidColorBrush(Color.FromRgb(0xB0, 0x20, 0x20)),
-        Verdict.Missing => new SolidColorBrush(Color.FromRgb(0x99, 0x99, 0x99)),
-        _ => new SolidColorBrush(Color.FromRgb(0x22, 0x22, 0x22)),
+        Verdict.Good => ThemeBrushes.Ok,
+        Verdict.Warn => ThemeBrushes.Warn,
+        Verdict.Bad => ThemeBrushes.Danger,
+        Verdict.Missing => ThemeBrushes.Gray,
+        // 无判定的普通行用正文色——深色主题下这里原来写死的近黑色会整行看不见
+        _ => ThemeBrushes.Foreground,
     };
 
     /// <summary>整份分析导成纯文本——方便贴进【分析笔记】。</summary>

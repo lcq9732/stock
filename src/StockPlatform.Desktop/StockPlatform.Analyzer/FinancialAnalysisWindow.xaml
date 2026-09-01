@@ -1,9 +1,11 @@
-<Window x:Class="StockPlatform.Analyzer.FinancialAnalysisWindow"
+﻿<Window x:Class="StockPlatform.Analyzer.FinancialAnalysisWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:oxy="http://oxyplot.org/wpf"
         Title="财务分析" MinHeight="500" MinWidth="900"
-        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei">
+        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei"
+        Background="{DynamicResource Theme.Window.Background}"
+        Foreground="{DynamicResource Theme.Foreground}">
     <!-- 财务分析（2026-08-27 新增）——把 52 个财务科目翻译成人能一眼看懂的判断。
          不是再列一张比率表：每行都带"这意味着什么"，每节末尾给结论，最后汇总异常项。
          计算全在 FinancialAnalyzer 里（纯计算、不联网），这里只负责画。
@@ -27,15 +29,15 @@
                 "标题给结论 → 先知道有哪几项要留意 → 再往下看详细时就会盯着这几项"，
                 放在底部等于看完全部细节才告诉你重点在哪，顺序是反的。 -->
         <StackPanel Grid.Row="1">
-            <Border x:Name="HeadlineBorder" Background="#FFF8E7" BorderBrush="#E8D8A8"
+            <Border x:Name="HeadlineBorder" Background="{DynamicResource Theme.Warn.Background}" BorderBrush="{DynamicResource Theme.Warn.Border.Deep}"
                     BorderThickness="1" Padding="10,7" Margin="0,0,0,8" Visibility="Collapsed">
                 <TextBlock x:Name="HeadlineText" TextWrapping="Wrap" FontSize="14" />
             </Border>
 
-            <Border x:Name="AlertBorder" Background="#FDF2F2" BorderBrush="#F0C8C8"
+            <Border x:Name="AlertBorder" Background="{DynamicResource Theme.Danger.Background}" BorderBrush="{DynamicResource Theme.Danger.Border}"
                     BorderThickness="1" Padding="10,6" Margin="0,0,0,8" Visibility="Collapsed">
                 <StackPanel>
-                    <TextBlock x:Name="AlertTitle" FontWeight="Bold" Foreground="#B02020" Margin="0,0,0,3" />
+                    <TextBlock x:Name="AlertTitle" FontWeight="Bold" Foreground="{DynamicResource Theme.Danger.Foreground}" Margin="0,0,0,3" />
                     <!-- 异常项多时限高滚动，别把下面的详细区挤没了 -->
                     <ScrollViewer MaxHeight="128" VerticalScrollBarVisibility="Auto">
                         <ItemsControl x:Name="AlertList">
@@ -65,8 +67,8 @@
                         <DataTemplate>
                             <StackPanel Margin="0,0,0,14">
                                 <TextBlock Text="{Binding Title}" FontSize="14" FontWeight="Bold"
-                                           Foreground="#1F4E79" Margin="0,0,0,4" />
-                                <Border BorderBrush="#E0E0E0" BorderThickness="0,1,0,0">
+                                           Foreground="{DynamicResource Theme.Accent.Deep}" Margin="0,0,0,4" />
+                                <Border BorderBrush="{DynamicResource Theme.Border.Soft}" BorderThickness="0,1,0,0">
                                     <ItemsControl ItemsSource="{Binding Lines}">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
@@ -86,7 +88,7 @@
                                                     <TextBlock Grid.Column="0" Text="{Binding Clause}"
                                                                Visibility="{Binding ClauseVisibility}"
                                                                FontFamily="Consolas" FontSize="11"
-                                                               Foreground="#9AA5B1" Margin="0,1,6,0" />
+                                                               Foreground="{DynamicResource Theme.Foreground.Disabled}" Margin="0,1,6,0" />
                                                     <TextBlock Grid.Column="1" Text="{Binding Mark}"
                                                                Foreground="{Binding Brush}" FontWeight="Bold"
                                                                FontFamily="Segoe UI Symbol" />
@@ -99,23 +101,23 @@
                                                                FontWeight="{Binding Weight}" />
                                                     <TextBlock Grid.Column="4" Text="{Binding Change}"
                                                                FontFamily="Consolas" FontSize="12"
-                                                               Foreground="#555555" Margin="0,0,10,0" />
+                                                               Foreground="{DynamicResource Theme.Foreground.Subtle}" Margin="0,0,10,0" />
                                                     <!-- 参考值：体检报告里的"正常范围"那一列 -->
                                                     <TextBlock Grid.Column="5" Text="{Binding Reference}"
                                                                Visibility="{Binding ReferenceVisibility}"
                                                                MaxWidth="230" TextWrapping="Wrap"
-                                                               FontSize="11.5" Foreground="#3A6EA5"
+                                                               FontSize="11.5" Foreground="{DynamicResource Theme.Accent.Link}"
                                                                Margin="0,0,12,0" />
                                                     <TextBlock Grid.Column="6" Text="{Binding Note}"
                                                                TextWrapping="Wrap" FontSize="12"
-                                                               Foreground="#666666" />
+                                                               Foreground="{DynamicResource Theme.Foreground.Subtle}" />
                                                 </Grid>
                                             </DataTemplate>
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>
                                 </Border>
                                 <!-- 本节结论：整节看下来该得出什么，不让用户自己拼 -->
-                                <Border Background="#F2F7FB" BorderBrush="#D6E4F0" BorderThickness="1"
+                                <Border Background="{DynamicResource Theme.Info.Background}" BorderBrush="{DynamicResource Theme.Info.Border}" BorderThickness="1"
                                         Padding="8,5" Margin="0,6,0,0"
                                         Visibility="{Binding ConclusionVisibility}">
                                     <TextBlock Text="{Binding Conclusion}" TextWrapping="Wrap" FontSize="12.5" />
@@ -135,17 +137,17 @@
             <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto">
                 <StackPanel>
                     <TextBlock Text="趋势（同期比较，最多8期）" FontSize="13" FontWeight="Bold"
-                               Foreground="#1F4E79" Margin="0,0,0,4" />
-                    <TextBlock x:Name="TrendHintText" FontSize="11" Foreground="#888888"
+                               Foreground="{DynamicResource Theme.Accent.Deep}" Margin="0,0,0,4" />
+                    <TextBlock x:Name="TrendHintText" FontSize="11" Foreground="{DynamicResource Theme.Foreground.Muted}"
                                TextWrapping="Wrap" Margin="0,0,0,6" />
-                    <ItemsControl x:Name="TrendList" BorderBrush="#E8E8E8" BorderThickness="0,0,0,1">
+                    <ItemsControl x:Name="TrendList" BorderBrush="{DynamicResource Theme.Border.Soft}" BorderThickness="0,0,0,1">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <!-- 共用横坐标：只有最后一张图有报告期标签，所以它高一点。
                                      图与图之间不留间隙（Margin 0），看起来像一张连续的图。 -->
-                                <Border BorderBrush="#E8E8E8" BorderThickness="1,1,1,0"
+                                <Border BorderBrush="{DynamicResource Theme.Border.Soft}" BorderThickness="1,1,1,0"
                                         Height="{Binding Height}">
-                                    <oxy:PlotView Model="{Binding Model}" Background="White" />
+                                    <oxy:PlotView Model="{Binding Model}" Background="{DynamicResource Theme.Chart.Background}" />
                                 </Border>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
@@ -158,7 +160,7 @@
         <Grid Grid.Row="3" Margin="0,8,0,0">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <TextBlock x:Name="FooterText" VerticalAlignment="Center" FontSize="11"
-                           Foreground="#888888" Margin="0,0,16,0" />
+                           Foreground="{DynamicResource Theme.Foreground.Muted}" Margin="0,0,16,0" />
                 <Button Content="复制全文" Width="90" Click="CopyAll_Click"
                         ToolTip="把整份分析复制成纯文本，可以贴到分析笔记里" />
                 <Button Content="关闭" Width="90" Margin="8,0,0,0" IsCancel="True" Click="Close_Click" />

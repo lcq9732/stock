@@ -38,10 +38,22 @@ public class SqliteBankRegulatoryRepository
         using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
+        // ⚠ 不能用 INSERT OR REPLACE——那会把**人拍过板的数据**一起冲掉。
+        // 解析规则每改进一次就会重跑一遍全部本地 PDF，而人工补的正是解析不出来的那些，
+        // 冲掉就等于白填。这里用 ON CONFLICT DO UPDATE + WHERE，只覆盖机器自己产的行
+        // （source 是 pdf 或 ocr），manual / ocr_confirmed 一律不动，见 MetricSources。
+        // source 跟着每一行走（'pdf' 或 'ocr'）：OCR 出来的值要能被认出来，才好让人核对。
         cmd.CommandText = """
-            INSERT OR REPLACE INTO BankRegulatoryMetric
-                (code, report_date, metric_key, basis, value, standard_value, source_page, fetched_at)
-            VALUES ($code, $date, $key, $basis, $val, $std, $page, $fetched);
+            INSERT INTO BankRegulatoryMetric
+                (code, report_date, metric_key, basis, value, standard_value, source_page, fetched_at, source)
+            VALUES ($code, $date, $key, $basis, $val, $std, $page, $fetched, $source)
+            ON CONFLICT(code, report_date, metric_key, basis) DO UPDATE SET
+                value = excluded.value,
+                standard_value = excluded.standard_value,
+                source_page = excluded.source_page,
+                fetched_at = excluded.fetched_at,
+                source = excluded.source
+            WHERE IFNULL(BankRegulatoryMetric.source, 'pdf') NOT IN ('manual', 'ocr_confirmed');
             """;
         var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
         var pDate = cmd.CreateParameter(); pDate.ParameterName = "$date"; cmd.Parameters.Add(pDate);
@@ -51,10 +63,12 @@ public class SqliteBankRegulatoryRepository
         var pStd = cmd.CreateParameter(); pStd.ParameterName = "$std"; cmd.Parameters.Add(pStd);
         var pPage = cmd.CreateParameter(); pPage.ParameterName = "$page"; cmd.Parameters.Add(pPage);
         var pFetched = cmd.CreateParameter(); pFetched.ParameterName = "$fetched"; cmd.Parameters.Add(pFetched);
+        var pSource = cmd.CreateParameter(); pSource.ParameterName = "$source"; cmd.Parameters.Add(pSource);
 
         var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         foreach (var r in rows)
         {
+            pSource.Value = string.IsNullOrEmpty(r.Source) ? MetricSources.Pdf : r.Source;
             pCode.Value = r.Code;
             pDate.Value = r.ReportDate.ToString("yyyy-MM-dd");
             pKey.Value = r.MetricKey;
@@ -66,6 +80,69 @@ public class SqliteBankRegulatoryRepository
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
+    }
+
+    /// <summary>
+    /// 写入**人工回填**的指标（来源标 'manual'）。跟 <see cref="Upsert"/> 的区别有两点：
+    /// 它无条件覆盖（人工填的就是最新的判断），而且之后的自动重解析不会再动这些行。
+    /// </summary>
+    public void UpsertManual(IEnumerable<BankRegulatoryMetric> rows)
+    {
+        using var conn = Open();
+        SqliteSchema.EnsureSchema(conn);
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO BankRegulatoryMetric
+                (code, report_date, metric_key, basis, value, standard_value, source_page, fetched_at, source)
+            VALUES ($code, $date, $key, $basis, $val, NULL, 0, $fetched, 'manual');
+            """;
+        var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        foreach (var r in rows)
+        {
+            cmd.Parameters.Clear();
+            cmd.Parameters.AddWithValue("$code", r.Code);
+            cmd.Parameters.AddWithValue("$date", r.ReportDate.ToString("yyyy-MM-dd"));
+            cmd.Parameters.AddWithValue("$key", r.MetricKey);
+            cmd.Parameters.AddWithValue("$basis", r.Basis ?? "");
+            cmd.Parameters.AddWithValue("$val", r.Value);
+            cmd.Parameters.AddWithValue("$fetched", now);
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// 把 OCR 出来的值标成**人已核对通过**（source: ocr → ocr_confirmed），2026-08-30 新增。
+    ///
+    /// 触发点是回填清单里"OCR 值那一列有数、但用户没在最后一列填东西"——按约定这就表示
+    /// "我看过了，OCR 认得对"。标完之后这一项不再列进清单（不用每次都重看），重解析也不再
+    /// 覆盖它（人的判断优先）。只动 source 还是 'ocr' 的行：已经是 manual 的不碰。
+    /// </summary>
+    public int MarkOcrConfirmed(IEnumerable<(string Code, DateTime ReportDate, string MetricKey)> rows)
+    {
+        using var conn = Open();
+        SqliteSchema.EnsureSchema(conn);
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            UPDATE BankRegulatoryMetric SET source = 'ocr_confirmed'
+            WHERE code = $code AND report_date = $date AND metric_key = $key
+              AND IFNULL(source, 'pdf') = 'ocr';
+            """;
+        int n = 0;
+        foreach (var r in rows)
+        {
+            cmd.Parameters.Clear();
+            cmd.Parameters.AddWithValue("$code", r.Code);
+            cmd.Parameters.AddWithValue("$date", r.ReportDate.ToString("yyyy-MM-dd"));
+            cmd.Parameters.AddWithValue("$key", r.MetricKey);
+            n += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return n;
     }
 
     /// <summary>记录一份财报的解析状态。**失败也要记**——否则界面上分不清"没抓"和"抓失败"。</summary>
@@ -109,7 +186,8 @@ public class SqliteBankRegulatoryRepository
         SqliteSchema.EnsureSchema(conn);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT report_date, metric_key, basis, value, standard_value, source_page
+            SELECT report_date, metric_key, basis, value, standard_value, source_page,
+                   IFNULL(source, 'pdf')
             FROM BankRegulatoryMetric WHERE code = $code ORDER BY report_date DESC;
             """;
         cmd.Parameters.AddWithValue("$code", code);
@@ -127,6 +205,7 @@ public class SqliteBankRegulatoryRepository
                 Value = r.IsDBNull(3) ? 0 : r.GetDouble(3),
                 StandardValue = r.IsDBNull(4) ? null : r.GetString(4),
                 SourcePage = r.IsDBNull(5) ? 0 : r.GetInt32(5),
+                Source = r.IsDBNull(6) ? MetricSources.Pdf : r.GetString(6),
             });
         }
         return list;

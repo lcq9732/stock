@@ -20,6 +20,13 @@ public partial class App : Application
             return;
         }
 
+        // 界面主题（2026-08-29 新增）——必须在任何窗口创建之前应用，否则窗口先按默认浅色画一遍
+        // 再跳成深色，启动时会闪一下白。见 ThemeManager 类注释。
+        Desktop.Shared.Theme.ThemeManager.Initialize();
+        // 图表不是 WPF 画刷、跟不了 DynamicResource，单独挂一个钩子随主题改 OxyPlot 的颜色，
+        // 见 ChartTheme 类注释。
+        ChartTheme.Install();
+
         var paths = new AnalyzerPaths();
         var barRepository = new SqliteBarRepository(paths.CurrentDb);
         barRepository.EnsureSchema();

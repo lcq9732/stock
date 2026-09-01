@@ -1,0 +1,85 @@
+<!--
+    浅色主题的调色板（默认）。这里**只定义画刷、不定义控件模板**——浅色下控件保持 WPF 原生
+    Aero2 外观，跟做主题之前一模一样，所以切回浅色不会有任何视觉回归。
+    深色则额外合并 Controls.Dark.xaml（原生模板的渐变/悬停色写死是浅色的，必须换模板）。
+
+    键名一律 Theme.* ，窗口 XAML 里全部用 DynamicResource 引用——ThemeManager 换字典时
+    DynamicResource 会自动重刷，StaticResource 不会。
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ① 底层结构色 -->
+    <SolidColorBrush x:Key="Theme.Window.Background" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="Theme.Panel.Background" Color="#F5F5F5" />
+    <SolidColorBrush x:Key="Theme.Panel.Background.Soft" Color="#FAFAFA" />
+    <SolidColorBrush x:Key="Theme.Panel.Background.Alt" Color="#FCFCFC" />
+    <SolidColorBrush x:Key="Theme.Border" Color="#DDDDDD" />
+    <SolidColorBrush x:Key="Theme.Border.Soft" Color="#E8E8E8" />
+
+    <!-- ② 文字 -->
+    <SolidColorBrush x:Key="Theme.Foreground" Color="#000000" />
+    <SolidColorBrush x:Key="Theme.Foreground.Muted" Color="#808080" />
+    <SolidColorBrush x:Key="Theme.Foreground.Subtle" Color="#666666" />
+    <SolidColorBrush x:Key="Theme.Foreground.Disabled" Color="#9AA5B1" />
+
+    <!-- ③ 控件（输入框/按钮/下拉） -->
+    <SolidColorBrush x:Key="Theme.Control.Background" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="Theme.Control.Background.Hover" Color="#EAEAEA" />
+    <SolidColorBrush x:Key="Theme.Control.Background.Pressed" Color="#DCDCDC" />
+    <SolidColorBrush x:Key="Theme.Control.Background.Disabled" Color="#F0F0F0" />
+    <SolidColorBrush x:Key="Theme.Control.Border" Color="#ACACAC" />
+    <SolidColorBrush x:Key="Theme.Control.Border.Hover" Color="#7EB4EA" />
+
+    <!-- ④ 表格 -->
+    <SolidColorBrush x:Key="Theme.Grid.Row.Background" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="Theme.Grid.Row.Alternate" Color="#F5F5F5" />
+    <SolidColorBrush x:Key="Theme.Grid.Header.Background" Color="#F0F0F0" />
+    <SolidColorBrush x:Key="Theme.Grid.Header.Foreground" Color="#000000" />
+    <SolidColorBrush x:Key="Theme.Grid.Line" Color="#DDDDDD" />
+    <!-- 选中行：故意用浅蓝底+黑字而不是系统深蓝底+白字，否则各列自定义的红/绿/橙文字会被压得看不清 -->
+    <SolidColorBrush x:Key="Theme.Selection.Background" Color="#D9E8FB" />
+    <SolidColorBrush x:Key="Theme.Selection.Foreground" Color="#000000" />
+
+    <!-- ⑤ 语义色 -->
+    <SolidColorBrush x:Key="Theme.Accent" Color="#084298" />
+    <SolidColorBrush x:Key="Theme.Accent.Soft" Color="#1F6FB2" />
+    <SolidColorBrush x:Key="Theme.Accent.Deep" Color="#1F4E79" />
+    <SolidColorBrush x:Key="Theme.Accent.Link" Color="#3A6EA5" />
+    <SolidColorBrush x:Key="Theme.Accent.Warm" Color="#8B4513" />
+    <SolidColorBrush x:Key="Theme.Accent.Teal" Color="#0F6674" />
+
+    <SolidColorBrush x:Key="Theme.Warn.Foreground" Color="#B36B00" />
+    <SolidColorBrush x:Key="Theme.Warn.Foreground.Deep" Color="#6B4E00" />
+    <SolidColorBrush x:Key="Theme.Warn.Background" Color="#FFF8E7" />
+    <SolidColorBrush x:Key="Theme.Warn.Background.Alt" Color="#FFF8E1" />
+    <SolidColorBrush x:Key="Theme.Warn.Border" Color="#FFE0A3" />
+    <SolidColorBrush x:Key="Theme.Warn.Border.Deep" Color="#E8D8A8" />
+
+    <SolidColorBrush x:Key="Theme.Danger.Foreground" Color="#B02020" />
+    <SolidColorBrush x:Key="Theme.Danger.Background" Color="#FDF2F2" />
+    <SolidColorBrush x:Key="Theme.Danger.Border" Color="#F0C8C8" />
+
+    <SolidColorBrush x:Key="Theme.Info.Background" Color="#F2F7FB" />
+    <SolidColorBrush x:Key="Theme.Info.Border" Color="#D6E4F0" />
+
+    <SolidColorBrush x:Key="Theme.Ok.Foreground" Color="#1D9E75" />
+
+    <!-- 图表（OxyPlot 的 PlotView）——画布底色，C# 侧的 ChartTheme 也读同一套值 -->
+    <SolidColorBrush x:Key="Theme.Chart.Background" Color="#FFFFFF" />
+
+    <!-- ⑥ 涨跌（A股口径：红涨绿跌）与图例小方块 -->
+    <SolidColorBrush x:Key="Theme.Up" Color="#FF0000" />
+    <SolidColorBrush x:Key="Theme.Down" Color="#008000" />
+    <SolidColorBrush x:Key="Theme.Legend.Orange" Color="#FFA500" />
+    <SolidColorBrush x:Key="Theme.Legend.Blue" Color="#0000FF" />
+    <SolidColorBrush x:Key="Theme.Legend.Purple" Color="#800080" />
+
+    <!-- ⑦ 行情条（QuoteDetailWindow 的黑底报价栏——它本来就是深色的，两个主题下都保持深色） -->
+    <SolidColorBrush x:Key="Theme.Ticker.Background" Color="#1A1A1A" />
+    <SolidColorBrush x:Key="Theme.Ticker.Border" Color="#333333" />
+    <SolidColorBrush x:Key="Theme.Ticker.Foreground" Color="#DDDDDD" />
+    <SolidColorBrush x:Key="Theme.Ticker.Foreground.Bright" Color="#EEEEEE" />
+    <SolidColorBrush x:Key="Theme.Ticker.Foreground.Muted" Color="#888888" />
+
+</ResourceDictionary>

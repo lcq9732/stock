@@ -1,0 +1,16 @@
+<!-- 主题选择器——Fetcher 和 Analyzer 两个程序共用这一个控件（csproj 里 Link 进去），
+     所以两边的入口长得一样、行为也一样。选择存在 data/ui-theme.json，见 ThemeManager。 -->
+<UserControl x:Class="StockPlatform.Desktop.Shared.Theme.ThemeSwitcher"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <TextBlock Text="主题：" VerticalAlignment="Center" />
+        <ComboBox x:Name="ModeCombo" Width="92" Margin="4,0,0,0" VerticalAlignment="Center"
+                  SelectionChanged="ModeCombo_SelectionChanged"
+                  ToolTip="界面配色。切换立即生效、不用重启，选择会记住（存在 data/ui-theme.json，两个程序共用同一份，所以在这里改，另一个程序下次启动也是这个主题）。&#10;&#10;跟随系统 = 跟着 Windows 的“设置 → 个性化 → 颜色 → 默认应用模式”走，系统切换时程序会自动跟着变。&#10;&#10;行情详情（K线）窗口不受影响——那是通达信风格的黑底看盘窗，本来就是深色。">
+            <ComboBoxItem Content="浅色" Tag="Light" />
+            <ComboBoxItem Content="深色" Tag="Dark" />
+            <ComboBoxItem Content="跟随系统" Tag="System" />
+        </ComboBox>
+    </StackPanel>
+</UserControl>

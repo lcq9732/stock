@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -153,7 +153,7 @@ public static class CorePositionChartBuilder
         }
     }
 
-    private static PlotModel NewModel(string title) => new()
+    private static PlotModel NewModel(string title) => ChartTheme.Track(new()
     {
         Title = title,
         TitleFontSize = 14,
@@ -162,7 +162,7 @@ public static class CorePositionChartBuilder
         PlotAreaBorderColor = OxyColor.FromRgb(0xDD, 0xDD, 0xDD),
         DefaultFontSize = 12,
         IsLegendVisible = false,
-    };
+    });
 
     /// <summary>年份轴。用 <see cref="LinearAxis"/> 而不是 CategoryAxis——柱子画的是
     /// <see cref="LinearBarSeries"/>（数值X），两者必须配数值轴。年数多时放稀刻度，

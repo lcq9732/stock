@@ -36,10 +36,11 @@ public class TencentThenSinaBarFetcher : IBarDataFetcher
         {
             throw; // 用户点了"停止"，不是腾讯本身失败，不应该触发新浪回退
         }
-        catch (Exception) when (granularity == Granularity.DayHfq)
+        catch (Exception) when (granularity is Granularity.DayHfq or Granularity.DayRaw)
         {
-            // 后复权没有备胎：新浪只有前复权，回退过去会把前复权数据当成后复权存进库里，
-            // 那比缺数据危险得多（回测会拿错误的收益率算因子）。宁可这只股票这轮失败、下次重试。
+            // 后复权和不复权都没有备胎：新浪只有前复权，回退过去会把前复权数据当成另一套口径存进库里，
+            // 那比缺数据危险得多（回测会拿错误的收益率算因子；不复权更要命——本地复权因子就是拿它算的，
+            // 灌进前复权价会让整条 day_adj 全错）。宁可这只股票这轮失败、下次重试。
             throw;
         }
         catch (Exception ex)

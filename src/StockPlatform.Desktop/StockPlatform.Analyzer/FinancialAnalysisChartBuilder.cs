@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Axes;
 using OxyPlot.Series;
 using StockPlatform.Logic.Models;
@@ -40,7 +40,7 @@ public static class FinancialAnalysisChartBuilder
     /// </summary>
     public static PlotModel Build(TrendSeries series, bool showXLabels = true)
     {
-        var model = new PlotModel
+        var model = ChartTheme.Track(new PlotModel
         {
             Title = series.Unit.Length > 0 ? $"{series.Name}（{series.Unit}）" : series.Name,
             TitleFontSize = 12,
@@ -50,7 +50,7 @@ public static class FinancialAnalysisChartBuilder
             PlotMargins = new OxyThickness(46, 0, 10,
                 showXLabels ? BottomMarginWithLabels : BottomMarginCompact),
             DefaultFont = "Microsoft YaHei",
-        };
+        });
 
         var labels = series.Points.Select(p => p.Period.ToString("yy/MM")).ToList();
         model.Axes.Add(new LinearAxis

@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -114,7 +114,7 @@ public static class MidCapPullbackChartBuilder
         ChartBuilder.HideAxisVisually(dayAxis);
         ChartBuilder.HideAxisVisually(monthAxis);
 
-        var main = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var main = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         main.Axes.Add(dayAxis);
         main.Axes.Add(monthAxis);
         var mainYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
@@ -194,7 +194,7 @@ public static class MidCapPullbackChartBuilder
         ChartBuilder.HideAxisVisually(dayAxis);
         ChartBuilder.HideAxisVisually(monthAxis);
 
-        var model = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var model = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         model.Axes.Add(dayAxis);
         model.Axes.Add(monthAxis);
         var macdYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };

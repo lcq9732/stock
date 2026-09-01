@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -74,7 +74,7 @@ public static class RisingLowsChartBuilder
         // 主图：K线 + MA5/10/20 + 锚点。
         ChartBuilder.HideAxisVisually(mainDay);
         ChartBuilder.HideAxisVisually(mainMonth);
-        var main = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var main = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         main.Axes.Add(mainDay);
         main.Axes.Add(mainMonth);
         var mainYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
@@ -104,7 +104,7 @@ public static class RisingLowsChartBuilder
         // MACD 面板。
         ChartBuilder.HideAxisVisually(macdDay);
         ChartBuilder.HideAxisVisually(macdMonth);
-        var macd = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var macd = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         macd.Axes.Add(macdDay);
         macd.Axes.Add(macdMonth);
         var macdYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
@@ -120,7 +120,7 @@ public static class RisingLowsChartBuilder
         // 成交量面板。
         ChartBuilder.HideAxisVisually(volDay);
         ChartBuilder.HideAxisVisually(volMonth);
-        var volumeModel = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var volumeModel = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         volumeModel.Axes.Add(volDay);
         volumeModel.Axes.Add(volMonth);
         var volumeYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };

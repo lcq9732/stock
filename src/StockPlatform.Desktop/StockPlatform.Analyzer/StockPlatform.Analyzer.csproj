@@ -50,4 +50,37 @@
     <ProjectReference Include="..\StockPlatform.FactorLab\StockPlatform.FactorLab.csproj" />
   </ItemGroup>
 
+  <!-- 界面主题（浅色/深色）——画刷字典 + 控件模板 + ThemeManager 跟 Fetcher 共用同一份源码，
+       用 Link 链接进来（跟上面的单实例守卫同样的做法）。Link 决定编译后的资源路径，所以
+       ThemeManager 里用相对 Uri "Theme/Colors.Dark.xaml" 就能找到。 -->
+  <ItemGroup>
+    <Compile Include="..\Shared\Theme\ThemeManager.cs" Link="Shared\Theme\ThemeManager.cs" />
+    <Compile Include="..\Shared\Theme\ThemeBrushes.cs" Link="Shared\Theme\ThemeBrushes.cs" />
+    <Page Include="..\Shared\Theme\Colors.Light.xaml" Link="Theme\Colors.Light.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="..\Shared\Theme\Colors.Dark.xaml" Link="Theme\Colors.Dark.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="..\Shared\Theme\Controls.Common.xaml" Link="Theme\Controls.Common.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="..\Shared\Theme\Controls.Dark.xaml" Link="Theme\Controls.Dark.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <!-- 主题选择下拉（两个程序共用的 UserControl）——xaml 和它的 code-behind 要成对链接进来 -->
+    <Page Include="..\Shared\Theme\ThemeSwitcher.xaml" Link="Theme\ThemeSwitcher.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Compile Include="..\Shared\Theme\ThemeSwitcher.xaml.cs" Link="Theme\ThemeSwitcher.xaml.cs">
+      <DependentUpon>ThemeSwitcher.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </Compile>
+  </ItemGroup>
+
 </Project>

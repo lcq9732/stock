@@ -594,6 +594,25 @@ otes\{code}.md`，一票一份（`AnalyzerPaths.NotesDir` / `StockNoteStore`）�
 
 验证过程还发现我手算的四个数是错的（营运资金占用 14.98→22.44、收现比 1.02→0.99、覆盖率 0.35→0.33、Q2 单季 6.61→7.17 亿）—— **手抄必错，自动算不会**，这本身就是这个功能的价值。
 
+### 5.9 界面主题：浅色 / 深色 / 跟随系统（2026-08-29 新增）
+
+两个程序（Fetcher 和 Analyzer）共用一套主题，**默认深色**。顶部有【主题】下拉，切换立即生效、不用重启；选择存在 `data/ui-theme.json`，两个 exe 装在同一目录、共用同一个 `data/`，所以在哪个程序里改，另一个下次启动也是这个主题。「跟随系统」读 Windows 的"设置 → 个性化 → 颜色 → 默认应用模式"，系统切换时程序会自动跟着变。
+
+实现放在 `src/StockPlatform.Desktop/Shared/Theme/`，跟单实例守卫一样用 csproj 的 `Compile`/`Page` + `Link` 链接进两个项目（不是各复制一份）：
+
+- `Colors.Light.xaml` / `Colors.Dark.xaml`：只有画刷，键名 `Theme.*` 一一对应。窗口 XAML 里所有颜色都写成 `{DynamicResource Theme.*}`，`ThemeManager` 换字典时 WPF 自动重刷。**必须是 DynamicResource**，StaticResource 加载时就把值定死了。
+- `Controls.Dark.xaml`：深色专属的控件模板。WPF 内置模板把浅色渐变/悬停高亮写死在模板里，只设 Background/Foreground 压不住，所以按钮/输入框/下拉/页签/滚动条等都换了一套极简模板。浅色不加载这份。
+- `Controls.Common.xaml`：两个主题都加载。表格列头/单元格样式必须放这里——窗口里有二十几处列级 `HeaderStyle`（只为给列头挂 ToolTip），列级 Style 一出现 App 级隐式样式就整份失效，只能让它们 `BasedOn` 一个**换主题时不被替换的**样式对象。代价是浅色下列头不再是 Windows 原生渐变，改成纯色版。
+- `ThemeManager` / `ThemeBrushes` / `ThemeSwitcher`：分别是切换入口、代码里用的语义画刷（同一个 SolidColorBrush 实例改 Color，绑定它的文字会自动变色，不用 ViewModel 重发 PropertyChanged）、以及那个下拉控件本身。
+
+图表（OxyPlot）不吃 DynamicResource，单独由 `ChartTheme` 处理：各 ChartBuilder 建 model 时调一下 `ChartTheme.Track(...)`，它订阅 `PlotModel.Updated`——OxyPlot 每次绘制前都会 Update 一遍，那一刻坐标轴和序列都已加齐，正好上色（坐标轴文字、网格、图上直接标的数值、零轴/十字线，并把纯黑这类在深底上看不见的线按亮度提亮）。改之前先把原配色整份快照下来，切回浅色时照着还原，所以浅色下图表跟做主题之前完全一样。
+
+> 这里踩过一个坑，别改回去：最初想用 `EventManager.RegisterClassHandler(typeof(PlotView), FrameworkElement.LoadedEvent, …)` 一处安装全局接管，**一次都不会触发**——WPF 的 Loaded/Unloaded 是 BroadcastEventHelper 广播的，不走类处理器。当时的表现极具迷惑性：图的底色变深了（那是 PlotView 控件自己的 Background 跟着主题走），但画布里的数值标签还是黑的，很容易误判成"配色没调好"而不是"整段代码没跑"。
+
+**窗口标题栏**（连同边框和右上角三个按钮）是非客户区、由 Windows 自己画，WPF 的样式和画刷都够不着，只能用 DWM 的 `DWMWA_USE_IMMERSIVE_DARK_MODE` 属性通知系统（属性号在 Win10 20H1 以后是 20、1809~1903 是 19，所以先试 20 再退回 19）。新开的窗口靠一个挂在 `Window.SizeChanged` 上的类处理器自动跟上——**不能用 Loaded**，原因同上面图表那条。
+
+**故意不跟随主题的地方**：行情详情（K线）窗口。那是通达信风格的黑底专业看盘窗，本来就自带一整套深色配色（`QuoteChartBuilder`），两个主题下都保持原样；`ChartTheme` 见到图自己设了 `PlotModel.Background` 就跳过。
+
 ---
 
 ## 6. 技术栈与项目结构：legacy StockAnalyzer 已完全退役

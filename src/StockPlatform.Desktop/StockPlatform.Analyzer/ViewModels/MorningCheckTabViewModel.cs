@@ -7,6 +7,7 @@ using StockPlatform.Analyzer.Watchlist;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
+using StockPlatform.Desktop.Shared.Theme;
 
 namespace StockPlatform.Analyzer.ViewModels;
 
@@ -15,12 +16,16 @@ namespace StockPlatform.Analyzer.ViewModels;
 /// </summary>
 public class IndexLightRowViewModel
 {
+    /// <summary>该指数在 Bar 表里的代码——**带厂商前缀的8位符号**（"sh000300"），不是6位裸代码
+    /// （见 <see cref="MarketIndexCatalog"/>：上证指数的 000001 会跟平安银行撞车）。
+    /// 只为"双击这行看它自己的K线"而存（2026-09-01 新增），红绿灯本身的计算不用它。</summary>
+    public string Code { get; }
     public string Name { get; }
     public string CloseText { get; } = "—";
     public string Ma20Text { get; } = "—";
     public string Ma60Text { get; } = "—";
     public string StateText { get; } = "数据不足";
-    public Brush StateColor { get; } = Brushes.Gray;
+    public Brush StateColor { get; } = ThemeBrushes.Gray;
 
     /// <summary>收盘是否站上MA60；数据不足60根时为 null（总开关判定时按"线下"保守处理）。</summary>
     public bool? AboveMa60 { get; }
@@ -33,8 +38,9 @@ public class IndexLightRowViewModel
     public double? Ma20Value { get; private set; }
     public double? Ma60Value { get; private set; }
 
-    public IndexLightRowViewModel(string name, List<Bar> bars)
+    public IndexLightRowViewModel(string code, string name, List<Bar> bars)
     {
+        Code = code;
         Name = name;
         if (bars.Count == 0) return;
 
@@ -66,7 +72,7 @@ public class IndexLightRowViewModel
         StateText = AboveMa60 == true
             ? $"线上✅（自{bars[segStart].PeriodStart:MM-dd}起，{days}个交易日）"
             : $"线下❌（自{bars[segStart].PeriodStart:MM-dd}起，{days}个交易日）";
-        StateColor = AboveMa60 == true ? Brushes.Firebrick : Brushes.Green; // 涨红跌绿的看盘习惯
+        StateColor = AboveMa60 == true ? ThemeBrushes.Firebrick : ThemeBrushes.Green; // 涨红跌绿的看盘习惯
     }
 }
 
@@ -95,7 +101,7 @@ public class MorningStockRowViewModel
     public string LatestCloseText { get; private set; } = "—";
     public string Ma60Text { get; private set; } = "—";
     public string SincePickText { get; private set; } = "—";
-    public Brush SincePickColor { get; private set; } = Brushes.Gray;
+    public Brush SincePickColor { get; private set; } = ThemeBrushes.Gray;
     /// <summary>"较基准涨跌"的数值形式（持仓=较买入价，待买=较自选日收盘）——给汇总里"该方法整体
     /// 平均涨跌/胜率"用，方法过滤后这几个数字就是各选股方法的横向对比口径。</summary>
     public double? SinceBasisPct { get; private set; }
@@ -115,7 +121,7 @@ public class MorningStockRowViewModel
     public double? PnlValue { get; private set; }
     public string DrawdownText { get; private set; } = "—";
     public string PnlText { get; private set; } = "—";
-    public Brush PnlColor { get; private set; } = Brushes.Gray;
+    public Brush PnlColor { get; private set; } = ThemeBrushes.Gray;
     /// <summary>纪律参考价——持仓：止损线(买入后最高收盘×0.85)和止盈线(买入价×1.5)；待买：参考
     /// 买点(线下=站上MA60的价位、线上=回踩MA20位置)。机械推导自回测过的纪律，不是预测。</summary>
     public string AdviceText { get; private set; } = "—";
@@ -124,14 +130,14 @@ public class MorningStockRowViewModel
     /// <summary>MA5 与当前收盘的关系——短线卖出纪律(R1)看的就是这一条。摆成一列是为了让人在
     /// 触发的**前一天**就看见"快贴上了"，而不是等它变成红字才反应过来。非持仓也算，纯参考。</summary>
     public string Ma5Text { get; private set; } = "—";
-    public Brush Ma5Color { get; private set; } = Brushes.Gray;
+    public Brush Ma5Color { get; private set; } = ThemeBrushes.Gray;
 
     /// <summary>近60日日均波幅（|当日涨跌|的均值）——决定这只票用几天的时间止损。回测显示
     /// &gt;4.5% 那一档所有卖出规则都会退化（最优规则的期望只有低波档的 60%），所以超限带 ⚠。</summary>
     public string VolatilityText { get; private set; } = "—";
 
     public string ActionText { get; private set; } = "数据不足";
-    public Brush ActionColor { get; private set; } = Brushes.Gray;
+    public Brush ActionColor { get; private set; } = ThemeBrushes.Gray;
 
     /// <summary>是否真实持仓中（买过、还没卖完；**分批卖出后只要还剩仓位就仍算持仓**）——止损/止盈
     /// 纪律只对它生效。</summary>
@@ -177,9 +183,9 @@ public class MorningStockRowViewModel
         Method = string.Join("、", methods);
         IsClosed = entry.IsClosedTrade;
         IsHolding = entry.IsHoldingPosition;   // 分批卖出后只要还剩仓位就仍算持仓
-        (StatusText, StatusColor) = IsHolding ? ("持仓", (Brush)Brushes.Firebrick)
-                                  : IsClosed ? ("已平仓", Brushes.SteelBlue)
-                                  : ("待买", Brushes.Gray);   // 在交易池里但还没有买入记录=打算买、还没买
+        (StatusText, StatusColor) = IsHolding ? ("持仓", (Brush)ThemeBrushes.Firebrick)
+                                  : IsClosed ? ("已平仓", ThemeBrushes.SteelBlue)
+                                  : ("待买", ThemeBrushes.Gray);   // 在交易池里但还没有买入记录=打算买、还没买
         var basisDate = IsHolding ? (entry.FirstBuyDate ?? entry.DataDate) : entry.DataDate;
         DataDate = basisDate.ToString("yyyy-MM-dd") + (IsHolding ? "买" : "");
         Compute(entry, basisDate, barRepository, shareholderRepository);
@@ -212,7 +218,7 @@ public class MorningStockRowViewModel
             double gap = (last.Close / ma5 - 1) * 100;
             Ma5Text = $"{ma5:F2}（{(belowMa5 ? "跌破" : "站上")}{gap:+0.0;-0.0}%）";
             Ma5Value = ma5;
-            Ma5Color = belowMa5 ? Brushes.Firebrick : Brushes.SeaGreen;
+            Ma5Color = belowMa5 ? ThemeBrushes.Firebrick : ThemeBrushes.SeaGreen;
         }
 
         // 日均波幅：决定时间止损天数（>4.5% 用15天，其余20天），也提示这票适不适合做。
@@ -235,7 +241,7 @@ public class MorningStockRowViewModel
             sinceBasisPct = (last.Close - basisPrice) / basisPrice * 100;
             SinceBasisPct = sinceBasisPct;
             SincePickText = $"{(sinceBasisPct >= 0 ? "+" : "")}{sinceBasisPct:F1}%";
-            SincePickColor = sinceBasisPct >= 0 ? Brushes.Red : Brushes.Green;
+            SincePickColor = sinceBasisPct >= 0 ? ThemeBrushes.Red : ThemeBrushes.Green;
         }
 
         if (IsHolding)
@@ -264,7 +270,7 @@ public class MorningStockRowViewModel
                 ? $"已平仓 {pnl:+#,0;-#,0}元（{RealizedText}）"
                 : $"已平仓 {RealizedText}";
             PnlValue = entry.RealizedPnl ?? spct;
-            PnlColor = spct >= 0 ? Brushes.Red : Brushes.Green;
+            PnlColor = spct >= 0 ? ThemeBrushes.Red : ThemeBrushes.Green;
         }
 
         // 距基准日后最高收盘的回撤——15%止损纪律看的是这个（回测里对集中持仓有效的口径）。
@@ -365,17 +371,17 @@ public class MorningStockRowViewModel
         if (actions.Count == 0)
         {
             ActionText = IsHolding ? "✓ 正常，继续持有" : "✓ 正常，等买点";
-            ActionColor = Brushes.SeaGreen;
+            ActionColor = ThemeBrushes.SeaGreen;
         }
         else
         {
             ActionText = string.Join("；", actions);
             ActionColor = Severity switch
             {
-                0 => Brushes.Firebrick,
-                1 => Brushes.DarkOrange,
-                2 => Brushes.DarkOrange,
-                _ => Brushes.Gray,
+                0 => ThemeBrushes.Firebrick,
+                1 => ThemeBrushes.DarkOrange,
+                2 => ThemeBrushes.DarkOrange,
+                _ => ThemeBrushes.Gray,
             };
         }
 
@@ -387,7 +393,7 @@ public class MorningStockRowViewModel
             ActionText += DaysToEarnings == 0
                 ? $"｜⚠ 今天披露财报（{EarningsDate:MM-dd}）：兑现日双向波动，跨事件持仓风险自担"
                 : $"｜⚠ {DaysToEarnings}天后财报（{EarningsDate:MM-dd}）：回测参数没区分财报窗口，{(IsHolding ? "要不要在披露前减仓自己定" : "临近别追高")}";
-            if (Severity >= 4) ActionColor = Brushes.DarkOrange;   // 其它都正常时，别让这条提醒淹没在绿色里
+            if (Severity >= 4) ActionColor = ThemeBrushes.DarkOrange;   // 其它都正常时，别让这条提醒淹没在绿色里
         }
         else if (EarningsJustPassed)
         {
@@ -469,7 +475,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
     private string _gateText = "";
     public string GateText { get => _gateText; set => Set(ref _gateText, value); }
 
-    private Brush _gateColor = Brushes.Gray;
+    private Brush _gateColor = ThemeBrushes.Gray;
     public Brush GateColor { get => _gateColor; set => Set(ref _gateColor, value); }
 
     private string _styleText = "";
@@ -477,7 +483,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
     /// 由 <see cref="StyleGauge"/> 算，缘起和口径见那个类的注释。</summary>
     public string StyleText { get => _styleText; set => Set(ref _styleText, value); }
 
-    private Brush _styleColor = Brushes.Gray;
+    private Brush _styleColor = ThemeBrushes.Gray;
     public Brush StyleColor { get => _styleColor; set => Set(ref _styleColor, value); }
 
     private string _summaryText = "";
@@ -544,7 +550,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         bool? csi300Above = null, chinextAbove = null;
         foreach (var (symbol, name) in MarketIndexCatalog.All)
         {
-            var row = new IndexLightRowViewModel(name, _barRepository.Query(symbol, Granularity.Day));
+            var row = new IndexLightRowViewModel(symbol, name, _barRepository.Query(symbol, Granularity.Day));
             IndexRows.Add(row);
             if (symbol == "sh000300") csi300Above = row.AboveMa60;
             if (symbol == "sz399006") chinextAbove = row.AboveMa60;
@@ -553,9 +559,9 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         _gateAboveCount = (csi300Above == true ? 1 : 0) + (chinextAbove == true ? 1 : 0);
         (GateText, GateColor) = _gateAboveCount switch
         {
-            2 => ("🟢 总开关：开启——沪深300、创业板指均在60日线上，可正常建仓", Brushes.SeaGreen),
-            1 => ("🟡 总开关：半开——沪深300/创业板指只有一个在60日线上，谨慎、轻仓", Brushes.DarkOrange),
-            _ => ("🔴 总开关：关闭——沪深300、创业板指均跌破60日线，不建新仓、逐步降仓", Brushes.Firebrick),
+            2 => ("🟢 总开关：开启——沪深300、创业板指均在60日线上，可正常建仓", ThemeBrushes.SeaGreen),
+            1 => ("🟡 总开关：半开——沪深300/创业板指只有一个在60日线上，谨慎、轻仓", ThemeBrushes.DarkOrange),
+            _ => ("🔴 总开关：关闭——沪深300、创业板指均跌破60日线，不建新仓、逐步降仓", ThemeBrushes.Firebrick),
         };
 
         BuildStyleGauge();
@@ -605,9 +611,17 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         if (market.Count == 0) { StyleText = ""; return; }
 
         var start = market[^1].PeriodStart.AddDays(-60);
+        // 口径优先 day_adj（本地算的乘法式复权，收益率精确），库里还没有就退回 day_hfq。
+        // 这里最吃口径的是红利篮子——全是高分红股，而数据源的后复权恰恰把这类压得最狠
+        // （实测收益率中位 ×0.967、5% 分位 ×0.754）。见 Granularity.DayAdj 的注释。
+        List<Bar> Bars(string code)
+        {
+            var bars = _barRepository.Query(code, Granularity.DayAdj, start);
+            return bars.Count > 0 ? bars : _barRepository.Query(code, Granularity.DayHfq, start);
+        }
         List<List<Bar>> Members(string indexCode) => _indexConsRepository
             .GetConsByIndex(indexCode)
-            .Select(code => _barRepository.Query(code, Granularity.DayHfq, start))
+            .Select(Bars)
             .Where(bars => bars.Count > 0)
             .ToList();
 
@@ -621,9 +635,9 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         StyleText = result.Text;
         StyleColor = result.Mood switch
         {
-            StyleMood.Defensive => Brushes.SteelBlue,   // 防御占优：跟"总开关关闭"的红区分开，它本身不是坏消息
-            StyleMood.RiskOn => Brushes.Firebrick,      // 成长占优（涨红跌绿的习惯，红=进攻）
-            _ => Brushes.Gray,
+            StyleMood.Defensive => ThemeBrushes.SteelBlue,   // 防御占优：跟"总开关关闭"的红区分开，它本身不是坏消息
+            StyleMood.RiskOn => ThemeBrushes.Firebrick,      // 成长占优（涨红跌绿的习惯，红=进攻）
+            _ => ThemeBrushes.Gray,
         };
     }
 

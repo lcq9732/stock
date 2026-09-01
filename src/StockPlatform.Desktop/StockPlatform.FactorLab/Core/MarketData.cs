@@ -46,9 +46,12 @@ public sealed class MarketData
     public required double[] IndexClose { get; init; }
     /// <summary>真实价格（前复权日线的收盘，最新日=实际成交价），只用于名单展示，不参与任何计算。</summary>
     public required double[][] DisplayClose { get; init; }
-    /// <summary>本次用的是不是后复权数据。false 表示库里还没有 day_hfq、降级用了前复权，
-    /// 长周期收益率不可信，报告里必须显著标注。</summary>
-    public required bool UsingHfq { get; init; }
+    /// <summary>
+    /// 本次实际用的价格口径："day_adj"（首选，本地算的乘法式复权，收益率精确）、
+    /// "day_hfq"（次选，数据源后复权，混合式、把高股息股压低）、"day"（末选，前复权，长周期失真）。
+    /// 原来这里是个 bool（UsingHfq），两级不够表达了——降级到哪一级，报告里必须显著标注。
+    /// </summary>
+    public required string PriceGranularity { get; init; }
     /// <summary>主力净流入（元，正=净流入）。2026-08-03：这张表补齐到十年了（原来只有3个月，是当初
     /// 没做资金流因子的唯一原因），现在可以做。非交易日/无数据为 NaN。</summary>
     public required double[][] NetInflow { get; init; }
@@ -128,16 +131,36 @@ public sealed class MarketData
         var open = Alloc(); var close = Alloc(); var high = Alloc(); var low = Alloc();
         var amount = Alloc(); var turnover = Alloc(); var displayClose = Alloc();
 
-        // 3) 全表扫日线。**回测用后复权**（Granularity.DayHfq）：数据源的前复权是减法式，十年前的
-        //    高分红股复权价接近零甚至为负，收益率完全失真（见 Granularity.DayHfq 注释）。库里没有
-        //    后复权时降级用前复权，但会在报告里显著标注、不静默。
-        bool usingHfq;
+        // 3) 全表扫日线。口径按 **day_adj → day_hfq → day** 三级降级，能用哪个用哪个：
+        //
+        //    day_adj（首选，2026-09-01 建成）——不复权原始价 × 本地算的**乘法式**复权因子。
+        //      非除权日的收益率**精确等于**真实收益率（298 只 × 59 万个交易日实测，8 位小数全是 1.0）。
+        //    day_hfq（次选）——数据源给的后复权，是"送转乘、分红加"的**混合式**，那个加法项会阻尼波动：
+        //      实测非除权日收益率÷真实 中位 0.967、5% 分位 0.754；累计影响更大——农业银行十年
+        //      157% vs 真实 293%、工商银行 112% vs 214%。**高股息股被压得最狠**，
+        //      所以拿它测红利/高股息类因子会被系统性低估。低分红股几乎无影响（云南白药 −0.1pp）。
+        //    day（末选）——前复权，减法式，十年前的高分红股复权价接近零甚至为负，收益率完全失真。
+        //
+        //    降级都会在报告里显著标注，不静默。
+        //    做口径对比研究时可以用环境变量 FACTORLAB_GRAN 强制指定（day_adj / day_hfq / day），
+        //    比如想量化"换成 day_adj 之后红利类因子变了多少"，就跑两遍对比。日常不要设。
+        string priceGran = "day";
+        var forced = Environment.GetEnvironmentVariable("FACTORLAB_GRAN");
+        if (forced is "day_adj" or "day_hfq" or "day")
+        {
+            log($"⚠ 环境变量 FACTORLAB_GRAN={forced} 强制指定了价格口径（研究用；日常不该设这个）");
+            priceGran = forced;
+        }
+        else
         using (var probe = conn.CreateCommand())
         {
-            probe.CommandText = "SELECT COUNT(*) FROM Bar WHERE granularity='day_hfq' LIMIT 1";
-            usingHfq = Convert.ToInt64(probe.ExecuteScalar() ?? 0L) > 0;
+            probe.CommandText = "SELECT granularity, COUNT(*) FROM Bar "
+                              + "WHERE granularity IN ('day_adj','day_hfq') GROUP BY granularity";
+            using var pr = probe.ExecuteReader();
+            var have = new HashSet<string>(StringComparer.Ordinal);
+            while (pr.Read()) if (pr.GetInt64(1) > 0) have.Add(pr.GetString(0));
+            priceGran = have.Contains("day_adj") ? "day_adj" : have.Contains("day_hfq") ? "day_hfq" : "day";
         }
-        string priceGran = usingHfq ? "day_hfq" : "day";
         long bars = 0;
         using (var cmd = conn.CreateCommand())
         {
@@ -157,7 +180,15 @@ public sealed class MarketData
                 bars++;
             }
         }
-        log(usingHfq ? $"后复权日线 {bars:N0} 条（回测用）" : $"⚠ 库里没有后复权日线，降级用前复权 {bars:N0} 条——长周期收益率不可信，请在 Fetcher 跑一次\"拉取区间数据\"");
+        log(priceGran switch
+        {
+            "day_adj" => $"回测序列 day_adj {bars:N0} 条（本地算的乘法式复权，收益率精确）",
+            "day_hfq" => $"⚠ 库里没有 day_adj，降级用数据源后复权 {bars:N0} 条——它是混合式的，"
+                       + "会把高股息股的收益率系统性压低（实测中位 ×0.967、5% 分位 ×0.754），"
+                       + "红利类因子会被低估。请在 Fetcher 跑一次【补不复权历史】+【重算回测序列】。",
+            _ => $"⚠ 库里既没有 day_adj 也没有 day_hfq，降级用前复权 {bars:N0} 条——长周期收益率不可信，"
+               + "请在 Fetcher 跑一次\"拉取区间数据\"",
+        });
 
         // 展示价（前复权，最新日=真实成交价）：只给"最新名单"显示用，不参与任何计算
         using (var cmd = conn.CreateCommand())
@@ -568,7 +599,7 @@ public sealed class MarketData
             Open = open, Close = close, High = high, Low = low, Amount = amount, Turnover = turnover,
             MarginBalance = margin, HolderChg = holderChg, FloatShares = floatShares,
             Industry = industry, IndustryName = industryName, LhbFlag = lhb, IndexClose = indexClose,
-            DisplayClose = displayClose, UsingHfq = usingHfq, DirtyBarsDropped = dirty,
+            DisplayClose = displayClose, PriceGranularity = priceGran, DirtyBarsDropped = dirty,
             Financials = financials, NetInflow = netInflow, Dividends = dividends, TopHolderRatio = topHolder,
             NorthboundRatio = northbound,
         };

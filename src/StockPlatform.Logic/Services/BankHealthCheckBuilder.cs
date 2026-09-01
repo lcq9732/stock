@@ -576,7 +576,8 @@ public static class BankHealthCheckBuilder
             Lines = lines,
             Conclusion = $"→ 十二条覆盖到 {clausesWithData} 条，共 {have} 项有数据"
                        + (missing > 0 ? $"、{missing} 项待接入" : "")
-                       + $"。{source}。{peerNote}。",
+                       + $"。{source}。{peerNote}。"
+                       + MetricSources.PendingOcrNote(regulatory, cur.ReportDate),
         };
     }
 

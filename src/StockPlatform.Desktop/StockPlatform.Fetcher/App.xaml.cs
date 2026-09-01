@@ -20,6 +20,30 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // 界面上的意外别把整个程序带走——尤其是抓取跑了几个小时的时候，
+        // 因为点错一个地方就退出、整轮进度作废，代价太大（2026-09-01 真的发生过：
+        // 点 ⓘ 弹出的说明文字，事件处理器里抛了异常，程序直接没了）。
+        // 抓取本身的失败有自己的重试/记名单机制，走不到这儿；能到这儿的基本都是 UI 层的意外。
+        DispatcherUnhandledException += (_, args) =>
+        {
+            args.Handled = true;           // 先保住进程，再告诉用户
+            try
+            {
+                var log = System.IO.Path.Combine(AppContext.BaseDirectory, "data", "local", "logs");
+                System.IO.Directory.CreateDirectory(log);
+                System.IO.File.AppendAllText(
+                    System.IO.Path.Combine(log, $"crash-{DateTime.Now:yyyy-MM-dd}.txt"),
+                    $"[{DateTime.Now:HH:mm:ss}] {args.Exception}{Environment.NewLine}{Environment.NewLine}");
+            }
+            catch { /* 连日志都写不了就算了，别在异常处理里再抛 */ }
+
+            System.Windows.MessageBox.Show(
+                $"界面上出了个意外，已经拦下来了，程序继续运行：{Environment.NewLine}{Environment.NewLine}" +
+                $"{args.Exception.Message}{Environment.NewLine}{Environment.NewLine}" +
+                "详情记在 data\\local\\logs\\crash-*.txt。正在进行的抓取不受影响。",
+                "出了点小问题", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+        };
+
         // 只允许开一个实例（2026-08-04新增，见 SingleInstanceGuard 的类注释）——两个 Fetcher 同时抓取
         // 会往同一个 SQLite 写、互相锁表，历史上因为启动要等几十秒、用户重复双击真的开出过多个。
         if (!Desktop.Shared.SingleInstanceGuard.TryAcquire("Fetcher", "A股历史数据获取程序"))
@@ -27,6 +51,10 @@ public partial class App : Application
             Shutdown();
             return;
         }
+
+        // 界面主题（2026-08-29 新增）——必须在任何窗口创建之前应用，否则窗口先按默认浅色画一遍
+        // 再跳成深色，启动时会闪一下白。见 ThemeManager 类注释。
+        Desktop.Shared.Theme.ThemeManager.Initialize();
 
         var paths = new FetchPaths();
 

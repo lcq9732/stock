@@ -1,9 +1,11 @@
-<Window x:Class="StockPlatform.Analyzer.DividendHistoryWindow"
+﻿<Window x:Class="StockPlatform.Analyzer.DividendHistoryWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:oxy="http://oxyplot.org/wpf"
         Title="分红历史" Height="560" Width="900" MinHeight="320" MinWidth="520"
-        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei">
+        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei"
+        Background="{DynamicResource Theme.Window.Background}"
+        Foreground="{DynamicResource Theme.Foreground}">
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -14,8 +16,8 @@
         <TextBlock x:Name="HeaderText" Grid.Row="0" FontSize="16" FontWeight="Bold" Margin="0,0,0,8"
                    TextWrapping="Wrap" />
 
-        <Border Grid.Row="1" BorderBrush="#DDDDDD" BorderThickness="1">
-            <oxy:PlotView x:Name="DividendPlot" Background="White" />
+        <Border Grid.Row="1" BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1">
+            <oxy:PlotView x:Name="DividendPlot" Background="{DynamicResource Theme.Chart.Background}" />
         </Border>
 
         <Button Grid.Row="2" Content="关闭" Width="90" HorizontalAlignment="Right" Margin="0,10,0,0"

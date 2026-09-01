@@ -26,6 +26,18 @@ public class FetchPaths
     /// 开关。跟 manifest.json 分开：那个是数据状态（抓到哪天了），这个是用户偏好。</summary>
     public string SettingsPath => Path.Combine(BaseDir, "fetcher-settings.json");
 
+    /// <summary>
+    /// 抓取计划（2026-08-31 新增）——排好的任务顺序、各自的触发时间和重复规则，以及每项上次
+    /// 跑的结果。跟 <see cref="SettingsPath"/> 分开：那个是零散开关，这个是一份有结构、
+    /// 会被用户反复编辑的清单，混在一起以后加字段两边都难受。
+    /// </summary>
+    public string PlanPath => Path.Combine(BaseDir, "fetch-plan.json");
+
+    /// <summary>计划执行的当日报告（<c>plan-yyyy-MM-dd.txt</c>）落在日志归档目录里——
+    /// 无人值守跑完，第二天早上看这一份就知道昨晚每项什么时候跑的、结果如何。</summary>
+    public string PlanReportPath(DateTime day) =>
+        Path.Combine(LogArchiveDir, $"plan-{day:yyyy-MM-dd}.txt");
+
     public FetchPaths(string? baseDir = null)
     {
         BaseDir = baseDir ?? Path.Combine(AppContext.BaseDirectory, "data");

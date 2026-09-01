@@ -33,7 +33,7 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" Orientation="Horizontal">
-                <TextBlock x:Name="TitleText" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Foreground="#EEEEEE" />
+                <TextBlock x:Name="TitleText" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Ticker.Foreground.Bright}" />
                 <TextBlock x:Name="LatestCloseText" FontSize="18" FontWeight="Bold" FontFamily="Consolas" Width="90"
                            TextAlignment="Right" Margin="14,0,0,0" VerticalAlignment="Center" />
                 <TextBlock x:Name="ChangeText" FontSize="14" FontFamily="Consolas" Margin="10,0,0,0" VerticalAlignment="Center" />
@@ -98,18 +98,18 @@ otes\{代码}.md，可直接用编辑器改、可进 git" />
              和各条均线（颜色跟图上的线一致）。所有数值右对齐补白到固定字符宽 + 等宽字体，所以数字长短
              变化时各字段的横向位置不动。内容由 QuoteDetailWindow.UpdateMainInfo 拼装。
              这一行就是原来主图正上方那条"K线 …"表头搬上来的，主图区因此少了一层表头。 -->
-        <Border Grid.Row="1" Padding="6,3" Margin="0,0,0,6" Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
+        <Border Grid.Row="1" Padding="6,3" Margin="0,0,0,6" Background="{DynamicResource Theme.Ticker.Background}" BorderBrush="{DynamicResource Theme.Ticker.Border}" BorderThickness="0,0,0,1">
             <TextBlock x:Name="MainInfoText" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center"
-                       TextTrimming="CharacterEllipsis" Foreground="#DDDDDD" />
+                       TextTrimming="CharacterEllipsis" Foreground="{DynamicResource Theme.Ticker.Foreground}" />
         </Border>
 
         <!-- 斐波那契信息条（2026-08-17新增）——勾选后才显示：波段端点 + 现价已回撤到哪一档 +
              各档价位。图上文字挤在左端不好读数，这里把同一批数字平铺出来，还标出离现价最近的
              支撑/阻力（就是【仓位计算器】取值时会用的那两条线）。 -->
         <Border Grid.Row="2" x:Name="FibInfoBorder" Padding="6,3" Margin="0,0,0,6" Visibility="Collapsed"
-                Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
+                Background="{DynamicResource Theme.Ticker.Background}" BorderBrush="{DynamicResource Theme.Ticker.Border}" BorderThickness="0,0,0,1">
             <TextBlock x:Name="FibInfoText" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center"
-                       TextWrapping="Wrap" Foreground="#DDDDDD" />
+                       TextWrapping="Wrap" Foreground="{DynamicResource Theme.Ticker.Foreground}" />
         </Border>
 
         <!-- 主图：表头已并入上面第2行，这里直接就是图（不再套一层带表头的 Grid） -->
@@ -123,7 +123,7 @@ otes\{代码}.md，可直接用编辑器改、可进 git" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <Border Grid.Row="0" Padding="6,3" Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
+            <Border Grid.Row="0" Padding="6,3" Background="{DynamicResource Theme.Ticker.Background}" BorderBrush="{DynamicResource Theme.Ticker.Border}" BorderThickness="0,0,0,1">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -157,7 +157,7 @@ otes\{代码}.md，可直接用编辑器改、可进 git" />
                         <ComboBoxItem Content="ARBR" />
                         <ComboBoxItem Content="ASI" />
                     </ComboBox>
-                    <TextBlock Grid.Column="1" x:Name="Sub1InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" Foreground="#DDDDDD" />
+                    <TextBlock Grid.Column="1" x:Name="Sub1InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Ticker.Foreground}" />
                 </Grid>
             </Border>
             <oxy:PlotView Grid.Row="1" x:Name="Sub1Plot" Model="{Binding Sub1PlotModel}" />
@@ -168,7 +168,7 @@ otes\{代码}.md，可直接用编辑器改、可进 git" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <Border Grid.Row="0" Padding="6,3" Background="#1A1A1A" BorderBrush="#333333" BorderThickness="0,0,0,1">
+            <Border Grid.Row="0" Padding="6,3" Background="{DynamicResource Theme.Ticker.Background}" BorderBrush="{DynamicResource Theme.Ticker.Border}" BorderThickness="0,0,0,1">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -202,7 +202,7 @@ otes\{代码}.md，可直接用编辑器改、可进 git" />
                         <ComboBoxItem Content="ARBR" />
                         <ComboBoxItem Content="ASI" />
                     </ComboBox>
-                    <TextBlock Grid.Column="1" x:Name="Sub2InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" Foreground="#DDDDDD" />
+                    <TextBlock Grid.Column="1" x:Name="Sub2InfoText" Text="将鼠标移到图表上查看该日详细数据" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Ticker.Foreground}" />
                 </Grid>
             </Border>
             <oxy:PlotView Grid.Row="1" x:Name="Sub2Plot" Model="{Binding Sub2PlotModel}" />

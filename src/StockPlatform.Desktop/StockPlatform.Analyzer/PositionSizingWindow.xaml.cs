@@ -4,6 +4,7 @@ using StockPlatform.Analyzer.Watchlist;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
+using StockPlatform.Desktop.Shared.Theme;
 
 namespace StockPlatform.Analyzer;
 
@@ -366,8 +367,10 @@ public partial class PositionSizingWindow : Window
             WarnText.Text = "";
             DetailText.Text = "需要：可投资总资金、上涨概率、对了能涨多少、错了在哪止损。"
                             + "\n止损那一项不能省——没有它就没有盈亏比，也就算不出仓位。";
-            PlanText.Text = "—";
-            SensitivityText.Text = "—";
+            // 留空而不是填"—"：右栏两段会整块折叠掉（含标题和分隔线），参数还没填全时
+            // 右半边干脆是空的，比两个标题下各挂一根破折号清楚。
+            PlanText.Text = "";
+            SensitivityText.Text = "";
             return;
         }
 
@@ -415,7 +418,7 @@ public partial class PositionSizingWindow : Window
         if (price is not > 0)
         {
             ActionText.Text = "填上现价，就会算出该买/该卖多少股。";
-            ActionText.Foreground = System.Windows.Media.Brushes.Gray;
+            ActionText.Foreground = ThemeBrushes.Gray;
             return;
         }
 
@@ -426,7 +429,7 @@ public partial class PositionSizingWindow : Window
 
         if (shares == 0)
         {
-            ActionText.Foreground = System.Windows.Media.Brushes.Firebrick;
+            ActionText.Foreground = ThemeBrushes.Firebrick;
             ActionText.Text = target > 0
                 ? $"还没买 → 买入 {target:N0} 股（约 {Money(target * price.Value)}）"
                 : "还没买 → 这个价位下建议的仓位不足一手，不用买";
@@ -436,7 +439,7 @@ public partial class PositionSizingWindow : Window
         // 差不到一手就别动——为了几十股来回交易，手续费和心力都不划算。
         if (Math.Abs(delta) < 100)
         {
-            ActionText.Foreground = System.Windows.Media.Brushes.SeaGreen;
+            ActionText.Foreground = ThemeBrushes.SeaGreen;
             ActionText.Text = $"现在拿着 {shares:N0} 股（{Money(currentValue)}）——跟建议仓位差不多，不用动。";
             return;
         }
@@ -444,13 +447,13 @@ public partial class PositionSizingWindow : Window
         if (delta < 0)
         {
             int sell = -delta;
-            ActionText.Foreground = System.Windows.Media.Brushes.Firebrick;
+            ActionText.Foreground = ThemeBrushes.Firebrick;
             ActionText.Text = $"现在拿着 {shares:N0} 股（{Money(currentValue)}）→ 卖出 {sell:N0} 股，"
                             + $"留 {target:N0} 股（约 {Money(target * price.Value)}）";
         }
         else
         {
-            ActionText.Foreground = System.Windows.Media.Brushes.Firebrick;
+            ActionText.Foreground = ThemeBrushes.Firebrick;
             ActionText.Text = $"现在拿着 {shares:N0} 股（{Money(currentValue)}）→ 还可以再买 {delta:N0} 股，"
                             + $"加到 {target:N0} 股（约 {Money(target * price.Value)}）";
         }
@@ -482,8 +485,8 @@ public partial class PositionSizingWindow : Window
             + $"（{pct:+0.0;-0.0}%，已扣卖出费用 {fee:N0} 元，成本按含费均价 {cost:F3}）"
             + "　※ 记账用，不该拿它决定卖不卖——赚了才肯卖、亏了就死扛，正是要避免的那种决策。";
         RealizedHintText.Foreground = realized >= 0
-            ? System.Windows.Media.Brushes.Firebrick
-            : System.Windows.Media.Brushes.SeaGreen;
+            ? ThemeBrushes.Firebrick
+            : ThemeBrushes.SeaGreen;
     }
 
     private void ShowDetail(PositionSizingResult r, PositionSizingInput input)

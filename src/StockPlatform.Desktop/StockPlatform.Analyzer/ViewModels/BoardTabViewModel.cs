@@ -1,10 +1,11 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows.Media;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Desktop.Shared.Theme;
 
 namespace StockPlatform.Analyzer.ViewModels;
 
@@ -20,7 +21,7 @@ public class BoardRowViewModel
     public string LeaderName { get; init; } = "";
 
     public string ChangePctText => $"{(ChangePct >= 0 ? "+" : "")}{ChangePct:F2}%";
-    public Brush ChangeColor => ChangePct >= 0 ? Brushes.Red : new SolidColorBrush(Color.FromRgb(0, 180, 0));
+    public Brush ChangeColor => ChangePct >= 0 ? ThemeBrushes.Red : ThemeBrushes.Green;
     /// <summary>成交额（亿元）——数值列，单位放在表头，这样点表头能按数字排序（不是按"592.5亿"这种
     /// 字符串排）。</summary>
     public double AmountYi => Amount / 1e8;
@@ -35,7 +36,7 @@ public class BoardMemberRowViewModel
     public bool HasQuote { get; init; }
 
     public string ChangePctText => HasQuote ? $"{(ChangePct >= 0 ? "+" : "")}{ChangePct:F2}%" : "—";
-    public Brush ChangeColor => !HasQuote ? Brushes.Gray : ChangePct >= 0 ? Brushes.Red : new SolidColorBrush(Color.FromRgb(0, 180, 0));
+    public Brush ChangeColor => !HasQuote ? ThemeBrushes.Gray : ChangePct >= 0 ? ThemeBrushes.Red : ThemeBrushes.Green;
 }
 
 /// <summary>"板块热度" tab —— 展示 Fetcher 抓来的概念/题材板块和行业板块行情榜（按涨跌幅从高到低），

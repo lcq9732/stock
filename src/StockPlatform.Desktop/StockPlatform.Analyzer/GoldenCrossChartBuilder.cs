@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -101,7 +101,7 @@ public static class GoldenCrossChartBuilder
         ChartBuilder.HideAxisVisually(mainDay);
         ChartBuilder.HideAxisVisually(mainMonth);
 
-        var main = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var main = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         main.Axes.Add(mainDay);
         main.Axes.Add(mainMonth);
         var mainYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
@@ -147,7 +147,7 @@ public static class GoldenCrossChartBuilder
         // 不影响IsPanEnabled/IsZoomEnabled，拖动缩放不受影响。
         ChartBuilder.HideAxisVisually(macdDay);
         ChartBuilder.HideAxisVisually(macdMonth);
-        var macd = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var macd = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         macd.Axes.Add(macdDay);
         macd.Axes.Add(macdMonth);
         var macdYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
@@ -171,7 +171,7 @@ public static class GoldenCrossChartBuilder
         // KDJ副图（条件4“KDJ在20~50区域金叉”）——20/50两条参考线标出条件要求的区间。
         ChartBuilder.HideAxisVisually(kdjDay);
         ChartBuilder.HideAxisVisually(kdjMonth);
-        var kdj = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var kdj = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         kdj.Axes.Add(kdjDay);
         kdj.Axes.Add(kdjMonth);
         var kdjYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true, Minimum = 0, Maximum = 100 };
@@ -188,7 +188,7 @@ public static class GoldenCrossChartBuilder
         // （条件本身用的判定阈值是≤35，见GoldenCrossAnalysisEngine.rsiWasNear30）。
         ChartBuilder.HideAxisVisually(rsiDay);
         ChartBuilder.HideAxisVisually(rsiMonth);
-        var rsiModel = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var rsiModel = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         rsiModel.Axes.Add(rsiDay);
         rsiModel.Axes.Add(rsiMonth);
         var rsiYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true, Minimum = 0, Maximum = 100 };
@@ -203,7 +203,7 @@ public static class GoldenCrossChartBuilder
         // 成交量副图（条件6“成交量≥5日均量的1.5倍”）。
         ChartBuilder.HideAxisVisually(volDay);
         ChartBuilder.HideAxisVisually(volMonth);
-        var volumeModel = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var volumeModel = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         volumeModel.Axes.Add(volDay);
         volumeModel.Axes.Add(volMonth);
         var volumeYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };

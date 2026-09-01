@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -65,7 +65,7 @@ public static class FoundationChartBuilder
         // 主图。
         ChartBuilder.HideAxisVisually(mainDay);
         ChartBuilder.HideAxisVisually(mainMonth);
-        var main = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var main = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         main.Axes.Add(mainDay);
         main.Axes.Add(mainMonth);
         var mainYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
@@ -105,7 +105,7 @@ public static class FoundationChartBuilder
         // 成交量面板。
         ChartBuilder.HideAxisVisually(volDay);
         ChartBuilder.HideAxisVisually(volMonth);
-        var volumeModel = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var volumeModel = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         volumeModel.Axes.Add(volDay);
         volumeModel.Axes.Add(volMonth);
         var volumeYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };

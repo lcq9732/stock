@@ -13,9 +13,42 @@ public partial class MainWindow : Window
     // 全部用全名引用，避免跟已经在用的 System.Windows.MessageBox 等同名类型产生歧义。
     private System.Windows.Forms.NotifyIcon? _trayIcon;
 
+    /// <summary>
+    /// 让右边日志的顶边跟左边【任务表】齐平。
+    ///
+    /// 为什么要用代码算：左边"任务表以上"的那截高度是 页签头 + 工具条 两段拼出来的，
+    /// 它们在 TabControl 内部、跟右边这一列不在同一个 Grid 里，XAML 没法直接对齐
+    /// （SharedSizeGroup 只能共享同一个 Grid 作用域里的行）。所以量一次实际位置最直接。
+    ///
+    /// 顺带解决的问题：这样右上角空出一块，计划的运行状态就搬到那儿了——
+    /// 原来它挤在工具条末尾，长句子被切得只剩半句（2026-09-01 用户反馈）。
+    /// </summary>
+    private void SyncLogTop()
+    {
+        if (PlanTableBox == null || RootGrid == null || LogTopRow == null) return;
+        if (!PlanTableBox.IsVisible) return;        // 切到【手动】页时任务表不可见，保持上一次的高度
+        try
+        {
+            double y = PlanTableBox.TranslatePoint(new System.Windows.Point(0, 0), RootGrid).Y;
+            if (y > 0 && y < RootGrid.ActualHeight) LogTopRow.Height = new GridLength(y);
+        }
+        catch { /* 布局还没算完，下一轮 LayoutUpdated 会再来 */ }
+    }
+
     public MainWindow()
     {
         InitializeComponent();
+        LayoutUpdated += (_, _) => SyncLogTop();   // 见 SyncLogTop：右边日志顶边对齐左边任务表
+#if DEBUG
+        // Debug 构建可以跟正在用的 Release 版同时开着（见 SingleInstanceGuard）——标题上标一下，
+        // 免得两个长得一样的窗口分不清谁是谁，把调试版当成日常用的那个去点抓取。
+        Title += "　【DEBUG 调试版·数据目录在 bin 下】";
+#endif
+        // 默认最大化（2026-08-31 按用户要求）。加了【计划】页之后窗口里要放的东西多了，
+        // 1240×780 的默认尺寸得横着拖一下才看得全。
+        // ⚠ 跟 Analyzer 一样**延到 Loaded 里设**：在构造函数或 XAML 里直接写 WindowState=Maximized
+        //    不一定生效，WPF 要先完成一次布局才认。Width/Height 留着当"还原"后的尺寸。
+        Loaded += (_, _) => WindowState = WindowState.Maximized;
         Closing += OnClosing;
         Closed += OnClosed;
         StateChanged += OnStateChanged;
@@ -38,9 +71,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        var result = MessageBox.Show(
-            "确定要关闭程序吗？",
-            "确认关闭", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        // 计划在跑（哪怕此刻只是在等下一项到点）也要说清楚：关掉程序计划就不再继续了。
+        // 无人值守靠的是进程活着——用户多半是想最小化到托盘而不是真的退出。
+        var question = vm?.IsPlanRunning == true
+            ? "计划正在执行中，关闭程序后就不会再自动继续了"
+              + "（想让它继续跑，请改成最小化到系统托盘）。\n\n确定要关闭吗？"
+            : "确定要关闭程序吗？";
+        var result = MessageBox.Show(question, "确认关闭", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (result != MessageBoxResult.Yes)
             e.Cancel = true;
     }
@@ -101,5 +138,71 @@ public partial class MainWindow : Window
         WindowState = WindowState.Normal;
         Activate();
         if (_trayIcon != null) _trayIcon.Visible = false;
+    }
+
+    // ══ 计划表的拖放排序（2026-08-31 按用户要求，取代原来的上移/下移按钮）══════════
+    //
+    // 顺序就是执行顺序，所以"调顺序"是这张表上最常做的编辑之一，用拖的比选中再点两下自然。
+    // 只做三件事：按下时记住起点、拖出阈值后启动拖放、放下时算出目标行号交给 ViewModel。
+    // 真正的移动和存盘在 MainViewModel.MovePlanItem 里。
+
+    /// <summary>按下时的位置和那一行——还不能立刻开拖，否则想点勾选框都会被当成拖动。</summary>
+    private System.Windows.Point _dragStart;
+    private object? _dragItem;
+
+    private void PlanGrid_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        _dragStart = e.GetPosition(null);
+        _dragItem = RowItemAt(e.OriginalSource as DependencyObject);
+    }
+
+    private void PlanGrid_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed || _dragItem == null) return;
+
+        // 超过系统的最小拖动距离才算拖——不然单击单元格里的勾选框/下拉框会被误判成拖动
+        var now = e.GetPosition(null);
+        if (Math.Abs(now.X - _dragStart.X) < SystemParameters.MinimumHorizontalDragDistance
+            && Math.Abs(now.Y - _dragStart.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+
+        var item = _dragItem;
+        _dragItem = null;                  // 一次拖动只触发一次
+        System.Windows.DragDrop.DoDragDrop(PlanGrid, item, System.Windows.DragDropEffects.Move);
+    }
+
+    private void PlanGrid_Drop(object sender, System.Windows.DragEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if (e.Data.GetData(typeof(PlanItemViewModel)) is not PlanItemViewModel dragged) return;
+
+        int from = vm.PlanItems.IndexOf(dragged);
+        if (from < 0) return;
+
+        // 落点在哪一行上就插到哪一行的位置；落在空白处（表格下方）就放到最后
+        var target = RowItemAt(e.OriginalSource as DependencyObject) as PlanItemViewModel;
+        int to = target != null ? vm.PlanItems.IndexOf(target) : vm.PlanItems.Count - 1;
+        vm.MovePlanItem(from, to);
+    }
+
+    /// <summary>
+    /// 从鼠标落到的那个元素往上找它属于哪一行，返回那一行绑定的对象。
+    ///
+    /// ⚠ 不能一路只用 VisualTreeHelper.GetParent：它**只接受 Visual/Visual3D**。
+    /// 点在 &lt;Run&gt; 这类 Inline 上时（ⓘ 弹出的说明里就有几个 Run），路由事件送过来的
+    /// OriginalSource 是 TextElement，不是 Visual，直接调用会抛异常——而这是个事件处理器，
+    /// 异常没人接，整个程序就退出了（2026-09-01 用户反馈："点 ⓘ 显示出来后再点那内容，程序自己退出"）。
+    ///
+    /// 所以遇到非 Visual 就先走**逻辑树**往上跳一层（Run → TextBlock），回到 Visual 之后再继续。
+    /// </summary>
+    private static object? RowItemAt(DependencyObject? source)
+    {
+        int guard = 0;                     // 万一逻辑树/视觉树接不上，别转成死循环
+        while (source != null && source is not System.Windows.Controls.DataGridRow && guard++ < 200)
+        {
+            source = source is System.Windows.Media.Visual or System.Windows.Media.Media3D.Visual3D
+                ? System.Windows.Media.VisualTreeHelper.GetParent(source)
+                : LogicalTreeHelper.GetParent(source);
+        }
+        return (source as System.Windows.Controls.DataGridRow)?.Item;
     }
 }

@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Shapes;
 using OxyPlot;
 using StockPlatform.Logic.Models;
+using StockPlatform.Desktop.Shared.Theme;
 
 namespace StockPlatform.Analyzer;
 
@@ -74,16 +75,16 @@ public partial class StockDossierWindow : Window
         {
             Text = section.Note,
             TextWrapping = TextWrapping.Wrap,
-            Foreground = Gray(0x66),
+            Foreground = ThemeBrushes.Gray,
             Margin = new Thickness(0, 0, 0, 6),
         };
         Grid.SetRow(note, 0);
         grid.Children.Add(note);
 
         FrameworkElement body = section.Error != null
-            ? Message($"读取失败：{section.Error}\n（这一节读不到不影响其它节；常见原因是本地数据库是旧版本、还没有这张表或这个字段）", Brushes.Firebrick)
+            ? Message($"读取失败：{section.Error}\n（这一节读不到不影响其它节；常见原因是本地数据库是旧版本、还没有这张表或这个字段）", ThemeBrushes.Firebrick)
             : section.Rows.Count == 0
-                ? Message("本地库里这只标的没有这类数据。", Gray(0x88))
+                ? Message("本地库里这只标的没有这类数据。", ThemeBrushes.Gray)
                 : BuildDataGrid(section);
         Grid.SetRow(body, 3);
         grid.Children.Add(body);
@@ -103,9 +104,11 @@ public partial class StockDossierWindow : Window
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch,
                 VerticalAlignment = System.Windows.VerticalAlignment.Center,
                 ResizeBehavior = GridResizeBehavior.PreviousAndNext,
-                Background = Gray(0xEE),
                 ToolTip = "上下拖动，调整图和表格的高度比例",
             };
+            // 这一屏是代码拼出来的，拿不到 XAML 的 DynamicResource；SetResourceReference 是它的
+            // 代码写法，换主题时同样会自己变色。
+            splitter.SetResourceReference(BackgroundProperty, "Theme.Border");
             Grid.SetRow(splitter, 2);
             grid.Children.Add(splitter);
         }
@@ -166,7 +169,7 @@ public partial class StockDossierWindow : Window
                 Text = chart.Note,
                 TextWrapping = TextWrapping.Wrap,
                 FontSize = 11,
-                Foreground = Gray(0x88),
+                Foreground = ThemeBrushes.Gray,
                 Margin = new Thickness(0, 2, 0, 2),
             };
             Grid.SetRow(chartNote, 2);
@@ -205,8 +208,6 @@ public partial class StockDossierWindow : Window
         return controller;
     }
 
-    private static SolidColorBrush Gray(byte level) => new(Color.FromRgb(level, level, level));
-
     private static TextBlock Message(string text, Brush foreground) => new()
     {
         Text = text,
@@ -226,10 +227,10 @@ public partial class StockDossierWindow : Window
             CanUserSortColumns = false,   // 见类注释：字符串列的字典序排序会骗人
             GridLinesVisibility = DataGridGridLinesVisibility.Horizontal,
             HeadersVisibility = DataGridHeadersVisibility.Column,
-            AlternatingRowBackground = Gray(0xF5),
             ClipboardCopyMode = DataGridClipboardCopyMode.IncludeHeader,
             EnableRowVirtualization = true,   // 净流入/融资融券可能上千行
         };
+        dataGrid.SetResourceReference(DataGrid.AlternatingRowBackgroundProperty, "Theme.Grid.Row.Alternate");
 
         for (int i = 0; i < section.Columns.Count; i++)
         {

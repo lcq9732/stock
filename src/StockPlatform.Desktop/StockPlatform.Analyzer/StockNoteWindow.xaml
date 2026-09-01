@@ -1,8 +1,10 @@
-<Window x:Class="StockPlatform.Analyzer.StockNoteWindow"
+﻿<Window x:Class="StockPlatform.Analyzer.StockNoteWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="分析笔记" Height="820" Width="1000" MinHeight="400" MinWidth="600"
-        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei">
+        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei"
+        Background="{DynamicResource Theme.Window.Background}"
+        Foreground="{DynamicResource Theme.Foreground}">
     <!-- 个股分析笔记（2026-08-27 新增）——存判断，不存数据。
          为什么单独一个窗口而不是塞进【其他数据】的页签里：笔记是要**动手写**的，埋在
          "行情详情 → 其他数据 → 第N个页签"里三层深，写的欲望就没了。做成独立窗口，
@@ -21,10 +23,10 @@
 
         <!-- 文件路径要显式给出来：笔记的价值之一是能直接用编辑器打开、能进 git，
              那就得让用户知道它在哪。 -->
-        <TextBlock Grid.Row="1" x:Name="PathText" Foreground="#666666" FontSize="11"
+        <TextBlock Grid.Row="1" x:Name="PathText" Foreground="{DynamicResource Theme.Foreground.Subtle}" FontSize="11"
                    TextWrapping="Wrap" Margin="0,0,0,8" />
 
-        <Border Grid.Row="2" BorderBrush="#DDDDDD" BorderThickness="1" Background="#FCFCFC">
+        <Border Grid.Row="2" BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1" Background="{DynamicResource Theme.Panel.Background.Alt}">
             <TextBox x:Name="Editor" AcceptsReturn="True" AcceptsTab="True" BorderThickness="0"
                      Background="Transparent" Padding="10"
                      FontFamily="Consolas, Microsoft YaHei" FontSize="14"
@@ -38,7 +40,7 @@
                     ToolTip="在正文最前面插入一个以今天日期为标题的小节（最新分析在最上面，不用滚到文件底部）" />
             <Button Content="打开所在文件夹" Width="120" Margin="8,0,0,0" Click="OpenFolder_Click"
                     ToolTip="在资源管理器里定位这个 .md 文件，可以用自己的编辑器改、也可以把整个 notes 目录纳入 git" />
-            <TextBlock x:Name="StatusText" VerticalAlignment="Center" Margin="16,0,0,0" Foreground="#1F6FB2" />
+            <TextBlock x:Name="StatusText" VerticalAlignment="Center" Margin="16,0,0,0" Foreground="{DynamicResource Theme.Accent.Soft}" />
         </StackPanel>
 
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">

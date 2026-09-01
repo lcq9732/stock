@@ -125,6 +125,128 @@ public static class InsurerRegulatoryKeys
     public const string AutoCombinedRatio = "auto_combined_ratio";
 }
 
+/// <summary>
+/// 指标 key → 中文名 + **到哪儿去找这个数**（2026-08-29 新增）。
+///
+/// 用途是生成「待手工回填清单」：解析失败的报告不能就这么算了——得告诉人这份报告缺哪几个数、
+/// 各自在财报的哪一章，照着翻两页就能补上。没有这层映射，清单里只有一串 metric_key，
+/// 等于没说。
+/// </summary>
+public static class RegulatoryMetricCatalog
+{
+    /// <summary>key → (中文名, 在财报里的位置)。</summary>
+    public static readonly Dictionary<string, (string Name, string Where)> Entries = new()
+    {
+        // ── 银行：几乎都在「会计数据和财务指标摘要」一章（招行中报是第 6~9 页）──
+        [BankRegulatoryKeys.NplRatio] = ("不良贷款率", "会计数据和财务指标摘要 → 资产质量指标"),
+        [BankRegulatoryKeys.LoanProvisionRatio] = ("贷款拨备率", "会计数据和财务指标摘要 → 资产质量指标"),
+        [BankRegulatoryKeys.ProvisionCoverage] = ("拨备覆盖率", "会计数据和财务指标摘要 → 资产质量指标"),
+        [BankRegulatoryKeys.CreditCost] = ("信用成本(年化)", "会计数据和财务指标摘要 → 资产质量指标"),
+        [BankRegulatoryKeys.CoreTier1Car] = ("核心一级资本充足率", "会计数据和财务指标摘要 → 资本充足率指标（**用权重法**那一栏）"),
+        [BankRegulatoryKeys.Tier1Car] = ("一级资本充足率", "同上，资本充足率指标"),
+        [BankRegulatoryKeys.TotalCar] = ("资本充足率", "同上，资本充足率指标"),
+        [BankRegulatoryKeys.Nim] = ("净息差/净利息收益率", "会计数据和财务指标摘要 → 补充财务比率（盈利能力指标）"),
+        [BankRegulatoryKeys.NetInterestSpread] = ("净利差", "同上，补充财务比率"),
+        [BankRegulatoryKeys.CostIncomeRatio] = ("成本收入比", "同上，补充财务比率"),
+        [BankRegulatoryKeys.Top1LoanRatio] = ("单一最大客户贷款比例", "补充财务指标（自带监管标准值 ≤10）"),
+        [BankRegulatoryKeys.Top10LoanRatio] = ("前十大客户贷款比例", "补充财务指标"),
+        [BankRegulatoryKeys.LiquidityRatio] = ("流动性比例", "补充财务指标（标准值 ≥25，取人民币那一行）"),
+        [BankRegulatoryKeys.Lcr] = ("流动性覆盖率", "补充财务指标（标准值 ≥100）"),
+        [BankRegulatoryKeys.NormalMigration] = ("正常类贷款迁徙率", "补充财务指标 → 迁徙率指标"),
+        [BankRegulatoryKeys.SpecialMentionMigration] = ("关注类贷款迁徙率", "补充财务指标 → 迁徙率指标"),
+        [BankRegulatoryKeys.SubstandardMigration] = ("次级类贷款迁徙率", "补充财务指标 → 迁徙率指标"),
+        [BankRegulatoryKeys.DoubtfulMigration] = ("可疑类贷款迁徙率", "补充财务指标 → 迁徙率指标"),
+
+        // ── 券商：都在「净资本及有关风险控制指标」那张表 ──
+        [BrokerRegulatoryKeys.RiskCoverage] = ("风险覆盖率", "母公司净资本及有关风险控制指标（监管 ≥100%，预警 120%）"),
+        [BrokerRegulatoryKeys.CapitalLeverage] = ("资本杠杆率", "同上（监管 ≥8%，预警 9.6%）"),
+        [BrokerRegulatoryKeys.LiquidityCoverage] = ("流动性覆盖率", "同上（监管 ≥100%）"),
+        [BrokerRegulatoryKeys.NetStableFunding] = ("净稳定资金率", "同上（监管 ≥100%）"),
+        [BrokerRegulatoryKeys.NetCapitalToNetAssets] = ("净资本/净资产", "同上（监管 ≥20%）"),
+        [BrokerRegulatoryKeys.NetCapitalToLiabilities] = ("净资本/负债", "同上（监管 ≥8%）"),
+        [BrokerRegulatoryKeys.EquityPropToNetCapital] = ("自营权益类/净资本", "同上（监管 ≤100%，是上限）"),
+        [BrokerRegulatoryKeys.NonEquityPropToNetCapital] = ("自营非权益类/净资本", "同上（监管 ≤500%，是上限）"),
+
+        // ── 保险：偿付能力在年报的偿付能力章节，也可查季度偿付能力报告 ──
+        [InsurerRegulatoryKeys.CoreSolvency] = ("核心偿付能力充足率",
+            "年报「偿付能力」章节，或公司官网的季度偿付能力报告摘要（监管 ≥50%）。⚠ 集团型公司要取**集团口径**，别取子公司的"),
+        [InsurerRegulatoryKeys.ComprehensiveSolvency] = ("综合偿付能力充足率",
+            "同上（监管 ≥100%）。⚠ 同样注意集团 vs 子公司口径"),
+        [InsurerRegulatoryKeys.CombinedRatio] = ("综合成本率", "年报「财产保险业务」章节（低于 100% 才是承保盈利）"),
+        [InsurerRegulatoryKeys.AutoCombinedRatio] = ("车险综合成本率", "年报「财产保险业务」章节"),
+    };
+
+    public static string NameOf(string key) =>
+        Entries.TryGetValue(key, out var e) ? e.Name : key;
+
+    public static string WhereOf(string key) =>
+        Entries.TryGetValue(key, out var e) ? e.Where : "（未登记出处）";
+
+    /// <summary>某类机构应当具备的全部指标 key——比对实际抓到的，差集就是要手工补的。</summary>
+    public static string[] ExpectedFor(FinancialInstitutionKind kind) => kind switch
+    {
+        FinancialInstitutionKind.Bank =>
+        [
+            BankRegulatoryKeys.NplRatio, BankRegulatoryKeys.ProvisionCoverage,
+            BankRegulatoryKeys.CoreTier1Car, BankRegulatoryKeys.TotalCar,
+            BankRegulatoryKeys.Nim, BankRegulatoryKeys.CostIncomeRatio,
+        ],
+        FinancialInstitutionKind.Broker =>
+        [
+            BrokerRegulatoryKeys.RiskCoverage, BrokerRegulatoryKeys.CapitalLeverage,
+            BrokerRegulatoryKeys.LiquidityCoverage, BrokerRegulatoryKeys.NetStableFunding,
+            BrokerRegulatoryKeys.NetCapitalToNetAssets, BrokerRegulatoryKeys.NetCapitalToLiabilities,
+            BrokerRegulatoryKeys.EquityPropToNetCapital, BrokerRegulatoryKeys.NonEquityPropToNetCapital,
+        ],
+        FinancialInstitutionKind.Insurer =>
+        [
+            InsurerRegulatoryKeys.CoreSolvency, InsurerRegulatoryKeys.ComprehensiveSolvency,
+            InsurerRegulatoryKeys.CombinedRatio,
+        ],
+        _ => [],
+    };
+}
+
+/// <summary>
+/// 一条监管指标的**来源**（数据库 source 列，2026-08-30 补全）。来源决定两件事：
+/// **重解析时能不能被覆盖**，以及**要不要让人核对一次**。
+///
+///   pdf            从 PDF 文本层解析出来的，确定性最高。重解析会覆盖它（规则改进后自愈）。
+///   ocr            文本层没有数（数字被转曲），是把页面渲染成图 OCR 出来的。**可能认错**，
+///                  所以要列进「待手工回填清单」让人对着 PDF 核一遍。重解析会覆盖。
+///   ocr_confirmed  人核对过、确认 OCR 认得对（清单里那一行留空导入回来的）。不再列进清单，
+///                  重解析也不覆盖——人的判断优先于机器。
+///   manual         人手工填的值（清单里填了数导入回来的）。最高优先级，什么都不覆盖它。
+/// </summary>
+public static class MetricSources
+{
+    public const string Pdf = "pdf";
+    public const string Ocr = "ocr";
+    public const string OcrConfirmed = "ocr_confirmed";
+    public const string Manual = "manual";
+
+    /// <summary>这些来源代表**人已经拍板**，自动解析一律不许覆盖。</summary>
+    public static readonly string[] HumanApproved = [OcrConfirmed, Manual];
+
+    /// <summary>
+    /// 本期有哪些指标是 OCR 认出来、还没人核对的——给体检表的结论补一句提醒。没有就返回空串。
+    ///
+    /// 为什么必须提醒：OCR 认错了照样是个像模像样的数（实测把 94.5% 认成 94.59%），
+    /// 摆在体检表里跟 PDF 里直接读出来的数长得一模一样。**看的人有权知道这个数的成色。**
+    /// </summary>
+    public static string PendingOcrNote(IEnumerable<BankRegulatoryMetric>? metrics, DateTime reportDate)
+    {
+        var names = metrics?
+            .Where(m => m.ReportDate == reportDate && m.Source == Ocr)
+            .Select(m => RegulatoryMetricCatalog.NameOf(m.MetricKey))
+            .Distinct().ToList();
+        if (names is not { Count: > 0 }) return "";
+        return $"　⚠ 其中 {string.Join("、", names)} 是 **OCR 从财报图像里认出来的**"
+             + "（这一期 PDF 的数字被排版转成了矢量图形，没有文本层可读），尚未人工核对，"
+             + "拿它下判断前请对一眼原文；Fetcher 的【导入手工数据】可以确认或更正。";
+    }
+}
+
 /// <summary>一条银行监管指标。</summary>
 public class BankRegulatoryMetric
 {
@@ -139,6 +261,8 @@ public class BankRegulatoryMetric
     public string? StandardValue { get; init; }
     /// <summary>取自 PDF 第几页（1 起），便于人工回查核对。</summary>
     public int SourcePage { get; init; }
+    /// <summary>数据来源，见 <see cref="MetricSources"/>。默认是 PDF 文本层解析。</summary>
+    public string Source { get; init; } = MetricSources.Pdf;
 }
 
 /// <summary>一份财报 PDF 的解析结果状态。</summary>

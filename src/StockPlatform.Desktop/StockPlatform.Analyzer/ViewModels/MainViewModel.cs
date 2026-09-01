@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -127,7 +127,7 @@ public class MainViewModel : INotifyPropertyChanged
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);
         RisingLowsTab = new RisingLowsTabViewModel(paths, barRepository, watchlistStore);
         ShortTermTab = new ShortTermTabViewModel(paths, barRepository, financialRepository, watchlistStore);
-        QueryTab = new QueryTabViewModel(paths, barRepository, watchlistStore);
+        QueryTab = new QueryTabViewModel(paths, barRepository, watchlistStore, corePositionStore);
         BoardTab = new BoardTabViewModel(boardRepository, barRepository, paths);
         FactorTab = new FactorTabViewModel(paths, watchlistStore);
         WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository, boardRepository, feeStore);
@@ -140,6 +140,8 @@ public class MainViewModel : INotifyPropertyChanged
         WatchlistTab.TradePoolChanged = () => TradePoolTab.Reload();
         TradePoolTab.TradePoolChanged = () => WatchlistTab.Reload();
         QueryTab.TradePoolChanged = () => { TradePoolTab.Reload(); WatchlistTab.Reload(); };
+        // 查询页也能直接加底仓（2026-09-01），加完让【底仓】页跟着刷新——同底仓法那页的联动。
+        QueryTab.CorePositionsChanged = () => CorePositionTab.Reload();
 
         LocalDbPathText = $"本地数据文件：{_paths.CurrentDb}（Fetcher 直接写这个文件，分析程序只读它）";
 

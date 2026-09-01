@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -73,7 +73,7 @@ public static class BottomReboundChartBuilder
         ChartBuilder.HideAxisVisually(mainDay);
         ChartBuilder.HideAxisVisually(mainMonth);
 
-        var main = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var main = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         main.Axes.Add(mainDay);
         main.Axes.Add(mainMonth);
         var mainYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };
@@ -128,7 +128,7 @@ public static class BottomReboundChartBuilder
         // MACD副图（规则1）——虚线标出近零阈值的下边界，直观看到DIF是否在允许范围内。
         ChartBuilder.HideAxisVisually(macdDay);
         ChartBuilder.HideAxisVisually(macdMonth);
-        var macd = new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) };
+        var macd = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(ChartBuilder.FixedLeftMargin, double.NaN, ChartBuilder.FixedRightMargin, double.NaN) });
         macd.Axes.Add(macdDay);
         macd.Axes.Add(macdMonth);
         var macdYAxis = new LinearAxis { Position = AxisPosition.Left, IsPanEnabled = true, IsZoomEnabled = true };

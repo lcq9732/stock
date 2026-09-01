@@ -68,14 +68,22 @@ public class TencentBarFetcher : IBarDataFetcher
 
     public async Task<(string Name, List<Bar> Bars)> FetchAsync(string code, string granularity, DateTime? start, DateTime? end, CancellationToken ct = default)
     {
-        if (granularity != Granularity.Day && granularity != Granularity.DayHfq)
-            throw new ArgumentException($"TencentBarFetcher 目前只直接支持日线/后复权日线（周/月请用本地聚合，分钟线暂未实现）：'{granularity}'");
+        if (granularity != Granularity.Day && granularity != Granularity.DayHfq && granularity != Granularity.DayRaw)
+            throw new ArgumentException($"TencentBarFetcher 目前只直接支持日线/后复权/不复权日线（周/月请用本地聚合，分钟线暂未实现）：'{granularity}'");
 
         return await _rateLimiter.RunAsync(() => FetchInternalAsync(code, granularity, start, end, ct), ct);
     }
 
-    /// <summary>接口的复权参数与返回节点名：前复权 qfq/qfqday，后复权 hfq/hfqday（指数节点是 day，下方两者都认）。</summary>
-    private static string FqParam(string granularity) => granularity == Granularity.DayHfq ? "hfq" : "qfq";
+    /// <summary>
+    /// 接口的复权参数与返回节点名：前复权 qfq/qfqday，后复权 hfq/hfqday，**不复权则参数留空、节点就叫 day**
+    /// （指数无论要哪种复权返回的都是 day 节点，所以下面取节点时两者都认）。
+    /// </summary>
+    private static string FqParam(string granularity) => granularity switch
+    {
+        Granularity.DayHfq => "hfq",
+        Granularity.DayRaw => "",      // 留空 = 不复权，实测返回 day 节点、值等于真实成交价
+        _ => "qfq",
+    };
 
     // Tencent's server hard-caps every response at 640 bars, no matter what "count" we ask for
     // (verified empirically — even requesting 2000 still returns exactly 640). A 3-year daily

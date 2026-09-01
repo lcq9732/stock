@@ -1,9 +1,11 @@
-<Window x:Class="StockPlatform.Analyzer.TradeLotsWindow"
+﻿<Window x:Class="StockPlatform.Analyzer.TradeLotsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:StockPlatform.Analyzer"
         Title="交易记录" Height="540" Width="820" MinHeight="360" MinWidth="620"
-        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei">
+        WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei"
+        Background="{DynamicResource Theme.Window.Background}"
+        Foreground="{DynamicResource Theme.Foreground}">
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -15,14 +17,14 @@
 
         <TextBlock x:Name="TitleText" Grid.Row="0" FontSize="15" FontWeight="Bold" Margin="0,0,0,4" />
         <StackPanel Grid.Row="1" Margin="0,0,0,8">
-            <TextBlock Foreground="Gray" TextWrapping="Wrap"
+            <TextBlock Foreground="{DynamicResource Theme.Foreground.Muted}" TextWrapping="Wrap"
                        Text="买入、卖出都可以录多笔（金字塔式建仓 / 分批止盈）。表格里双击即可修改；日期填 2026-08-11 这种格式，价格和股数都必须大于0。保存后，&quot;主动仓&quot;列表显示的是这些笔汇总出来的总股数和加权平均价。" />
 
             <!-- 费率设置——各家券商佣金不一样，做成可填的。全程序共用一份（存 data\trade-fees.json），
                  在这里改完立刻生效并落盘，下面的费用/汇总跟着重算。单位统一用"万分之"（券商就是这么
                  报价的），最低佣金按元。 -->
             <WrapPanel Margin="0,6,0,0">
-                <TextBlock Text="费率：" VerticalAlignment="Center" Foreground="Gray" />
+                <TextBlock Text="费率：" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" />
                 <TextBlock Text="佣金 万分之" VerticalAlignment="Center" Margin="4,0,0,0" />
                 <TextBox x:Name="CommissionBox" Width="46" Margin="2,0" LostFocus="FeeInput_LostFocus"
                          ToolTip="佣金费率，单位万分之（填 1.2 就是万分之1.2 = 0.012%）。买入、卖出都收。" />
@@ -36,8 +38,8 @@
                 <TextBlock Text="｜印花税 万分之" VerticalAlignment="Center" Margin="10,0,0,0" />
                 <TextBox x:Name="StampDutyBox" Width="46" Margin="2,0" LostFocus="FeeInput_LostFocus"
                          ToolTip="印花税费率，单位万分之。只有卖出才收。" />
-                <TextBlock Text="（只卖出收）" VerticalAlignment="Center" Foreground="Gray" />
-                <TextBlock Text="——改完点一下别处即生效，全局保存" VerticalAlignment="Center" Foreground="Gray" Margin="10,0,0,0"
+                <TextBlock Text="（只卖出收）" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                <TextBlock Text="——改完点一下别处即生效，全局保存" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" Margin="10,0,0,0"
                            ToolTip="费率是账户级设置，全程序共用一份：在这里改了，所有股票的含费盈亏和止亏价都按新费率重算。" />
             </WrapPanel>
 
@@ -55,12 +57,12 @@
                          ToolTip="想每年从这只票收多少分红（元，税前）。底仓的仓位按现金流倒推，不走凯利" />
                 <TextBlock Text="元" VerticalAlignment="Center" Margin="2,0,0,0" />
                 <TextBlock x:Name="TargetSharesText" VerticalAlignment="Center" Margin="12,0,0,0"
-                           Foreground="#1F6FB2" FontWeight="SemiBold" />
+                           Foreground="{DynamicResource Theme.Accent.Soft}" FontWeight="SemiBold" />
             </StackPanel>
         </StackPanel>
 
         <DataGrid x:Name="LotsGrid" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False"
-                  GridLinesVisibility="Horizontal" HeadersVisibility="Column" AlternatingRowBackground="#F5F5F5"
+                  GridLinesVisibility="Horizontal" HeadersVisibility="Column" AlternatingRowBackground="{DynamicResource Theme.Grid.Row.Alternate}"
                   SelectionMode="Extended" SelectionUnit="FullRow">
             <DataGrid.Columns>
                 <DataGridComboBoxColumn Header="方向" Width="80"

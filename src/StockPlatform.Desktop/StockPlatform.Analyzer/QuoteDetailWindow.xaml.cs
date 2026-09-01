@@ -129,10 +129,24 @@ public partial class QuoteDetailWindow : Window
         RebuildChart();
     }
 
+    /// <summary>选中的那个周期按钮高亮。配色走主题资源而不是写死的浅蓝/系统灰：这三个按钮原来固定
+    /// 浅底黑字，深色主题下按钮的默认字色变浅，就成了浅底浅字、几乎看不清（2026-08-29 修）。
+    /// 未选中的直接 ClearValue 交回主题的普通按钮外观。</summary>
     private void HighlightGranularityButton(Button selected)
     {
         foreach (var b in new[] { DayButton, WeekButton, MonthButton })
-            b.Background = ReferenceEquals(b, selected) ? new SolidColorBrush(Color.FromRgb(0xCC, 0xE5, 0xFF)) : SystemColors.ControlBrush;
+        {
+            if (ReferenceEquals(b, selected))
+            {
+                b.SetResourceReference(BackgroundProperty, "Theme.Selection.Background");
+                b.SetResourceReference(ForegroundProperty, "Theme.Selection.Foreground");
+            }
+            else
+            {
+                b.ClearValue(BackgroundProperty);
+                b.ClearValue(ForegroundProperty);
+            }
+        }
     }
 
     /// <summary>"其他数据"——把这只标的在库里除K线之外的所有数据读出来另开窗口展示（见

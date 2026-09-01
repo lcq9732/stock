@@ -1,0 +1,78 @@
+<!--
+    两个主题**都**加载的控件样式。跟 Controls.Dark.xaml 的区别：那份是"深色专属、浅色不加载"，
+    这份浅色深色一起用，颜色全走 DynamicResource，所以换主题时会自己变。
+
+    为什么有些控件非放这里不可：DataGrid 的列头/单元格样式经常被**列级**的 Style 覆盖
+    （表格里有二十几处 <DataGridTextColumn.HeaderStyle> 只是为了给列头挂个 ToolTip），
+    而列级 Style 一旦出现，App 级的隐式样式就整份失效——深色下那几个列头会退回 WPF 默认的
+    浅灰渐变、白底黑字，跟旁边的深色列头拼在一起很难看。
+
+    解决办法是让那些列级 Style 写 BasedOn="{StaticResource Theme.ColumnHeader}"。BasedOn 只能用
+    StaticResource（加载时定死），所以被它继承的样式必须是**换主题时不会被替换掉的同一个对象**
+    ——也就是必须放在这份始终加载的字典里。样式对象不变、里面的颜色是 DynamicResource，于是切换
+    主题时这些列头照样跟着变色。
+
+    代价：浅色下列头/选中行不再是 Windows 原生的渐变外观，而是这里定义的纯色版。差别很小，
+    换来的是"每个表格长得一样、且两个主题都对"。
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- 列头。列级 HeaderStyle 用 BasedOn 继承它，见上面 -->
+    <Style x:Key="Theme.ColumnHeader" TargetType="DataGridColumnHeader">
+        <Setter Property="Background" Value="{DynamicResource Theme.Grid.Header.Background}" />
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Grid.Header.Foreground}" />
+        <Setter Property="Padding" Value="6,4" />
+        <Setter Property="HorizontalContentAlignment" Value="Left" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="DataGridColumnHeader">
+                    <Grid>
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{DynamicResource Theme.Border}" BorderThickness="0,0,1,1">
+                            <ContentPresenter Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <!-- 拖拽改列宽的两个手柄——原生模板里就有，去掉的话列宽就拖不动了 -->
+                        <Thumb x:Name="PART_LeftHeaderGripper" HorizontalAlignment="Left" Width="6"
+                               Cursor="SizeWE" Opacity="0" Background="Transparent" />
+                        <Thumb x:Name="PART_RightHeaderGripper" HorizontalAlignment="Right" Width="6"
+                               Cursor="SizeWE" Opacity="0" Background="Transparent" />
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Control.Background.Hover}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource Theme.ColumnHeader}" />
+
+    <!-- 单元格。选中行故意不用系统那种高对比蓝底白字：这些表格里满是红/绿/橙的语义文字
+         （涨跌、动作、告警），底色一重就全被压平了。列级 CellStyle 同样 BasedOn 这个。 -->
+    <Style x:Key="Theme.DataGridCell" TargetType="DataGridCell">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Style.Triggers>
+            <Trigger Property="IsSelected" Value="True">
+                <Setter Property="Background" Value="{DynamicResource Theme.Selection.Background}" />
+                <Setter Property="Foreground" Value="{DynamicResource Theme.Selection.Foreground}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource Theme.Selection.Background}" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style TargetType="DataGridCell" BasedOn="{StaticResource Theme.DataGridCell}" />
+
+    <!-- 行。同样是给窗口里自定义的 RowStyle 当 BasedOn 用（代码规则窗口按"是不是股票"改行底色）。
+         这里只定文字色：行底色由 DataGrid 的 RowBackground/AlternatingRowBackground 逐行设本地值，
+         优先级比样式高，不会被这里盖掉。 -->
+    <Style x:Key="Theme.DataGridRow" TargetType="DataGridRow">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+    </Style>
+
+</ResourceDictionary>

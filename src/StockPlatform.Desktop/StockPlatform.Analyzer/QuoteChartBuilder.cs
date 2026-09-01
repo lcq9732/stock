@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -757,6 +757,8 @@ public static class QuoteChartBuilder
             TextColor = AxisTextColor,
             PlotMargins = new OxyThickness(LeftMargin, double.NaN, RightMargin, double.NaN),
         };
+        // 这套图自带全套深色配色（通达信风格看盘图），**故意不调用 ChartTheme.Track**——
+        // 不登记就不会被界面主题碰到，浅色深色下都保持这身黑底。
         return m;
     }
 

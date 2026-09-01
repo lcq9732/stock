@@ -132,7 +132,8 @@ public static class BrokerInsurerHealthCheckBuilder
                        + (hasReg
                             ? "风控指标来自年报/中报的「净资本及风险控制指标」表。"
                             : "风控指标需要跑一次 Fetcher 的【券商保险监管指标】才能补上。")
-                       + "参考值全部是监管明文红线与预警线，不随周期漂移，所以不用行业分位。",
+                       + "参考值全部是监管明文红线与预警线，不随周期漂移，所以不用行业分位。"
+                       + MetricSources.PendingOcrNote(regulatory, cur.ReportDate),
         };
     }
 
@@ -213,7 +214,8 @@ public static class BrokerInsurerHealthCheckBuilder
                        + "（综合成本率 100% 是分水岭）。"
                        + (hasReg ? "偿付能力与承保指标来自年报。"
                                  : "偿付能力与综合成本率需要跑一次【券商保险监管指标】才能补上。")
-                       + "内含价值(EV)/新业务价值(NBV)是金额不是比率，尚未接入。",
+                       + "内含价值(EV)/新业务价值(NBV)是金额不是比率，尚未接入。"
+                       + MetricSources.PendingOcrNote(regulatory, cur.ReportDate),
         };
     }
 

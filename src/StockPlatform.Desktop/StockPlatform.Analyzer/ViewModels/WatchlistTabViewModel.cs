@@ -6,6 +6,7 @@ using StockPlatform.Analyzer.Export;
 using StockPlatform.Analyzer.Watchlist;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Desktop.Shared.Theme;
 
 namespace StockPlatform.Analyzer.ViewModels;
 
@@ -69,7 +70,7 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     /// 交易日数据，会查到DataDate自己那根，涨跌幅显示为0%，这正确反映"还没有新的一天可比较"。</summary>
     public string LatestCloseText { get; private set; } = "—";
     public string ChangeText { get; private set; } = "本地无该日期之后的K线数据";
-    public Brush ChangeColor { get; private set; } = Brushes.Gray;
+    public Brush ChangeColor { get; private set; } = ThemeBrushes.Gray;
 
     /// <summary>"选中后涨跌幅"的数值形式——给"自选股"页统计各方法准确率用（平均涨跌/胜率）。</summary>
     public double? SincePickPct { get; private set; }
@@ -120,7 +121,7 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     /// <summary>是否在"主动仓"池里（显式勾入，或已填买入价）——"自选股"页用一列标出来，让人一眼看出
     /// 哪些样本自己真的下手了。</summary>
     public string TradePoolText => Entry.IsInTradePool ? (Entry.HasBought ? "✔持仓" : "✔已加入") : "";
-    public Brush TradePoolColor => Entry.HasBought ? Brushes.Firebrick : Brushes.SeaGreen;
+    public Brush TradePoolColor => Entry.HasBought ? ThemeBrushes.Firebrick : ThemeBrushes.SeaGreen;
 
     private void ComputeTracking(IBarRepository barRepository)
     {
@@ -134,7 +135,7 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
         var pct = (latest.Close - Entry.PriceAtPick) / Entry.PriceAtPick * 100;
         SincePickPct = pct;
         ChangeText = $"{(pct >= 0 ? "+" : "")}{pct:F2}%";
-        ChangeColor = pct >= 0 ? Brushes.Red : Brushes.Green; // 国内看盘习惯：涨红跌绿
+        ChangeColor = pct >= 0 ? ThemeBrushes.Red : ThemeBrushes.Green; // 国内看盘习惯：涨红跌绿
     }
 
     // ── 持仓信息（2026-08-11起支持多笔买入/卖出，见 TradeLot）——买卖明细在"主动仓"Tab点
@@ -177,8 +178,8 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     /// 两处不能各定各的，否则这边红了那边不提醒。跨财报持仓是回测参数里没有的事件风险。</summary>
     public Brush EarningsColor =>
         DaysToEarnings is { } d && d >= 0 && d <= MorningStockRowViewModel.EarningsWarnDays
-            ? Brushes.Firebrick
-            : Brushes.Black;
+            ? ThemeBrushes.Firebrick
+            : ThemeBrushes.Foreground;
 
     public string EarningsTooltip => DaysToEarnings switch
     {
@@ -210,8 +211,8 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     /// <summary>止亏价相对现价的位置——现价已经跌破止亏价就标红（再卖就是真亏钱了）。</summary>
     public Brush BreakEvenColor
         => _latestClose is > 0 && _cost.BreakEvenPrice() is { } p && _latestClose < p
-            ? Brushes.Firebrick
-            : Brushes.Black;
+            ? ThemeBrushes.Firebrick
+            : ThemeBrushes.Foreground;
 
     /// <summary>成交明细的悬停提示——逐笔列出来（日期/方向/价格/股数/该笔费用），外加含费成本均价，
     /// 不用打开窗口也能核对。</summary>
@@ -317,14 +318,14 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     {
         get
         {
-            if (!Entry.HasBought) return Brushes.Gray;
+            if (!Entry.HasBought) return ThemeBrushes.Gray;
             if (Entry.IsClosedTrade)
-                return (_cost.RealizedNetPct ?? Entry.RealizedPct) >= 0 ? Brushes.Red : Brushes.Green;
-            if (_latestClose is not (> 0)) return Brushes.Gray;
+                return (_cost.RealizedNetPct ?? Entry.RealizedPct) >= 0 ? ThemeBrushes.Red : ThemeBrushes.Green;
+            if (_latestClose is not (> 0)) return ThemeBrushes.Gray;
             // 含费口径：按现价全卖是赚是亏（跟"现价 vs 止亏价"是同一回事）。
             var pnl = _cost.TotalPnlIfLiquidated(_latestClose.Value)
                       ?? (_latestClose.Value - (Entry.AvgBuyPrice ?? 0));
-            return pnl >= 0 ? Brushes.Red : Brushes.Green;
+            return pnl >= 0 ? ThemeBrushes.Red : ThemeBrushes.Green;
         }
     }
 

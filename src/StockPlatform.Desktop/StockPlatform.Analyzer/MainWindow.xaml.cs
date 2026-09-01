@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using StockPlatform.Analyzer.ViewModels;
 using StockPlatform.Logic.Models;
@@ -15,6 +15,11 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+#if DEBUG
+        // Debug 构建可以跟正在用的 Release 版同时开着（见 SingleInstanceGuard）——标题上标一下，
+        // 免得两个长得一样的窗口分不清谁是谁，把调试版当成日常用的那个去点抓取。
+        Title += "　【DEBUG 调试版·数据目录在 bin 下】";
+#endif
         // Setting WindowState=Maximized here (or even in XAML) doesn't reliably stick — WPF
         // needs a completed layout pass first. Deferring to Loaded is the standard workaround.
         Loaded += (_, _) => WindowState = WindowState.Maximized;
@@ -351,6 +356,10 @@ public partial class MainWindow : Window
             case ResultRowViewModel r: code = r.Code; name = r.Name; return true;
             case WatchlistRowViewModel w: code = w.Code; name = w.Name; return true;
             case CorePositionRowViewModel c: code = c.Code; name = c.Name; return true;
+            // 查询页的行（2026-09-01 补）——这一类在 2026-08-27 加分裂按钮时漏了，点【财务分析】
+            // 一直报"这一行不是个股"。这里一律返回 true（指数/ETF/板块的K线是能看的），
+            // "有没有财务数据"交给 FinancialAnalysisButton_Click 按 IsStock 单独判。
+            case QueryRowViewModel q: code = q.Code; name = q.Name; return true;
             default: return false;
         }
     }
@@ -363,6 +372,14 @@ public partial class MainWindow : Window
         {
             MessageBox.Show(this, "这一行不是个股，没有财务数据。", "财务分析",
                 MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        // 查询页能搜到指数/ETF/板块，它们没有财务报表——说清楚是哪一类，并指一下K线还是能看的，
+        // 比笼统一句"不是个股"有用。
+        if ((sender as FrameworkElement)?.DataContext is QueryRowViewModel { IsStock: false } notStock)
+        {
+            MessageBox.Show(this, $"{notStock.Name} 是{notStock.Type}，没有财务报表。\n（下拉里的【行情详情】可以看它的K线）",
+                "财务分析", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         FinancialAnalysisWindow.Open(this, vm, code, name);
@@ -487,6 +504,19 @@ public partial class MainWindow : Window
     {
         if (((FrameworkElement)sender).DataContext is BoardRowViewModel row)
             OpenQuoteDetail(row.BoardCode, row.Name);
+    }
+
+    // 晨检页"大盘总开关"里双击某个指数 → 看它自己的K线（2026-09-01 新增）。表里只给了收盘和
+    // 两条均线的数字，"线下37个交易日"这种结论光看数字判断不了是横着磨还是一路阴跌，得看图。
+    // 指数在库里是带前缀的8位符号，直接喂给同一个行情详情窗口即可；叠加大盘那个勾对指数会
+    // 自动失效（MarketClassifier 认不出8位符号 → PickFor 返回 null），跟板块指数的行为一致。
+    private void IndexLightRow_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        // 双击表头、滚动条、空白处同样会冒泡到 DataGrid，所以从点中的元素往上找真正的行；
+        // 找不到就当没点（不能用 SelectedItem——那会拿到上一次选中的行，双击表头也弹窗）。
+        if (e.OriginalSource is not DependencyObject src) return;
+        if (ItemsControl.ContainerFromElement((DataGrid)sender, src) is not DataGridRow { Item: IndexLightRowViewModel row }) return;
+        if (row.Code.Length > 0) OpenQuoteDetail(row.Code, row.Name);
     }
 
     private void OpenQuoteDetail(string code, string name)

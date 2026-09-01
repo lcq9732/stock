@@ -39,6 +39,20 @@ public static class SingleInstanceGuard
     /// <param name="friendlyName">提示文字里显示的程序名。</param>
     public static bool TryAcquire(string appId, string friendlyName)
     {
+#if DEBUG
+        // ── Debug 构建不设守卫（2026-08-31 按用户要求）────────────────────────────
+        // 开发时经常要**一边开着日常在用的 Release 版、一边起一个 Debug 版看改动效果**，
+        // 守卫会把后者直接挡掉（弹"程序已在运行"然后退出），改动就没法当场验证。
+        // 正式用的永远是 Release 版，那边守卫照旧。
+        //
+        // ⚠ 为什么这样是安全的：Debug 版的数据目录是它自己 bin 目录下的 data\
+        //   （FetchPaths 默认取 AppContext.BaseDirectory\data），跟 publish\data 天然隔开，
+        //   不会两个进程写同一个 current.sqlite。真要把 Debug 版指到正式数据上时，
+        //   自己注意别同时抓取——类注释里说的锁表和覆盖 watchlist.json 那些风险依然成立。
+        _ = appId;
+        _ = friendlyName;
+        return true;
+#else
         // 用 Local\ 而不是 Global\：按登录会话隔离就够了，Global 需要更高权限、在某些环境会直接抛异常。
         _mutex = new Mutex(initiallyOwned: true, name: $"Local\\StockPlatform.{appId}.SingleInstance", out bool isFirst);
         if (isFirst) return true;
@@ -48,6 +62,7 @@ public static class SingleInstanceGuard
         _mutex.Dispose();   // 不是持有者，别留着
         _mutex = null;
         return false;
+#endif
     }
 
     /// <summary>进程退出时释放（App.OnExit 调用）。没显式释放虽然进程结束也会自动放开，但显式做更清晰、

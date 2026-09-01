@@ -1,4 +1,4 @@
-using OxyPlot;
+﻿using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -56,7 +56,7 @@ public static class DossierChartBuilder
     public static DossierChartResult Build(DossierChart chart)
     {
         int count = chart.XLabels.Count;
-        var model = new PlotModel { PlotMargins = new OxyThickness(64, 6, 64, 24) };
+        var model = ChartTheme.Track(new PlotModel { PlotMargins = new OxyThickness(64, 6, 64, 24) });
 
         var xAxis = new LinearAxis
         {
