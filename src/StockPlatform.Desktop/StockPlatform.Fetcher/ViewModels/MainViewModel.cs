@@ -5,7 +5,7 @@ using System.Text.Json;
 using System.Runtime.CompilerServices;
 using System.Windows.Threading;
 using StockPlatform.Data.Orchestration;
-using StockPlatform.Fetcher.Planning;
+using StockPlatform.Scheduling;
 using StockPlatform.Logic.Abstractions;
 
 namespace StockPlatform.Fetcher.ViewModels;
@@ -121,6 +121,15 @@ public class MainViewModel : INotifyPropertyChanged
         private set { Set(ref _pendingAdjRebuild, value); Raise(nameof(PendingAdjRebuildText)); }
     }
     public string PendingAdjRebuildText => PendingAdjRebuild > 0 ? $"待重算 {PendingAdjRebuild} 只" : "已是最新";
+
+    private int _pendingEarnings;
+    /// <summary>还有多少只股票的本期财报没披露——就是下一轮要复查披露日的那批。</summary>
+    public int PendingEarnings
+    {
+        get => _pendingEarnings;
+        private set { Set(ref _pendingEarnings, value); Raise(nameof(PendingEarningsText)); }
+    }
+    public string PendingEarningsText => PendingEarnings > 0 ? $"待披露 {PendingEarnings} 只" : "本期已披露完";
 
     private int _pendingFinancials;
     /// <summary>还有多少只股票的财务报表没补（报告期落后、或科目集版本落后于当前 v4）。</summary>
@@ -434,12 +443,13 @@ public class MainViewModel : INotifyPropertyChanged
         Task.Run(() =>
         {
             FailedRetrySummary? failed = null;
-            int qfq = 0, raw = 0, adj = 0, fin = 0;
+            int qfq = 0, raw = 0, adj = 0, fin = 0, earn = 0;
             try { failed = _orchestrator.GetFailedRetrySummary(); } catch { }
             // 待重取前复权的计数跟失败名单同源（都在 manifest.json 里），一起刷新
             try { qfq = _orchestrator.GetPendingQfqRepairCount(); } catch { /* 只是个计数 */ }
             try { raw = _orchestrator.GetPendingRawBarCount(); } catch { }
             try { adj = _orchestrator.GetPendingAdjRebuildCount(); } catch { }
+            try { earn = _orchestrator.GetPendingEarningsCount(); } catch { }
             try { fin = _orchestrator.GetFinancialFetchPlan().AllPending.Count; } catch { }
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
@@ -448,6 +458,7 @@ public class MainViewModel : INotifyPropertyChanged
                 PendingRawBars = raw;
                 PendingAdjRebuild = adj;
                 PendingFinancials = fin;
+                PendingEarnings = earn;
             });
             Interlocked.Exchange(ref _refreshingCounts, 0);
         });
@@ -1075,8 +1086,14 @@ public class MainViewModel : INotifyPropertyChanged
                 continue;
             }
 
-            // ② 今天已经有结果了——这一列最该说的就是它（空闲项也一样，跑过就报结果）
-            if (m.LastEnd?.Date == now.Date && m.LastOutcome != RunOutcome.None)
+            // ② 今天已经有结果了——这一列最该说的就是它（空闲项也一样，跑过就报结果）。
+            //    "今天的结果"看的是**这一轮从今天的计划时点之后开始**，不是"结束于今天"：
+            //    昨天 18:00 开工、今天凌晨收工的那一轮属于昨天，今天该显示的是"预计 18:00 再跑"。
+            bool hasTodayResult = m.LastOutcome != RunOutcome.None
+                && (m.Repeat == RepeatKind.WhenIdle
+                        ? m.LastEnd?.Date == now.Date
+                        : (m.LastStart ?? m.LastEnd) >= m.DueTimeOn(now));
+            if (hasTodayResult)
             {
                 (vm.StatusText, vm.StatusLevel) = m.LastOutcome switch
                 {
@@ -1349,6 +1366,9 @@ public class MainViewModel : INotifyPropertyChanged
                 // 一只补十年约 4 秒（多页），按空窗剩余时间估本轮补几只
                 return _orchestrator.RunFetchRawBarsAsync(
                     SelectedSource, progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(4)));
+
+            case FetchActionId.FetchEarningsSchedule:
+                return _orchestrator.RunFetchEarningsScheduleAsync(progress, ct);
 
             case FetchActionId.RebuildAdjSeries:
                 // 纯本地计算，一只十年约 50 毫秒；给足余量按 0.2 秒/只估

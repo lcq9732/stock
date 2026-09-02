@@ -2,7 +2,7 @@ using System.IO;
 using System.Text;
 using StockPlatform.Data.Orchestration;
 
-namespace StockPlatform.Fetcher.Planning;
+namespace StockPlatform.Scheduling;
 
 /// <summary>计划执行到哪一步了——界面顶部那行状态。</summary>
 public sealed record PlanRunnerState(
@@ -77,40 +77,42 @@ public sealed class PlanRunner(
             while (!ct.IsCancellationRequested)
             {
                 var now = DateTime.Now;
-                var (item, dueAt) = FindNext(now);
 
-                if (item == null)
+                // ① 有没有**已经到点**的定时项？有就跑，跑多久算多久，后面顺延。
+                var due = FindDue(now);
+                if (due != null)
                 {
-                    if (_hadWork) { LogRoundSummary(); _hadWork = false; }
+                    _hadWork = true;
+                    await ExecuteOneAsync(due, null, ct);
+                    continue;
+                }
 
-                    // 今天的定时项都跑完了 —— 正是「空闲时」那类项的主场，没有截止时刻
-                    var free = FindIdleTask(now, deadline: null);
-                    if (free != null) { await ExecuteOneAsync(free, null, ct); continue; }
+                // ② 没有 —— 下一个到点时刻是什么时候（可能今天已经没有了）
+                var next = NextDueTime(now);
+                if (next == null && _hadWork) { LogRoundSummary(); _hadWork = false; }
 
+                // ③ 空窗交给「空闲时」那类项。有下一个到点时刻就必须在它之前收尾。
+                DateTime? deadline = next is { } t ? t - IdleSafetyMargin : null;
+                var filler = FindIdleTask(now, deadline);
+                if (filler != null) { await ExecuteOneAsync(filler, deadline, ct); continue; }
+
+                // ④ 没得跑，睡一会儿再看。最多睡一分钟，这样中途改计划能很快生效。
+                if (next is { } dueAt)
+                {
+                    var waiting = FindWaitingItem(now, dueAt);
+                    var wait = dueAt - now;
+                    onState(new PlanRunnerState(true, null, waiting, dueAt,
+                        waiting is null
+                            ? $"等 {dueAt:HH:mm}"
+                            : $"等 {dueAt:HH:mm} 开始【{waiting.Info.Name}】（还有约 {Math.Ceiling(wait.TotalMinutes)} 分钟）"));
+                    await Task.Delay(wait < Reevaluate ? wait : Reevaluate, ct);
+                }
+                else
+                {
                     onState(new PlanRunnerState(true, null, null, null,
                         "计划已在待命——今天没有待执行的项了，到点会自动接着跑"));
                     await Task.Delay(Reevaluate, ct);
-                    continue;
                 }
-
-                _hadWork = true;
-
-                if (dueAt > now)
-                {
-                    // 离下一个定时项还有一段空窗：能塞下的话先让「空闲时」的项补一轮，
-                    // 但必须在 dueAt 前收尾（留 IdleSafetyMargin），绝不跟定时项撞上。
-                    var filler = FindIdleTask(now, deadline: dueAt - IdleSafetyMargin);
-                    if (filler != null) { await ExecuteOneAsync(filler, dueAt - IdleSafetyMargin, ct); continue; }
-
-                    var wait = dueAt - now;
-                    onState(new PlanRunnerState(true, null, item, dueAt,
-                        $"等 {dueAt:HH:mm} 开始【{item.Info.Name}】（还有约 {Math.Ceiling(wait.TotalMinutes)} 分钟）"));
-                    // 最多睡一分钟就回来重新评估，这样中途改计划能很快生效
-                    await Task.Delay(wait < Reevaluate ? wait : Reevaluate, ct);
-                    continue;
-                }
-
-                await ExecuteOneAsync(item, null, ct);
             }
         }
         catch (OperationCanceledException)
@@ -125,39 +127,108 @@ public sealed class PlanRunner(
     }
 
     /// <summary>
-    /// 按**计划顺序**找第一个该跑的项，返回它和它的最早开始时刻。
+    /// 按**频次优先级**排的顺序：数字越小越优先。
     ///
-    /// ⚠ 是"按顺序找第一个"，不是"找最早能跑的那个"。排在前面的项设了 22:00，后面的项就得等它——
-    /// 顺序即执行顺序，这样时间轴才是可预期的。想让某项先跑，把它拖到前面去。
+    /// 为什么按频次排（2026-09-02 用户定的）：频次越高的，时效性要求越硬。
+    /// 【每工作日】的晚一天就缺一天数据，补不回来；【每月】的 1 号该跑、5 号才跑，
+    /// 抓到的内容一模一样。所以让日更的插队，低频的让路——反正它们晚点没损失。
+    ///
+    /// 【仅一次】排第二：用户特意设成一次性的，多半是临时想尽快跑一趟。
     /// </summary>
-    private (FetchPlanItem? Item, DateTime DueAt) FindNext(DateTime now)
+    private static int TypePriority(RepeatKind kind) => kind switch
     {
+        RepeatKind.EveryWorkday => 0,
+        RepeatKind.Once => 1,
+        RepeatKind.Weekly => 2,
+        RepeatKind.Monthly => 3,
+        _ => int.MaxValue,          // 手动/空闲不走这条路
+    };
+
+    /// <summary>
+    /// 挑当下**已经该跑**的那一项：先按频次优先级分档，同档内按**表格里的排列顺序**。
+    ///
+    /// ⚠ 只返回「不早于」已经到点的。没到点的一律不返回——这是跟旧版最大的区别。
+    /// 旧版返回的是"按表格顺序的第一个待办项"，哪怕它还要等好几个小时；主循环拿到它就只能干等，
+    /// 后面那些**明明已经到点**的项全被堵住（2026-09-02 用户反馈：程序在等【拉取全部】到 18:00，
+    /// 下面几个每月 1 号的任务就一直不跑）。
+    ///
+    /// 现在的模型是：**这不是一条队列，是一组各自到期的任务**；优先级和排列顺序只用来决定
+    /// "同时到期时谁先跑"。谁到点了谁就有资格跑，不用陪着别人等。
+    /// </summary>
+    private FetchPlanItem? FindDue(DateTime now)
+    {
+        FetchPlanItem? best = null;
+        int bestPriority = int.MaxValue;
+
+        // 顺着表格从上往下走：同优先级时先遇到的胜出，所以天然就是"档内按排列顺序"
         foreach (var item in plan.Items)
         {
-            if (!item.Enabled) continue;
-            if (item.Repeat == RepeatKind.WhenIdle) continue;   // 空闲项走 FindIdleTask 那条路
-            if (!item.IsDueOn(now)) continue;
-            if (item.AlreadyRanOn(now)) continue;
-            // 失败过的今天不再自动重来——同一个错误连着撞几十次没有意义，而且会卡住后面所有项。
-            // 要重试就手动触发那一项，或者靠后台自动重试（它有自己的时机和停止条件）。
-            if (item.LastEnd?.Date == now.Date && item.LastOutcome is RunOutcome.Failed) continue;
-            // 前置今天失败了：第一次放过去让 ExecuteOneAsync 记一条"跳过"并说明原因，之后就静默
-            // 掠过——否则每分钟一轮评估就会往报告里刷一行。前置后来补跑成功的话，这里自然放行。
-            if (DependencyFailedToday(item) && item.AlreadySkippedOn(now)) continue;
-
-            var due = item.NotBefore.HasValue
-                ? now.Date.Add(item.NotBefore.Value.ToTimeSpan())
-                : now;
-            return (item, due);
+            if (!IsDueNow(item, now)) continue;
+            int p = TypePriority(item.Repeat);
+            if (p < bestPriority) { best = item; bestPriority = p; }
         }
-        return (null, default);
+        return best;
+    }
+
+    /// <summary>这一项现在就该跑：本期该跑、本期没跑过、今天没失败过，而且「不早于」已经到点。</summary>
+    private bool IsDueNow(FetchPlanItem item, DateTime now)
+        => IsPending(item, now) && item.DueTimeOn(now) <= now;
+
+    /// <summary>这一项这一期还欠着（不管到没到点）。</summary>
+    private bool IsPending(FetchPlanItem item, DateTime now)
+    {
+        if (!item.Enabled) return false;
+        if (item.Repeat is RepeatKind.WhenIdle or RepeatKind.Manual) return false;
+        if (!item.IsDueOn(now)) return false;
+        if (item.AlreadyRanOn(now)) return false;
+        // 失败过的今天不再自动重来——同一个错误连着撞几十次没有意义，而且会卡住后面所有项。
+        // 要重试就手动触发那一项，或者靠后台自动重试（它有自己的时机和停止条件）。
+        if (item.AlreadyFailedOn(now)) return false;
+        // 前置今天失败了：第一次放过去让 ExecuteOneAsync 记一条"跳过"并说明原因，之后就静默
+        // 掠过——否则每分钟一轮评估就会往报告里刷一行。前置后来补跑成功的话，这里自然放行。
+        if (DependencyFailedToday(item) && item.AlreadySkippedOn(now)) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// 还欠着、但**要等到将来某个时刻**才能跑的项里，最早的那个到点时刻。没有就返回 null。
+    /// 用来决定空窗有多长、以及该睡多久。
+    /// </summary>
+    private DateTime? NextDueTime(DateTime now)
+    {
+        DateTime? best = null;
+        foreach (var item in plan.Items)
+        {
+            if (!IsPending(item, now)) continue;
+            var due = item.DueTimeOn(now);
+            if (due > now && (best is null || due < best)) best = due;
+        }
+        return best;
+    }
+
+    /// <summary>界面上"在等谁"要显示的那一项：等到 <paramref name="dueAt"/> 那一刻能跑的、优先级最高的。</summary>
+    private FetchPlanItem? FindWaitingItem(DateTime now, DateTime dueAt)
+    {
+        FetchPlanItem? best = null;
+        int bestPriority = int.MaxValue;
+        foreach (var item in plan.Items)
+        {
+            if (!IsPending(item, now) || item.DueTimeOn(now) != dueAt) continue;
+            int p = TypePriority(item.Repeat);
+            if (p < bestPriority) { best = item; bestPriority = p; }
+        }
+        return best;
     }
 
     /// <summary>
     /// 挑一个「空闲时」的项来填当下这段空闲。挑不到就返回 null。
     ///
-    /// <paramref name="deadline"/> 是"最晚必须结束的时刻"：正在等下一个定时项时传它的开始时刻
-    /// 减去安全余量，今天没有定时项了就传 null（爱跑多久跑多久）。
+    /// <paramref name="deadline"/> 是"最晚必须结束的时刻"：还有定时项在等就传它的开始时刻
+    /// 减去安全余量，今天没有了就传 null（爱跑多久跑多久）。
+    ///
+    /// ⚠ 只挑空闲项。定时项不从这儿走——它们到点了自然会被 <see cref="FindDue"/> 挑中，
+    /// 而且**跑多久算多久、后面顺延**，不受 deadline 约束。这是两类任务的根本区别：
+    /// 定时项是"到点必须做的事"，空闲项是"有空才做的填充"。
     ///
     /// 三道门槛，都是原来那个"空闲时自动补财务"里验证过的经验：
     ///   ① **冷却**——上一轮跑完要歇一会儿（NothingToDo 的歇更久），别连着撞数据源配额；

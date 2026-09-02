@@ -2,7 +2,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace StockPlatform.Fetcher.Planning;
+namespace StockPlatform.Scheduling;
 
 /// <summary>
 /// 计划的存取（<c>data/fetch-plan.json</c>，2026-08-31 新增）。

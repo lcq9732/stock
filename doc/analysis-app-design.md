@@ -56,7 +56,7 @@
 
 排这个顺序的逻辑是**两层仓位各自紧跟自己的选股法**（主动仓←短线法、底仓←底仓法），日常动线就是前四个来回切。
 
-⚠ "主动仓"这个 Tab 名有一处**代码逻辑依赖**：`MainWindow.TabControl_SelectionChanged` 按 `TabItem { Header: "主动仓" }` 判断要不要 Reload（切过来时要能看到刚从别的页加进交易池的票）。改 Tab 名必须同步改那里，否则功能静默失效。
+⚠ "主动仓"这个 Tab 名有一处**代码逻辑依赖**：`MainWindow.TabControl_SelectionChanged` 按 `TabItem { Header: "主动仓" }` 判断要不要 Reload（切过来时要能看到刚从别的页加进主动仓的票）。改 Tab 名必须同步改那里，否则功能静默失效。
 
 #### 3.2.1 方法一：三角收敛（类名 TriangleConvergence）
 

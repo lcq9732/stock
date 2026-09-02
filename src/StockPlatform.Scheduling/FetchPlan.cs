@@ -1,6 +1,6 @@
 using System.Globalization;
 
-namespace StockPlatform.Fetcher.Planning;
+namespace StockPlatform.Scheduling;
 
 /// <summary>
 /// 重复规则。**名字进 json**，别改。
@@ -85,6 +85,18 @@ public sealed class FetchPlanItem
     /// <summary>
     /// 今天该不该跑（只看重复规则和日历，不看有没有已经跑过）。
     /// </summary>
+    /// <summary>
+    /// <paramref name="day"/> 这天该不该跑。
+    ///
+    /// ⚠ 「每周」「每月」用的是**当期应跑日或之后**，不是"就那一天"（2026-09-01 修）。
+    /// 原来写死 <c>day.Day == DayOfMonth</c>，结果是月度任务**一次都没跑过**：
+    /// 【拉取全部】排在队首、18:00 开工要跑 9 小时，等它收工已经是 2 号凌晨了，
+    /// 队列这才轮到月度项——而那时 IsDueOn(2号) 已经是 false，于是被静默跳过，下个月照样重演。
+    /// 程序当天没开、1 号撞上长时间停机，也是同样的下场。
+    ///
+    /// 改成"过了应跑日就一直待办"之后，什么时候轮到就什么时候补上；
+    /// 「这一期到底跑没跑过」交给 <see cref="AlreadyRanOn"/> 按**周期**判断，不会重复跑。
+    /// </summary>
     public bool IsDueOn(DateTime day) => Repeat switch
     {
         RepeatKind.Manual => false,
@@ -92,10 +104,20 @@ public sealed class FetchPlanItem
         RepeatKind.WhenIdle => true,
         RepeatKind.Once => true,
         RepeatKind.EveryWorkday => day.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday),
-        RepeatKind.Weekly => day.DayOfWeek == Weekday,
-        // 31 号设在只有 30 天的月份里也要能跑到，所以超出当月天数时落到月末那天
-        RepeatKind.Monthly => day.Day == Math.Min(DayOfMonth, DateTime.DaysInMonth(day.Year, day.Month)),
+        RepeatKind.Weekly or RepeatKind.Monthly => day.Date >= PeriodStartOn(day),
         _ => false,
+    };
+
+    /// <summary>
+    /// <paramref name="day"/> 所属周期的**应跑日**：每周=本周的那个星期几，每月=本月的那一号
+    /// （31 号设在只有 30 天的月份里落到月末），其余=当天。
+    /// </summary>
+    public DateTime PeriodStartOn(DateTime day) => Repeat switch
+    {
+        RepeatKind.Weekly => day.Date.AddDays(-(((int)day.DayOfWeek - (int)Weekday + 7) % 7)),
+        RepeatKind.Monthly => new DateTime(day.Year, day.Month,
+            Math.Min(Math.Max(DayOfMonth, 1), DateTime.DaysInMonth(day.Year, day.Month))),
+        _ => day.Date,
     };
 
     /// <summary>
@@ -106,14 +128,57 @@ public sealed class FetchPlanItem
     /// 结果是金融监管指标一旦因财务失败被跳过，那天就再也不会跑了。
     ///
     /// ⚠ **空闲项除外**：它一天本来就要跑很多轮（每轮补一批），跑过一轮不代表今天不用再跑。
+    ///
+    /// ⚠ 判的是**当前周期**跑没跑过，不是"今天"：月度项在本月应跑日之后跑过一次就够了，
+    /// 本月剩下的日子不再重复；到了下个月，<see cref="DueTimeOn"/> 指向新一期，自然又待办。
     /// </summary>
     public bool AlreadyRanOn(DateTime day) =>
-        Repeat != RepeatKind.WhenIdle
-        && LastEnd.HasValue && LastEnd.Value.Date == day.Date && LastOutcome == RunOutcome.Ok;
+        Repeat != RepeatKind.WhenIdle && LastOutcome == RunOutcome.Ok && StartedAfterDueOn(day);
 
     /// <summary>今天已经因为前置失败被跳过、并且记过一次了——别再重复记。</summary>
     public bool AlreadySkippedOn(DateTime day) =>
-        LastEnd.HasValue && LastEnd.Value.Date == day.Date && LastOutcome == RunOutcome.Skipped;
+        LastOutcome == RunOutcome.Skipped && StartedOnCalendarDay(day);
+
+    /// <summary>
+    /// 今天失败过了。当天不自动重来（同一个错误连撞几十次没意义，还会卡住后面的项），明天再试。
+    ///
+    /// ⚠ 这里按**自然日**判，不跟着 <see cref="AlreadyRanOn"/> 走周期：
+    /// 月度任务要是按周期算，失败一次就得等下个月，太狠了。失败次日重试才对。
+    /// </summary>
+    public bool AlreadyFailedOn(DateTime day) =>
+        LastOutcome == RunOutcome.Failed && StartedOnCalendarDay(day);
+
+    /// <summary>上一轮是不是**在 <paramref name="day"/> 当天开始**的（跨午夜跑完的那轮算前一天）。</summary>
+    private bool StartedOnCalendarDay(DateTime day)
+        => (LastStart ?? LastEnd) is { } t && t.Date == day.Date;
+
+    /// <summary>
+    /// 这一项在 <paramref name="day"/> 所属的周期里，最早什么时候可以开跑。
+    /// 每周/每月算的是**当期应跑日**那天的「不早于」时刻——所以补跑时（比如 2 号才轮到月度项）
+    /// 它返回的是已经过去的时刻，调用方一看就知道"早该跑了，现在立刻跑"。
+    /// </summary>
+    public DateTime DueTimeOn(DateTime day)
+    {
+        var d = PeriodStartOn(day);
+        return NotBefore.HasValue ? d.Add(NotBefore.Value.ToTimeSpan()) : d;
+    }
+
+    /// <summary>
+    /// 上一轮是不是**从 <paramref name="day"/> 当天的计划时点之后**开始的——也就是"今天这一轮已经跑过了"。
+    ///
+    /// ⚠ 为什么不能简单比较 <see cref="LastEnd"/> 落在哪一天（2026-09-01 用户报的 bug）：
+    /// 【拉取全部】这类要跑好几个小时，设了「不早于 18:00」的话，昨天 18:00 开工、**今天凌晨 3 点收工**，
+    /// LastEnd 就落在了今天。按旧判据今天一整天都算"已经跑过"，于是今天 18:00 那轮被静默跳过，
+    /// 数据永远停在前一天，而界面上还显示着"✔ 03:16 完成"，看着一切正常。
+    ///
+    /// 用**开始时间**跟当天的计划时点比就不会错：昨天 18:00 开的工 &lt; 今天 18:00，所以今天照跑。
+    /// LastStart 为空（老版本写的记录）时退回用 LastEnd，行为跟以前一致。
+    /// </summary>
+    private bool StartedAfterDueOn(DateTime day)
+    {
+        if (LastEnd is not { } end) return false;
+        return (LastStart ?? end) >= DueTimeOn(day);
+    }
 
     public string RepeatText => Repeat switch
     {
@@ -190,6 +255,8 @@ public sealed class FetchPlan
                 // 所以默认「手动」：补完一次就不用再跑，之后看参数格的待办量是不是 0 就行。
                 new FetchPlanItem { Action = FetchActionId.FetchRawBars, Enabled = false, Repeat = RepeatKind.Manual },
                 new FetchPlanItem { Action = FetchActionId.RebuildAdjSeries, Enabled = true, Repeat = RepeatKind.WhenIdle },
+                // 预约披露日：每天都得看一眼，因为它会改（12% 改过，提前的还比延后的多）
+                new FetchPlanItem { Action = FetchActionId.FetchEarningsSchedule, Enabled = true, Repeat = RepeatKind.EveryWorkday },
 
                 // ── 定期：财报季勾上，跑完取消 ──
                 Monthly(FetchActionId.FetchIndustry),

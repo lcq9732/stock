@@ -278,6 +278,12 @@
                                                                   RelativeSource={RelativeSource AncestorType=DataGrid}}"
                                                            ToolTip="还有多少只股票的财务报表没补齐。&#10;判据有两条，任一落后就要重抓：① 报告期不够新（按法定披露截止日算）② 科目集版本落后（旧版代码抓的、科目不全）。&#10;这个接口配额很严，每轮上限 300 只，全市场要跨几天补完。" />
                                                 <TextBlock VerticalAlignment="Center"
+                                                           Visibility="{Binding IsFetchEarnings, Converter={StaticResource BoolToVis}}"
+                                                           Foreground="{DynamicResource Theme.Foreground.Subtle}"
+                                                           Text="{Binding DataContext.PendingEarningsText,
+                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                           ToolTip="本期还有多少只股票没披露财报——就是每天要复查披露日的那批。&#10;预约日会改（实测 12% 改过，提前的比延后的还多），所以没披露的必须天天看一眼。&#10;已经披露完的不再重抓。" />
+                                                <TextBlock VerticalAlignment="Center"
                                                            Visibility="{Binding IsFetchRawBars, Converter={StaticResource BoolToVis}}"
                                                            Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                            Text="{Binding DataContext.PendingRawBarsText,

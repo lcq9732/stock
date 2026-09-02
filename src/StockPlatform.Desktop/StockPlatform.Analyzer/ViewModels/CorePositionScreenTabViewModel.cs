@@ -44,7 +44,7 @@ public class CorePositionScreenTabViewModel : INotifyPropertyChanged
     private readonly JsonWatchlistStore _watchlistStore;
     private readonly JsonCorePositionStore _corePositionStore;
 
-    /// <summary>"加入底仓"之后要通知【底仓】页重新加载——由 MainViewModel 注入（同交易池那对页）。</summary>
+    /// <summary>"加入底仓"之后要通知【底仓】页重新加载——由 MainViewModel 注入（同主动仓那对页）。</summary>
     public Action? CorePositionsChanged { get; set; }
 
     public ObservableCollection<string> LogLines { get; } = new();

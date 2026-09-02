@@ -105,6 +105,12 @@ public partial class App : Application
         var announcementRepository = new SqliteAnnouncementRepository(paths.CurrentDb);
         var announcementOrchestrator = new AnnouncementFetchOrchestrator(announcementSearchProvider, announcementDetailFetcher, announcementRepository);
 
+        // 财报预约披露日（2026-09-01）。翻页是串行的（要先拿到 totalPages），所以并发给 1 就够，
+        // 真正决定耗时的是间隔：某一期首抓要翻 555 页，1 秒间隔要 16 分钟、两期半小时，太久。
+        // 实测这个接口 0.15 秒间隔连抓 60 页没被拒，取 0.35 秒留足余量 → 一期约 4 分钟。
+        var prebookProvider = new CninfoPrebookProvider(
+            new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromMilliseconds(350)));
+
         // 板块（概念/题材 + 行业）数据走新浪，独立限流；单独的"拉取板块"按钮触发（见
         // FetchOrchestrator.RunFetchBoardsAsync），不掺进主抓取流程。
         var boardFetcher = new SinaBoardFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
@@ -165,7 +171,7 @@ public partial class App : Application
         // 证监会行业分类(两所门类+新浪大类)——因子法显示"板块"、FactorLab 行业中性化都用它。
         var industryProvider = new ExchangeSinaIndustryProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider);
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider);
 
         var viewModel = new MainViewModel(paths, orchestrator, sources);
         var window = new MainWindow { DataContext = viewModel };

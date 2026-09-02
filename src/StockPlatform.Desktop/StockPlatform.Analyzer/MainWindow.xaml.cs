@@ -93,10 +93,10 @@ public partial class MainWindow : Window
         if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "自选股" })
             vm.WatchlistTab.Reload(); // picks up anything added from another tab this session
         if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "主动仓" })
-            vm.TradePoolTab.Reload(); // 同上——刚从"自选股"/"查询"页加进交易池的票，切过来就能看到
+            vm.TradePoolTab.Reload(); // 同上——刚从"自选股"/"查询"页加进主动仓的票，切过来就能看到
         // 每日晨检不在切Tab时自动体检（读全库+逐只算、会顿一下）——改成纯手动，用户点该Tab里的"刷新"按钮才算，
         // 这样开程序秒开、切Tab也不卡（2026-07-31 按用户要求从"启动/切Tab自动跑"改为全手动）。
-        // 同理：交易池成员变动也不自动触发晨检重算（见 MainViewModel 里 TradePoolChanged 的接线）。
+        // 同理：主动仓成员变动也不自动触发晨检重算（见 MainViewModel 里 TradePoolChanged 的接线）。
     }
 
     // 让单元格在鼠标按下的 Tunneling 阶段就获得焦点。原本是为了解决"勾选框要点两下"，但那条路走不通
@@ -405,7 +405,7 @@ public partial class MainWindow : Window
 
     // "主动仓"Tab的【交易记录】——录这只票的每一笔买入/卖出（金字塔式建仓、分批止盈）。窗口里改的是
     // 拷贝，点保存才整份写回 watchlist.json；取消什么都不动。存完刷新两个列表：持仓状态变了会影响
-    // "主动仓"的排序（持仓优先）和"自选股"页的"在交易池"标记。晨检不在这里自动重算——跟交易池成员
+    // "主动仓"的排序（持仓优先）和"自选股"页的"在主动仓"标记。晨检不在这里自动重算——跟主动仓成员
     // 变动一样，要等用户主动点【刷新】（见本文件上方的接线说明）。
     private void TradeLotsButton_Click(object sender, RoutedEventArgs e)
     {

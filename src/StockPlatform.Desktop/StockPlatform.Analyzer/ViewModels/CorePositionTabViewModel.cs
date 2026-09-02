@@ -1,6 +1,8 @@
 ﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Windows.Media;   // 临近财报标色用（见 EarningsColor）
+using StockPlatform.Desktop.Shared.Theme;
 using StockPlatform.Analyzer.Watchlist;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
@@ -37,6 +39,55 @@ public class CorePositionRowViewModel : ISelectableRow, INotifyPropertyChanged
     private readonly int _consecutiveYears;
     private readonly string _dividendTrend;
 
+    // ── 财报披露日（2026-09-01）──────────────────────────────────────────────────
+    // 底仓是"吃分红、不设止损"的长期仓，为什么还要盯财报日？
+    // 分红方案是**跟着年报一起公布**的：派息变了、连续分红断了，底仓的持有理由本身就动摇了。
+    // 这跟主动仓的用法不同——主动仓怕的是财报当天的价格波动，底仓关心的是分红政策会不会变。
+    // 数据由 Fetcher 的【拉取财报预约日】抓，这里只读；抓不到就显示"—"。
+
+    /// <summary>抓来的本期预约披露情况；没有则为 null。</summary>
+    public StockPlatform.Logic.Models.EarningsScheduleRow? AutoEarnings { get; }
+
+    public string EarningsDateText => AutoEarnings?.EffectiveDate?.ToString("yyyy-MM-dd") ?? "—";
+
+    /// <summary>排序用（没日期的排最后）。</summary>
+    public DateTime EarningsSortValue => AutoEarnings?.EffectiveDate ?? DateTime.MaxValue;
+
+    private int? DaysToEarnings => AutoEarnings?.EffectiveDate is { } d
+        ? (int)(d - DateTime.Today).TotalDays : null;
+
+    /// <summary>临近财报标个色。年报尤其要紧——分红方案跟它一起出。</summary>
+    public Brush EarningsColor =>
+        DaysToEarnings is { } d && d >= 0 && d <= MorningStockRowViewModel.EarningsWarnDays
+            ? ThemeBrushes.Firebrick
+            : ThemeBrushes.Foreground;
+
+    public string EarningsTooltip
+    {
+        get
+        {
+            if (AutoEarnings is not { } a || a.EffectiveDate is null)
+                return "还不知道下一次财报什么时候披露。\n【拉取财报预约日】每天自动抓，但预约表分期发布——"
+                     + "上一期都披露完、下一期还没发布时就是空的。";
+            string changed = a.ChangeCount switch
+            {
+                0 => "",
+                1 => $"（改过 1 次，原定 {a.AppointDate:MM-dd}）",
+                _ => $"（改过 {a.ChangeCount} 次，原定 {a.AppointDate:MM-dd}）",
+            };
+            string head = DaysToEarnings switch
+            {
+                < 0 => $"{a.EffectiveDate:yyyy-MM-dd} 已披露",
+                0 => "今天披露财报",
+                { } d => $"还有 {d} 天披露财报（{a.EffectiveDate:MM-dd}）",
+                _ => $"{a.EffectiveDate:yyyy-MM-dd} 披露财报",
+            };
+            return head + changed
+                 + "\n底仓看财报主要是看**分红方案**——它跟年报一起公布。派息缩水或者连续分红中断，"
+                 + "持有理由就变了，该重新算一遍股息率和仓位。";
+        }
+    }
+
     /// <summary>历年每股派息（升序，全部历史）——【分红历史】按钮画柱状图用。</summary>
     public IReadOnlyList<(int Year, double PerShare)> AnnualDividends { get; }
 
@@ -53,8 +104,10 @@ public class CorePositionRowViewModel : ISelectableRow, INotifyPropertyChanged
         IReadOnlyList<DividendRow> dividendRows,
         int consecutiveYears,
         string dividendTrend,
-        IReadOnlyList<(int Year, double PerShare)> annualDividends)
+        IReadOnlyList<(int Year, double PerShare)> annualDividends,
+        StockPlatform.Logic.Models.EarningsScheduleRow? autoEarnings = null)
     {
+        AutoEarnings = autoEarnings;
         Entry = entry;
         _store = store;
         _latestClose = latestClose;
@@ -310,6 +363,8 @@ public class CorePositionTabViewModel : INotifyPropertyChanged
     public void Reload()
     {
         Entries.Clear();
+        // 财报预约日（每只票取还没披露的最早那期）。抓取归 Fetcher 的【拉取财报预约日】，这里只读。
+        var earnings = EarningsLookup.LoadUpcoming();
         // 取全部历史：【分红历史】图要画完整历史，"连续分红年数"也不该被回看窗口截断（2026-08-20）
         var since = new DateTime(1990, 1, 1);
 
@@ -342,7 +397,8 @@ public class CorePositionTabViewModel : INotifyPropertyChanged
             string trend = DividendMetrics.TrendShape(byYear, CorePositionAnalysisEngine.DividendLookbackYears);
 
             Entries.Add(new CorePositionRowViewModel(
-                entry, _store, close, _fees.Current, dps, rows, consecutive, trend, byYear));
+                entry, _store, close, _fees.Current, dps, rows, consecutive, trend, byYear,
+                earnings.TryGetValue(entry.Code, out var es) ? es : null));
         }
 
         UpdateSummary();

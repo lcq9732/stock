@@ -120,7 +120,7 @@ public class MainViewModel : INotifyPropertyChanged
         var corePositionStore = new JsonCorePositionStore(paths.CorePositionPath);
         CorePositionTab = new CorePositionTabViewModel(corePositionStore, barRepository, dividendRepository, feeStore);
         CorePositionScreenTab = new CorePositionScreenTabViewModel(paths, barRepository, financialRepository, dividendRepository, watchlistStore, corePositionStore);
-        // 底仓法页"加入底仓"后，底仓页要跟着刷新（同交易池那对页的联动）。
+        // 底仓法页"加入底仓"后，底仓页要跟着刷新（同主动仓那对页的联动）。
         CorePositionScreenTab.CorePositionsChanged = () => CorePositionTab.Reload();
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, shareholderRepository, marginRepository, watchlistStore);
@@ -133,7 +133,7 @@ public class MainViewModel : INotifyPropertyChanged
         WatchlistTab = new WatchlistTabViewModel(watchlistStore, barRepository, boardRepository, feeStore);
         TradePoolTab = new TradePoolTabViewModel(watchlistStore, barRepository, boardRepository, feeStore);
 
-        // 交易池成员一变（自选页"加入交易池"/交易池页"移出"/查询页直接加入），另外那页要跟着刷新——
+        // 主动仓成员一变（自选页"加入主动仓"/主动仓页"移出"/查询页直接加入），另外那页要跟着刷新——
         // 几个页读的是同一份 watchlist.json，不联动就会出现"加进去了但那边还没有"的错觉。
         // 故意不在这里连带刷新每日晨检：晨检读全库+逐只体检，2026-07-31 已按用户要求改成纯手动
         // （只有点它自己的"刷新"才算），这里自动触发会把那份"开程序秒开、切Tab不卡"的收益又赔进去。

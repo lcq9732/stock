@@ -24,11 +24,13 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     /// <summary>本行成交明细的汇总（含佣金/过户费/印花税）——费率改了或成交明细改了就重算。</summary>
     private TradeCostSummary _cost;
 
-    public WatchlistRowViewModel(WatchlistEntry entry, IBarRepository barRepository, string conceptBoards, JsonWatchlistStore store, TradeFeeStore fees)
+    public WatchlistRowViewModel(WatchlistEntry entry, IBarRepository barRepository, string conceptBoards, JsonWatchlistStore store, TradeFeeStore fees,
+        StockPlatform.Logic.Models.EarningsScheduleRow? autoEarnings = null)
     {
         Entry = entry;
         Board = conceptBoards;
         _store = store;
+        AutoEarnings = autoEarnings;
         _fees = fees;
         _cost = TradeCostSummary.For(entry.Lots, fees.Current);
         ComputeTracking(barRepository);
@@ -153,12 +155,29 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
         : Entry.IsClosedTrade ? "已清仓"
         : Entry.RemainingShares > 0 ? $"{Entry.RemainingShares:N0}股" : "—";
 
-    // ── 财报披露日（2026-08-17新增）——手填，本地库里没有"预约披露日"这种数据（只有已披露的报告期）。
-    //    单元格里直接编辑、失焦即存；解析不了的输入丢弃（Raise 让界面回显旧值）。 ──
+    // ── 财报披露日 ─────────────────────────────────────────────────────────────
+    //   2026-08-17 起是手填的（当时本地没有预约披露日这种数据）。
+    //   2026-09-01 起由【拉取财报预约日】自动抓（巨潮，深沪京全覆盖），手填保留为**覆盖**手段：
+    //     · 你填过 → 一直用你填的，自动值不会盖掉它（清空即可交还给自动值）
+    //     · 你没填 → 显示自动抓来的
+    //   为什么保留手填：预约日有空窗——上一期都披露完、下一期预约表还没发布时自动值是空的，
+    //   那时候你从公告里看到日期还是得能录进来。
+    //   单元格里直接编辑、失焦即存；解析不了的输入丢弃（Raise 让界面回显旧值）。
+
+    /// <summary>【拉取财报预约日】抓来的本期预约情况；没抓到/没这只票时为 null。</summary>
+    public StockPlatform.Logic.Models.EarningsScheduleRow? AutoEarnings { get; }
+
+    /// <summary>真正用来算"还有几天"的日期：手填的优先，其次是抓来的。</summary>
+    private DateTime? EffectiveEarningsDate => Entry.EarningsDate ?? AutoEarnings?.EffectiveDate;
+
+    /// <summary>这一格的值是不是手填的（界面上用来区分显示）。</summary>
+    public bool IsEarningsManual => Entry.EarningsDate.HasValue;
 
     public string EarningsDateText
     {
-        get => Entry.EarningsDate?.ToString("yyyy-MM-dd") ?? "";
+        get => Entry.EarningsDate?.ToString("yyyy-MM-dd")
+            ?? AutoEarnings?.EffectiveDate?.ToString("yyyy-MM-dd")
+            ?? "";
         set
         {
             var t = (value ?? "").Trim();
@@ -171,8 +190,8 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
         }
     }
 
-    /// <summary>距财报还有几天（自然日）；没填或已过去为 null / 负数。</summary>
-    private int? DaysToEarnings => Entry.EarningsDate is { } d ? (int)(d - DateTime.Today).TotalDays : null;
+    /// <summary>距财报还有几天（自然日）；没有日期为 null，已过去为负数。</summary>
+    private int? DaysToEarnings => EffectiveEarningsDate is { } d ? (int)(d - DateTime.Today).TotalDays : null;
 
     /// <summary>临近财报标红——跟晨检用同一个提前量（<see cref="MorningStockRowViewModel.EarningsWarnDays"/>），
     /// 两处不能各定各的，否则这边红了那边不提醒。跨财报持仓是回测参数里没有的事件风险。</summary>
@@ -183,13 +202,34 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
 
     public string EarningsTooltip => DaysToEarnings switch
     {
-        null => "手填下一次财报的披露日期（如 2026-08-26）——本地库里没有预约披露日，只能自己录。\n填了以后每日晨检会在临近时提醒。",
+        null => "还不知道下一次财报什么时候披露。\n【拉取财报预约日】每天会自动抓，但预约表是分期发布的——"
+             + "上一期都披露完、下一期还没发布时就是空的（季报/半年报的预约表在报告期结束后才出，年报在前一年底）。\n"
+             + "在公告里看到日期的话，也可以直接在这一格填，手填的优先级更高。",
         0 => "今天披露财报——利好出尽/低于预期都可能，跨事件持仓的风险自己认。",
         > 0 and <= MorningStockRowViewModel.EarningsWarnDays =>
-            $"还有 {DaysToEarnings} 天披露财报（{Entry.EarningsDate:MM-dd}）。\n短线法/回调法的参数是按普通交易日回测的，没区分财报窗口：预期打得越满，兑现日越容易利好出尽。",
-        > 0 => $"{Entry.EarningsDate:yyyy-MM-dd} 披露财报，还有 {DaysToEarnings} 天。",
-        _ => $"{Entry.EarningsDate:yyyy-MM-dd} 已披露。记得跑一次\"季度/不定期\"抓取，把新报告期入库——在那之前，各方法的财务条件用的还是上一期数据。",
+            $"还有 {DaysToEarnings} 天披露财报（{EffectiveEarningsDate:MM-dd}{EarningsSourceNote}）。\n短线法/回调法的参数是按普通交易日回测的，没区分财报窗口：预期打得越满，兑现日越容易利好出尽。",
+        > 0 => $"{EffectiveEarningsDate:yyyy-MM-dd} 披露财报，还有 {DaysToEarnings} 天{EarningsSourceNote}。",
+        _ => $"{EffectiveEarningsDate:yyyy-MM-dd} 已披露。记得跑一次\"季度/不定期\"抓取，把新报告期入库——在那之前，各方法的财务条件用的还是上一期数据。",
     };
+
+    /// <summary>
+    /// 这个日期哪来的、可不可靠。改期是常事——实测沪市 2000 条样本里 12% 改过，
+    /// 而且**提前的比延后的还多**（55% vs 44%，最多提前 44 天），所以改过几次值得摆出来。
+    /// </summary>
+    private string EarningsSourceNote
+    {
+        get
+        {
+            if (Entry.EarningsDate.HasValue) return "，你手填的";
+            if (AutoEarnings is not { } a) return "";
+            return a.ChangeCount switch
+            {
+                0 => "，交易所预约日",
+                1 => $"，交易所预约日（改过 1 次，原定 {a.AppointDate:MM-dd}）",
+                _ => $"，交易所预约日（改过 {a.ChangeCount} 次，原定 {a.AppointDate:MM-dd}）",
+            };
+        }
+    }
 
     /// <summary>止亏价——剩下的股票卖到这个价刚好不赚不亏（买入费用已在成本里，卖出的佣金/过户费/
     /// 印花税按这个价再扣一遍；分批卖过的把已落袋的钱也算进去了）。已清仓/没买过显示"—"。</summary>
@@ -339,9 +379,9 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
 /// 统计各方法的准确率（见下方 MethodStatsText）。2026-07-31 起这里**不再录买卖信息**——那是"主动仓"
 /// Tab 的事（<see cref="TradePoolTabViewModel"/>）；本页只看"选中后涨跌幅"。
 ///
-/// 关键设计：一只票加入交易池后**仍然留在本页**。否则"你挑走的正好是自己看好的那些"，剩下的样本
+/// 关键设计：一只票加入主动仓后**仍然留在本页**。否则"你挑走的正好是自己看好的那些"，剩下的样本
 /// 就有了选择偏差，方法准确率会被系统性低估/高估——验证样本必须包含方法选出的全部票。本页因此显示
-/// 的是全部自选记录，交易池只是叠加在上面的一个标记（"在交易池"列）。
+/// 的是全部自选记录，主动仓只是叠加在上面的一个标记（"在主动仓"列）。
 ///
 /// Reads/writes JsonWatchlistStore, not the market database — this is the Analyzer's own state, not
 /// Fetcher's shared read-only data.
@@ -370,7 +410,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
     public RelayCommand ExportCommand { get; }
     public RelayCommand AddToTradePoolCommand { get; }
 
-    /// <summary>加入交易池后要通知"主动仓"页和晨检页重新加载——由 MainViewModel 注入。</summary>
+    /// <summary>加进去之后要通知"主动仓"页和晨检页重新加载——由 MainViewModel 注入。</summary>
     public Action? TradePoolChanged { get; set; }
 
     public WatchlistTabViewModel(JsonWatchlistStore store, IBarRepository barRepository, IBoardRepository boardRepository, TradeFeeStore fees)
@@ -395,12 +435,16 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
         Entries.Clear();
         // 一次性反查"股票→所属概念板块"，每行直接取（没有板块数据时 map 为空，各行显示"—"）。
         var conceptMap = _boardRepository.GetConceptBoardsByStock();
+        // 一次性取出"下一次财报日"（每只票取还没披露的最早那期），各行直接查表。
+        // 抓取由 Fetcher 的【拉取财报预约日】负责，这里只读。
+        var earnings = EarningsLookup.LoadUpcoming();
         foreach (var e in _store.Load().OrderByDescending(e => e.AddedAt))
         {
             var boards = conceptMap.TryGetValue(e.Code, out var list) && list.Count > 0
                 ? string.Join("、", list)
                 : "—";
-            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store, _fees));
+            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store, _fees,
+                earnings.TryGetValue(e.Code, out var es) ? es : null));
         }
         BuildMethodStats();
     }
@@ -439,7 +483,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
         if (toRemove.Count == 0) return;
         _store.Remove(toRemove);
         Reload();
-        TradePoolChanged?.Invoke();   // 删掉的可能正在交易池里
+        TradePoolChanged?.Invoke();   // 删掉的可能正在主动仓里
     }
 
     /// <summary>把勾选的票加进"主动仓"页——买卖信息去那边录。本页仍然保留这些票（验证样本不能被挑走，
@@ -464,7 +508,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
 /// 为真的那些记录（显式勾进来的 + 已经填了买入价的）——这样一只票"既是算法样本又是我的持仓"不需要
 /// 存两份、也不会两边不同步。
 ///
-/// 进入方式：①"自选股"页勾选后点"加入交易池"；②"查询"页搜到后直接"加入交易池"（手工看好的票）。
+/// 进入方式：①"自选股"页勾选后点"加入主动仓"；②"查询"页搜到后直接"加入主动仓"（手工看好的票）。
 /// </summary>
 public class TradePoolTabViewModel
 {
@@ -479,7 +523,7 @@ public class TradePoolTabViewModel
     public RelayCommand RemoveFromPoolCommand { get; }
     public RelayCommand ExportCommand { get; }
 
-    /// <summary>移出交易池后要通知晨检页重新加载——由 MainViewModel 注入。</summary>
+    /// <summary>移出主动仓后要通知晨检页重新加载——由 MainViewModel 注入。</summary>
     public Action? TradePoolChanged { get; set; }
 
     public TradePoolTabViewModel(JsonWatchlistStore store, IBarRepository barRepository, IBoardRepository boardRepository, TradeFeeStore fees)
@@ -502,6 +546,9 @@ public class TradePoolTabViewModel
     {
         Entries.Clear();
         var conceptMap = _boardRepository.GetConceptBoardsByStock();
+        // 一次性取出"下一次财报日"（每只票取还没披露的最早那期），各行直接查表。
+        // 抓取由 Fetcher 的【拉取财报预约日】负责，这里只读。
+        var earnings = EarningsLookup.LoadUpcoming();
         // 持仓中的排最前（真金白银的先看），然后已平仓，最后只是打算买的；同组按加入时间倒序。
         foreach (var e in _store.Load().Where(e => e.IsInTradePool)
                      .OrderByDescending(e => e.IsHoldingPosition)
@@ -511,11 +558,12 @@ public class TradePoolTabViewModel
             var boards = conceptMap.TryGetValue(e.Code, out var list) && list.Count > 0
                 ? string.Join("、", list)
                 : "—";
-            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store, _fees));
+            Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store, _fees,
+                earnings.TryGetValue(e.Code, out var es) ? es : null));
         }
     }
 
-    /// <summary>把勾选的票移出交易池（不删除记录，它仍留在"自选股"页作为算法样本，交易记录也不清空）。
+    /// <summary>把勾选的票移出主动仓（不删除记录，它仍留在"自选股"页作为算法样本，交易记录也不清空）。
     /// 只有**未平仓的持仓**移不出去——钱还在里面就必须每天盯；已平仓的可以移出（这笔交易已经结束，
     /// 没道理继续占着每天要看的清单）。有挡下的就如实提示，不静默失败。</summary>
     private void RemoveFromPool()
@@ -532,7 +580,7 @@ public class TradePoolTabViewModel
 
         if (held.Count > 0)
             System.Windows.MessageBox.Show(
-                $"已移出 {movable.Count} 只。\n\n以下 {held.Count} 只是未平仓的持仓，仍留在交易池：\n{string.Join("、", held)}\n\n" +
+                $"已移出 {movable.Count} 只。\n\n以下 {held.Count} 只是未平仓的持仓，仍留在主动仓：\n{string.Join("、", held)}\n\n" +
                 "钱还在里面就必须每天盯，所以不允许移出。要么在【交易记录】里把剩余股数都卖出（平仓后就能移出了），" +
                 "要么把买入记录删掉（表示这笔其实没买）。",
                 "部分未移出", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);

@@ -1,6 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using StockPlatform.Fetcher.Planning;
+using StockPlatform.Scheduling;
 
 namespace StockPlatform.Fetcher.ViewModels;
 
@@ -210,6 +210,9 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
 
     /// <summary>是不是【拉取财务报表】那一行——参数格显示还差多少只没补。</summary>
     public bool IsFetchFinancials => Model.Action == FetchActionId.FetchFinancials;
+
+    /// <summary>是不是【拉取财报预约日】那一行——参数格显示还有多少只没到披露日。</summary>
+    public bool IsFetchEarnings => Model.Action == FetchActionId.FetchEarningsSchedule;
     public bool NeedsAnyParam => NeedsDate || NeedsYearRange || NeedsLookback;
 
     /// <summary>首次回看几年——只有「拉取全部」这一行会显示。留空=用【手动】页那个框的值。</summary>

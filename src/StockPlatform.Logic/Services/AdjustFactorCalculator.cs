@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Models;
+﻿using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Services;
 
@@ -15,7 +15,7 @@ namespace StockPlatform.Logic.Services;
 /// 因子排序会被系统性扭曲。这是行业惯例（看盘用没问题），但算收益就是错的。
 ///
 /// ════ 本类用的是纯乘法式 ════
-///     除权参考价 = (前收 − 每股分红) ÷ (1 + 每股送转)
+///     除权参考价 = (前收 − 每股分红 + 配股价×配股比例) ÷ (1 + 每股送转 + 配股比例)
 ///     factor    ×= 前收 ÷ 除权参考价
 ///     复权价     = 原价 × factor
 /// 非除权日 factor 不动，所以**收益率精确等于真实收益率**（12 只样本、23000 个交易日实测零偏差）。
@@ -33,10 +33,25 @@ namespace StockPlatform.Logic.Services;
 /// </summary>
 public static class AdjustFactorCalculator
 {
-    /// <summary>一次除权：每股送转股数（10送1转1 = 0.2）、每股现金分红（税前，10派5元 = 0.5）。</summary>
-    public readonly record struct ExDividend(DateTime ExDate, double ShareRatio, double CashPerShare)
+    /// <summary>
+    /// 一次除权：每股送转股数（10送1转1 = 0.2）、每股现金分红（税前，10派5元 = 0.5），
+    /// 外加**配股**（2026-09-01）——每股配股数（10配3 = 0.3）和配股价（元/股）。
+    ///
+    /// 配股跟前两者的方向不同：送转和分红都只让股价往下调，配股是股东**掏钱**买新股，
+    /// 掏进去的钱留在公司里，所以除权参考价的分子要把它加回来。两个字段必须成对出现，
+    /// 只有比例没有价格算不出参考价（见 <see cref="RightsCash"/>）。
+    /// </summary>
+    public readonly record struct ExDividend(
+        DateTime ExDate, double ShareRatio, double CashPerShare,
+        double RightsRatio = 0, double RightsPrice = 0)
     {
-        public bool IsEmpty => ShareRatio <= 0 && CashPerShare <= 0;
+        public bool IsEmpty => ShareRatio <= 0 && CashPerShare <= 0 && !HasRights;
+
+        /// <summary>配股要两个数都有才算数——缺一个就没法算除权参考价，当没配过处理。</summary>
+        public bool HasRights => RightsRatio > 0 && RightsPrice > 0;
+
+        /// <summary>每股因配股**收进来**的现金 = 配股价 × 配股比例。进除权参考价的分子（加号）。</summary>
+        public double RightsCash => HasRights ? RightsPrice * RightsRatio : 0;
     }
 
     /// <summary>算完之后的说明：应用了哪些、跳过了哪些、为什么。给日志和排查用。</summary>
@@ -90,13 +105,20 @@ public static class AdjustFactorCalculator
                 // 同一天可能有多条（少见，比如分红和转增分开公告），合并成一次处理
                 double share = todays.Sum(e => e.ShareRatio);
                 double cash = todays.Sum(e => e.CashPerShare);
-                double refPrice = (prevClose - cash) / (1 + share);
+                // 配股：分子加回股东掏的钱、分母加上新增的股。完整式子是
+                //   除权参考价 = (前收 − 每股分红 + 配股价×配股比例) ÷ (1 + 每股送转 + 配股比例)
+                // 同一天既送转又配股是可能的（配股方案里带送股），所以三项分别累加而不是二选一。
+                double rightsRatio = todays.Sum(e => e.RightsRatio);
+                double rightsCash = todays.Sum(e => e.RightsCash);
+                double refPrice = (prevClose - cash + rightsCash) / (1 + share + rightsRatio);
 
                 if (prevClose <= 0 || refPrice <= 0)
                 {
                     report.Skipped++;
                     report.Notes.Add($"{code} {bar.PeriodStart:yyyy-MM-dd} 跳过：除权参考价算出来 ≤0"
-                                   + $"（前收 {prevClose:F2}、每股派 {cash:F4}、每股送转 {share:F4}）");
+                                   + $"（前收 {prevClose:F2}、每股派 {cash:F4}、每股送转 {share:F4}"
+                                   + (rightsRatio > 0 ? $"、每股配 {rightsRatio:F4}@{rightsCash / rightsRatio:F2}元" : "")
+                                   + "）");
                 }
                 else
                 {
@@ -107,9 +129,12 @@ public static class AdjustFactorCalculator
                     {
                         report.Skipped++;
                         report.Notes.Add(
-                            $"{code} {bar.PeriodStart:yyyy-MM-dd} 跳过：记着每股送转 {share:F4}、派息 {cash:F4}，"
-                          + $"理论该跳 {theoretical * 100:+0.00;-0.00}%，实际只跳了 {actual * 100:+0.00;-0.00}%"
-                          + "——多半是破产重整的资本公积转增（股份给债权人、不分配给原股东，所以不除权）");
+                            $"{code} {bar.PeriodStart:yyyy-MM-dd} 跳过：记着每股送转 {share:F4}、派息 {cash:F4}"
+                          + (rightsRatio > 0 ? $"、每股配 {rightsRatio:F4}@{rightsCash / rightsRatio:F2}元" : "")
+                          + $"，理论该跳 {theoretical * 100:+0.00;-0.00}%，实际只跳了 {actual * 100:+0.00;-0.00}%"
+                          + (rightsRatio > 0
+                                ? "——配股方案多半最终没实施（配股表没有\"进度\"列，分不出来，只能靠这道价格校验）"
+                                : "——多半是破产重整的资本公积转增（股份给债权人、不分配给原股东，所以不除权）"));
                     }
                     else
                     {

@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ⚠ 版本必须是本地 global-packages 缓存里已有的：这台机器连不上 nuget.org（见仓库根的
+         NuGet.config），换版本号会直接 NU1101 找不到包。缓存里现有 xunit 2.4.0/2.4.1/2.4.2/2.8.1。 -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.8.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 调度逻辑 2026-09-02 从 Fetcher 挪进独立类库之后，这里就是普通的类库引用了。
+         原先引用 Fetcher（自包含单文件 exe）要撞 NETSDK1151，只能跟着标 SelfContained。 -->
+    <ProjectReference Include="..\..\StockPlatform.Scheduling\StockPlatform.Scheduling.csproj" />
+  </ItemGroup>
+
+</Project>

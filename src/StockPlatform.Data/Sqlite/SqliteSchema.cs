@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 
 namespace StockPlatform.Data.Sqlite;
 
@@ -222,6 +222,30 @@ public static class SqliteSchema
                 PRIMARY KEY (code, announce_date)
             );
 
+            -- 定期报告预约披露日（2026-09-01）——交易所要求上市公司预约本期定期报告的披露日期。
+            -- 用途：主动仓的"财报日"列、以及选股时避开"马上要出财报"的票（跨财报持仓是回测参数里
+            -- 没有的事件风险）。数据源是巨潮（深沪京全覆盖），见 CninfoPrebookProvider。
+            --
+            -- 为什么四个日期都存、而不是只存一个"下次财报日"：
+            --   ① 预约日**会改**，最多能改三次——实测沪市 2000 条样本里 12% 改过；
+            --   ② 改的方向**不是只会延后**：提前 55%、延后 44%，最多提前 44 天、最多延后 62 天。
+            --      提前那半边更危险（你按原日期盯，财报已经出了还不知道），所以不能只在临近时复查。
+            --   ③ 变更轨迹本身有信息量：反复推迟披露往往不是好信号。
+            --
+            -- actual_date 为空 = 这期还没披露 = 需要每天复查；有值 = 这期结束了，
+            -- 下一期的预约日要等交易所发布新一期预约表才会出现（见 RunFetchEarningsScheduleAsync）。
+            CREATE TABLE IF NOT EXISTS EarningsSchedule (
+                code TEXT NOT NULL,             -- 6位股票代码
+                report_period TEXT NOT NULL,    -- 报告期，如 2026-06-30
+                appoint_date TEXT,              -- 首次预约披露日
+                change1 TEXT,                   -- 一次变更后的日期
+                change2 TEXT,                   -- 二次变更
+                change3 TEXT,                   -- 三次变更
+                actual_date TEXT,               -- 实际披露日（空=还没披露）
+                fetched_at TEXT,
+                PRIMARY KEY (code, report_period)
+            );
+
             -- 银行监管指标（2026-08-29）——不良率/拨备覆盖率/核心一级资本充足率/客户集中度等。
             -- 这些**不在三张报表里**，只在财报正文"会计数据和财务指标摘要"那两三页，所以单独
             -- 一张表、单独的抓取路径（下载 PDF + 解析），见 BankRegulatoryFetcher。
@@ -259,6 +283,25 @@ public static class SqliteSchema
                 pdf_path TEXT,                   -- 本地缓存路径（相对 data/reports）
                 fetched_at TEXT,
                 PRIMARY KEY (code, report_date)
+            );
+
+            -- 配股（2026-09-01新增）——A股第四类除权事件，前三类（现金分红/送股/转增）在 Dividend 表。
+            -- 为什么不并进 Dividend：① 主键都是 (code, announce_date)，同一天既有分红方案又有配股方案
+            -- 时会撞车；② 字段语义完全不同（配股要的是"配几股 + 每股掏多少钱"，分红是"送几股 + 收多少钱"）。
+            -- 数据来源跟分红是**同一次请求**：新浪 vISSUE_ShareBonus 页里 sharebonus_1 是分红、
+            -- sharebonus_2 是配股，一次 HTTP 拿两张表。
+            -- 用途：day_adj 复权序列。漏掉配股会让除权日凭空多一根阴线——中信证券 2022-01 那次
+            -- 10配1.5@14.43 理论跳空 −5.72%，10配3 的量级能到 −15%，且集中在银行/券商。
+            CREATE TABLE IF NOT EXISTS RightsIssue (
+                code TEXT NOT NULL,             -- 6位股票代码
+                announce_date TEXT NOT NULL,    -- 公告日期（方案标识）
+                shares_per_10 REAL,             -- 每10股配X股（10配3 = 3.0）
+                price REAL,                     -- 配股价格（元/股）
+                ex_date TEXT,                   -- 除权日（可空=未实施）。⚠ 缴款期常停牌，此日是复牌日，
+                                                --   不等于"登记日+1"，见 RightsIssueRow.ExDate 注释
+                record_date TEXT,               -- 股权登记日（可空）
+                fetched_at TEXT,
+                PRIMARY KEY (code, announce_date)
             );
 
             -- 反查热点列索引（2026-07-16）：这两条反查用的不是主键最左前缀，无索引会全表扫。

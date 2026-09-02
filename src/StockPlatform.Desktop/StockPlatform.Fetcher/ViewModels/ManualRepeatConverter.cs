@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
-using StockPlatform.Fetcher.Planning;
+using StockPlatform.Scheduling;
 
 namespace StockPlatform.Fetcher.ViewModels;
 

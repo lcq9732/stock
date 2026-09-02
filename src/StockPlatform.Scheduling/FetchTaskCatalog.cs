@@ -1,4 +1,4 @@
-namespace StockPlatform.Fetcher.Planning;
+﻿namespace StockPlatform.Scheduling;
 
 /// <summary>
 /// 计划里能放的动作。**存进 fetch-plan.json 的是这个枚举的名字**，所以已有成员不能改名、
@@ -12,6 +12,7 @@ public enum FetchActionId
     RepairQfq,
     FetchRawBars,
     RebuildAdjSeries,
+    FetchEarningsSchedule,
     FetchBoards,
     FetchIndustry,
     FetchIndexCons,
@@ -135,6 +136,18 @@ public static class FetchTaskCatalog
             + "取过的不会重取；没取完不要紧，下一轮日常比对还会把它检出来。后复权不受除权影响，不用重取。",
             SupportsPartialRun: true),
 
+        new(FetchActionId.FetchEarningsSchedule, "拉取财报预约日", "巨潮", QuotaGroup.Mixed,
+            TimeSpan.FromSeconds(20), "每工作日",
+            "抓定期报告的**预约披露日**——交易所要求上市公司预约本期定期报告什么时候披露。\n"
+            + "用途：主动仓的「财报日」列自动填上，不用再手工录；选股时也能避开「马上要出财报」的票"
+            + "（跨财报持仓是回测参数里没有的事件风险）。\n"
+            + "**必须每天跑，不能抓一次当定论**：实测沪市 2000 条样本里 12% 改过披露日期，"
+            + "而且**提前的比延后的还多**（提前 55%、延后 44%，最多提前 44 天、最多延后 62 天）。"
+            + "提前那半边尤其要紧——按原日期盯的话，财报已经出了你还不知道。\n"
+            + "成本几乎为零：一期全市场 5500 条一个请求 0.3 秒就拿回来了，每次全量覆盖，不用管增量。"
+            + "⚠ 数据源只给最近两期，所以有空窗：上一期都披露完、下一期预约表还没发布时，这一列会是空的。",
+            SupportsPartialRun: false),
+
         new(FetchActionId.FetchRawBars, "补不复权历史", "跟随K线的源", QuotaGroup.Mixed,
             TimeSpan.FromHours(2), "一次性（补完就不用再跑了）",
             "抓**不复权**日线（原始成交价）。\n"
@@ -182,9 +195,14 @@ public static class FetchTaskCatalog
             + "跨几天慢慢啃完。设成「每月某天」只会跑一轮 300 只，全市场根本补不完。",
             SupportsPartialRun: true),
 
-        new(FetchActionId.FetchDividend, "拉取分红", "新浪", QuotaGroup.Sina,
+        new(FetchActionId.FetchDividend, "拉取分红送配", "新浪", QuotaGroup.Sina,
             TimeSpan.FromHours(2), "年度",
-            "逐只抓历年全部分红方案。做股息率因子、核对除权除息日都靠这张表。"),
+            "逐只抓历年全部分红方案，**同一次请求顺带抓配股**（源页面上分红和配股是两张表，不额外花请求）。\n"
+            + "做股息率因子、核对除权除息日都靠分红这张表。\n"
+            + "配股是A股第四类除权事件（前三类是现金分红/送股/转增），2026-09-01 起才抓——漏掉它，"
+            + "回测序列 day_adj 会在配股除权日凭空多一根阴线：实测招商证券 2020 年那次 10配3@7.46 "
+            + "让十年累计收益少算了 25 个百分点，中信证券少 12 个。配股集中在**银行和券商**，正是底仓的重点。\n"
+            + "⚠ 抓完要再跑一次【重算回测序列】，配股才会体现到 day_adj 上。"),
 
         new(FetchActionId.BankRegulatory, "金融监管指标", "新浪(页面 + PDF文件)", QuotaGroup.Sina,
             TimeSpan.FromHours(1), "半年（年报/中报后）",

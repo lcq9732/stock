@@ -97,11 +97,11 @@
                     </Grid.RowDefinitions>
 
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-                        <TextBlock Text="我打算买卖的票——买入/卖出在这里录（点&quot;交易记录&quot;，可分多笔金字塔建仓/分批止盈，佣金等费率也在那里设），每日晨检只体检这一页。从&quot;自选股&quot;页点&quot;加入交易池&quot;、或&quot;查询&quot;页点&quot;加入主动仓&quot;加进来。"
+                        <TextBlock Text="我打算买卖的票——买入/卖出在这里录（点&quot;交易记录&quot;，可分多笔金字塔建仓/分批止盈，佣金等费率也在那里设），每日晨检只体检这一页。从&quot;自选股&quot;或&quot;查询&quot;页勾选后点&quot;加入主动仓&quot;加进来。"
                                    VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" TextWrapping="Wrap" MaxWidth="540" />
                         <Button Content="刷新" Command="{Binding RefreshCommand}" Width="70" Margin="16,0,0,0" />
-                        <Button Content="移出交易池" Command="{Binding RemoveFromPoolCommand}" Width="90" Margin="8,0,0,0"
-                                ToolTip="把勾选的票移出交易池（记录和买卖留痕都不删除，仍留在&quot;自选股&quot;页作为算法样本）。&#10;已平仓的可以移出——那笔交易已经结束了。&#10;只有【未平仓的持仓】移不出去（钱还在里面必须每天盯）：先在【交易记录】里把剩余股数卖出平仓，或把买入记录删掉。" />
+                        <Button Content="移出主动仓" Command="{Binding RemoveFromPoolCommand}" Width="90" Margin="8,0,0,0"
+                                ToolTip="把勾选的票移出主动仓（记录和买卖留痕都不删除，仍留在&quot;自选股&quot;页作为算法样本）。&#10;已平仓的可以移出——那笔交易已经结束了。&#10;只有【未平仓的持仓】移不出去（钱还在里面必须每天盯）：先在【交易记录】里把剩余股数卖出平仓，或把买入记录删掉。" />
                         <Button Content="仓位计算器" Width="90" Margin="8,0,0,0" Click="PositionSizingButton_Click"
                                 ToolTip="按凯利公式把&quot;我觉得有几成把握涨&quot;换算成&quot;该买多少钱/该留多少股&quot;。&#10;这里打开是空手起算（不带某只票）；要针对某一只，点那一行的【仓位】按钮，现价和持仓会自动带进去。" />
                         <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0" />
@@ -428,6 +428,18 @@
                                     </Style>
                                 </DataGridTextColumn.CellStyle>
                             </DataGridTextColumn>
+                            <!-- 财报日（2026-09-01）：底仓看财报是为了看**分红方案**——它跟年报一起公布。
+                                 派息缩水或连续分红中断，底仓的持有理由本身就变了。由【拉取财报预约日】自动抓，只读。 -->
+                            <DataGridTextColumn Header="财报日" Binding="{Binding EarningsDateText}" Width="95"
+                                                IsReadOnly="True" SortMemberPath="EarningsSortValue">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Foreground" Value="{Binding EarningsColor}" />
+                                        <Setter Property="ToolTip" Value="{Binding EarningsTooltip}" />
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+
                             <DataGridTextColumn Header="建仓理由/退出条件✎" Binding="{Binding Note, UpdateSourceTrigger=LostFocus}" Width="260" />
                             <DataGridTemplateColumn Header="操作" Width="266">
                                 <DataGridTemplateColumn.CellTemplate>
@@ -731,13 +743,13 @@
 
                     <StackPanel Grid.Row="0" Margin="0,0,0,10">
                         <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="各选股方法丢进来的【算法验证样本】——只用来统计各方法准不准，不代表要买。想买卖的票请勾选后点右边&quot;加入交易池&quot;。"
+                            <TextBlock Text="各选股方法丢进来的【算法验证样本】——只用来统计各方法准不准，不代表要买。想买卖的票请勾选后点右边&quot;加入主动仓&quot;。"
                                        VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" TextWrapping="Wrap" MaxWidth="520" />
-                            <Button Content="加入交易池" Command="{Binding AddToTradePoolCommand}" Width="90" Margin="16,0,0,0"
+                            <Button Content="加入主动仓" Command="{Binding AddToTradePoolCommand}" Width="90" Margin="16,0,0,0"
                                     ToolTip="把勾选的票放进&quot;主动仓&quot;页——买卖信息在那边录，每日晨检也只体检那边的票。&#10;注意：加入后这些票【仍然留在本页】，因为验证样本不能被挑走（只留下自己没看好的那些会让准确率统计失真）。" />
                             <Button Content="刷新" Command="{Binding RefreshCommand}" Width="70" Margin="8,0,0,0" />
                             <Button Content="移除勾选" Command="{Binding RemoveSelectedCommand}" Width="80" Margin="8,0,0,0"
-                                    ToolTip="从自选里彻底删除（连同交易池里的同一条记录一起删）" />
+                                    ToolTip="从自选里彻底删除（连同主动仓里的同一条记录一起删）" />
                             <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
                                     ToolTip="把自选股列表导出成 Excel(.xlsx)" />
                         </StackPanel>
@@ -774,8 +786,8 @@
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <!-- 买卖信息不在本页录（2026-07-31改）——本页是算法验证样本，只看"选中后涨跌幅"；
-                                 买入/卖出请到"主动仓"页。这里只用一列标出哪些样本已经进了交易池。 -->
-                            <DataGridTextColumn Header="交易池" Binding="{Binding TradePoolText}" Width="70" IsReadOnly="True">
+                                 买入/卖出请到"主动仓"页。这里只用一列标出哪些样本已经进了主动仓。 -->
+                            <DataGridTextColumn Header="主动仓" Binding="{Binding TradePoolText}" Width="70" IsReadOnly="True">
                                 <DataGridTextColumn.HeaderStyle>
                                     <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource Theme.ColumnHeader}">
                                         <Setter Property="ToolTip" Value="是否已放进&quot;主动仓&quot;页：✔持仓=已填买入价；✔已加入=打算买、还没填买入价；空=只是算法样本" />
@@ -827,7 +839,7 @@
                              所以是三个去处而不是一个带标记的加法。主按钮给最常用的主动仓，另两个收在 ▾ 里。
                              箭头复用 DetailDropdown_Click——它做的就是把 DataContext 传给独立 popup 的 ContextMenu。 -->
                         <Button Content="加入主动仓" Command="{Binding AddToTradePoolCommand}" Margin="16,0,0,0" Padding="10,3"
-                                ToolTip="把勾选的个股放进&quot;主动仓&quot;页（记录当天收盘价）——从这里手工搜出来加的，本来就是你看好想买卖的票，所以直接进交易池、纳入每日晨检体检，买卖信息去&quot;主动仓&quot;页录。&#10;指数/ETF/板块不支持。已经在自选里的票会被一并标进交易池。&#10;要放到别处（底仓 / 只挂自选），点右边的 ▾。" />
+                                ToolTip="把勾选的个股放进&quot;主动仓&quot;页并记下当天收盘价。&#10;从这里手工搜出来加的，本来就是你看好想买卖的票，所以直接纳入每日晨检体检；买卖记录到那一页去录。&#10;指数/ETF/板块不支持。已经在自选里的票会被一并打上标记。&#10;要放到别处（底仓 / 只挂自选），点右边的 ▾。" />
                         <Button Content="▾" Width="22" Padding="0" Click="DetailDropdown_Click"
                                 ToolTip="改放到别处：底仓 / 只加自选股">
                             <Button.ContextMenu>
@@ -835,7 +847,7 @@
                                     <MenuItem Header="加入底仓（长期拿着吃分红）" Command="{Binding AddToCorePositionCommand}"
                                               ToolTip="放进【底仓】页——按股息倒推仓位、不设价格止损，退出条件是分红中断或基本面变坏。&#10;只建记录，成交明细和目标年化股息到那页用【录成交】填。" />
                                     <MenuItem Header="只加入自选股（不进晨检）" Command="{Binding AddToWatchlistOnlyCommand}"
-                                              ToolTip="只挂进【自选股】页看着，不进交易池、不做每日体检。&#10;想先观察一阵、还没到要每天盯止损的时候用这个。" />
+                                              ToolTip="只挂进【自选股】页看着，不进主动仓、不做每日体检。&#10;想先观察一阵、还没到要每天盯止损的时候用这个。" />
                                 </ContextMenu>
                             </Button.ContextMenu>
                         </Button>

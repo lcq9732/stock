@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    抓取计划的**排期与调度**（2026-09-02 从 StockPlatform.Fetcher/Planning 挪出来）。
+
+    为什么要独立成库：这里全是纯逻辑、零 UI 依赖，却原本待在 WPF 的 exe 项目里。
+    代价是实打实的——测试项目引用一个自包含单文件 exe 会撞 NETSDK1151，只能跟着标
+    SelfContained；调度逻辑也没法给别的程序（将来的后台服务/移动端）复用。
+
+    这里**只管"什么时候该跑哪一项"**，具体每一项干什么活不归它管：
+    调用方传一个执行回调进来（见 PlanRunner 的构造函数）。所以往后把「拉取全部」拆成
+    十几个细任务，改的是 FetchTaskCatalog + 调用方的分派，调度器一行都不用动。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 只为了 FetchResult（任务跑完的结果摘要）。除此之外不碰 Data 层。 -->
+    <ProjectReference Include="..\StockPlatform.Data\StockPlatform.Data.csproj" />
+  </ItemGroup>
+
+</Project>

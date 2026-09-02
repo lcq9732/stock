@@ -185,7 +185,7 @@ public class MorningStockRowViewModel
         IsHolding = entry.IsHoldingPosition;   // 分批卖出后只要还剩仓位就仍算持仓
         (StatusText, StatusColor) = IsHolding ? ("持仓", (Brush)ThemeBrushes.Firebrick)
                                   : IsClosed ? ("已平仓", ThemeBrushes.SteelBlue)
-                                  : ("待买", ThemeBrushes.Gray);   // 在交易池里但还没有买入记录=打算买、还没买
+                                  : ("待买", ThemeBrushes.Gray);   // 在主动仓里但还没有买入记录=打算买、还没买
         var basisDate = IsHolding ? (entry.FirstBuyDate ?? entry.DataDate) : entry.DataDate;
         DataDate = basisDate.ToString("yyyy-MM-dd") + (IsHolding ? "买" : "");
         Compute(entry, basisDate, barRepository, shareholderRepository);
@@ -340,7 +340,7 @@ public class MorningStockRowViewModel
         // ⚠ 口径：用**收盘价**判断，所以这是"尾盘/次日"的动作，不是盘中。回测按当天收盘价成交，
         // 实际次日开盘卖会有低开损耗，所以真实收益略低于上面的数字。
         // ⚠ 适用范围：对**所有持仓**生效，不按来源方法过滤。
-        // 曾经想只对"短线法/回调法"来源的票生效，但实测 watchlist 里交易池的20只有一多半
+        // 曾经想只对"短线法/回调法"来源的票生效，但实测 watchlist 里主动仓的20只有一多半
         // Method="查询"（茅台、中国移动、宁德这些手动加的），按方法过滤会把真正在交易的票
         // 全部漏掉。「主动仓」页按定义就是"我打算买卖、要每天盯"的票，默认全都算短线口径。
         // 如果将来要长期拿底仓吃分红，需要给条目加一个"底仓"标记再在这里排除——现在没有这个字段。
@@ -509,9 +509,9 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             "   · 只有一个线上 → 半开：谨慎、轻仓\n" +
             "   · 都线下 → 关闭：不建新仓、逐步降仓，等重新站上再回来\n" +
             "   回测：创业板指3年 +82% vs 买入持有 +50%，最大回撤 -20% vs -32%\n\n" +
-            "二、交易池逐只体检（按严重度排序；持仓排在待买前面）\n" +
+            "二、主动仓逐只体检（按严重度排序；持仓排在待买前面）\n" +
             "   ★ 只体检\"主动仓\"页里的票——各选股方法丢进\"自选股\"的只是算法验证样本、不会进这里。\n" +
-            "     要盯某只票：\"自选股\"页勾选→\"加入交易池\"，或\"查询\"页搜到→\"加入交易池\"。\n" +
+            "     要盯某只票：在\"自选股\"或\"查询\"页选中它，点\"加入主动仓\"。\n" +
             "   持仓 / 待买 / 已平仓：在\"主动仓\"页给某只票填了\"买入价\"就算真实持仓（基准=买入价/买入日，\n" +
             "   有股数还显示盈亏金额）；没填=待买（基准=自选价/自选日，止损止盈不触发）；\n" +
             "   买入价+卖出价都填了=已平仓（显示最终已实现盈亏，作为交易留痕沉淀，供复盘纪律执行情况）。\n" +
@@ -571,7 +571,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         // 填过买入价（真实持仓）的记录优先作基准（止损/止盈要按真实成本算），否则用最早那条
         // 记录（最早的峰值最高，止损触发最保守）；方法列合并展示所有来源。
         // 只体检"主动仓"池里的票（2026-07-31起）——各选股方法丢进自选的是"算法验证样本"，不代表
-        // 我要买；每天早上要盯的只是打算买卖的那一小撮。交易池的维护在"主动仓"Tab。
+        // 我要买；每天早上要盯的只是打算买卖的那一小撮。名单的维护在"主动仓"页。
         var entries = _watchlistStore.Load().Where(e => e.IsInTradePool).ToList();
         _entryCount = entries.Count;
         _allRows.Clear();
@@ -690,9 +690,9 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
         if (rows.Count == 0)
         {
             sb.AppendLine(methodFilter == null
-                ? "2) 交易池为空——晨检只体检\"主动仓\"页里的票（打算买卖的那些）。去\"自选股\"页勾选后点\"加入交易池\"，" +
-                  "或在\"查询\"页搜到后点\"加入交易池\"；各方法丢进自选的票只是算法验证样本，不会自动进来。"
-                : $"2) 【仅方法：{methodFilter}】交易池里没有该方法来源的票——把方法列表头的下拉切回\"全部方法\"看全部。");
+                ? "2) 主动仓为空——晨检只体检这一页里的票（打算买卖的那些）。在\"自选股\"或\"查询\"页选中想盯的票，" +
+                  "点\"加入主动仓\"即可；各方法丢进自选的票只是算法验证样本，不会自动进来。"
+                : $"2) 【仅方法：{methodFilter}】主动仓里没有该方法来源的票——把方法列表头的下拉切回\"全部方法\"看全部。");
         }
         else
         {
@@ -708,7 +708,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             // 去重说明只在"全部方法 + 真有重复记录"时展示：过滤后拿总记录数跟子集比是没有意义的。
             var dedupNote = methodFilter == null && entryCount != rows.Count ? $"，{entryCount} 条记录按股票去重" : "";
             var filterNote = methodFilter == null ? "" : $"【仅方法：{methodFilter}】";
-            sb.AppendLine($"2) {filterNote}交易池 {rows.Count} 只体检结果（持仓 {holding} 只 / 待买 {rows.Count - holding - closed.Count} 只 / 已平仓 {closed.Count} 只{dedupNote}）：");
+            sb.AppendLine($"2) {filterNote}主动仓 {rows.Count} 只体检结果（持仓 {holding} 只 / 待买 {rows.Count - holding - closed.Count} 只 / 已平仓 {closed.Count} 只{dedupNote}）：");
 
             // 方法横向对比用的整体口径：平均"较基准涨跌"+上涨占比（持仓算较买入价、待买算较自选日收盘）。
             var pcts = rows.Where(r => r.SinceBasisPct.HasValue).Select(r => r.SinceBasisPct!.Value).ToList();

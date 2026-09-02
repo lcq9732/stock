@@ -19,7 +19,7 @@ public class QueryRowViewModel : ISelectableRow
     /// <summary>标的类型显示：个股/大盘指数/ETF/板块——2026-07-15 起查询页也能搜到指数/ETF/板块，
     /// 用这列区分（分析仍只跑个股）。</summary>
     public string Type { get; init; } = "";
-    /// <summary>StockMeta 里的原始 type 值——"加入交易池"只对个股放行（指数/ETF/板块没有股东户数
+    /// <summary>StockMeta 里的原始 type 值——"加入主动仓"只对个股放行（指数/ETF/板块没有股东户数
     /// 等跟踪数据、也不是"选股"语义），用它判断而不是拿显示文本反推。</summary>
     public string TypeRaw { get; init; } = "";
 
@@ -28,7 +28,7 @@ public class QueryRowViewModel : ISelectableRow
     /// 去引 Data 层的 SqliteStockMetaUpsert。</summary>
     public bool IsStock => TypeRaw == SqliteStockMetaUpsert.TypeStock;
     /// <summary>Plain mutable, same reasoning as ResultRowViewModel.IsSelected — only read when
-    /// "加入交易池" is clicked.</summary>
+    /// "加入主动仓" is clicked.</summary>
     public bool IsSelected { get; set; }
 }
 
@@ -76,7 +76,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
     public RelayCommand AddToCorePositionCommand { get; }
     public RelayCommand AddToWatchlistOnlyCommand { get; }
 
-    /// <summary>加进交易池后要通知"主动仓"/"自选股"/晨检三页刷新——由 MainViewModel 注入。</summary>
+    /// <summary>加进去之后要通知"主动仓"/"自选股"/晨检三页刷新——由 MainViewModel 注入。</summary>
     public Action? TradePoolChanged { get; set; }
 
     /// <summary>加进底仓后要通知【底仓】页刷新——同上，由 MainViewModel 注入。</summary>
@@ -134,7 +134,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
     /// true = 进【主动仓】：手工搜出来加的本来就是"我看好、想买卖"的票，纳入每日晨检体检。
     /// 这也是 2026-07-31 起这个按钮的默认行为。
     /// false = 只进【自选股】：2026-09-01 按用户要求加的第二条路——有时候只是想先挂着看一阵，
-    /// 还没到要每天盯止损的程度。这条路**不会**动已存在记录的交易池状态（否则跟上面那条没区别）。
+    /// 还没到要每天盯止损的程度。这条路**不会**动已存在记录的主动仓状态（否则跟上面那条没区别）。
     /// </param>
     private void AddSelectedToWatchlist(bool intoTradePool)
     {
@@ -171,19 +171,19 @@ public class QueryTabViewModel : INotifyPropertyChanged
         ClearSelection();
         if (added > 0 || existingIds.Count > 0) TradePoolChanged?.Invoke();
 
-        string target = intoTradePool ? "交易池" : "自选股";
+        string target = intoTradePool ? "主动仓" : "自选股";
         var parts = new List<string>
         {
             added > 0 ? $"已加入{target} {added} 只"
-            : existingIds.Count > 0 ? $"已把 {existingIds.Count} 只已在自选里的票放进交易池"
+            : existingIds.Count > 0 ? $"已把 {existingIds.Count} 只已在自选里的票放进主动仓"
             : $"勾选的个股都已经在{target}里了",
         };
         if (skippedType > 0) parts.Add($"跳过 {skippedType} 个非个股（指数/ETF/板块不支持自选跟踪）");
         if (skippedNoBar > 0) parts.Add($"跳过 {skippedNoBar} 个无K线数据的");
         if (entries.Count > 0 && added < entries.Count)
             parts.Add(intoTradePool
-                ? $"{entries.Count - added} 只本来就在自选里（已确保在交易池中）"
-                : $"{entries.Count - added} 只本来就在自选里（交易池状态没动）");
+                ? $"{entries.Count - added} 只本来就在自选里（已确保在主动仓中）"
+                : $"{entries.Count - added} 只本来就在自选里（主动仓状态没动）");
         StatusText = string.Join("；", parts);
     }
 
