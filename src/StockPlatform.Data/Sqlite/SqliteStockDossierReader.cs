@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using Microsoft.Data.Sqlite;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
@@ -57,7 +57,7 @@ public class SqliteStockDossierReader
         Add(dossier, "主力资金净流入", "NetInflow：日频，正=净流入。", () => ReadNetInflow(conn, code));
         Add(dossier, "龙虎榜", "Lhb：新浪龙虎榜。同一天可因多个上榜指标出现多行；\"对应值\"随指标而定（涨跌幅/偏离值）。", () => ReadLhb(conn, code));
         Add(dossier, "通用基本面指标", "FundamentalMetric：键值表，目前实际写入的是流通市值（元，抓取日快照，不是每个交易日都有）。", () => ReadFundamental(conn, code));
-        Add(dossier, "所属板块", "BoardMember + Board：新浪概念/行业板块。**当下快照**，每次拉板块整体覆盖，没有历史，所以没有趋势图。", () => ReadBoards(conn, code));
+        Add(dossier, "所属板块", "BoardMember + Board：东财概念/行业板块的官方成分名单（2026-09-03 起，此前是新浪）。**当下快照**，每次拉板块整体覆盖，没有历史，所以没有趋势图。", () => ReadBoards(conn, code));
         Add(dossier, "所属指数", "IndexCons + IndexWeight。成分名单只留最新一版；权重仅中证系指数有（来自中证官网 closeweight），按调样基准日版本化。", () => ReadIndexes(conn, code));
         Add(dossier, "中标/订单公告", "OrderWinAnnouncement：巨潮全文检索，按界面上填的关键词抓。金额是从正文里解析出来的，可能为空或不准，所以不画趋势图。", () => ReadAnnouncements(conn, code));
 

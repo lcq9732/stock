@@ -23,17 +23,24 @@ public class PlanPriorityTests
     /// <summary>2026-09-02 是周三，工作日。</summary>
     private static readonly DateTime Wed10Am = D("2026-09-02 10:00");
 
+    /// <summary>
+    /// 造一项任务，连同它自己的组（2026-09-02 分组之后重复规则和时刻都在组上）。
+    /// 这里**一项一组**：这样"组顺序＝任务顺序"，跟分组之前那份平铺计划完全等价，
+    /// 测的仍然是"同时到期时谁先跑"这件事本身。
+    /// </summary>
     private static FetchPlanItem Item(
-        FetchActionId action, RepeatKind repeat, TimeOnly? notBefore = null, int dayOfMonth = 1)
-        => new()
+        FetchActionId action, RepeatKind repeat, TimeOnly? notBefore = null, int dayOfMonth = 1,
+        RunPacing pacing = RunPacing.Immediate)
+    {
+        var g = new FetchPlanGroup
         {
-            Action = action,
-            Enabled = true,
-            Repeat = repeat,
-            NotBefore = notBefore,
-            DayOfMonth = dayOfMonth,
-            Weekday = DayOfWeek.Monday,
+            Name = action.ToString(), Enabled = true, Repeat = repeat, Pacing = pacing,
+            NotBefore = notBefore, DayOfMonth = dayOfMonth, Weekday = DayOfWeek.Monday,
         };
+        var item = new FetchPlanItem { Action = action, Enabled = true, Owner = g };
+        g.Items.Add(item);
+        return item;
+    }
 
     /// <summary>PlanRunner 的挑选逻辑是私有的，用反射调——不值得为了测试把它公开。</summary>
     private static FetchPlanItem? PickDue(FetchPlan plan, DateTime now)
@@ -57,7 +64,7 @@ public class PlanPriorityTests
     }
 
     private static FetchPlan PlanOf(params FetchPlanItem[] items)
-        => new() { Items = [.. items] };
+        => new() { Groups = [.. items.Select(i => i.Owner!)] };
 
     // ══ 核心：已经到点的不该被"还没到点的"堵住 ═══════════════════════════
 
@@ -173,12 +180,13 @@ public class PlanPriorityTests
     // ══ 不参与自动调度的 ═════════════════════════════════════════════════
 
     [Fact]
-    public void 空闲项和手动项不进定时调度()
+    public void 空闲时补的项和手动项不进定时调度()
     {
-        // 空闲项走 FindIdleTask 那条路（填空窗、受 deadline 约束），手动项压根不自动跑
+        // 「空闲时补」的走 FindIdleTask 那条路（填空窗、受 deadline 约束），手动的压根不自动跑。
+        // 这两类都不该出现在"下一个到点时刻"里，否则主循环会为它们空等。
         var plan = PlanOf(
-            Item(FetchActionId.FetchFinancials, RepeatKind.WhenIdle),
-            Item(FetchActionId.FetchDay, RepeatKind.Manual));
+            Item(FetchActionId.FetchFinancials, RepeatKind.Monthly, pacing: RunPacing.WhenIdle),
+            Item(FetchActionId.OptimizeDatabase, RepeatKind.Manual));
 
         Assert.Null(PickDue(plan, Wed10Am));
         Assert.Null(NextDue(plan, Wed10Am));

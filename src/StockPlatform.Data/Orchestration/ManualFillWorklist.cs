@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using StockPlatform.Data.Remote;
 using StockPlatform.Data.Sqlite;
@@ -179,6 +179,35 @@ public static class ManualFillWorklist
     ///   填这里 空 + OCR 也空     → 还没填，跳过（分批填是常态，不能当成"确认"）
     /// 第二条是这份清单的核心约定：**留空 = OCR 是对的**，让人只需要在错的地方动手。
     /// </summary>
+    /// <summary>
+    /// 清单里还剩多少项要人动手——**只数「填这里」还空着的行**。
+    ///
+    /// 为什么要有它（2026-09-03 用户提的）：PDF 解析不出来的指标会变成这份清单，可界面上
+    /// 一点痕迹都没有，用户根本不知道有活等着自己干，"要不能用户无法判断数据是否取正确了"。
+    /// 把这个数摆在【导入手工数据】那一行，一眼就知道该不该去填、填完了没有。
+    ///
+    /// 留空 + 有 OCR 值 的那种也算"要动手"：它要人对着 PDF 核一眼，认对了才留空提交。
+    /// </summary>
+    public static (int Total, int NeedFill) CountPending(string csvPath)
+    {
+        if (!File.Exists(csvPath)) return (0, 0);
+        var lines = File.ReadAllLines(csvPath, Encoding.UTF8);
+        if (lines.Length < 2) return (0, 0);
+
+        int total = 0, need = 0;
+        for (int i = 1; i < lines.Length; i++)
+        {
+            if (string.IsNullOrWhiteSpace(lines[i])) continue;
+            var f = ParseCsvLine(lines[i]);
+            if (f.Count < 9) continue;
+            total++;
+            bool legacy = f.Count == 9;
+            var fill = (legacy ? f[ColFillLegacy] : f[ColFill]).Trim();
+            if (fill.Length == 0) need++;
+        }
+        return (total, need);
+    }
+
     public static (int Imported, int Confirmed, int Skipped, List<string> Errors) Import(
         string dbPath, string csvPath)
     {

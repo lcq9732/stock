@@ -9,7 +9,9 @@ using StockPlatform.Desktop.Shared.Theme;
 
 namespace StockPlatform.Analyzer.ViewModels;
 
-/// <summary>板块榜里的一行（概念/行业）。涨跌幅、成交额、领涨股来自新浪板块口径（Fetcher 抓的
+/// <summary>板块榜里的一行（概念/行业）。成分股来自东财官方成分名单；涨跌幅/成交额是
+/// **本地用成分股日K等权算的**（2026-09-03 起，见 FetchOrchestrator.SynthesizeBoardIndexCore）——
+/// 跟点进去看到的板块K线是同一个口径。领涨股列暂空（Fetcher 抓的
 /// 快照），成分股数也来自快照。</summary>
 public class BoardRowViewModel
 {

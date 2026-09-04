@@ -104,15 +104,50 @@ public class BankReportFetcher
     /// 结尾允许跟一个括号后缀（"（A股）""（修订版）"这类是同一份报告的不同版本，要留），
     /// 但摘要版和英文版要排除——前者没有完整表格，后者标签是英文、匹配不上。
     /// </summary>
-    private static bool IsRealReport(string title, string kind)
-    {
-        if (title.Contains("摘要") || title.Contains("英文") ||
-            title.Contains("English", StringComparison.OrdinalIgnoreCase)) return false;
+    /// <summary>
+    /// 标题**明显不可能是报告正文**的那些词。命中一个就直接排除，不下载。
+    ///
+    /// H股 是 2026-09-02 加的，实测抓到的元凶：中国银行的年报列表里
+    /// 「2025年年度报告」和「H股公告-2025年年度报告」**两条都以"年度报告"结尾**，
+    /// 老规则只看结尾，把港版也放行了。港版指标表的口径和排版跟 A 股版不同，解析不出来，
+    /// 于是记成 wrong_file——全库 21 条 wrong_file 里一大批就是中行/工行/中信/浦发/太保
+    /// 这些 **A+H 两地上市**的银行保险。
+    /// </summary>
+    private static readonly string[] TitleBlockers =
+    [
+        "摘要", "英文", "English", "H股", "港股",
+        "问询", "回复", "专项报告", "行动方案", "落实情况", "更正", "补充",
+    ];
 
-        var pattern = kind == "中报"
-            ? @"\d{4}\s*年\s*半年度报告\s*(（[^）]*）|\([^)]*\))?\s*$"
-            : @"\d{4}\s*年\s*年度报告\s*(（[^）]*）|\([^)]*\))?\s*$";
-        return Regex.IsMatch(title, pattern);
+    /// <summary>
+    /// 标题有多像"报告正文"：**-1 = 排除**，0/1/2 = 候选优先级（越小越可信）。
+    ///
+    /// ⚠ 这里只是**粗筛加排序**，不是终判（2026-09-02 按用户意见改）。
+    /// 真正的判据是"这份 PDF 里解析不解析得出监管指标"——见 FetchBestAsync：
+    /// 它按这个档次逐个下载试，出得来指标就采用、出不来就删掉试下一个。
+    ///
+    /// 为什么不能靠标题定生死，两个方向都吃过亏：
+    ///   · **太松**会下错——「关于落实2024年度报告问询函的回复公告」也含"年度报告"（实测 353 份里 9 份）；
+    ///   · **太严**会漏掉，而且是**静默**的——平安银行 2022 年半年报的标题是
+    ///     「2022年半年度报告**2**」（末尾多个 2），严格正则要求以"报告"结尾，直接漏过，
+    ///     那一期就无声无息地没有数据。太严比太松更危险：下错了会进手工回填清单让人看见，
+    ///     漏掉了则什么痕迹都不留。
+    /// </summary>
+    private static int TitleRank(string title, string kind)
+    {
+        foreach (var bad in TitleBlockers)
+            if (title.Contains(bad, StringComparison.OrdinalIgnoreCase)) return -1;
+
+        string core = kind == "中报" ? @"\d{4}\s*年\s*半年度报告" : @"\d{4}\s*年\s*年度报告";
+
+        // 0 档：干干净净以"XXXX年年度报告"结尾（允许「（A股）」「（修订版）」这类版本后缀）
+        if (Regex.IsMatch(title, core + @"\s*(（[^）]*）|\([^)]*\))?\s*$")) return 0;
+        // 1 档：正文标题带了别的零碎（"…年度报告2"、末尾跟编号/日期之类）
+        if (Regex.IsMatch(title, core)) return 1;
+        // 2 档：连"年度报告"都不完整，只是像（"2024年半年报"）。兜底，正常轮不到
+        if (kind == "中报" && Regex.IsMatch(title, @"\d{4}\s*年\s*半年报")) return 2;
+        if (kind != "中报" && Regex.IsMatch(title, @"\d{4}\s*年\s*年报")) return 2;
+        return -1;
     }
 
     /// <summary>
@@ -122,8 +157,27 @@ public class BankReportFetcher
     /// 2 期中报就够。取 3 期会让 PDF 数量和下载量直接多五成，而第三期基本用不上。
     /// </summary>
     public async Task<List<ReportRef>> ListReportsAsync(string code, int maxPerKind = 2, CancellationToken ct = default)
+        => (await ListCandidatesAsync(code, maxPerKind, ct))
+            .Select(g => g.Value[0]).OrderByDescending(r => r.ReportDate).ToList();
+
+    /// <summary>
+    /// 列出最近若干期的年报/中报，**每一期给出全部候选**（按 <see cref="TitleRank"/> 从可信到勉强排序）。
+    ///
+    /// 为什么要多候选（2026-09-02 改）：同一个报告期往往有好几条公告的标题都长得像正文，
+    /// 光看标题分不出哪份才有指标表。中国银行 2025 年报就有「2025年年度报告」和
+    /// 「H股公告-2025年年度报告」两条，平安银行还出现过「2022年半年度报告2」。
+    /// 与其把宝押在正则上，不如**下载下来解析一下，用"出不出得来指标"当判据**——见 FetchBestAsync。
+    ///
+    /// <paramref name="maxPerKind"/> 数的是**报告期**不是公告条数：体检表只要"当期 + 去年同期"，
+    /// 2 期年报 + 2 期中报够用，取 3 期会让下载量多五成而第三期基本用不上。
+    /// </summary>
+    public async Task<SortedDictionary<DateTime, List<ReportRef>>> ListCandidatesAsync(
+        string code, int maxPerKind = 2, CancellationToken ct = default)
     {
-        var refs = new List<ReportRef>();
+        var byDate = new SortedDictionary<DateTime, List<ReportRef>>(
+            Comparer<DateTime>.Create((a, b) => b.CompareTo(a)));   // 新的报告期排前面
+        var rank = new Dictionary<(DateTime, string), int>();
+
         foreach (var (fmt, kind) in ListPages)
         {
             ct.ThrowIfCancellationRequested();
@@ -131,21 +185,68 @@ public class BankReportFetcher
             try { html = await FetchTextAsync(string.Format(fmt, code), Encoding.GetEncoding("GBK"), ct); }
             catch { continue; }   // 某一类列表页取不到不影响另一类
 
-            int taken = 0;
+            var periods = new HashSet<DateTime>();
             foreach (Match m in DetailLink.Matches(html))
             {
                 var title = WebUtility.HtmlDecode(m.Groups[2].Value).Trim();
-                if (!IsRealReport(title, kind)) continue;
+                int r = TitleRank(title, kind);
+                if (r < 0) continue;
 
                 var ym = TitleYear.Match(title);
                 if (!ym.Success || !int.TryParse(ym.Groups[1].Value, out var year)) continue;
                 var date = kind == "中报" ? new DateTime(year, 6, 30) : new DateTime(year, 12, 31);
 
-                refs.Add(new ReportRef(code, date, title, SinaBase + m.Groups[1].Value));
-                if (++taken >= maxPerKind) break;
+                // 期数够了就别再往里加新的报告期（同一期的其它候选还是要收）
+                if (!periods.Contains(date) && periods.Count >= maxPerKind) continue;
+                periods.Add(date);
+
+                var url = SinaBase + m.Groups[1].Value;
+                if (!byDate.TryGetValue(date, out var list)) byDate[date] = list = [];
+                if (list.Any(x => x.DetailUrl == url)) continue;      // 同一条公告列了两遍
+                list.Add(new ReportRef(code, date, title, url));
+                rank[(date, url)] = r;
             }
         }
-        return refs;
+
+        foreach (var list in byDate.Values)
+            list.Sort((a, b) => rank[(a.ReportDate, a.DetailUrl)].CompareTo(rank[(b.ReportDate, b.DetailUrl)]));
+        return byDate;
+    }
+
+    /// <summary>
+    /// 一个报告期的多个候选**逐个试**，直到解析出指标为止。
+    ///
+    /// 这是"标题只做粗筛、解析结果才是终判"这条原则的落点：
+    ///   · 第 0 档候选正常一次就中，不会多下载什么；
+    ///   · 只有它下错了（H股版/专项报告）或者解析不出（版式变了）才会试下一个；
+    ///   · 全试完还不行才记 no_match，进手工回填清单。
+    ///
+    /// 返回**最后一次尝试**的状态；成功的话就是那次成功的。多试的那几份都会被删掉，
+    /// 不留在本地占地方也不干扰"已缓存 PDF 重解析"那条自愈路径。
+    /// </summary>
+    public async Task<(BankReportFetchState State, List<BankRegulatoryMetric> Metrics)> FetchBestAsync(
+        IReadOnlyList<ReportRef> candidates, FinancialInstitutionKind kind = FinancialInstitutionKind.Bank,
+        Action<string>? progress = null, CancellationToken ct = default)
+    {
+        BankReportFetchState? last = null;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var r = candidates[i];
+            if (i > 0)
+                progress?.Invoke($"    上一个候选没解析出指标，改试：{r.Title}");
+
+            var (state, metrics) = await FetchOneAsync(r, kind, progress, ct);
+            if (metrics.Count > 0) return (state, metrics);
+            last = state;
+        }
+        return (last ?? new BankReportFetchState
+        {
+            Code = candidates.Count > 0 ? candidates[0].Code : "",
+            ReportDate = candidates.Count > 0 ? candidates[0].ReportDate : default,
+            Status = "no_pdf",
+            Message = "这一期没有像正文的公告",
+        }, []);
     }
 
     /// <summary>

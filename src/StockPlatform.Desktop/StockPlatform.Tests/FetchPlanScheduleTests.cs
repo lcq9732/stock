@@ -1,4 +1,4 @@
-using StockPlatform.Scheduling;
+﻿using StockPlatform.Scheduling;
 using Xunit;
 
 namespace StockPlatform.Tests;
@@ -18,14 +18,26 @@ public class FetchPlanScheduleTests
 {
     private static DateTime D(string s) => DateTime.Parse(s);
 
-    private static FetchPlanItem Monthly(int dayOfMonth = 1, TimeOnly? notBefore = null) => new()
+    /// <summary>
+    /// 造一个"挂在组上"的任务（2026-09-02 分组之后：重复规则和触发时刻都在**组**上，
+    /// 任务通过 Owner 读它们）。这些排期判据本身没变，变的只是取值来源。
+    /// </summary>
+    private static FetchPlanItem InGroup(FetchActionId action, RepeatKind repeat,
+        TimeOnly? notBefore = null, int dayOfMonth = 1, DayOfWeek weekday = DayOfWeek.Monday,
+        RunPacing pacing = RunPacing.Immediate)
     {
-        Action = FetchActionId.FetchIndustry,
-        Enabled = true,
-        Repeat = RepeatKind.Monthly,
-        DayOfMonth = dayOfMonth,
-        NotBefore = notBefore,
-    };
+        var g = new FetchPlanGroup
+        {
+            Name = "测试组", Enabled = true, Repeat = repeat, Pacing = pacing,
+            DayOfMonth = dayOfMonth, Weekday = weekday, NotBefore = notBefore,
+        };
+        var item = new FetchPlanItem { Action = action, Enabled = true, Owner = g };
+        g.Items.Add(item);
+        return item;
+    }
+
+    private static FetchPlanItem Monthly(int dayOfMonth = 1, TimeOnly? notBefore = null)
+        => InGroup(FetchActionId.FetchIndustry, RepeatKind.Monthly, notBefore, dayOfMonth);
 
     // ══ 月度：错过当天要能补跑 ════════════════════════════════════════════
 
@@ -58,7 +70,8 @@ public class FetchPlanScheduleTests
 
         Assert.True(it.AlreadyRanOn(D("2026-09-02")));
         Assert.True(it.AlreadyRanOn(D("2026-09-20")));
-        Assert.False(it.AlreadyRanOn(D("2026-10-01")));
+        Assert.True(it.AlreadyRanOn(D("2026-10-01 17:59")));   // 10 月这一期还没到点，仍属 9 月那期
+        Assert.False(it.AlreadyRanOn(D("2026-10-01 18:00")));  // 到点了，新一期
     }
 
     [Fact]
@@ -82,30 +95,24 @@ public class FetchPlanScheduleTests
     [Fact]
     public void 跨午夜_昨天开工今天凌晨收工_今天仍要跑()
     {
-        var it = new FetchPlanItem
-        {
-            Action = FetchActionId.FetchAll,
-            Repeat = RepeatKind.EveryWorkday,
-            NotBefore = new TimeOnly(18, 0),
-            LastStart = D("2026-08-31 18:00"),   // 周一 18:00 开工
-            LastEnd = D("2026-09-01 03:16"),     // 周二 03:16 收工
-            LastOutcome = RunOutcome.Ok,
-        };
+        var it = InGroup(FetchActionId.StepStockDayBars, RepeatKind.EveryWorkday, new TimeOnly(18, 0));
+        it.LastStart = D("2026-08-31 18:00");    // 周一 18:00 开工
+        it.LastEnd = D("2026-09-01 03:16");      // 周二 03:16 收工
+        it.LastOutcome = RunOutcome.Ok;
 
-        Assert.False(it.AlreadyRanOn(D("2026-09-01")));
+        // 判据要传**当时的时刻**而不是光秃秃一个日期：一轮的归属看「当期锚点」
+        //（最近一个已经过去的 18:00），不看自然日。
+        Assert.True(it.AlreadyRanOn(D("2026-09-01 03:20")));    // 刚收工那会儿还是同一轮，别再来一遍
+        Assert.False(it.AlreadyRanOn(D("2026-09-01 18:00")));   // 到周二 18:00 就是新一轮了，照跑
     }
 
     [Fact]
     public void 跨午夜_没设不早于也一样()
     {
-        var it = new FetchPlanItem
-        {
-            Action = FetchActionId.FetchBoards,
-            Repeat = RepeatKind.EveryWorkday,
-            LastStart = D("2026-08-31 20:00"),
-            LastEnd = D("2026-09-01 02:00"),
-            LastOutcome = RunOutcome.Ok,
-        };
+        var it = InGroup(FetchActionId.StepBoards, RepeatKind.EveryWorkday);
+        it.LastStart = D("2026-08-31 20:00");
+        it.LastEnd = D("2026-09-01 02:00");
+        it.LastOutcome = RunOutcome.Ok;
 
         Assert.False(it.AlreadyRanOn(D("2026-09-01")));
     }
@@ -113,29 +120,21 @@ public class FetchPlanScheduleTests
     [Fact]
     public void 当天开工跑完_当天不再跑_次日照跑()
     {
-        var it = new FetchPlanItem
-        {
-            Action = FetchActionId.FetchAll,
-            Repeat = RepeatKind.EveryWorkday,
-            NotBefore = new TimeOnly(18, 0),
-            LastStart = D("2026-09-01 18:05"),
-            LastEnd = D("2026-09-01 23:00"),
-            LastOutcome = RunOutcome.Ok,
-        };
+        var it = InGroup(FetchActionId.StepStockDayBars, RepeatKind.EveryWorkday, new TimeOnly(18, 0));
+        it.LastStart = D("2026-09-01 18:05");
+        it.LastEnd = D("2026-09-01 23:00");
+        it.LastOutcome = RunOutcome.Ok;
 
-        Assert.True(it.AlreadyRanOn(D("2026-09-01")));
-        Assert.False(it.AlreadyRanOn(D("2026-09-02")));
+        Assert.True(it.AlreadyRanOn(D("2026-09-01 23:30")));    // 当晚跑完了，别再来一轮
+        Assert.True(it.AlreadyRanOn(D("2026-09-02 09:00")));    // 次日白天仍属那一轮，还是不跑
+        Assert.False(it.AlreadyRanOn(D("2026-09-02 18:00")));   // 次日到点，新一轮
     }
 
     // ══ 每周：本周内补跑，跨周重置 ════════════════════════════════════════
 
-    private static FetchPlanItem Weekly() => new()
-    {
-        Action = FetchActionId.FetchShareholder,
-        Repeat = RepeatKind.Weekly,
-        Weekday = DayOfWeek.Monday,
-        NotBefore = new TimeOnly(20, 0),
-    };
+    private static FetchPlanItem Weekly()
+        => InGroup(FetchActionId.FetchShareholder, RepeatKind.Weekly, new TimeOnly(20, 0),
+                   weekday: DayOfWeek.Monday);
 
     [Theory]
     [InlineData("2026-08-31", true)]   // 周一，应跑日
@@ -153,7 +152,9 @@ public class FetchPlanScheduleTests
         it.LastOutcome = RunOutcome.Ok;
 
         Assert.True(it.AlreadyRanOn(D("2026-09-02")));
-        Assert.False(it.AlreadyRanOn(D("2026-09-07")));
+        // 下周一 20:00 之前仍属上一期（上周跑过了）；到点之后才是新一期
+        Assert.True(it.AlreadyRanOn(D("2026-09-07 19:59")));
+        Assert.False(it.AlreadyRanOn(D("2026-09-07 20:00")));
     }
 
     // ══ 失败/跳过按自然日，不跟周期 ═══════════════════════════════════════
@@ -192,33 +193,99 @@ public class FetchPlanScheduleTests
     [InlineData("2026-09-05", false)]   // 周六
     [InlineData("2026-09-06", false)]   // 周日
     public void 每工作日_周末不跑(string day, bool expected)
-        => Assert.Equal(expected, new FetchPlanItem
-        {
-            Action = FetchActionId.FetchAll,
-            Repeat = RepeatKind.EveryWorkday,
-        }.IsDueOn(D(day)));
+        => Assert.Equal(expected,
+            InGroup(FetchActionId.StepStockDayBars, RepeatKind.EveryWorkday).IsDueOn(D(day)));
 
     [Fact]
     public void 手动项永远不自动跑()
-        => Assert.False(new FetchPlanItem
-        {
-            Action = FetchActionId.FetchDay,
-            Repeat = RepeatKind.Manual,
-        }.IsDueOn(D("2026-09-01")));
+        => Assert.False(InGroup(FetchActionId.OptimizeDatabase, RepeatKind.Manual).IsDueOn(D("2026-09-01")));
 
+    /// <summary>没挂在任何组上的任务（理论上不该出现）按「手动」处理——绝不自作主张地跑。</summary>
     [Fact]
-    public void 空闲项每天都可以跑_跑过一轮不代表今天不用再跑()
-    {
-        var it = new FetchPlanItem
-        {
-            Action = FetchActionId.FetchFinancials,
-            Repeat = RepeatKind.WhenIdle,
-            LastStart = D("2026-09-01 10:00"),
-            LastEnd = D("2026-09-01 10:30"),
-            LastOutcome = RunOutcome.Ok,
-        };
+    public void 没有组的任务不跑()
+        => Assert.False(new FetchPlanItem { Action = FetchActionId.StepLhb, Enabled = true }
+            .IsDueOn(D("2026-09-01")));
 
-        Assert.True(it.IsDueOn(D("2026-09-01")));
-        Assert.False(it.AlreadyRanOn(D("2026-09-01")));   // 空闲项不受"今天跑过"约束
+    // ══ 分批补的任务：一轮只做一部分，不算这一期做完 ═══════════════════════
+
+    /// <summary>
+    /// 财务报表每轮上限 300 只、全市场要跨几天，所以"跑成功一轮"不等于这一期做完了——
+    /// 判据是上一轮有没有报"没什么可做"。判错的后果很实在：算成做完就再也不补，
+    /// 全市场 5000 多只永远停在第一批 300 只。
+    /// </summary>
+    [Fact]
+    public void 分批补的任务_还有活干就不算这一期做完()
+    {
+        var it = InGroup(FetchActionId.FetchFinancials, RepeatKind.Monthly, pacing: RunPacing.WhenIdle);
+        it.LastStart = D("2026-09-01 10:00");
+        it.LastEnd = D("2026-09-01 11:30");
+        it.LastOutcome = RunOutcome.Ok;
+
+        it.LastNothingToDo = false;                        // 这一轮补了 300 只，还欠着
+        Assert.False(it.AlreadyRanOn(D("2026-09-02")));
+
+        it.LastNothingToDo = true;                         // 真的补齐了
+        Assert.True(it.AlreadyRanOn(D("2026-09-02")));
+    }
+
+    /// <summary>
+    /// **到点就跑的项，跑完一轮就是跑完了** —— 哪怕它在目录里标着"能分批"。
+    ///
+    /// 2026-09-02 实测炸过：判据当时只看目录里那个静态标记，于是【个股日K·不复权】
+    /// （标着能分批、但当前是增量模式）每轮跑完都判成"还没做完"，而它在日更组是到点就跑、
+    /// 没有空闲冷却挡着，主循环立刻又把它挑出来——4 秒一轮无限重跑，日志刷了几百轮。
+    /// 「空闲时补」不会这样，它每轮跑完都进 20 分钟冷却。
+    /// </summary>
+    [Fact]
+    public void 到点就跑的项_跑完一轮就算这一期做完()
+    {
+        var it = InGroup(FetchActionId.StepStockRawBars, RepeatKind.EveryWorkday,
+                         new TimeOnly(18, 0), pacing: RunPacing.Immediate);
+        it.LastStart = D("2026-09-02 19:36");
+        it.LastEnd = D("2026-09-02 20:06");
+        it.LastOutcome = RunOutcome.Ok;
+        it.LastNothingToDo = false;          // 真抓了活（这正是当时死循环的那个状态）
+
+        Assert.True(it.AlreadyRanOn(D("2026-09-02")), "到点就跑的项没有冷却，判不出'跑过了'就会立刻重跑");
+    }
+
+    /// <summary>
+    /// 同一个动作换成「空闲时补 + 整段回补」时，"还有活就接着补"才成立——那时有冷却挡着，
+    /// 不会变成死循环。
+    /// </summary>
+    [Fact]
+    public void 空闲时补且真分批时_还有活就不算做完()
+    {
+        var it = InGroup(FetchActionId.StepStockRawBars, RepeatKind.EveryWorkday,
+                         pacing: RunPacing.WhenIdle);
+        it.Mode = FetchMode.FirstBackfill;   // 整段回补才是真的分批
+        it.LastStart = D("2026-09-02 10:00");
+        it.LastEnd = D("2026-09-02 10:30");
+        it.LastOutcome = RunOutcome.Ok;
+        it.LastNothingToDo = false;
+
+        Assert.False(it.AlreadyRanOn(D("2026-09-02")));
+    }
+
+    /// <summary>不能分批的任务照常：跑成功一轮就是这一期做完了。</summary>
+    [Fact]
+    public void 不能分批的任务_跑成功一轮就算做完()
+    {
+        var it = InGroup(FetchActionId.FetchIndustry, RepeatKind.Monthly, pacing: RunPacing.WhenIdle);
+        it.LastStart = D("2026-09-01 10:00");
+        it.LastEnd = D("2026-09-01 10:05");
+        it.LastOutcome = RunOutcome.Ok;
+        it.LastNothingToDo = false;
+
+        Assert.True(it.AlreadyRanOn(D("2026-09-02")));
+    }
+
+    /// <summary>「空闲时补」只是执行方式，不改变"这一期该不该跑"——那仍由重复规则说了算。</summary>
+    [Fact]
+    public void 空闲时补的项_周期判定跟到点就跑的一样()
+    {
+        var idle = InGroup(FetchActionId.FetchShareholder, RepeatKind.Monthly, pacing: RunPacing.WhenIdle);
+        Assert.True(idle.IsDueOn(D("2026-09-02")));        // 1 号过了，本月仍待办
+        Assert.Equal(RunPacing.WhenIdle, idle.Pacing);
     }
 }

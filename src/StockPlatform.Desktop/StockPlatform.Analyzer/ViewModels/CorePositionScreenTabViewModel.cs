@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows;
@@ -261,7 +261,11 @@ public class CorePositionScreenTabViewModel : INotifyPropertyChanged
                     // ETF/板块指数/指数不参与个股筛选——它们没有财报也没有分红方案。
                     if (!names.TryGetValue(code, out var name)) continue;
                     if (code.StartsWith("sh") || code.StartsWith("sz") || code.StartsWith("gn_") ||
-                        code.StartsWith("new_") || code.StartsWith("dy_")) continue;
+                        code.StartsWith("new_") || code.StartsWith("dy_") ||
+                        // BK 是东财板块代码（2026-09-03 板块源换成东财后新增的形态，如 BK1137）。
+                        // GetAllCodes 只认 6 位纯数字、本来就挡得住，这里是多一道防御——
+                        // 板块代码体系变过一次，下次再变时这行能少一个坑。
+                        code.StartsWith("BK", StringComparison.OrdinalIgnoreCase)) continue;
                     // 科创板(688)/北交所(8x/4x/92x)排除：跟其它方法保持同一个扫描范围，
                     // 而且这两个板块基本没有稳定高分红的标的。
                     if (code.StartsWith("688") || code.StartsWith("8") || code.StartsWith("4")

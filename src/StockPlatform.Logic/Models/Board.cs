@@ -1,10 +1,10 @@
 namespace StockPlatform.Logic.Models;
 
-/// <summary>板块类型：概念/题材板块 vs 行业板块（新浪的两套分类）。</summary>
+/// <summary>板块类型：概念/题材板块 vs 行业板块。</summary>
 public enum BoardType
 {
-    Concept,   // 概念/题材（如"华为汽车""固态电池"）
-    Industry,  // 行业（新浪行业分类）
+    Concept,   // 概念/题材（如"存储芯片""液冷服务器"）
+    Industry,  // 行业分类
 }
 
 /// <summary>
@@ -14,7 +14,7 @@ public enum BoardType
 /// </summary>
 public class Board
 {
-    public string BoardCode { get; set; } = "";   // 新浪板块代码，如 gn_hwqc / new_blhy
+    public string BoardCode { get; set; } = "";   // 东财板块代码，如 BK1137
     public BoardType Type { get; set; }
     public string Name { get; set; } = "";
     public int MemberCount { get; set; }

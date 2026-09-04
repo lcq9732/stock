@@ -1,4 +1,4 @@
-namespace StockPlatform.Logic.Models;
+﻿namespace StockPlatform.Logic.Models;
 
 /// <summary>
 /// Small piece of cross-run state for the Fetcher UI, persisted next to the local database
@@ -74,6 +74,25 @@ public class Manifest
     public DateTime? MissingDayDate { get; set; }
 
     /// <summary>
+    /// **全库体检**查出来的日线空洞（2026-09-02 新增，见 FetchOrchestrator.RunStepFullAuditAsync）。
+    ///
+    /// 跟上面那份 <see cref="MissingDayCodes"/> 的分工：那个只管**最新一个交易日**、每天日更末尾自动查；
+    /// 这个是手动触发的全库体检，查的是每只票在自己存续期内的所有空洞。
+    ///
+    /// 存的是**区间**不是一堆散日期：抓一只票的一段跟抓一天成本几乎一样（数据源一页固定返回 640 根K线），
+    /// 所以补的时候一次请求就能把中间的洞全填上。
+    ///
+    /// 2026-09-04 起同一只票可能有**多条**记录——每条对应一个口径（前复权/后复权/不复权，
+    /// 见 <see cref="MissingBarRange.Granularity"/>），另外名单里还会混进 ETF 和指数的代码。
+    /// 补的时候按口径分组、把口径传给数据源；板块指数和 day_adj 不会进这份名单，它们靠本地重算。
+    ///
+    /// <see cref="MissingBarRange.Tries"/> 是补过几轮——停牌那种"补也补不到"的，
+    /// 连补两轮拿不到就移出这份名单、写进库里的 MissingBarConfirmed 白名单，往后体检跳过它，
+    /// 否则每次体检都报一遍、每次都白抓一遍，永远收敛不了。
+    /// </summary>
+    public List<MissingBarRange> MissingBars { get; set; } = new();
+
+    /// <summary>
     /// **等着重取前复权全历史**的股票（2026-08-31 新增）。
     ///
     /// 数据源的前复权是"原价 − 之后累计分红送配"，基准随抓取时点变化：某只股票一分红，
@@ -90,4 +109,67 @@ public class Manifest
     /// 重新检出来——这个机制本身是自愈的。
     /// </summary>
     public List<string> PendingQfqRepairCodes { get; set; } = new();
+
+    /// <summary>
+    /// **确认没有权重文件**的指数（2026-09-02 新增）：指数代码 → 上次确认 404 的时间。
+    ///
+    /// 内置指数全集有 732 个，而 closeweight.xls **只有中证系才有**，其余一律 404。
+    /// 每次跑都把这四五百个 404 重敲一遍，是最容易把中证那边反爬撞醒的原因——
+    /// 而它们一条数据都拿不到。记下来之后，一个月内不再问；一个月后重试一次
+    /// （中证偶尔会给新指数补上文件，所以不能永久拉黑）。
+    ///
+    /// 跟【全库体检】那份"确认数据源没有"的白名单是同一个思路：**抓过、确认拿不到，才记**。
+    /// </summary>
+    public Dictionary<string, DateTime> IndexWeightMissing { get; set; } = new();
+
+    /// <summary>
+    /// **每个任务**上一次跑完的时间和结果（2026-09-02 新增，随【拉取全部】拆成 13 个原子项）。
+    ///
+    /// 为什么需要它：<see cref="LastFetchKind"/> 记的是"最后一次抓取是哪一种"，在只有
+    /// 拉取全部/当天/重试三个入口时够用；拆细之后一天会有十几项各跑各的，那个字段就变成
+    /// "今天最后收尾的那一项"，看不出别的项跑没跑、什么时候跑的。
+    ///
+    /// key 用任务的中文名（就是 FetchOrchestrator.FinishFetchRun 的 fetchKind 参数，
+    /// 也是目录里的 Name）——不用枚举名，是因为编排层不认识计划层的 FetchActionId。
+    /// 改名会丢历史记录，但这只是"给人看的最近运行时间"，丢了下次跑完就重新有了。
+    /// </summary>
+    public Dictionary<string, TaskRunRecord> LastRunByTask { get; set; } = new();
+}
+
+/// <summary>
+/// 一只标的缺日线的那一段（见 <see cref="Manifest.MissingBars"/>）。
+/// 空洞不连续时取**包络区间**：数据源一页返回 640 根，一次请求覆盖整段比逐日请求划算得多。
+/// </summary>
+public class MissingBarRange
+{
+    public string Code { get; set; } = "";
+
+    /// <summary>
+    /// 缺的是**哪一套日线**（2026-09-04 新增）：<see cref="Models.Granularity.Day"/> 前复权 /
+    /// <see cref="Models.Granularity.DayHfq"/> 后复权 / <see cref="Models.Granularity.DayRaw"/> 不复权。
+    ///
+    /// 同一只票的不同口径是**各自独立的一条记录**——它们的水位线、历史起点、能不能抓（后复权和
+    /// 不复权只有腾讯给）全都不一样，合成一条就没法分别计 <see cref="Tries"/>、也没法分别补。
+    ///
+    /// 老 manifest 里没有这个字段，反序列化出来是 null/空串，一律按前复权处理
+    /// （2026-09-04 之前体检只查前复权，那些记录本来就都是前复权的）。
+    /// </summary>
+    public string Granularity { get; set; } = StockPlatform.Logic.Models.Granularity.Day;
+    /// <summary>最早缺的那个交易日。</summary>
+    public DateTime From { get; set; }
+    /// <summary>最晚缺的那个交易日。</summary>
+    public DateTime To { get; set; }
+    /// <summary>缺了几个交易日（给人看的，判断这只票是停牌还是真漏抓）。</summary>
+    public int Days { get; set; }
+    /// <summary>补过几轮。补两轮还拿不到就判定"数据源确实没有"，移进白名单表。</summary>
+    public int Tries { get; set; }
+}
+
+/// <summary>某个任务最后一次跑完的记录（见 <see cref="Manifest.LastRunByTask"/>）。</summary>
+public class TaskRunRecord
+{
+    public DateTime At { get; set; }
+
+    /// <summary>那一轮记了多少条错误（0 = 干净跑完）。</summary>
+    public int ErrorCount { get; set; }
 }

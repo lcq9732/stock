@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 // UseWindowsForms=true（为了托盘图标NotifyIcon，见MainWindow.xaml.cs）会让项目里同时能看到
 // System.Windows.Forms.Application，跟这里要用的System.Windows.Application同名——显式取别名
 // 消歧义，不然连这个partial class的基类都会报"ambiguous reference"。
@@ -46,11 +46,17 @@ public partial class App : Application
 
         // 只允许开一个实例（2026-08-04新增，见 SingleInstanceGuard 的类注释）——两个 Fetcher 同时抓取
         // 会往同一个 SQLite 写、互相锁表，历史上因为启动要等几十秒、用户重复双击真的开出过多个。
+        //
+        // ⚠ Debug 构建不设这道限制（2026-09-04）：开发时得能让调试版跟正在跑的正式版并存，
+        //    否则每验证一次改动都要先把正式版关掉——那正是抓取跑到一半最不该做的事。
+        //    Debug 版走的是自己 bin 目录下的库，不会跟正式版抢同一个 SQLite。
+#if !DEBUG
         if (!Desktop.Shared.SingleInstanceGuard.TryAcquire("Fetcher", "A股历史数据获取程序"))
         {
             Shutdown();
             return;
         }
+#endif
 
         // 界面主题（2026-08-29 新增）——必须在任何窗口创建之前应用，否则窗口先按默认浅色画一遍
         // 再跳成深色，启动时会闪一下白。见 ThemeManager 类注释。
@@ -111,9 +117,74 @@ public partial class App : Application
         var prebookProvider = new CninfoPrebookProvider(
             new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromMilliseconds(350)));
 
-        // 板块（概念/题材 + 行业）数据走新浪，独立限流；单独的"拉取板块"按钮触发（见
-        // FetchOrchestrator.RunFetchBoardsAsync），不掺进主抓取流程。
-        var boardFetcher = new SinaBoardFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        // 板块（概念/题材 + 行业）——2026-09-03 从新浪整体换成东财，**不保留新浪回退**。
+        //
+        // 换的原因是新浪的概念分类严重老化：175 个概念板块里没有存储芯片/算力/液冷/AI芯片/CPO/
+        // 先进封装/人形机器人，占着位置的却是"融资融券""社保重仓""成渝特区"这类根本不是产业链的东西。
+        // 东财实测 1031 个板块、5656 只股票、93867 条归属关系，上述主题一个不缺。
+        //
+        // 为什么不留新浪当备胎：板块是**快照**，抓取失败时库里上一次的数据还在，本来就不会"没数据"
+        // （SqliteBoardRepository.ReplaceAll 对空集合是空操作）。所以回退实际会做的事，是拿 224 个
+        // 没有存储/算力/液冷的老板块去覆盖 1031 个好板块——那是负价值。何况成分股走的是 datacenter，
+        // 真到它挂了的时候，业绩预告/龙虎榜/大宗交易全都没有回退源，单给板块留备胎也不自洽。
+        //
+        // 成分股走 push2 的**官方成分名单**，不能用 datacenter 的 F10 报表替代——
+        // 实测 F10 会系统性漏股（液冷服务器 170 只漏 4 只，含美的集团、拓普集团这种链上有实际
+        // 业务的大票；PCB 漏 2 只；两次都是 F10 ⊂ 官方名单、多出 0），而且漏了不报错，会一路
+        // 带进板块营收中位数这类指标。详见 EastMoneyBoardFetcher 类注释。
+        //
+        // 代价是 1031 个板块 ≈ 2500 个请求，而 push2 限流极敏感。所以限流器给到 2 秒间隔、
+        // 单并发，并且整个抓取设计成**跑不完也没关系**：逐板块落库记进度，下一轮跳过已成功的，
+        // 连续失败 10 个就判定被限流、提前收尾（见 FetchBoardsCoreAsync）。
+        //
+        // 2026-09-04：push2 在本机有线上被网关按域名拦了——TCP 和 TLS 都通，一发 HTTP 请求就被
+        // 切断（0 字节），而同为东财的 datacenter 一直正常，所以不是东财在限流，是本地网络。
+        // 换一条没限制的链路（另一个 Wi-Fi、或手机热点）就能通，实测两条链路的出口公网 IP 确实
+        // 不同。配置 data/fetcher-settings.json 里的 "Push2NetworkInterface": "Wi-Fi" 就让 push2
+        // 的请求从那块网卡出去，其余任务照旧走默认路由（有线更快更稳）。留空＝保持原样。
+        //
+        // 2026-09-04：push2 的请求改从**浏览器内核**发出去（WebView2＝Edge/Chromium）。
+        // 实测同一 IP、同一接口、相近时间：真浏览器 18/20 成功、27 个/分钟，
+        // 而 HttpClient 第 7 个请求就被切、折算 4.8 个/分钟。请求头、Cookie、连接复用、HTTP/2
+        // 全都单独排除过，差别在 TLS 指纹——Chrome 的 ClientHello 跟 .NET 的 Schannel 不同，
+        // 而 .NET 改不了这个。取数方式是直接把 WebView2 导航到接口地址、读页面上的文本，
+        // 跟人在地址栏敲那个 URL 完全一样；要验证的话程序自己等 JS 挑战跑完再重发，不用人点。
+        // WebView2 用不了（没装运行时、被组策略拦）会自动退回 HttpClient，不影响能不能抓。
+        // Cookie 存 data/local/webview2，跨次启动留着，省得每次开程序都被当成生面孔。
+        var browserChannel = new Services.WebView2JsonFetcher(
+            System.IO.Path.Combine(AppContext.BaseDirectory, "data", "local", "webview2"));
+
+        // 限流参数按 2026-09-04 的实测日志定（跟"能不能访问"是两回事——那个由本地网关决定，
+        // 这里说的是访问得到之后东财自己的限流）：
+        //   · 连发 16~35 个请求就被切断。用库里 fetched_at 反推出三串成功：
+        //     25只/61秒、16只/31秒、33只/97秒；间隔 2.1 秒和 3.0 秒撑的个数差不多，
+        //     所以**触发点是累计请求数，不是速率**——光降速没用，得在被切之前主动歇。
+        //   · 频率按**人翻页的节奏**来（2026-09-04 改）：4 秒一个、上下抖 ±30%（2.8~5.2 秒），
+        //     每 30 个歇 60 秒。摊下来 6 秒/请求＝10 个/分钟。
+        //     依据是浏览器实测能持续到 27 个/分钟（1.5 秒间隔 20 个，成功 18 个），
+        //     10 个/分钟只有它的三分之一，留足余量；同时又比原来给 HttpClient 定的
+        //     "5 秒 + 每 15 个歇 2 分钟"（4.6 个/分钟）快一倍——那套是为成功率不到 20% 的
+        //     通道调的，浏览器通道用不着那么憋。
+        //   · **抖动比固定间隔重要**：人不会精确每 5.000 秒点一次，固定节奏是机器行为里最好认的。
+        //     既然整条通道都在模仿浏览器，节奏也该像人。
+        //   · 导航取数本身还要等页面加载（1~3 秒），所以实际间隔比设定值更宽。
+        //
+        // 1350 个成分股请求约 2.5 小时。板块是逐个落库的，跨几轮抓完没关系。
+        var boardFetcher = new EastMoneyBoardFetcher(
+            new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(4),
+                            batchSize: 30, restDuration: TimeSpan.FromSeconds(60),
+                            jitter: 0.3,
+                            // ⚠ 这里**不重试**（2026-09-04 实测踩到）：浏览器通道内部已经自己重试
+                            // 3 次了（5 秒、15 秒，为的是等验证脚本跑完）。外层再重试 3 次的话，
+                            // 一个逻辑请求会变成 3×3＝9 个实际请求——被限流的时候等于火上浇油，
+                            // 而且日志里看着像"试了很多次"，其实全是自己打自己。
+                            retryDelays: []),
+            bindNetworkInterface: ReadSetting(paths.SettingsPath, "Push2NetworkInterface"),
+            browser: browserChannel);
+
+        // datacenter 客户端给业绩预告/龙虎榜席位等报表用（跟 push2 是不同域名、独立限流）
+        var emDataCenter = new EastMoneyDataCenterClient(
+            new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1)));
         var boardRepository = new SqliteBoardRepository(paths.CurrentDb);
         boardRepository.EnsureSchema();
 
@@ -126,7 +197,14 @@ public partial class App : Application
         // 进主抓取流程。中证权重源偏不稳、失败进 Manifest 可用"重新拉取失败股票"重试。三张表(IndexCons/
         // IndexWeight/Lhb/EtfIndexMap)都写进同一个 current.sqlite。
         var indexConsProvider = new SinaIndexConsProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
-        var indexWeightProvider = new CsindexWeightProvider(new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        // 中证 OSS 很容易触发反爬（2026-09-02 用户反馈）：原来是 2 并发 + 1 秒 ≈ 2 请求/秒，
+        // 而这一步一轮要问几百个指数、其中大半是注定 404 的非中证系。降到单并发 + 2 秒 +
+        // 每 30 个歇 60 秒 ≈ 0.4 请求/秒；配合 RunStepIndexWeightOnlyAsync 里那两道筛子
+        // （本地已是最新一期的、确认没有文件的都不问），稳态下每轮实发请求接近 0。
+        // 权重是月度数据，慢一点完全无所谓——撞醒反爬要停一整天才是真损失。
+        var indexWeightProvider = new CsindexWeightProvider(new RateLimiter(
+            maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
+            batchSize: 30, restDuration: TimeSpan.FromSeconds(60)));
         var lhbProvider = new SinaLhbProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
         var indexRepository = new SqliteIndexRepository(paths.CurrentDb);
         indexRepository.EnsureSchema();
@@ -171,16 +249,101 @@ public partial class App : Application
         // 证监会行业分类(两所门类+新浪大类)——因子法显示"板块"、FactorLab 行业中性化都用它。
         var industryProvider = new ExchangeSinaIndustryProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider);
+        // 业绩预告/快报（2026-09-03，东财）——本地此前完全没有这两份数据，且没有回退源：
+        // 新浪/腾讯/交易所都不提供结构化预告，巨潮只有公告原文。复用上面那个 datacenter 客户端
+        // （跟板块共享同一套 1 秒间隔的限流器，这是同一个域名的同一份配额，分开配反而会打架）。
+        var forecastProvider = new EastMoneyEarningsForecastProvider(emDataCenter);
+        var forecastRepository = new SqliteEarningsForecastRepository(paths.CurrentDb);
+        forecastRepository.EnsureSchema();
 
-        var viewModel = new MainViewModel(paths, orchestrator, sources);
+        // 龙虎榜营业部席位明细（2026-09-03，东财）——跟已有的【龙虎榜】(新浪)是不同粒度、不替换它：
+        // 那张表没有买卖前五营业部名单，而龙虎榜真正的信息量就在"是谁在买"。
+        // 264 万行，走流式回调落库（见 RunFetchLhbSeatAsync），共用同一个 datacenter 客户端。
+        var lhbSeatProvider = new EastMoneyLhbSeatProvider(emDataCenter);
+        var lhbSeatRepository = new SqliteLhbSeatRepository(paths.CurrentDb);
+        lhbSeatRepository.EnsureSchema();
+
+        // 分档资金流（2026-09-03，东财 push2his）——跟已有的【资金净流入】(新浪)是同一件事的
+        // 不同精度：那张表每行只有主力净额合计，这里拆成超大/大/中/小单的净额+净占比。
+        // push2his 跟 push2 是不同域名、独立限流，且不需要人工验证；但全市场 5500+ 个请求。
+        //
+        // 限流参数跟板块那边同一套依据（2026-09-04 实测，见上面 boardFetcher 的注释）：
+        // 那三串成功记录（25只/61秒、16只/31秒、33只/97秒）量的就是这个接口——**连发 16~35 个
+        // 就被切**，触发点是累计请求数不是速率。所以每 15 个主动歇 2 分钟，别撞到被切。
+        // 摊下来约 11 秒/只，全市场 5500 只要跨很多轮才抓得完；但它是"空闲时补"的定期项，
+        // 且按"这只票今天抓过没有"断点续传，慢慢攒就行——总比现在每轮 0~33 只然后被封强。
+        // ⚠ 分档资金流**暂时不接浏览器通道**（2026-09-04）：实测 push2his 在东财页面上下文里
+        //    同样能通（贵州茅台 120 条一次拿全），改法跟板块一模一样——但先等板块那条线在真实
+        //    环境里跑顺了再说，别两处一起动、出问题分不清是谁的锅。
+        var moneyFlowProvider = new EastMoneyMoneyFlowProvider(
+            new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(5),
+                            batchSize: 15, restDuration: TimeSpan.FromMinutes(2)));
+        var moneyFlowRepository = new SqliteNetInflowDetailRepository(paths.CurrentDb);
+        moneyFlowRepository.EnsureSchema();
+
+        // 市场事件四项（2026-09-03，东财）：大宗交易/机构调研/限售解禁/股东增减持，本地此前全没有。
+        // 共用 datacenter 客户端和它的配额——它们跟业绩预告、龙虎榜席位打的是同一个域名，
+        // 各配一个限流器只会互相打架（见 QuotaGroup 的注释：限流器独立 ≠ 配额独立）。
+        var marketEventProvider = new EastMoneyMarketEventProvider(emDataCenter);
+        var marketEventRepository = new SqliteMarketEventRepository(paths.CurrentDb);
+        marketEventRepository.EnsureSchema();
+
+        // 个股行业/题材归属（2026-09-03）：补证监会分类的粒度不足，两份并存不替换。
+        var boardMapProvider = new EastMoneyStockBoardMapProvider(emDataCenter);
+        var boardMapRepository = new SqliteStockBoardMapRepository(paths.CurrentDb);
+        boardMapRepository.EnsureSchema();
+
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository);
+
+        var viewModel = new MainViewModel(paths, orchestrator, sources, browserChannel);
         var window = new MainWindow { DataContext = viewModel };
+        // 显式认定主窗口：ShutdownMode=OnMainWindowClose 全靠它认对是哪一个。
+        // 不设的话 WPF 会拿"第一个 Show 出来的窗口"当主窗口——现在还轮得到它，
+        // 但将来谁在它之前 Show 了别的窗口（比如浏览器通道提前初始化），退出逻辑就悄悄错位了。
+        MainWindow = window;
         window.Show();
     }
 
+    /// <summary>
+    /// 退出时要销毁的东西（2026-09-04 随浏览器通道加的）。
+    /// 不销毁的话 msedgewebview2 子进程会一直留着——实测残留过一批。
+    /// </summary>
+    private static IAsyncDisposable? _browserChannelToDispose;
+
     protected override void OnExit(ExitEventArgs e)
     {
+        // ⚠ 浏览器通道一定要显式销毁：它内部那个隐藏窗口 + 一串 msedgewebview2 子进程
+        //    不会自己走。2026-09-04 踩过——主窗口关了进程还赖着，发布时提示"文件被占用"。
+        try { _browserChannelToDispose?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); }
+        catch { /* 关不掉也别拦着退出 */ }
+
         Desktop.Shared.SingleInstanceGuard.Release();
         base.OnExit(e);
+
+        // 兜底硬退（2026-09-04）。走到这一步说明用户已经在关闭确认框上点过"确定"，
+        // 关闭这件事已经定了；剩下的只是别让进程赖在那儿。
+        //
+        // 为什么要这一手：WebView2 会拉起一串 msedgewebview2 子进程，还往进程里塞了
+        // 非托管资源和它自己的消息循环；只要有一个非后台线程没退，整个进程就卡住不走。
+        // 用户看到的后果很实在——任务管理器里还挂着，发布时报"文件被占用"，只能去强杀。
+        // 已经落库的数据不受影响（SQLite 是同步事务，走到这儿早提交完了）。
+        Environment.Exit(e.ApplicationExitCode);
+    }
+
+    /// <summary>
+    /// 读 data/fetcher-settings.json 里的一个字符串设置。读不到就返回 null——
+    /// 配置文件坏了不该拦住程序启动（跟 MainViewModel.ResolveBarSource 一个路子）。
+    /// </summary>
+    private static string? ReadSetting(string settingsPath, string key)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(settingsPath)) return null;
+            using var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(settingsPath));
+            return doc.RootElement.TryGetProperty(key, out var v)
+                && v.ValueKind == System.Text.Json.JsonValueKind.String
+                ? v.GetString() : null;
+        }
+        catch { return null; }
     }
 }

@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text.Json;
 using StockPlatform.Logic.Models;
 
@@ -59,10 +59,19 @@ public class CninfoPrebookProvider
     private async Task<JsonDocument> PostAsync(string path, Dictionary<string, string> form, CancellationToken ct)
         => await _rateLimiter.RunAsync(async () =>
         {
-            using var resp = await _http.PostAsync(Base + path, new FormUrlEncodedContent(form), ct);
-            resp.EnsureSuccessStatusCode();
-            var body = await resp.Content.ReadAsStringAsync(ct);
-            return JsonDocument.Parse(body);
+            try
+            {
+                using var resp = await _http.PostAsync(Base + path, new FormUrlEncodedContent(form), ct);
+                resp.EnsureSuccessStatusCode();
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                return JsonDocument.Parse(body);
+            }
+            // 超时/连不上要转成普通异常。原样抛的是 TaskCanceledException，上层会当成
+            // "用户点了停止"，一次抖动就把整份计划掀掉。判据是 ct——真取消才原样抛。
+            catch (Exception ex) when ((ex is HttpRequestException or TaskCanceledException) && !ct.IsCancellationRequested)
+            {
+                throw new InvalidOperationException($"巨潮预约披露接口请求失败（{path}）：{ex.Message}", ex);
+            }
         }, ct);
 
     /// <summary>

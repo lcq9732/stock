@@ -21,6 +21,51 @@
         <Style x:Key="PlanSubtleCellTip" TargetType="TextBlock" BasedOn="{StaticResource PlanSubtleCell}">
             <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}" />
         </Style>
+
+        <!-- 组的折叠箭头（2026-09-02）。WPF Expander 自带的是个带圆圈边框的按钮，
+             在这种一行一组的密集表头里太抢眼（用户反馈"不好看"）——这里换成一个
+             纯文字的小箭头：没有边框、没有背景，只在鼠标悬停时提亮一点。 -->
+        <Style x:Key="PlanGroupToggle" TargetType="ToggleButton">
+            <Setter Property="Width" Value="16" />
+            <Setter Property="Height" Value="16" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Muted}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <!-- 细线 chevron（2026-09-02 按用户要求）：展开时是 ⌄，折叠时整个转 -90° 变成 ›。
+                             用 Path 画而不是打字符，是因为 ▸/▾ 那类实心三角在这个字号下太重，
+                             而不同字体里 ⌄ 的粗细和基线又不一致——自己画的两个状态一定是同一个形状。 -->
+                        <Border Background="Transparent">
+                            <Path x:Name="Arrow" Data="M 0,0 L 4,4 L 8,0"
+                                  Stroke="{TemplateBinding Foreground}" StrokeThickness="1.3"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                                  RenderTransformOrigin="0.5,0.5">
+                                <!-- ⚠ 转角写在 Path 的 RenderTransform 上、由 Trigger 整个替换：
+                                     RotateTransform 不是 FrameworkElement，给它起的 x:Name 在模板里
+                                     注册不进去，Trigger 找不到那个目标（MC4111）。 -->
+                                <Path.RenderTransform>
+                                    <RotateTransform Angle="-90" />
+                                </Path.RenderTransform>
+                            </Path>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Arrow" Property="RenderTransform">
+                                    <Setter.Value>
+                                        <RotateTransform Angle="0" />
+                                    </Setter.Value>
+                                </Setter>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
     <Grid x:Name="RootGrid" Margin="10">
         <Grid.ColumnDefinitions>
@@ -44,7 +89,8 @@
             <TabItem Header="计划">
                 <Grid Margin="6,6,6,3">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />  <!-- 工具条（含唯一一个全局参数：公告关键词） -->
+                        <RowDefinition Height="Auto" />  <!-- 工具条 -->
+                        <RowDefinition Height="Auto" />  <!-- 自检提醒（没问题时整行不占地方） -->
                         <RowDefinition Height="*" />     <!-- 任务表 -->
                     </Grid.RowDefinitions>
 
@@ -55,7 +101,7 @@
                              没在跑  → 【停止计划】红色（当前是停着的）
                              另一个按钮保持常态色，表示"这个是你现在能点的动作"。 -->
                         <Button Content="开始执行计划" Command="{Binding StartPlanCommand}" Width="110" Padding="8,4"
-                                ToolTip="从上往下依次执行勾选了的任务：设了时间的等到那个点（不早于），没设时间的接着上一项跑。&#10;&#10;一项失败不影响后面的项。跑完当天的全部任务后继续待命，到明天该跑的时刻自动接着跑——程序要一直开着。&#10;&#10;⚠ 任务是**严格串行**的：它们共用限流器和数据库，而且大部分打的是同一家服务器（新浪），并发只会一起撞配额（实测财务报表接口并发到 100 多个请求就被封 40 分钟、整轮零成功）。">
+                                ToolTip="按组执行：组头设「什么时候到期」和「到期后怎么跑」，组里勾选的任务按顺序串行跑（拖动某一行可在组内改顺序）。&#10;&#10;到点就跑＝到了时刻排进队列；空闲时补＝到期后程序空着才补，能分批的分批、下一个定时任务开始前收尾让路。&#10;&#10;一项失败不影响后面的项。跑完当天的全部任务后继续待命，到明天该跑的时刻自动接着跑——程序要一直开着。&#10;&#10;⚠ 任务是**严格串行**的：它们共用限流器和数据库，而且大部分打的是同一家服务器（新浪），并发只会一起撞配额（实测财务报表接口并发到 100 多个请求就被封 40 分钟、整轮零成功）。">
                             <Button.Style>
                                 <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
                                     <Style.Triggers>
@@ -69,8 +115,8 @@
                                 </Style>
                             </Button.Style>
                         </Button>
-                        <Button Content="停止计划" Command="{Binding StopPlanCommand}" Width="90" Margin="6,0,0,0" Padding="8,4"
-                                ToolTip="停掉整个计划：当前正在跑的任务会被取消，后面的项不再执行。已写进数据库的部分不会回滚，下次接着跑会跳过已有数据。&#10;&#10;正在抓的那一批要等当前这个网络请求收尾才真正停下，慢的时候几秒——界面不会卡住，日志会打「正在停止计划」。">
+                        <Button Content="停止全部" Command="{Binding StopPlanCommand}" Width="90" Margin="6,0,0,0" Padding="8,4"
+                                ToolTip="停掉现在正在跑的一切：计划队列、单独【执行】的那一项、【手动】页触发的抓取，以及排定中的自动重试。&#10;&#10;已写进数据库的部分不会回滚，下次跑会跳过已有数据。&#10;正在抓的那一批要等当前这个网络请求收尾才真正停下，慢的时候几秒——界面不会卡住，日志会打「正在停止…」。">
                             <Button.Style>
                                 <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
                                     <Style.Triggers>
@@ -84,20 +130,26 @@
                                 </Style>
                             </Button.Style>
                         </Button>
+                        <Button Content="东财验证" Command="{Binding VerifyEastMoneyCommand}" Width="80" Margin="16,0,0,0" Padding="8,4"
+                                ToolTip="打开一个东财页面，让你手工过一次它的人工验证。&#10;&#10;为什么需要：程序抓 push2（板块列表和成分股）用的是自己那套浏览器数据，跟你日常的 Chrome/Edge 是两套。&#10;那套刚建起来时在东财眼里是个生面孔，可能先要过验证才给数据。验证只能人来点，程序代替不了。&#10;&#10;过完验证直接关掉那个窗口就行，Cookie 会自动留下（存在 data\local\webview2，下次开程序还在）。&#10;&#10;它也是个排错窗口：板块一直抓不到时打开看看东财到底返回了什么——验证页、空白、还是正常数据。" />
                         <CheckBox Content="程序启动后自动开始" IsChecked="{Binding AutoStartPlanOnLaunch}"
                                   VerticalAlignment="Center" Margin="16,0,0,0"
                                   ToolTip="勾上后，下次打开程序会自动开始执行计划，不用手动点【开始执行计划】。无人值守用。&#10;开关记在 data/fetch-plan.json 里。" />
-                        <!-- 唯一一个跨任务共用的参数，就放在这一行；括号里写明谁在用，
-                             免得像原来那样单独占一行、看着像"所有任务都吃这个设置"。
-                             （数据源那个下拉已经撤掉，见 MainViewModel.SelectedSource） -->
-                        <TextBlock Text="中标/订单公告关键词：" Margin="24,0,0,0" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource Theme.Foreground.Muted}" />
-                        <TextBox Text="{Binding AnnouncementKeywordsText, UpdateSourceTrigger=PropertyChanged}"
-                                 Width="170" Margin="4,0" VerticalContentAlignment="Center"
-                                 IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBoolConverter}}"
-                                 ToolTip="逗号分隔，例如：中标,签订合同。清空则不抓公告。&#10;这三个任务跑的时候会自动按这里的关键词去巨潮全文检索，不用单独点什么。" />
-                        <TextBlock Text="（拉取全部、补指定历史日、拉取区间数据 用）" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource Theme.Foreground.Subtle}" />
+                        <!-- 原来那个 GroupBox 的标题（"组头设时间和重复规则；组里勾选的按顺序执行…"）
+                             2026-09-02 撤了：先并到这一行，但这行放不下，索性并进【开始执行计划】的
+                             ToolTip——它是一句静态说明，占位置不值当，纵向空间留给任务表更实在。 -->
+                        <!-- 公告关键词原来摆在这一行（全局参数）：当时有三个复合动作都要用它。
+                             拆开之后真正用得上的只剩【中标/订单公告】和【拉取区间数据】两行，
+                             2026-09-02 按用户意见挪进了它们各自的参数格——摆在顶上会让人以为
+                             所有任务都吃这个设置。 -->
+
+                        <!-- 模板（2026-09-02）：把一整套任务一次铺进计划。
+                             铺完就是一串**独立的行**，跟手动加的没区别——模板只是排版，运行时没有"组"。
+                             已经在计划里的动作会跳过，所以反复点是安全的。 -->
+                        <!-- 这儿先后放过「从模板建组」和「新建组」，2026-09-02 都撤掉了：
+                             模板跟默认的五个组一模一样、等于摆着不用；而"新建组"建出来的空组
+                             又没法往里放任务（跨组移动还没做），一样没用。
+                             先把现有这五个组用顺了再说——用户原话："先把现在的组理顺再说"。 -->
 
                         <!-- 计划的运行状态原来挂在这一行末尾，被挤得只剩半句
                              （2026-09-01 用户反馈"显示不完整"）。现在搬到右上角日志上方那块空白，
@@ -109,20 +161,122 @@
                          同日按反馈再改一轮：预计/上次/说明三列合并或收起（同一时刻只有一列有内容，
                          其余全空反而看不出重点）；说明挪进任务名旁边的 ⓘ；参数直接放进表里编辑；
                          排序改成鼠标拖放；【执行】按钮放进每一行。 -->
-                    <GroupBox x:Name="PlanTableBox" Grid.Row="1" Header="任务表（勾选的按顺序执行；没勾的只是列在这里，不会跑。按住某一行上下拖动可以改顺序）">
+                    <!-- 计划自检的提醒（2026-09-02）：现在只查"要等收盘的项会不会在收盘前开跑"。
+                         **只提醒不拦**——用户完全可能是故意那么排的（比如白天先补一遍断档）。 -->
+                    <Border Grid.Row="1" Margin="0,0,0,6" Padding="8,4" CornerRadius="3"
+                            Background="{DynamicResource Theme.Warn.Background}"
+                            BorderBrush="{DynamicResource Theme.Warn.Border}" BorderThickness="1"
+                            Visibility="{Binding HasPlanWarning, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Text="{Binding PlanWarningText}" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource Theme.Warn.Foreground}" />
+                    </Border>
+
+                    <!-- 计划＝一串**组**，每组一张任务表（2026-09-02 分组改造）。
+                         组头管"什么时候跑"（启用/重复/不早于），组里的行管"做什么"（模式/参数/顺序）——
+                         拆成 26 个原子项之后，26 行各自摆一份一模一样的重复规则正是界面变乱的主因。
+                         组是**排期单位不是执行单位**：跑没跑过、失败没失败仍按每一行记，
+                         所以一项失败不拖累同组其它项（见 FetchPlanGroup 的类注释）。 -->
+                    <!-- 2026-09-02：GroupBox 的标题（那句静态说明）并进了上面的工具条，
+                         这里只留一个无边框容器——省下的一行给任务表。
+                         x:Name 保留：MainWindow.xaml.cs 用它算日志面板的起始高度。 -->
+                    <Border x:Name="PlanTableBox" Grid.Row="2">
+                      <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <ItemsControl ItemsSource="{Binding PlanGroups}">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                              <!-- 一组＝一张卡片：细边框 + 圆角，头一行是组头，展开后才画任务表。
+                                   刻意**不用 WPF 的 Expander**：它自带的折叠按钮是个带圆圈边框的控件，
+                                   在这种一行一组的密集表头里太抢眼（2026-09-02 用户反馈"不好看"）。
+                                   这里就是 ToggleButton（纯文字小箭头）+ Visibility，样子干净得多。 -->
+                              <Border Margin="0,0,0,6" CornerRadius="3" BorderThickness="1"
+                                      BorderBrush="{DynamicResource Theme.Grid.Line}"
+                                      Background="{DynamicResource Theme.Panel.Background}">
+                                <StackPanel>
+                                  <!-- 组头：一眼看清"这一组什么时候跑、有多少项、今天跑到哪儿了" -->
+                                  <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="6,5,8,5">
+                                    <ToggleButton IsChecked="{Binding IsExpanded, Mode=TwoWay}"
+                                                  Style="{StaticResource PlanGroupToggle}" Margin="0,0,4,0"
+                                                  ToolTip="展开/折叠这一组" />
+                                    <CheckBox IsChecked="{Binding Enabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              IsEnabled="{Binding CanEnable}" VerticalAlignment="Center"
+                                              ToolTip="整组开关：没勾则整组不跑，哪怕组里的项各自勾着。" />
+                                    <TextBox Text="{Binding Name, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                             Width="110" Margin="6,0,0,0" FontWeight="Bold"
+                                             BorderThickness="0" Background="Transparent"
+                                             VerticalContentAlignment="Center" ToolTip="组名，随便改。只用于显示，不影响执行。" />
+                                    <ComboBox ItemsSource="{Binding RepeatOptions}" DisplayMemberPath="Text"
+                                              IsSynchronizedWithCurrentItem="False"
+                                              SelectedItem="{Binding SelectedRepeat, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              Width="82" Margin="6,0,0,0"
+                                              ToolTip="整组的重复规则。&#10;每工作日=周一到周五（不是交易日历，节假日会空跑一次；所有任务都是增量的，空跑无副作用）。&#10;空闲时=程序空着就补一批。&#10;手动=不自动跑，只能点某一行的【执行】。" />
+                                    <ComboBox ItemsSource="{Binding WeekdayOptions}" DisplayMemberPath="Text"
+                                              IsSynchronizedWithCurrentItem="False"
+                                              SelectedItem="{Binding SelectedWeekday, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              Width="58" Margin="4,0,0,0"
+                                              Visibility="{Binding ShowWeekday, Converter={StaticResource BoolToVis}}" />
+                                    <TextBox Text="{Binding DayOfMonthText, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                             Width="30" Margin="4,0,0,0" VerticalContentAlignment="Center"
+                                             Visibility="{Binding ShowDayOfMonth, Converter={StaticResource BoolToVis}}"
+                                             ToolTip="每月几号（1~31）。设 31 而当月没有 31 号时，落在月末那天。" />
+                                    <TextBlock Text="号" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Visibility="{Binding ShowDayOfMonth, Converter={StaticResource BoolToVis}}" />
+                                    <!-- 到期之后怎么跑（2026-09-02）：跟左边那个"多久到期一次"是两回事。
+                                         拆成两个下拉才表达得了"每月 1 号到期、然后空闲时慢慢补"——
+                                         财务报表每轮只能 300 只、全市场跨几天，正是这么跑的。 -->
+                                    <ComboBox ItemsSource="{Binding PacingOptions}" DisplayMemberPath="Text"
+                                              IsSynchronizedWithCurrentItem="False"
+                                              SelectedItem="{Binding SelectedPacing, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              Width="86" Margin="6,0,0,0"
+                                              Visibility="{Binding ShowPacing, Converter={StaticResource BoolToVis}}"
+                                              ToolTip="到期之后怎么跑。&#10;到点就跑＝排进队列，跑多久算多久（**每日数据必须用这个**：当天的行情有时效，等空闲可能等不到）。&#10;空闲时补＝到期后程序空着才补，能分批的分批、下一个定时任务开始前收尾让路。判据只有一条：晚几天也没关系（周期基本面就是这样）。" />
+                                    <StackPanel Orientation="Horizontal" Margin="10,0,0,0"
+                                                Visibility="{Binding ShowNotBefore, Converter={StaticResource BoolToVis}}">
+                                      <TextBlock Text="不早于" VerticalAlignment="Center"
+                                                 Foreground="{DynamicResource Theme.Foreground.Subtle}" />
+                                      <TextBox Text="{Binding NotBeforeText, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                               Width="52" Margin="4,0,0,0" VerticalContentAlignment="Center"
+                                               ToolTip="HH:mm，整组的开始时刻。留空=接着上一组跑。&#10;⚠ 语义是「不早于这个点才开始」，不是「准时开始」：上一组超时的话这一组顺延，不会抢跑。&#10;要让某一项更晚才开始，把它单独拆成一组——组里是串行跑的，给单项设时刻不起作用。" />
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding TimelineText}" VerticalAlignment="Center" Margin="12,0,0,0"
+                                               Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                                    <TextBlock Text="{Binding SummaryText}" VerticalAlignment="Center" Margin="12,0,0,0"
+                                               Foreground="{DynamicResource Theme.Foreground.Subtle}" />
+                                    <TextBlock Text="{Binding ProgressText}" VerticalAlignment="Center" Margin="12,0,0,0"
+                                               Foreground="{DynamicResource Theme.Foreground.Muted}" />
+
+                                    <!-- 组操作：整组跑一遍 / 调整组之间的先后。放在组头右边，
+                                         跟"什么时候跑"那几个设置在同一行——它们都是**组**的事。 -->
+                                    <Button Content="执行整组" Margin="14,0,0,0" Padding="6,1" FontSize="11"
+                                            Command="{Binding DataContext.RunPlanGroupNowCommand,
+                                                      RelativeSource={RelativeSource AncestorType=Window}}"
+                                            CommandParameter="{Binding}"
+                                            ToolTip="从上到下把这一组里勾选的项跑一遍（仍是一项一项串行跑，某一项失败不影响后面的）。&#10;计划正在运行时不能点——那时它自己会跑。" />
+                                    <!-- 这儿原来有一对 ↑↓（调组的先后），2026-09-02 撤掉：
+                                         组的先后**不决定**执行先后——真正决定的是各组的「不早于」和重复规则档位。
+                                         而这三个组（每工作日+到点就跑 / 每月+空闲时补 / 手动）永远不可能
+                                         "同时到期且同一档"，那个顺序一次都用不上。
+                                         组内子项的拖动排序仍然有用：组里是严格按顺序串行跑的。 -->
+                                  </StackPanel>
+
                         <!-- IsReadOnly=True 但单元格里放的是真控件（CellTemplate 而不是 CellEditingTemplate），
-                             所以勾选/改时间/换重复规则都是**单击即改**，不用先双击进编辑态。
+                             所以勾选/改时间/换模式都是**单击即改**，不用先双击进编辑态。
                              ⚠⚠ 单元格里**每一个双向绑定都必须显式写 UpdateSourceTrigger**，一个都不能省：
                              DataGrid 会把单元格里的绑定纳入行的 BindingGroup，默认写回时机被推迟到"提交行编辑"，
                              而这张表 IsReadOnly=True 永远不进编辑模式、也就永远不提交——绑定看着好好的、
                              界面上值也变了，**就是永远写不回源属性**。实测：换了重复规则，fetch-plan.json 里
                              纹丝不动，setter 一次都没进来。
-                             AllowDrop + 三个鼠标事件是拖放排序，处理在 MainWindow.xaml.cs。 -->
+                             AllowDrop + 三个鼠标事件是拖放排序（**组内**换位），处理在 MainWindow.xaml.cs。 -->
                         <!-- 字体保持系统默认（Segoe UI + 中文回落微软雅黑），别改成日志那套 Consolas+宋体：
                              2026-09-01 试过一次，字号是对齐了（本来两边就都是 12，看着不一样纯粹是字体族——
                              雅黑的中文字面比宋体大一圈），但宋体在这个字号下 hinting 差、发虚，
                              用户反馈"字是大了，但还没原来清晰"。等宽字体只适合日志那种对齐列的场景。 -->
-                        <DataGrid x:Name="PlanGrid" ItemsSource="{Binding PlanItems}" SelectedItem="{Binding SelectedPlanItem}"
+                        <!-- 左边缩进 + 一条竖线：让"这张表属于上面那个组头"一眼看得出来
+                             （2026-09-02 用户反馈"不像父子关系"）。 -->
+                        <DataGrid ItemsSource="{Binding Items}"
+                                  Margin="20,0,0,0" BorderThickness="1,0,0,0"
+                                  BorderBrush="{DynamicResource Theme.Grid.Line}"
+                                  Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVis}}"
+                                  SelectedItem="{Binding DataContext.SelectedPlanItem, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWayToSource}"
                                   AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
                                   CanUserDeleteRows="False" CanUserReorderColumns="False" CanUserSortColumns="False"
                                   CanUserResizeRows="False" HeadersVisibility="Column" RowHeaderWidth="0"
@@ -133,15 +287,21 @@
                                   HorizontalGridLinesBrush="{DynamicResource Theme.Grid.Line}"
                                   VerticalScrollBarVisibility="Auto"
                                   AllowDrop="True"
+                                  PreviewMouseWheel="PlanGrid_PreviewMouseWheel"
                                   PreviewMouseLeftButtonDown="PlanGrid_PreviewMouseLeftButtonDown"
                                   MouseMove="PlanGrid_MouseMove"
                                   Drop="PlanGrid_Drop">
                             <DataGrid.RowStyle>
                                 <Style TargetType="DataGridRow" BasedOn="{StaticResource Theme.DataGridRow}">
-                                    <Setter Property="ToolTip" Value="按住这一行上下拖动可以改执行顺序" />
+                                    <Setter Property="ToolTip" Value="按住这一行上下拖动可以在组内改顺序" />
                                 </Style>
                             </DataGrid.RowStyle>
                             <DataGrid.Columns>
+                                <!-- 编号 组号.序号（2026-09-02）：日更 1.x、季度 2.x、按需 3.x。
+                                     跨组唯一，右边"依赖"列才指得清是谁。拖动排序后自动重排。 -->
+                                <DataGridTextColumn Header="#" Binding="{Binding Number}" Width="38"
+                                                    ElementStyle="{StaticResource PlanSubtleCell}" />
+
                                 <DataGridTemplateColumn Header="启用" Width="44">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
@@ -164,6 +324,14 @@
 
                                 <!-- 任务名 + ⓘ：说明不再单独占一列（那列太长、又不是每次都要看），
                                      点 ⓘ 弹出来看，鼠标停上去也能看。 -->
+                                <!-- 依赖：这一项要用谁产出的东西，显示成对方的编号（如 1.2）。
+                                     带 * 的是**硬**前置——它今天失败了，这一项直接跳过（跑了也白跑）；
+                                     不带 * 的是软的——没它也能跑，只是结果偏旧，日志里会说一句。
+                                     依赖写在目录里（FetchActionInfo.DependsOn / SoftDependsOn），
+                                     单元测试拿它校验"被依赖的必须排在前面"，所以这一列不是装饰。 -->
+                                <DataGridTextColumn Header="依赖" Binding="{Binding DependsText}" Width="60"
+                                                    ElementStyle="{StaticResource PlanSubtleCellTip}" />
+
                                                                 <DataGridTemplateColumn Header="任务" Width="150">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
@@ -205,50 +373,49 @@
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
 
-                                                                <DataGridTemplateColumn Header="重复" Width="170">
-                                    <DataGridTemplateColumn.CellTemplate>
-                                        <DataTemplate>
-                                            <StackPanel Orientation="Horizontal">
-                                                <!-- ⚠ ItemsSource 绑的是**这一行自己的**选项列表、SelectedItem 而不是
-                                                     SelectedValue+SelectedValuePath，两处都不能改回去：原先 14 个下拉共用
-                                                     一个静态列表，WPF 只给它建一个 CollectionView，当前项被十四个下拉抢，
-                                                     结果选了新值压根不写回源。详见 PlanItemViewModel.RepeatOptions 的注释。 -->
-                                                <ComboBox ItemsSource="{Binding RepeatOptions}" DisplayMemberPath="Text"
-                                                          IsSynchronizedWithCurrentItem="False"
-                                                          SelectedItem="{Binding SelectedRepeat, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="82"
-                                                          ToolTip="每工作日=周一到周五（不是交易日历，节假日会空跑一次；所有任务都是增量的，空跑无副作用）。&#10;仅一次=跑成功后自动取消勾选。&#10;手动=不自动跑，只能点这一行的【执行】。" />
-                                                <ComboBox ItemsSource="{Binding WeekdayOptions}" DisplayMemberPath="Text"
-                                                          IsSynchronizedWithCurrentItem="False"
-                                                          SelectedItem="{Binding SelectedWeekday, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="58" Margin="4,0,0,0"
-                                                          Visibility="{Binding ShowWeekday, Converter={StaticResource BoolToVis}}" />
-                                                <TextBox Text="{Binding DayOfMonthText, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
-                                                         Width="30" Margin="4,0,0,0" VerticalContentAlignment="Center"
-                                                         Visibility="{Binding ShowDayOfMonth, Converter={StaticResource BoolToVis}}"
-                                                         ToolTip="每月几号（1~31）。设 31 而当月没有 31 号时，落在月末那天。" />
-                                                <TextBlock Text="号" VerticalAlignment="Center" Margin="2,0,0,0"
-                                                           Visibility="{Binding ShowDayOfMonth, Converter={StaticResource BoolToVis}}" />
-                                            </StackPanel>
-                                        </DataTemplate>
-                                    </DataGridTemplateColumn.CellTemplate>
-                                </DataGridTemplateColumn>
-
                                 <!-- 参数直接在表里填（原来藏在下面的说明面板里，要先选中才看得到）。
-                                     不需要参数的行这一格是空的；留空的表示用【手动】页上的全局输入框。 -->
-                                                                <DataGridTemplateColumn Header="参数" Width="330">
+                                     不需要参数的行这一格是空的；留空的表示用【手动】页上的全局输入框。
+                                     「模式」（抓哪一段）2026-09-02 并进这一列：它本来就是这一行的一个参数，
+                                     而且只有 6 行用得上，单占一列会让其余十几行都空着一格。 -->
+                                                                <DataGridTemplateColumn Header="参数" Width="430">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                            <!-- 「不早于」原来单占一列。它其实就是这一行的一个参数，而且只对定时项有效，
-                                                 并进来之后手动/空闲那些行就不会再摆一个填了也没用的时间框（2026-09-01 用户要求）。 -->
-                                            <StackPanel Orientation="Horizontal" Margin="0,0,10,0"
-                                                        Visibility="{Binding ShowNotBefore, Converter={StaticResource BoolToVis}}">
-                                                <TextBlock Text="不早于" VerticalAlignment="Center"
+                                            <!-- 抓哪一段。只有支持不止一种模式的行才显示（6 行），其余这一格里没有它。
+                                                 排在最前面是因为它决定后面那个日期框有没有意义（整段回补时日期没用、会自动隐藏）。 -->
+                                            <ComboBox ItemsSource="{Binding ModeOptions}" DisplayMemberPath="Text"
+                                                      IsSynchronizedWithCurrentItem="False"
+                                                      SelectedItem="{Binding SelectedMode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                      Width="98" Margin="0,0,10,0" VerticalAlignment="Center"
+                                                      Visibility="{Binding ShowMode, Converter={StaticResource BoolToVis}}"
+                                                      ToolTip="增量＝每个标的从自己上次抓到那天续抓到今天（日常用这个，只有它会补断档）。&#10;只抓某一天＝不看水位线、只补日期格里那一天（原【补指定历史日】）。&#10;首次整段回补＝从头补齐历史，补完就不用再跑了（原【补不复权历史】【一键补齐每日历史】）。" />
+                                            <!-- 这里原来有个「不早于」框（2026-09-01 从独立列并进来的）。
+                                                 2026-09-02 分组之后去掉了：组里是**串行**跑的，给单项设时刻不起作用
+                                                 （排在后面的项跑到它时早过点了），而真要"更晚才开始"就是另一个触发时机，
+                                                 那正是另一个组该干的事。时刻只在组头设，一个真相。 -->
+                                            <!-- 公告关键词（2026-09-02 从计划页顶部的全局参数挪进来）：
+                                                 只有【中标/订单公告】和【拉取区间数据】两行用得上，
+                                                 摆在顶上会让人以为所有任务都吃这个设置。 -->
+                                            <!-- 【全库数据体检】的彻底模式：清空"确认数据源没有"的白名单、全部重查。
+                                                 默认不勾——那份白名单正是让体检能收敛的东西，天天清等于每次都把
+                                                 全市场的停牌重报一遍。 -->
+                                            <CheckBox Content="彻底体检" Margin="0,0,10,0" VerticalAlignment="Center"
+                                                      IsChecked="{Binding ThoroughAudit, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                      Visibility="{Binding NeedsThorough, Converter={StaticResource BoolToVis}}"
+                                                      ToolTip="不勾（默认）＝常规体检：跳过之前已确认「数据源确实没有」的那些（多半是停牌），只查新的空洞。&#10;勾上＝彻底体检：清空那份白名单、全部重查一遍。用在怀疑数据源当时抽风、后来补上了的时候。&#10;⚠ 勾上之后第一次跑会把十年的停牌天数全报出来，补一轮可能要几小时。" />
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Center"
+                                                        Visibility="{Binding NeedsKeywords, Converter={StaticResource BoolToVis}}">
+                                                <TextBlock Text="关键词" VerticalAlignment="Center"
                                                            Foreground="{DynamicResource Theme.Foreground.Subtle}" />
-                                                <TextBox Text="{Binding NotBeforeText, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
-                                                         Width="52" Margin="4,0,0,0" VerticalContentAlignment="Center"
-                                                         ToolTip="HH:mm，留空=上一项跑完就接着跑。&#10;⚠ 语义是「不早于这个点才开始」，不是「准时开始」：上一项超时的话这一项顺延，不会抢跑。" />
+                                                <TextBox Text="{Binding KeywordsText, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                                         Width="150" Margin="4,0,0,0" VerticalContentAlignment="Center"
+                                                         ToolTip="逗号分隔，例如：中标,签订合同。&#10;留空=用【手动】页那个关键词框里的值；两边都空就不抓公告。" />
                                             </StackPanel>
-                                            <Grid VerticalAlignment="Center">
+                                            <!-- ⚠ 这里必须是 StackPanel 不能是 Grid：Grid 的子元素是**叠加**的，
+                                                 而"日期"和"新标的补N年"这两块可以同时出现（个股日K 选了「只抓某一天」时），
+                                                 用 Grid 就会两行字重叠在一起（2026-09-02 实测）。下面那些"待办量"文本彼此互斥，
+                                                 排在一行里也不占地方。 -->
+                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                                 <StackPanel Orientation="Horizontal"
                                                             Visibility="{Binding NeedsDate, Converter={StaticResource BoolToVis}}">
                                                     <TextBlock Text="日期" VerticalAlignment="Center"
@@ -263,39 +430,52 @@
                                                            Visibility="{Binding IsRetryFailed, Converter={StaticResource BoolToVis}}"
                                                            Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                            Text="{Binding DataContext.FailedRetryText,
-                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
                                                            ToolTip="上次抓取留下的失败名单，按类型分开计数（K线/市值/资金流/指数成分/权重/股东/分红各自独立记录）。&#10;跑这一行就是重试它们；名单为空时秒过。&#10;另外后台还有一套自动重试：跑完 1 小时后、且不早于当天 21:00，最多 3 轮，没进展就停。" />
                                                 <TextBlock VerticalAlignment="Center"
                                                            Visibility="{Binding IsRepairQfq, Converter={StaticResource BoolToVis}}"
                                                            Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                            Text="{Binding DataContext.PendingQfqRepairText,
-                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
                                                            ToolTip="除权后前复权基准变了、还等着整段重取的股票数。&#10;日常抓取会自动比对最近 400 天把它们检出来；这一行负责慢慢补，取过的不会重取。&#10;名单存在 data/local/manifest.json，关程序也不会丢。" />
                                                 <TextBlock VerticalAlignment="Center"
                                                            Visibility="{Binding IsFetchFinancials, Converter={StaticResource BoolToVis}}"
                                                            Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                            Text="{Binding DataContext.PendingFinancialsText,
-                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
                                                            ToolTip="还有多少只股票的财务报表没补齐。&#10;判据有两条，任一落后就要重抓：① 报告期不够新（按法定披露截止日算）② 科目集版本落后（旧版代码抓的、科目不全）。&#10;这个接口配额很严，每轮上限 300 只，全市场要跨几天补完。" />
+                                                <TextBlock VerticalAlignment="Center"
+                                                           Visibility="{Binding IsImportManual, Converter={StaticResource BoolToVis}}"
+                                                           Foreground="{DynamicResource Theme.Foreground.Subtle}"
+                                                           Text="{Binding DataContext.ManualFillText,
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
+                                                           ToolTip="PDF 解析不出来的监管指标会列成「待手工回填清单.csv」(在 data
+eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填——不显示的话根本不知道有活等着自己干。&#10;流程:①【金融监管指标】跑完自动生成清单 ②用 Excel 打开只填「填这里」一列 ③点这一行的「执行」写回库 ④以后重新解析不会覆盖你填的值。" />
                                                 <TextBlock VerticalAlignment="Center"
                                                            Visibility="{Binding IsFetchEarnings, Converter={StaticResource BoolToVis}}"
                                                            Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                            Text="{Binding DataContext.PendingEarningsText,
-                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
                                                            ToolTip="本期还有多少只股票没披露财报——就是每天要复查披露日的那批。&#10;预约日会改（实测 12% 改过，提前的比延后的还多），所以没披露的必须天天看一眼。&#10;已经披露完的不再重抓。" />
                                                 <TextBlock VerticalAlignment="Center"
                                                            Visibility="{Binding IsFetchRawBars, Converter={StaticResource BoolToVis}}"
                                                            Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                            Text="{Binding DataContext.PendingRawBarsText,
-                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
                                                            ToolTip="还差多少只个股没补不复权日线。&#10;日常那一根增量已经并进【拉取全部】和【拉取当天】，这一项只管首次回补十年历史。&#10;所以这个数正常应该是 0；不是 0 时点一次「执行」补上即可。" />
+                                                <TextBlock VerticalAlignment="Center"
+                                                           Visibility="{Binding IsFetchMoneyFlow, Converter={StaticResource BoolToVis}}"
+                                                           Foreground="{DynamicResource Theme.Foreground.Subtle}"
+                                                           Text="{Binding DataContext.PendingMoneyFlowText,
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
+                                                           ToolTip="还有多少只个股没抓过分档资金流。&#10;⚠ 这一项跟别的「还差多少」不一样：接口只给最近约120个交易日、全市场5900只按配额每天只抓百来只，跑满一圈要两个月，所以「今天待抓5800只」是常态、不代表落后。&#10;真正要盯的是「从没抓过」那个数——它归零才算历史铺满了一轮，之后只是按最久没抓的顺序轮换维护。&#10;排队顺序是最久没抓的优先，所以不用担心代码靠后的票轮不到。" />
                                                 <TextBlock VerticalAlignment="Center"
                                                            Visibility="{Binding IsRebuildAdj, Converter={StaticResource BoolToVis}}"
                                                            Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                            Text="{Binding DataContext.PendingAdjRebuildText,
-                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
                                                            ToolTip="还有多少只个股的回测序列要重算（不复权比它新，或者还没算过）。纯本地计算，不联网。" />
-                                                <StackPanel Orientation="Horizontal"
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,10,0"
                                                             Visibility="{Binding NeedsLookback, Converter={StaticResource BoolToVis}}">
                                                     <TextBlock Text="新标的补" VerticalAlignment="Center"
                                                                Foreground="{DynamicResource Theme.Foreground.Subtle}" />
@@ -322,7 +502,7 @@
                                                               VerticalAlignment="Center" Margin="8,0,0,0"
                                                               ToolTip="覆盖重抓前复权：勾上后不再跳过本地已有的部分，把整段前复权按数据源当前基准重写一遍。&#10;用途：数据源的前复权是「原价−之后累计分红送配」、基准随抓取时点变化，而本地历史分批入库，接缝处会出现假跳空（实测有股票虚增 50%）。跑一次可一次性抹平。&#10;代价：这一轮失去「已有就跳过」的优化，耗时与首次回补相当。" />
                                                 </StackPanel>
-                                            </Grid>
+                                            </StackPanel>
                                           </StackPanel>
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
@@ -334,9 +514,9 @@
                                         <DataTemplate>
                                             <Button Content="执行" Padding="8,2" Margin="2"
                                                     Command="{Binding DataContext.RunPlanItemNowCommand,
-                                                              RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                              RelativeSource={RelativeSource AncestorType=Window}}"
                                                     CommandParameter="{Binding}"
-                                                    ToolTip="把这一行立刻跑一次——不看时间、不看启用状态、不看重复规则，跑完就结束，不会接着跑下一项。&#10;&#10;⚠ 跑成功后这一行会记成「今天已完成」，当天再启动计划时会跳过它（避免同一件事白做两遍）。&#10;计划正在执行时按钮不可用（避免两个抓取并发）。" />
+                                                    ToolTip="把这一行立刻跑一次——不看时间、不看启用状态、不看重复规则，跑完就结束，不会接着跑下一项。&#10;&#10;⚠ 跑成功后这一行会记成「今天已完成」，当天再启动计划时会跳过它（避免同一件事白做两遍）。&#10;&#10;计划正在运行时点它会被拒绝（两个抓取并发会一起撞数据源配额），日志里会说明原因——要单独跑这一项，先点【停止全部】。" />
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
@@ -369,7 +549,13 @@
 
                                 </DataGrid.Columns>
                         </DataGrid>
-                    </GroupBox>
+                                </StackPanel>
+                              </Border>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </ScrollViewer>
+                    </Border>
                 </Grid>
             </TabItem>
 
@@ -433,7 +619,7 @@
              顺序按"点的频率"排：板块最勤 → 一键（含后面全部）→ 各单项。 -->
         <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
             <Button Content="拉取板块" Command="{Binding FetchBoardsCommand}" Width="90" Margin="0,0,4,0"
-                    ToolTip="抓取概念/题材板块 + 行业板块的最新行情（涨跌幅/成交额/领涨股）及各板块成分股，整体覆盖写入本地库，供分析程序的\板块热度\页使用。数据来自新浪，是当下快照。拉完会自动接着合成板块指数(用本地已有个股K线按新成分重算,不联网)，不用再单独点。更新频率高、想刷就点。" />
+                    ToolTip="抓取概念/题材板块 + 行业板块的**官方成分名单**，供分析程序的\板块热度\页使用。是当下快照，整体覆盖写入。拉完会自动接着合成板块指数(用本地已有个股K线按新成分重算,不联网)，不用再单独点。&#10;&#10;⚠ 2026-09-03 数据源从新浪换成东财：新浪那套概念分类严重老化——175个概念板块里没有存储芯片/算力/液冷/AI芯片/CPO/先进封装/人形机器人，占着位置的却是「融资融券」「社保重仓」「成渝特区」这类根本不是产业链的东西。东财1000+个板块，主题一个不缺。&#10;&#10;⚠ 板块的涨跌幅/成交额不在这一步取，改由板块指数合成用本地成分股日K算出来回填——好处是不依赖需要人工过反爬验证的行情接口，而且热度页和板块K线从此是同一个口径。&#10;&#10;⚠ 慢：1000+个板块要逐个查成分，而东财push2限流很敏感。跑不完是常态、也没关系——每个板块单独落库并记进度，下一轮自动跳过已成功的；连续失败10个就判定被限流、提前收尾，再点一次从没抓到的接着来。" />
             <Button Content="一键拉取定期数据" Command="{Binding FetchPeriodicCommand}" Width="130" Margin="4,0"
                     ToolTip="不是每天更新的数据一次点完:依次跑 指数成分/权重 → 股东数据 → 财务报表 → 分红送配(全量刷新)。较慢,可能数小时,季度点一次即可。各项内部失败进\重新拉取失败股票\可重试。板块不在这里(它更新快,用左边的\拉取板块\)。前置:先\拉取全部\一次。&#10;&#10;⚠ 其中【财务报表】那一段有每轮上限(300只):新浪的报表下载接口配额很严,常规速度跑100多个请求就会被封约40分钟,所以已单独降速到约10请求/分钟并分轮进行。也就是说这个按钮跑完时财务很可能还没补齐——跑完的汇总里会明确告诉你还剩多少只。要补完请勾选右边的【空闲时自动补财务】,程序空着时会自己一轮一轮补,已抓的不会重抓。" />
             <Button Content="拉取财务报表" Command="{Binding FetchFinancialsCommand}" Width="100" Margin="4,0"
@@ -507,12 +693,20 @@
                  挪上来还顺带把底部那条腾给了运行日志。 -->
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top"
                         Margin="0,2,10,0">
-                <TextBlock Text="{Binding BusyText}" VerticalAlignment="Center" FontWeight="Bold" />
-                <TextBlock Text="{Binding ElapsedText}" Margin="8,0,0,0" VerticalAlignment="Center"
-                           Foreground="{DynamicResource Theme.Foreground.Muted}" FontWeight="Bold" />
+                <!-- ToolTip 从固定文字改成绑定（2026-09-02）：任务拆细之后，"上次抓取"只说得清最后
+                     收尾的那一项，逐项的"上次什么时候跑完"在 DataStatusDetail 里。 -->
                 <TextBlock Text="{Binding DataStatusText}" Margin="16,0,0,0" VerticalAlignment="Center"
-                           Foreground="{DynamicResource Theme.Foreground.Muted}"
-                           ToolTip="本地库里已有数据的日期范围和上次抓取时间。程序启动时在后台统计（库大时要几十秒），不影响操作。" />
+                           Foreground="{DynamicResource Theme.Foreground.Muted}">
+                    <TextBlock.ToolTip>
+                        <ToolTip>
+                            <StackPanel>
+                                <TextBlock Text="本地库里已有数据的日期范围和上次抓取时间。程序启动时在后台统计（库大时要几十秒），不影响操作。"
+                                           TextWrapping="Wrap" MaxWidth="420" />
+                                <TextBlock Text="{Binding DataStatusDetail}" Margin="0,6,0,0" TextWrapping="Wrap" MaxWidth="420" />
+                            </StackPanel>
+                        </ToolTip>
+                    </TextBlock.ToolTip>
+                </TextBlock>
 
                 <!-- 自动重试的排定提示（见 MainViewModel.ScheduleAutoRetry）：没排定时文字为空、
                      按钮整个隐藏——平时挂着一个灰按钮只是噪音。 -->
@@ -541,7 +735,15 @@
             </Grid.RowDefinitions>
 
             <StackPanel Grid.Row="0" VerticalAlignment="Center" Margin="4,0,0,4">
-                <TextBlock Text="{Binding PlanRunStateText}" FontWeight="Bold"
+                <!-- 运行状态和已用时（2026-09-04 从左上角挪过来）：原来它在页签栏右端，
+                     离运行日志隔着大半个窗口——而人盯日志的时候最想知道的就是"还在跑吗、跑多久了"。
+                     摆在日志正上方，一眼扫得到。 -->
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{Binding BusyText}" FontWeight="Bold" VerticalAlignment="Center" />
+                    <TextBlock Text="{Binding ElapsedText}" Margin="8,0,0,0" VerticalAlignment="Center"
+                               Foreground="{DynamicResource Theme.Foreground.Muted}" FontWeight="Bold" />
+                </StackPanel>
+                <TextBlock Text="{Binding PlanRunStateText}" FontWeight="Bold" Margin="0,2,0,0"
                            Foreground="{DynamicResource Theme.Foreground.Muted}" TextWrapping="Wrap" />
                 <TextBlock Text="{Binding PlanStatusText}" Margin="0,2,0,0"
                            Foreground="{DynamicResource Theme.Accent}" FontWeight="Bold"

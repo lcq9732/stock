@@ -76,9 +76,24 @@ public static class AdjustFactorCalculator
     /// 生成复权序列。<paramref name="rawBars"/> 必须是**不复权**日线且按日期升序。
     /// 返回的 Bar 是新对象（Granularity = <see cref="Granularity.DayAdj"/>），不改入参。
     /// </summary>
+    /// <param name="computedAt">
+    /// 写进 <see cref="Bar.FetchedAt"/> 的时间戳——**是"这条序列什么时候算出来的"，
+    /// 不是源K线什么时候抓的**（2026-09-04 修）。
+    ///
+    /// 原来这里直接抄 rawBars 的 FetchedAt，导致 day_adj 的时间戳等于 day_raw 的抓取时间，
+    /// 跟"上次重算是什么时候"毫无关系。而 FetchOrchestrator.CodesWithStaleAdjEvents 正是拿
+    /// 「除权事件.fetched_at > day_adj.fetched_at」来判断"事件变新了、该重算"的——基准一错，
+    /// 判据就只在"事件抓得比K线还晚"时才碰巧成立。实测：配股 09-02 抓入、K线 09-03 抓取，
+    /// 判据算出 09-02 &gt; 09-03 = 假，642 只有配股的票一只都没被检出（全库只碰巧检出 7 只）。
+    /// day_adj 是纯本地计算产物，它的时间戳记"算的时刻"才有意义。
+    ///
+    /// 留成参数而不是写死 DateTime.Now：测试要能固定时间断言。
+    /// </param>
     public static List<Bar> BuildAdjusted(
-        string code, IReadOnlyList<Bar> rawBars, IReadOnlyList<ExDividend> events, out Report report)
+        string code, IReadOnlyList<Bar> rawBars, IReadOnlyList<ExDividend> events, out Report report,
+        DateTime? computedAt = null)
     {
+        var stamp = computedAt ?? DateTime.Now;
         report = new Report();
         var result = new List<Bar>(rawBars.Count);
         if (rawBars.Count == 0) return result;
@@ -156,7 +171,7 @@ public static class AdjustFactorCalculator
                 Volume = bar.Volume,        // 成交量/额不复权——它们是"当时真实发生的量"，缩放没有意义
                 Amount = bar.Amount,
                 Turnover = bar.Turnover,
-                FetchedAt = bar.FetchedAt,
+                FetchedAt = stamp,          // 重算时刻，不是源K线的抓取时刻——见 computedAt 的说明
             });
         }
         report.FinalFactor = factor;

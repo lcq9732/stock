@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Text.Json;
@@ -63,6 +63,8 @@ public class MainViewModel : INotifyPropertyChanged
     public string ElapsedText { get => _elapsedText; private set => Set(ref _elapsedText, value); }
 
     private CancellationTokenSource? _cts;
+    private readonly Services.WebView2JsonFetcher? _browserChannel;
+    private bool _verifyingEastMoney;
     private DispatcherTimer? _heartbeat;
     private DateTime _runStartedAt;
     private readonly StreamWriter? _logFileWriter;
@@ -74,8 +76,11 @@ public class MainViewModel : INotifyPropertyChanged
     /// 2026-08-19 由原来的"一个总数"改成分类汇总：流通市值是整轮扫描，失败时会把整批代码记进
     /// 名单，加总后按钮上会显示"（5547）"，被读成丢了5547只票的数据，实际只是一次市值快照没取到
     /// 外加3只资金流。现在按钮直接显示"K线 0 只 · 市值 1 轮 · 净流入 3 只"这样的分类文字。</summary>
-    private FailedRetrySummary _failedRetry = new();
-    public FailedRetrySummary FailedRetry
+    // 初值是 null 而不是 new()：**"还没读到" 和 "读到了、是空的" 必须分得开**。
+    // 用 new() 顶上会让统计失败时界面显示"无失败"，用户据此判断"不用管了"——而实际上
+    // 名单可能有几千只没补（2026-09-03 用户："要不能用户无法判断数据是否取正确了"）。
+    private FailedRetrySummary? _failedRetry;
+    public FailedRetrySummary? FailedRetry
     {
         get => _failedRetry;
         private set
@@ -86,10 +91,10 @@ public class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>按钮上那行字。</summary>
-    public string FailedRetryText => _failedRetry.Describe();
+    /// <summary>按钮上那行字。还没统计出来时明说，别冒充"无失败"。</summary>
+    public string FailedRetryText => _failedRetry?.Describe() ?? "失败名单还没读到";
 
-    private int _pendingQfqRepair;
+    private int _pendingQfqRepair = -1;   // -1 = 还没算出来，别跟"0 已补齐"混为一谈
     /// <summary>
     /// 还有多少只股票等着重取前复权——除权之后数据源的前复权基准就变了，那只票的全部历史都得
     /// 按新基准整段重写。日常抓取顺带检出来记进名单，计划里的【重取前复权】慢慢补。
@@ -102,45 +107,95 @@ public class MainViewModel : INotifyPropertyChanged
     }
 
     public string PendingQfqRepairText =>
-        PendingQfqRepair > 0 ? $"待重取 {PendingQfqRepair} 只" : "无待重取";
+        PendingQfqRepair < 0 ? "待重取数还没算出来"
+        : PendingQfqRepair > 0 ? $"待重取 {PendingQfqRepair} 只" : "无待重取";
 
-    private int _pendingRawBars;
+    private int _pendingRawBars = -1;   // -1 = 还没算出来，别跟"0 已补齐"混为一谈
     /// <summary>还差多少只个股没补不复权日线。</summary>
     public int PendingRawBars
     {
         get => _pendingRawBars;
         private set { Set(ref _pendingRawBars, value); Raise(nameof(PendingRawBarsText)); }
     }
-    public string PendingRawBarsText => PendingRawBars > 0 ? $"待补 {PendingRawBars} 只" : "已补齐";
+    public string PendingRawBarsText =>
+        PendingRawBars < 0 ? "待补数还没算出来"
+        : PendingRawBars > 0 ? $"待补 {PendingRawBars} 只" : "已补齐";
 
-    private int _pendingAdjRebuild;
+    private int _pendingAdjRebuild = -1;   // -1 = 还没算出来，别跟"0 已补齐"混为一谈
     /// <summary>还有多少只个股的回测序列要重算（不复权比它新，或者还没算过）。</summary>
     public int PendingAdjRebuild
     {
         get => _pendingAdjRebuild;
         private set { Set(ref _pendingAdjRebuild, value); Raise(nameof(PendingAdjRebuildText)); }
     }
-    public string PendingAdjRebuildText => PendingAdjRebuild > 0 ? $"待重算 {PendingAdjRebuild} 只" : "已是最新";
+    public string PendingAdjRebuildText =>
+        PendingAdjRebuild < 0 ? "待重算数还没算出来"
+        : PendingAdjRebuild > 0 ? $"待重算 {PendingAdjRebuild} 只" : "已是最新";
 
-    private int _pendingEarnings;
+    private (int Total, int NeedFill)? _manualFill;
+    /// <summary>
+    /// 「待手工回填清单」里还剩多少项要人动手（PDF 解析不出来的指标）。
+    /// 摆在【导入手工数据】那一行——不显示的话用户根本不知道有活等着自己干
+    /// （2026-09-03 用户："主要是让用户一眼知道有需要手工处理的数据"）。
+    /// </summary>
+    public (int Total, int NeedFill)? ManualFill
+    {
+        get => _manualFill;
+        private set { Set(ref _manualFill, value); Raise(nameof(ManualFillText)); }
+    }
+
+    public string ManualFillText =>
+        ManualFill is not { } m ? "待手工处理数还没算出来"
+        : m.Total == 0 ? "没有待手工处理的"
+        : m.NeedFill > 0 ? $"⚠ 有 {m.NeedFill} 项要手工填（共 {m.Total} 项）"
+        : $"清单 {m.Total} 项都填好了，点「执行」导入";
+
+    private int _pendingEarnings = -1;   // -1 = 还没算出来，别跟"0 已补齐"混为一谈
     /// <summary>还有多少只股票的本期财报没披露——就是下一轮要复查披露日的那批。</summary>
     public int PendingEarnings
     {
         get => _pendingEarnings;
         private set { Set(ref _pendingEarnings, value); Raise(nameof(PendingEarningsText)); }
     }
-    public string PendingEarningsText => PendingEarnings > 0 ? $"待披露 {PendingEarnings} 只" : "本期已披露完";
+    public string PendingEarningsText =>
+        PendingEarnings < 0 ? "待披露数还没算出来"
+        : PendingEarnings > 0 ? $"待披露 {PendingEarnings} 只" : "本期已披露完";
 
-    private int _pendingFinancials;
+    private (int Todo, int Never)? _pendingMoneyFlow;
+    /// <summary>分档资金流还剩多少只没轮到。null = 还没算出来。</summary>
+    public (int Todo, int Never)? PendingMoneyFlow
+    {
+        get => _pendingMoneyFlow;
+        private set { Set(ref _pendingMoneyFlow, value); Raise(nameof(PendingMoneyFlowText)); }
+    }
+
+    /// <summary>
+    /// 这一项的文案跟别的"还差多少"不一样，**故意不说"待抓 N 只"**：接口是 120 天滚动窗口、
+    /// 每天只能抓百来只，跑满全市场要两个月，所以"今天还剩 5800 只"是常态而不是落后。
+    /// 有信息量的是"从没抓过"那个数——它归零才算铺满一轮，之后就只是轮换维护。
+    /// </summary>
+    public string PendingMoneyFlowText =>
+        PendingMoneyFlow is not { } m ? "待抓数还没算出来"
+        // 一轮还没铺满时这两个数常常相等（今天抓过的都是新铺的），相等就别重复报一遍
+        : m.Never > 0 && m.Never == m.Todo ? $"还有 {m.Never} 只从没抓过"
+        : m.Never > 0 ? $"还有 {m.Never} 只从没抓过（今天待抓 {m.Todo} 只）"
+        : m.Todo > 0 ? $"已铺满一轮，今天待轮换 {m.Todo} 只"
+        : "今天已全部抓过";
+
+    private int _pendingFinancials = -1;   // -1 = 还没算出来，别跟"0 已补齐"混为一谈
     /// <summary>还有多少只股票的财务报表没补（报告期落后、或科目集版本落后于当前 v4）。</summary>
     public int PendingFinancials
     {
         get => _pendingFinancials;
         private set { Set(ref _pendingFinancials, value); Raise(nameof(PendingFinancialsText)); }
     }
-    public string PendingFinancialsText => PendingFinancials > 0 ? $"待补 {PendingFinancials} 只" : "已补齐";
+    public string PendingFinancialsText =>
+        PendingFinancials < 0 ? "待补数还没算出来"
+        : PendingFinancials > 0 ? $"待补 {PendingFinancials} 只" : "已补齐";
 
-    public bool HasFailed => _failedRetry.Any;
+    // 名单还没读到（null）时按"没有失败"算：这个属性是【重新拉取失败】按钮的 CanExecute，
+    // 界面一渲染就会调到，那会儿后台统计还没跑完。文字那边会照实说"失败名单还没读到"。
+    public bool HasFailed => _failedRetry?.Any == true;
 
     /// <summary>自动重试的状态文字（"将于 21:00 自动重试（…）"），空=当前没有排定。</summary>
     private string _autoRetryText = "";
@@ -157,6 +212,26 @@ public class MainViewModel : INotifyPropertyChanged
     /// 判断该不该再点一次抓取，不用凭感觉重复点或者担心漏了哪天。</summary>
     private string _dataStatusText = "";
     public string DataStatusText { get => _dataStatusText; private set => Set(ref _dataStatusText, value); }
+
+    /// <summary>
+    /// 鼠标停在数据状态那行上显示的**逐项**明细（2026-09-02 新增）：每个任务上次什么时候跑完的。
+    ///
+    /// 拆细之后"上次抓取：xx（龙虎榜）"只说得清最后收尾的那一项，回答不了"名册今天刷新了没""
+    /// 融资余额补到哪天了"——那些答案在这份明细里。
+    /// </summary>
+    private string _dataStatusDetail = "";
+    public string DataStatusDetail { get => _dataStatusDetail; private set => Set(ref _dataStatusDetail, value); }
+
+    /// <summary>把 manifest 里按任务记的运行时间排成给人看的多行文本（最多 15 行，太长的 ToolTip 没人看）。</summary>
+    private static string BuildTaskRunDetail(DataStatus status)
+    {
+        if (status.RecentTaskRuns.Count == 0)
+            return "还没有任何任务跑完的记录。";
+        var lines = status.RecentTaskRuns.Take(15).Select(r =>
+            $"{r.At:MM-dd HH:mm}  {r.Task}" + (r.ErrorCount > 0 ? $"（{r.ErrorCount} 条错误）" : ""));
+        return "各任务上次跑完的时间：\n" + string.Join("\n", lines)
+             + (status.RecentTaskRuns.Count > 15 ? $"\n…（还有 {status.RecentTaskRuns.Count - 15} 项）" : "");
+    }
 
     /// <summary>Date typed in for "补指定历史日"（旧名"拉取当天"） (see doc/data-platform-design.md) — free text so the
     /// user can pick any day, defaults to today. Parsed on click, not as-you-type, so a
@@ -248,10 +323,22 @@ public class MainViewModel : INotifyPropertyChanged
     // ── 计划（2026-08-31）──
     public RelayCommand StartPlanCommand { get; }
     public RelayCommand StopPlanCommand { get; }
-    public RelayCommand RunPlanItemNowCommand { get; }
 
-    public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources)
+    /// <summary>打开东财人工验证窗口（2026-09-04）。见 <see cref="VerifyEastMoneyAsync"/>。</summary>
+    public RelayCommand VerifyEastMoneyCommand { get; }
+    public RelayCommand RunPlanItemNowCommand { get; }
+    public RelayCommand AddPlanTemplateCommand { get; }
+    public RelayCommand RunPlanGroupNowCommand { get; }
+
+    /// <param name="browserChannel">
+    /// 东财的浏览器通道（2026-09-04）。界面上只用它做一件事：把那个平时藏着的浏览器窗口
+    /// 显示出来，让人手工过一次东财的人工验证——验证只能人点，程序代替不了。
+    /// 给 null 就是没有这个能力，按钮点了会说明原因。
+    /// </param>
+    public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources,
+                         Services.WebView2JsonFetcher? browserChannel = null)
     {
+        _browserChannel = browserChannel;
         _orchestrator = orchestrator;
         _paths = paths;
         AvailableSources = availableSources;
@@ -280,12 +367,7 @@ public class MainViewModel : INotifyPropertyChanged
         // 计划也归它管：等下一项到点的那段时间 IsBusy=false，不把 IsPlanRunning 算进来的话
         // 按钮是灰的、用户没法停一个正在等待的计划。"停止"表达的是"别再跑了"，就该停到底。
         StopCommand = new RelayCommand(
-            _ =>
-            {
-                if (IsPlanRunning) StopPlan("用户点了停止");
-                _cts?.Cancel();
-                CancelAutoRetry("用户点了停止");
-            },
+            _ => StopEverything("用户点了停止"),
             _ => IsBusy || IsPlanRunning);
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && HasFailed);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
@@ -303,11 +385,34 @@ public class MainViewModel : INotifyPropertyChanged
         CancelAutoRetryCommand = new RelayCommand(_ => CancelAutoRetry("用户手动取消"), _ => HasAutoRetry);
 
         StartPlanCommand = new RelayCommand(async _ => await StartPlanAsync(), _ => !IsPlanRunning);
-        StopPlanCommand = new RelayCommand(_ => StopPlan("用户点了停止计划"), _ => IsPlanRunning);
+        // 计划页那个【停止】＝停止全部（2026-09-02 用户要求）：以前它只在"计划正在跑"时可用，
+        // 于是手动点某一行【执行】跑起来之后，在计划页上根本没有能停的按钮（得切回【手动】页）。
+        // ⚠ **故意不判 IsBusy / IsPlanRunning**（2026-09-04，跟下面【执行】按钮同一个道理）：
+        // 那两个条件会让按钮变成禁用态，而禁用的按钮点下去什么都不发生、也不说为什么，
+        // 深色主题下连"它是灰的"都看不出来。实况是数据源在限流熔断里、顶上写着"空闲"，
+        // 人想停掉排着的自动重试却发现按钮点不动。拦截和说明都放进 StopEverything。
+        StopPlanCommand = new RelayCommand(_ => StopEverything("用户点了停止"), _ => true);
+
+        // 跟【执行】【停止全部】同一个原则：永远可点，点了被拒也要在日志里说清楚为什么，
+        // 别做成一个灰着的、点下去毫无反应的按钮。
+        VerifyEastMoneyCommand = new RelayCommand(async _ => await VerifyEastMoneyAsync(), _ => true);
         // 每行一个【执行】按钮，参数就是那一行——比"先选中再点右边的按钮"少一步
         RunPlanItemNowCommand = new RelayCommand(
             async p => await RunPlanItemNowAsync(p as PlanItemViewModel),
-            p => p is PlanItemViewModel && !IsBusy && !IsPlanRunning);
+            // ⚠ 这里**故意不判 IsBusy / IsPlanRunning**（2026-09-03 用户反馈"点了没反应"）：
+            // 那两个条件会让按钮变成禁用态，而禁用的按钮点下去什么都不发生、也不说为什么，
+            // 深色主题下连"它是灰的"都看不出来。真正的拦截放在 RunPlanItemNowAsync 里，
+            // 那儿会往日志写清楚"没执行，因为计划正在运行中"。宁可点了被拒绝，也别静默。
+            p => p is PlanItemViewModel);
+        AddPlanTemplateCommand = new RelayCommand(_ => AddPlanTemplate(), _ => !IsPlanRunning);
+        RunPlanGroupNowCommand = new RelayCommand(
+            async p => await RunPlanGroupNowAsync(p as PlanGroupViewModel),
+            p => p is PlanGroupViewModel);      // 同上：拦截和说明都在 RunPlanGroupNowAsync 里
+
+        // 日志批量刷新（见 Log 的注释）：攒 120ms 一批，高频写日志时 UI 线程才有空处理点击
+        _logFlushTimer = new DispatcherTimer { Interval = LogFlushInterval };
+        _logFlushTimer.Tick += (_, _) => FlushPendingLogLines();
+        _logFlushTimer.Start();
 
         RefreshDataStatus();
         RefreshFailedCodeCount();
@@ -355,8 +460,15 @@ public class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private List<string> ParseAnnouncementKeywords() =>
-        AnnouncementKeywordsText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+    /// <summary>
+    /// 公告关键词：优先用计划行里填的那个（2026-09-02 从全局参数挪进行里），留空就用【手动】页那个框。
+    /// 跟"首次回看几年""日期"是同一套规矩——参数属于行，全局框只当兜底。
+    /// </summary>
+    private List<string> ParseAnnouncementKeywords(string? rowValue = null)
+    {
+        var text = string.IsNullOrWhiteSpace(rowValue) ? AnnouncementKeywordsText : rowValue;
+        return text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+    }
 
     /// <summary>
     /// 刷新"本地数据覆盖：X 至 Y"那行状态文字——**放到后台线程跑**（2026-08-04改）。
@@ -379,6 +491,7 @@ public class MainViewModel : INotifyPropertyChanged
         _ = Task.Run(() =>
         {
             string text;
+            string detail = "";
             try
             {
                 var status = _orchestrator.GetDataStatus();
@@ -392,21 +505,60 @@ public class MainViewModel : INotifyPropertyChanged
                     if (status.LastFetchAt != null)
                         text += $"；上次抓取：{status.LastFetchAt:yyyy-MM-dd HH:mm}（{status.LastFetchKind}）";
                 }
+                detail = BuildTaskRunDetail(status);
             }
             catch (Exception ex)
             {
                 text = $"读取数据范围失败：{ex.Message}";
             }
             // DataStatusText 的 setter 触发 PropertyChanged → 必须回到 UI 线程更新绑定
-            System.Windows.Application.Current?.Dispatcher.Invoke(() => DataStatusText = text);
+            System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+            {
+                DataStatusText = text;
+                DataStatusDetail = detail;
+            });
         });
     }
 
+    /// <summary>还没搬上界面的日志行（新的在后面）。见 <see cref="Log"/>。</summary>
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _pendingLogLines = new();
+
+    /// <summary>攒多久刷一次。120ms 肉眼看不出延迟，又能把一秒内几十条合成一次界面更新。</summary>
+    private static readonly TimeSpan LogFlushInterval = TimeSpan.FromMilliseconds(120);
+
+    private DispatcherTimer? _logFlushTimer;
+
+    /// <summary>
+    /// 记一行日志。
+    ///
+    /// ════ 为什么要攒着批量刷（2026-09-02）════
+    /// <see cref="LogLines"/> 是绑到界面上的 ObservableCollection，每 Insert 一次就触发一次
+    /// 布局+渲染，而且**必须在 UI 线程上**。高频写日志时 UI 线程被这些更新占满，
+    /// 用户的点击事件排在后面——实测撞过一次：一个任务 4 秒一轮无限重跑、每轮刷 4 行，
+    /// 【停止全部】按钮点了没反应（事件进了队列，但前面堆着几百次渲染）。
+    ///
+    /// 所以界面更新改成"攒 120ms 刷一批"：单次点击/单条日志的体感没变化，
+    /// 高频时几十条合成一次渲染，UI 线程始终有空处理输入。
+    ///
+    /// ⚠ **文件写入保持即时**（AutoFlush）：程序崩溃或被强制结束时，
+    /// 磁盘上那份 fetch.log 得能看到最后发生了什么——这正是它存在的意义。
+    /// </summary>
     private void Log(string message)
     {
         var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
-        LogLines.Insert(0, line);
         _logFileWriter?.WriteLine(line);
+        _pendingLogLines.Enqueue(line);
+    }
+
+    /// <summary>把攒下的日志一次性搬上界面（新的在最上面）。定时器每 120ms 调一次。</summary>
+    private void FlushPendingLogLines()
+    {
+        if (_pendingLogLines.IsEmpty) return;
+        var batch = new List<string>();
+        while (_pendingLogLines.TryDequeue(out var line)) batch.Add(line);
+
+        // 界面是"最新在最上面"，所以这一批要倒着插——插完之后组内先后仍是对的
+        for (int i = batch.Count - 1; i >= 0; i--) LogLines.Insert(0, batch[i]);
     }
 
     /// <summary>
@@ -442,25 +594,42 @@ public class MainViewModel : INotifyPropertyChanged
         if (Interlocked.Exchange(ref _refreshingCounts, 1) == 1) return;
         Task.Run(() =>
         {
-            FailedRetrySummary? failed = null;
-            int qfq = 0, raw = 0, adj = 0, fin = 0, earn = 0;
-            try { failed = _orchestrator.GetFailedRetrySummary(); } catch { }
-            // 待重取前复权的计数跟失败名单同源（都在 manifest.json 里），一起刷新
-            try { qfq = _orchestrator.GetPendingQfqRepairCount(); } catch { /* 只是个计数 */ }
-            try { raw = _orchestrator.GetPendingRawBarCount(); } catch { }
-            try { adj = _orchestrator.GetPendingAdjRebuildCount(); } catch { }
-            try { earn = _orchestrator.GetPendingEarningsCount(); } catch { }
-            try { fin = _orchestrator.GetFinancialFetchPlan().AllPending.Count; } catch { }
-            System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+            // ⚠ 整段包在 try/finally 里：中途任何一次抛异常（连关窗时的 Dispatcher.Invoke 都算）
+            //    要是把重置漏掉，标志就永久卡在 1，**之后每一次刷新都被静默跳过**，
+            //    界面上这些数字从此不再变化，而且一点提示都没有（2026-09-03 用户发现）。
+            try
             {
-                if (failed is not null) FailedRetry = failed;
-                PendingQfqRepair = qfq;
-                PendingRawBars = raw;
-                PendingAdjRebuild = adj;
-                PendingFinancials = fin;
-                PendingEarnings = earn;
-            });
-            Interlocked.Exchange(ref _refreshingCounts, 0);
+                FailedRetrySummary? failed = null;
+                // null = 这一项没算出来。别用 0 顶替——"取不到"和"真的是 0"在界面上是两句话，
+                // 混在一起用户就没法判断"该不该做、做了没有"了。
+                int? qfq = null, raw = null, adj = null, fin = null, earn = null;
+                try { failed = _orchestrator.GetFailedRetrySummary(); } catch { }
+                // 待重取前复权的计数跟失败名单同源（都在 manifest.json 里），一起刷新
+                try { qfq = _orchestrator.GetPendingQfqRepairCount(); } catch { /* 只是个计数 */ }
+                try { raw = _orchestrator.GetPendingRawBarCount(); } catch { }
+                try { adj = _orchestrator.GetPendingAdjRebuildCount(); } catch { }
+                try { earn = _orchestrator.GetPendingEarningsCount(); } catch { }
+                // 这一个要读 StockMeta、退市表、财务状态表，而它恰好在每项任务跑完时触发——
+                // 那会儿库常常还被写锁占着，抛 SqliteException 是常事，所以更不能拿 0 顶。
+                try { fin = _orchestrator.GetFinancialFetchPlan().AllPending.Count; } catch { }
+                (int, int)? manual = null;
+                try { manual = _orchestrator.GetManualFillPending(); } catch { }
+                // 这一个只查一条 GROUP BY，比上面几项便宜得多，放在这里不会拖慢刷新
+                (int Todo, int Never)? flow = null;
+                try { flow = _orchestrator.GetPendingMoneyFlowCount(); } catch { }
+                System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    if (failed is not null) FailedRetry = failed;
+                    if (qfq is { } v1) PendingQfqRepair = v1;
+                    if (raw is { } v2) PendingRawBars = v2;
+                    if (adj is { } v3) PendingAdjRebuild = v3;
+                    if (fin is { } v4) PendingFinancials = v4;
+                    if (earn is { } v5) PendingEarnings = v5;
+                    if (manual is { } v6) ManualFill = v6;
+                    if (flow is { } v7) PendingMoneyFlow = v7;
+                });
+            }
+            finally { Interlocked.Exchange(ref _refreshingCounts, 0); }
         });
     }
 
@@ -513,6 +682,36 @@ public class MainViewModel : INotifyPropertyChanged
         if (!string.IsNullOrWhiteSpace(want))
             Log($"⚠ 配置里的 BarSource=\"{want}\" 不认识，改用腾讯。可选：{string.Join(" / ", sources.Select(s => s.Name))}");
         return sources.FirstOrDefault(s => s.Name == "Tencent") ?? sources[0];
+    }
+
+    /// <summary>
+    /// 这一项要是因为数据源限流熔断而没开工，返回预计恢复的时刻（"HH:mm"）；别的情况返回 null。
+    /// 信息来自 <see cref="FetchPlanItem.LastMessage"/>——那句话是 FetchResult.SkippedReason 原样存下来的。
+    /// 取不到就退回"已跳过（前置失败）"的老文案，不至于显示错。
+    /// </summary>
+    /// <summary>
+    /// 「跳过」这一轮该怎么显示（2026-09-04）。原来不管什么原因都写"已跳过（前置失败）"，
+    /// 可 Skipped 有好几种来由：限流熔断没轮到、数据源前置条件不满足、真的前置项失败……
+    /// 显示成不存在的原因比不显示更糟——人会顺着那个方向白查一通。
+    ///
+    /// 真实原因存在 <see cref="FetchPlanItem.LastMessage"/> 里（＝FetchResult.SkippedReason 原样），
+    /// 完整那句在鼠标悬停的提示里能看到，状态列只放最短的那一截。
+    /// </summary>
+    private static string SkipStatusText(FetchPlanItem m, string 时刻)
+    {
+        var msg = m.LastMessage ?? "";
+        if (PausedResumeAt(m) is { } resume) return $"⏸ 暂停中，{resume} 恢复";
+        if (msg.Contains("全部失败")) return $"⏭ {时刻} 没抓到（数据源拒绝）";
+        if (msg.Contains("前置")) return "⏭ 已跳过（前置失败）";
+        if (msg.Length > 0) return $"⏭ {时刻} 跳过";
+        return "⏭ 已跳过";
+    }
+
+    private static string? PausedResumeAt(FetchPlanItem m)
+    {
+        if (m.LastMessage is not { Length: > 0 } msg || !msg.Contains("熔断中")) return null;
+        var mm = System.Text.RegularExpressions.Regex.Match(msg, @"预计 (\d\d:\d\d) 恢复");
+        return mm.Success ? mm.Groups[1].Value : null;
     }
 
     /// <summary>
@@ -573,7 +772,8 @@ public class MainViewModel : INotifyPropertyChanged
     private int _autoRetryLastPending;
 
     /// <summary>待重试的总量（逐只那几类的股票数 + 市值那一轮算 1）——用来判断自动重试有没有进展。</summary>
-    private int PendingRetryCount() => _failedRetry.PerStockTotal + (_failedRetry.MarketCapPending ? 1 : 0);
+    private int PendingRetryCount()
+        => _failedRetry is { } f ? f.PerStockTotal + (f.MarketCapPending ? 1 : 0) : 0;
 
     /// <summary>
     /// 每个操作跑完后决定要不要排一次自动重试（2026-08-21新增）。
@@ -932,10 +1132,78 @@ public class MainViewModel : INotifyPropertyChanged
     private FetchPlan _plan = new();
     private FetchPlanStore? _planStore;
     private CancellationTokenSource? _planCts;
+
+    /// <summary>
+    /// 手动点某一行/某一组【执行】用的取消令牌。**跟计划循环的 <see cref="_planCts"/> 分开**——
+    /// 2026-09-03 之前两者共用一个：那时手动执行的按钮在计划运行时是禁用的，共用不会打架。
+    /// 现在计划"在待命"（没在跑任务、只是等下一个时刻）也允许手动插一项，共用就会出事：
+    /// 手动那一轮结束时把 _planCts 置 null，计划循环的令牌就此丢失，【停止全部】对它再也不起作用。
+    /// </summary>
+    private CancellationTokenSource? _manualCts;
     private DispatcherTimer? _planTimer;
 
-    /// <summary>计划里的任务项，顺序即执行顺序。</summary>
+    /// <summary>
+    /// 计划里的**组**（2026-09-02）：界面上一个可折叠的块，组头管时间和重复规则。
+    /// 组顺序即组间执行顺序。
+    /// </summary>
+    public ObservableCollection<PlanGroupViewModel> PlanGroups { get; } = [];
+
+    /// <summary>
+    /// 所有任务摊平后的视图（按组顺序 + 组内顺序），给"当前在跑哪一项""重画状态列"这类
+    /// 不关心分组的逻辑用。跟 <see cref="PlanGroups"/> 里的是**同一批** PlanItemViewModel 实例。
+    /// </summary>
     public ObservableCollection<PlanItemViewModel> PlanItems { get; } = [];
+
+    /// <summary>
+    /// 计划排得有没有明显问题（2026-09-02）——现在只查"要等收盘的项会不会在收盘前开跑"，
+    /// 见 <see cref="FetchPlan.CheckSchedule"/>。空字符串＝没问题，界面上那条黄字就不显示。
+    /// **只提醒、不拦**：用户完全可能是故意那么排的。
+    /// </summary>
+    private string _planWarningText = "";
+    public string PlanWarningText
+    {
+        get => _planWarningText;
+        private set { Set(ref _planWarningText, value); Raise(nameof(HasPlanWarning)); }
+    }
+    public bool HasPlanWarning => PlanWarningText.Length > 0;
+
+    // ── 计划模板（2026-09-02，配合【拉取全部】拆成 13 个原子项）──
+
+    public IReadOnlyList<PlanTemplate> PlanTemplates { get; } = FetchPlanTemplates.All;
+
+    private PlanTemplate? _selectedPlanTemplate = FetchPlanTemplates.All[0];
+    public PlanTemplate? SelectedPlanTemplate
+    {
+        get => _selectedPlanTemplate;
+        set => Set(ref _selectedPlanTemplate, value);
+    }
+
+    /// <summary>
+    /// 把选中的模板铺进计划：**每一行都是独立的一项**，铺完就跟手动排的没有区别
+    /// （模板只是排版动作，运行时不存在"组"这个概念，见 FetchPlanTemplates 的类注释）。
+    ///
+    /// 规则见 <see cref="FetchPlanTemplates.Apply"/>：已经被用户配过的项一律不动，
+    /// 其余按模板配置好、按模板顺序连成一串排在末尾。
+    /// </summary>
+    private void AddPlanTemplate()
+    {
+        var tpl = SelectedPlanTemplate;
+        if (tpl == null || _plan == null) return;
+
+        // 具体怎么铺（哪些配置、哪些保持原样）在 FetchPlanTemplates.Apply 里，那边有单元测试守着
+        var (group, applied, untouched) = FetchPlanTemplates.Apply(_plan, tpl);
+
+        RebuildPlanItems();
+        SavePlan();
+        RecalcTimeline();
+
+        Log($"已按模板铺好「{group.Name}」组：{applied.Count} 项（{group.RepeatText}"
+          + (group.NotBefore.HasValue ? $"，{group.TriggerText}" : "") + "）"
+          + (untouched.Count > 0
+                ? $"；另有 {untouched.Count} 项你已经在别处排着了，保持原样没动：{string.Join("、", untouched)}"
+                : "")
+          + "。组头改时间和重复规则，组里改顺序和参数。");
+    }
 
     private PlanItemViewModel? _selectedPlanItem;
     public PlanItemViewModel? SelectedPlanItem
@@ -983,6 +1251,7 @@ public class MainViewModel : INotifyPropertyChanged
         _planStore = new FetchPlanStore(_paths.PlanPath);
         _plan = _planStore.Load();
         MigrateLegacyIdleSetting();
+        ReportPlanMigration();
         RebuildPlanItems();
         Raise(nameof(AutoStartPlanOnLaunch));
 
@@ -1016,11 +1285,15 @@ public class MainViewModel : INotifyPropertyChanged
     {
         if (!ReadLegacyIdleFinancialSetting()) return;
 
-        var fin = _plan.Items.FirstOrDefault(i => i.Action == FetchActionId.FetchFinancials);
+        var fin = _plan.AllItems.FirstOrDefault(i => i.Action == FetchActionId.FetchFinancials);
         if (fin != null)
         {
+            // 分组之后"空闲时"是**组**的规则：把它挪进空闲组就等于原来那个开关
+            fin.Owner?.Items.Remove(fin);
+            var idle = _plan.GroupOf(PlanGroupKind.Periodic);
             fin.Enabled = true;
-            fin.Repeat = RepeatKind.WhenIdle;
+            fin.Owner = idle;
+            idle.Items.Add(fin);
             _planStore?.Save(_plan);
             Log("【空闲时自动补财务】这个开关已经并进计划了——"
               + "已把计划里的「拉取财务报表」设成 启用 + 重复「空闲时」，效果跟原来一样："
@@ -1029,24 +1302,115 @@ public class MainViewModel : INotifyPropertyChanged
         ClearLegacyIdleFinancialSetting();
     }
 
-    private void RebuildPlanItems()
+    /// <summary>
+    /// 把加载时做过的"退役动作 → 原子项"替换讲清楚（2026-09-02）。计划表会当场变样，
+    /// 不说一声人会以为自己排的东西丢了。替换规则见 <see cref="FetchPlan.MigrateRetired"/>。
+    /// </summary>
+    private void ReportPlanMigration()
     {
-        PlanItems.Clear();
-        foreach (var item in _plan.Items)
-            PlanItems.Add(new PlanItemViewModel(item, OnPlanItemEdited));
+        if (_plan == null || _plan.MigrationNotes.Count == 0) return;
+        Log("计划里有几个动作已经拆成更细的任务，已自动替换（设置照搬，顺序不变）：");
+        foreach (var note in _plan.MigrationNotes) Log("　" + note);
+        Log("　好处是能挑着跑、自己排顺序，某一项失败也不会拖累其它项。不满意就直接在表里改。");
+        _planStore?.Save(_plan);   // 迁移结果落盘，免得每次启动都重算一遍
     }
 
-    /// <summary>任何一项被改动（勾选/时间/重复/参数）都会走到这里：立刻存盘 + 重画时间轴。</summary>
+    /// <summary>
+    /// 按 _plan 重建界面上的两层结构：组 → 组里的任务（2026-09-02）。
+    /// <see cref="PlanItems"/> 是所有子项摊平后的视图，给"当前在跑哪一项""按序号找行"这类逻辑用。
+    /// </summary>
+    private void RebuildPlanItems()
+    {
+        PlanGroups.Clear();
+        PlanItems.Clear();
+        foreach (var g in _plan.Groups)
+        {
+            var gvm = new PlanGroupViewModel(g, OnPlanItemEdited);
+            foreach (var item in g.Items)
+            {
+                var ivm = new PlanItemViewModel(item, OnPlanItemEdited);
+                gvm.Items.Add(ivm);
+                PlanItems.Add(ivm);
+            }
+            PlanGroups.Add(gvm);
+        }
+        RenumberPlanItems();
+        RefreshPlanWarning();
+    }
+
+    /// <summary>
+    /// 重排"#"列的执行序号（2026-09-02）。序号是**组内**的位置，不存进 json——
+    /// 顺序本来就是列表顺序，另存一份编号只会多一个可能对不上的真相。
+    /// 建表、拖动排序、模板铺开之后都要调一次。
+    /// </summary>
+    private void RenumberPlanItems()
+    {
+        // ① 编号：组号.序号（日更 1.x、季度 2.x、按需 3.x）
+        var numberOf = new Dictionary<FetchActionId, string>();
+        for (int gi = 0; gi < PlanGroups.Count; gi++)
+        {
+            var g = PlanGroups[gi];
+            for (int i = 0; i < g.Items.Count; i++)
+            {
+                g.Items[i].GroupIndex = gi + 1;
+                g.Items[i].Order = i + 1;
+                numberOf[g.Items[i].Model.Action] = g.Items[i].Number;
+            }
+            g.RefreshHeader();
+        }
+
+        // ② 依赖列：把前置动作翻译成编号。硬前置带 *（它失败了这一项直接跳过），软的不带。
+        //    编号得等①算完才有，所以分两趟。
+        foreach (var vm in PlanItems)
+        {
+            var info = vm.Info;
+            var parts = new List<string>();
+            if (info.DependsOn is { } hard)
+                parts.Add((numberOf.TryGetValue(hard, out var hn) ? hn : FetchTaskCatalog.Info(hard).Name) + "*");
+            foreach (var soft in info.SoftDependsOn ?? [])
+                parts.Add(numberOf.TryGetValue(soft, out var sn) ? sn : FetchTaskCatalog.Info(soft).Name);
+            // 按编号从小到大排：目录里的声明顺序是按"哪条依赖更重要"写的，摆到界面上就成了
+            // "1.12 1.02"这种乱序，读的人得自己在脑子里排一遍。
+            // 序号补足两位之后，字符串序就是数值序，直接排即可（带 * 的硬前置也落在正确位置）。
+            parts.Sort(StringComparer.Ordinal);
+            vm.DependsText = string.Join(" ", parts);
+        }
+    }
+
+    /// <summary>跑一次计划自检，把提醒放到表格上方那条黄字里（没问题就清空）。</summary>
+    private void RefreshPlanWarning()
+    {
+        if (_plan == null) return;
+        SyncPlanFromUi();
+        PlanWarningText = string.Join("\n", _plan.CheckSchedule());
+    }
+
+    /// <summary>
+    /// 界面上的顺序才是权威顺序（拖动排序改的是它），把它写回 _plan。
+    /// 组的顺序、组内任务的顺序都在这里同步，顺便回填每个任务的 Owner。
+    /// </summary>
+    private void SyncPlanFromUi()
+    {
+        if (_plan == null) return;
+        _plan.Groups = PlanGroups.Select(g =>
+        {
+            g.Model.Items = g.Items.Select(v => v.Model).ToList();
+            return g.Model;
+        }).ToList();
+        _plan.LinkOwners();
+    }
+
+    /// <summary>任何一项被改动（勾选/时间/重复/参数）都会走到这里：立刻存盘 + 重画时间轴 + 自检。</summary>
     private void OnPlanItemEdited()
     {
         SavePlan();
         RecalcTimeline();
+        RefreshPlanWarning();
     }
 
     private void SavePlan()
     {
-        // PlanItems 的顺序才是权威顺序（拖动排序改的是它），回写进 _plan 再存
-        _plan.Items = PlanItems.Select(v => v.Model).ToList();
+        SyncPlanFromUi();
         _planStore?.Save(_plan);
     }
 
@@ -1081,39 +1445,49 @@ public class MainViewModel : INotifyPropertyChanged
             // ① 正在跑/正在等的那行，PlanRunner 的回调刚写过，别覆盖；但时间轴要照样往后推
             if (vm.StatusLevel == 3)
             {
-                if (m.Enabled && m.IsDueOn(now) && m.Repeat != RepeatKind.WhenIdle)
-                    cursor = (cursor > now ? cursor : now) + vm.Info.Estimate;
+                if (m.EffectiveEnabled && m.IsDueOn(now) && m.Pacing != RunPacing.WhenIdle)
+                    cursor = (cursor > now ? cursor : now) + m.EffectiveEstimate;
                 continue;
             }
 
-            // ② 今天已经有结果了——这一列最该说的就是它（空闲项也一样，跑过就报结果）。
-            //    "今天的结果"看的是**这一轮从今天的计划时点之后开始**，不是"结束于今天"：
-            //    昨天 18:00 开工、今天凌晨收工的那一轮属于昨天，今天该显示的是"预计 18:00 再跑"。
-            bool hasTodayResult = m.LastOutcome != RunOutcome.None
-                && (m.Repeat == RepeatKind.WhenIdle
-                        ? m.LastEnd?.Date == now.Date
-                        : (m.LastStart ?? m.LastEnd) >= m.DueTimeOn(now));
-            if (hasTodayResult)
+            // ② 本轮已经有结果了——这一列最该说的就是它（空闲项也一样，跑过就报结果）。
+            //    "本轮"看的是**当期锚点之后开工**，不是"结束于今天"，也不是"今天的到点之后"：
+            //    18:00 开工跑到次日凌晨，那些项属于**同一轮**，第二天白天看界面就该看到
+            //    它们昨晚的结果——2026-09-03 用户："程序跑完了，但我从界面上看不出昨天哪些跑了"。
+            //    锚点跟 PlanRunner 判"该不该跑"用的是同一个，界面说的和引擎想的才对得上。
+            bool hasRoundResult = m.LastOutcome != RunOutcome.None
+                && m.DueAnchorAt(now) is { } anchor
+                && (m.LastStart ?? m.LastEnd) >= anchor;
+            if (hasRoundResult)
             {
+                // 跨天的结果要带上日期，否则昨晚 23:10 跑完的显示成"✔ 23:10 完成"，
+                // 今天早上看还以为是今天跑的。
+                var 时刻 = m.LastEnd?.Date == now.Date ? $"{m.LastEnd:HH:mm}" : $"{m.LastEnd:M/d HH:mm}";
                 (vm.StatusText, vm.StatusLevel) = m.LastOutcome switch
                 {
-                    RunOutcome.Ok        => ($"✔ {m.LastEnd:HH:mm} 完成", 1),
-                    RunOutcome.Failed    => ($"✘ {m.LastEnd:HH:mm} 失败", 2),
-                    RunOutcome.Skipped   => ("⏭ 已跳过（前置失败）", 2),
-                    RunOutcome.Cancelled => ($"⏹ {m.LastEnd:HH:mm} 被停止", 2),
-                    _                    => ($"· {m.LastEnd:HH:mm}", 0),
+                    // 带上存量进度（2026-09-04）：板块成分股要跨好几轮，
+                    // 只写"完成"看不出还剩多少，人只能去翻日志。
+                    RunOutcome.Ok        => (m.LastMessage is { Length: > 0 } prog && prog.StartsWith("已抓")
+                                             ? $"✔ {时刻} {prog}" : $"✔ {时刻} 完成", 1),
+                    RunOutcome.Failed    => ($"✘ {时刻} 失败", 2),
+                    // Skipped 有好几种来由，显示要分开，别一律写成"前置失败"——
+                    // 板块列表压根没有前置依赖，却因为这条兜底显示成"已跳过（前置失败）"，
+                    // 人看了会去找根本不存在的前置项（2026-09-04 用户指出）。
+                    RunOutcome.Skipped   => (SkipStatusText(m, 时刻), 2),
+                    RunOutcome.Cancelled => ($"⏹ {时刻} 被停止", 2),
+                    _                    => ($"· {时刻}", 0),
                 };
                 continue;
             }
 
             // ③ 今天还要跑的**定时**项：算预计时段，并占掉时间轴。
             //    空闲项填的是别人不用的空隙，没有"预计几点跑"这回事，也不该占时间轴。
-            if (m.Enabled && m.IsDueOn(now)
-                && m.Repeat != RepeatKind.WhenIdle && m.Repeat != RepeatKind.Manual)
+            if (m.EffectiveEnabled && m.IsDueOn(now)
+                && m.Pacing != RunPacing.WhenIdle && m.Repeat != RepeatKind.Manual)
             {
-                var earliest = m.NotBefore.HasValue ? now.Date.Add(m.NotBefore.Value.ToTimeSpan()) : cursor;
+                var earliest = m.DueTimeOn(now) is var due && due > now.Date ? due : cursor;
                 var start = earliest > cursor ? earliest : cursor;
-                var end = start + vm.Info.Estimate;
+                var end = start + m.EffectiveEstimate;
                 vm.StatusText = $"{start:HH:mm} → {end:HH:mm}";
                 vm.StatusLevel = 0;
                 cursor = end;
@@ -1123,6 +1497,43 @@ public class MainViewModel : INotifyPropertyChanged
             // ④ 今天不跑的（没启用、手动、空闲时、今天不是它的日子）：拿上一次的结果顶上。
             //    比"未启用"有用得多——那只票到底补没补过、上次是成是败，本来得翻日志才知道。
             (vm.StatusText, vm.StatusLevel) = LastRunBrief(m);
+        }
+
+        RecalcGroupHeaders(now);
+    }
+
+    /// <summary>
+    /// 组头那段时间轴（2026-09-02）："18:00 → 21:12"。
+    /// 算法跟子项那条一样是**顺序累加**，只是取的是每组第一项的开始和最后一项的结束；
+    /// 折叠着的组光看这一行就知道它占掉晚上哪一段。
+    /// </summary>
+    private void RecalcGroupHeaders(DateTime now)
+    {
+        var cursor = now;
+        foreach (var g in PlanGroups)
+        {
+            var model = g.Model;
+            g.RefreshHeader();
+
+            if (!model.Enabled || model.Pacing == RunPacing.WhenIdle || model.Repeat == RepeatKind.Manual || !model.IsDueOn(now))
+            {
+                g.TimelineText = model.Pacing == RunPacing.WhenIdle ? "空档里自动补"
+                    : model.Repeat == RepeatKind.Manual ? "不会自动跑"
+                    : !model.Enabled ? ""
+                    : $"下次 {model.PeriodStartOn(now.AddMonths(1)):MM-dd}";
+                continue;
+            }
+
+            var due = model.DueTimeOn(now);
+            var start = due > cursor ? due : cursor;
+            var total = TimeSpan.FromSeconds(g.Items
+                .Where(i => i.Model.EffectiveEnabled)
+                .Sum(i => i.Model.EffectiveEstimate.TotalSeconds));
+            if (total <= TimeSpan.Zero) { g.TimelineText = ""; continue; }
+
+            var end = start + total;
+            g.TimelineText = $"{start:HH:mm} → {end:HH:mm}";
+            cursor = end;
         }
     }
 
@@ -1145,15 +1556,20 @@ public class MainViewModel : INotifyPropertyChanged
     /// （2026-08-31 用户要求改成鼠标拖放，原来的上移/下移按钮撤掉了）。
     /// 拖动处理在 MainWindow.xaml.cs，那边只管算行号，顺序和存盘都在这里。
     /// </summary>
-    public void MovePlanItem(int from, int to)
+    public void MovePlanItem(PlanGroupViewModel group, int from, int to)
     {
-        if (from < 0 || from >= PlanItems.Count) return;
-        if (to < 0 || to >= PlanItems.Count || from == to) return;
-        var vm = PlanItems[from];
-        PlanItems.Move(from, to);
+        if (from < 0 || from >= group.Items.Count) return;
+        if (to < 0 || to >= group.Items.Count || from == to) return;
+        var vm = group.Items[from];
+        group.Items.Move(from, to);
+        // 摊平视图跟着重排：它跟组里装的是同一批实例，顺序得保持一致
+        PlanItems.Clear();
+        foreach (var g in PlanGroups) foreach (var i in g.Items) PlanItems.Add(i);
         SelectedPlanItem = vm;
+        RenumberPlanItems();
         SavePlan();
         RecalcTimeline();
+        RefreshPlanWarning();
         Log($"计划顺序已调整：【{vm.Name}】移到第 {to + 1} 位。");
     }
 
@@ -1196,7 +1612,10 @@ public class MainViewModel : INotifyPropertyChanged
                     }
                     RecalcTimeline();
                 });
-            });
+            },
+            // 一轮跑完才排一次自动重试（2026-09-02）：以前它挂在每一项的 finally 里，
+            // 【拉取全部】拆成 13 项之后，同一天会被重排十几次。
+            onRoundFinished: () => System.Windows.Application.Current?.Dispatcher.Invoke(ScheduleAutoRetry));
 
         try
         {
@@ -1229,20 +1648,149 @@ public class MainViewModel : INotifyPropertyChanged
         _cts?.Cancel();          // 正在跑的那个任务用的是它派生出来的 token
     }
 
+    /// <summary>
+    /// **停止全部**（2026-09-02）：正在跑的计划、单独执行的那一项、手动页触发的抓取、
+    /// 还有排定中的自动重试，一起停掉。"停止"表达的是"别再跑了"，就该停到底——
+    /// 只停其中一样的话，人点完发现日志还在刷，会以为按钮坏了。
+    ///
+    /// ⚠ 三个 CTS 都要取消，一个都不能省：
+    ///   · <c>_planCts</c>——计划循环；
+    ///   · <c>_manualCts</c>——手动点某一行/某一组【执行】那条路（2026-09-03 从 _planCts 分出来，
+    ///     因为计划待命时也能手动插一项，两者可能同时存在）；
+    ///   · <c>_cts</c>——当前那个抓取任务（计划项和手动按钮派生出来的都是它）；
+    ///   · 自动重试有自己的定时器，不取消的话过一小时它又自己跑起来。
+    /// 已经写进数据库的部分不回滚，下次跑会跳过已有数据。
+    /// </summary>
+    private void StopEverything(string why)
+    {
+        bool somethingRunning = IsPlanRunning || IsBusy || _planCts != null || _manualCts != null;
+        bool hadRetry = HasAutoRetry;
+
+        if (IsPlanRunning) StopPlan(why);
+        else if (somethingRunning)
+            Log($"正在停止当前任务（{why}）——已抓到的数据不会丢。");
+
+        _planCts?.Cancel();
+        _manualCts?.Cancel();
+        _cts?.Cancel();
+        CancelAutoRetry(why);
+
+        // 什么都没在跑也要回话——按钮以前在这种时候是禁用的，点下去毫无反应，
+        // 深色主题下还看不出它是灰的。宁可说一句"没什么可停的"，也别静默。
+        if (!somethingRunning && !hadRetry)
+        {
+            var paused = _orchestrator.GetPausedSources();
+            if (paused.Count > 0)
+                Log("现在没有任务在跑，没什么可停的。" +
+                    string.Join("；", paused.Select(p => $"{p.Source} 还在限流熔断中，预计 {p.Until:HH:mm} 恢复")) +
+                    "——熔断是数据源那边的配额限制，停不掉也不用停，到点会自己接着跑。");
+            else
+                Log("现在没有任务在跑，没什么可停的。");
+        }
+    }
+
+    /// <summary>
+    /// 打开东财人工验证窗口（2026-09-04）。
+    ///
+    /// 程序抓 push2 用的是自己那套浏览器数据（data/local/webview2），跟用户日常的 Chrome/Edge
+    /// 是两套。那套刚建起来时在东财眼里是个生面孔，可能先要过一道人工验证才给数据——
+    /// 而验证只能人来点。过完之后 Cookie 留在那个目录里，抓取就带着它走，跨次启动也还在。
+    ///
+    /// 它同时是个排错窗口：板块一直抓不到时打开看看东财到底返回了什么
+    /// （验证页？空白？正常数据？），比对着日志猜快得多。
+    /// </summary>
+    private async Task VerifyEastMoneyAsync()
+    {
+        if (_browserChannel == null)
+        {
+            Log("这个版本没有浏览器通道，用不了东财验证窗口。");
+            return;
+        }
+        // 连点防抖：第一次要几秒才出窗口，人看不到反馈就会一直点（实测被连点了六次），
+        // 结果是六次 Navigate 打断彼此、窗口反而更难出来。
+        if (_verifyingEastMoney)
+        {
+            Log("验证窗口正在打开中，稍等一下——第一次要几秒（启动浏览器内核 + 打开东财页面）。");
+            return;
+        }
+        _verifyingEastMoney = true;
+        try
+        {
+            Log("正在打开东财验证窗口……第一次要几秒（启动浏览器内核 + 打开东财页面）。");
+            await _browserChannel.ShowForManualVerificationAsync();
+            Log("验证窗口已打开：按页面提示过一次验证，完了直接关掉那个窗口即可，"
+              + "Cookie 会留在 data/local/webview2，后面的板块抓取会带着它走。");
+        }
+        catch (Exception ex)
+        {
+            Log($"打开东财验证窗口失败：{ex.Message}");
+        }
+        finally { _verifyingEastMoney = false; }
+    }
+
+    // 【新建组】和【右键移到别的组】2026-09-02 做了又撤掉：空组建出来没法往里放任务，
+    // 而跨组移动要连带换重复规则和触发时刻，牵扯到"这一项今天跑过没有"该怎么算。
+    // 先把默认那五个组用顺了再说（用户原话："先把现在的组理顺再说"）。
+    // 组的模型本身支持任意多个组，将来要恢复这两个功能，加回命令 + 界面入口即可。
+
+    // 组之间的换位（↑↓）2026-09-02 做了又撤：组的先后**不决定**执行先后——真正决定的是
+    // 各组的「不早于」和重复规则档位（见 PlanRunner.FindDue，同时到期且同档时才看排列顺序）。
+    // 而现有这三个组（每工作日+到点就跑 / 每月+空闲时补 / 手动）永远凑不出"同时到期且同档"，
+    // 那个顺序一次都用不上。组**内**子项的排序仍在（组里是严格按顺序串行跑的）。
+
+    /// <summary>
+    /// 把一整组**立刻**跑一遍（2026-09-02）：从上到下，只跑组里勾选了的项。
+    ///
+    /// ⚠ 仍是**一项一项串行**跑，跟计划引擎的做法一样——组不是"一次调用"，
+    /// 所以某一项失败不影响后面的，中途点【停止全部】也停得下来。
+    /// </summary>
+    private async Task RunPlanGroupNowAsync(PlanGroupViewModel? group)
+    {
+        if (group == null) return;
+        // 同 RunPlanItemNowAsync：只拦"有任务在跑"，计划待命时照样能手动跑
+        if (IsBusy) { Log($"「{group.Name}」没有执行：另一个任务正在跑，等它结束再点（要停当前任务用【停止全部】）。"); return; }
+
+        var todo = group.Items.Where(i => i.Enabled).ToList();
+        if (todo.Count == 0) { Log($"「{group.Name}」里没有勾选的项，什么都没跑。"); return; }
+
+        Log($"===== 手动执行整组「{group.Name}」（{todo.Count} 项，按顺序串行）=====");
+        // 整组共用一个令牌：点【停止全部】要能把"后面还没跑的项"一起掐掉，而不是只停当前这一项
+        _manualCts?.Dispose();
+        _manualCts = new CancellationTokenSource();
+        try
+        {
+            foreach (var vm in todo)
+            {
+                if (_manualCts?.IsCancellationRequested == true) { Log("已停止，后面的项不再执行。"); break; }
+                await RunPlanItemNowAsync(vm);
+                // 一项失败不拖累后面的——这正是拆分和分组要保住的东西，所以这里不 break
+            }
+        }
+        finally
+        {
+            // ⚠ 必须在 finally 里收（2026-09-04）：中途抛出去的话，一个**已取消**的令牌会留在
+            // _manualCts 上，下次手动执行 `??=` 正好捡到它，任务一开跑就被立刻取消——
+            // 表现是"点了执行，秒结束，什么也没干"，而且看不出为什么。
+            _manualCts?.Dispose();
+            _manualCts = null;
+        }
+        Log($"===== 整组「{group.Name}」执行结束 =====");
+    }
+
     /// <summary>把选中的那一项**立刻**跑一次（不走队列，也不影响它的重复规则）。</summary>
     private async Task RunPlanItemNowAsync(PlanItemViewModel? vm)
     {
         if (vm == null) return;
-        // 原来这里是**静默 return**：计划正在跑的时候点【执行】，什么都不发生、也不说为什么，
-        // 用户只能反复点（2026-09-01 反馈）。现在至少说清楚。
-        if (IsPlanRunning)
-        {
-            Log($"【{vm.Name}】没有执行：计划正在运行中。任务是严格串行的，要单独跑这一项请先点【停止计划】。");
-            return;
-        }
+        // ⚠ 拦的是"**有任务正在跑**"，不是"计划开着"（2026-09-03 用户要求）：
+        // 计划大部分时间处于**待命**——没在抓任何东西，只是等下一个到点时刻。那会儿程序是空闲的，
+        // 没道理不让手动插一项。真正不能并发的只有"同时抓两份数据"（共用限流器和数据库，
+        // 并发只会一起撞数据源配额），那由 IsBusy 挡住就够了。
+        //
+        // 原来这里连同按钮的 CanExecute 一起判了 IsPlanRunning，于是计划一开着按钮就是禁用的，
+        // 点下去什么都不发生、也不说为什么——深色主题下连"它是灰的"都看不出来（用户："点执行没反应"）。
         if (IsBusy)
         {
-            Log($"【{vm.Name}】没有执行：另一个任务正在跑，等它结束再点。");
+            Log($"【{vm.Name}】没有执行：另一个任务正在跑，等它结束再点（要停当前任务用【停止全部】）。");
             return;
         }
 
@@ -1251,12 +1799,31 @@ public class MainViewModel : INotifyPropertyChanged
         // 没这个标记就看不出到底点没点上。
         vm.StatusText = "▶ 执行中…";
         vm.StatusLevel = 3;
-        _planCts = new CancellationTokenSource();
+        // 整组执行时令牌由外层建好、外层负责回收；单独跑一项时自己建自己收。
+        // 分清"谁拥有"很要紧：组里逐项调这里，要是每项跑完都把令牌置 null，
+        // 点【停止全部】就只能掐掉当前这一项，后面还没跑的照样往下走。
+        bool ownsCts = _manualCts == null;
+        var cts = _manualCts ??= new CancellationTokenSource();
         try
         {
-            await ExecutePlanItemAsync(vm.Model, null, new Progress<string>(Log), _planCts.Token);
+            var result = await ExecutePlanItemAsync(vm.Model, null, new Progress<string>(Log), cts.Token);
             vm.Model.LastEnd = DateTime.Now;
-            vm.Model.LastOutcome = RunOutcome.Ok;
+
+            // 「根本没开工」不能记成完成（2026-09-04）：原来这里无条件写 Ok、连返回值都没看，
+            // 结果数据源还在限流熔断里、一行都没抓，界面上照样是绿勾"09:25 完成"。
+            // 更要命的是 FetchPlanItem.AlreadyRanOn 只认 Ok——记成完成的话今天就不会再跑了。
+            if (result?.SkippedReason is { } why)
+            {
+                vm.Model.LastOutcome = RunOutcome.Skipped;
+                vm.Model.LastMessage = why;
+                Log($"⏸ 【{vm.Name}】本轮没开工——{why}。今天恢复之后还会再来。");
+            }
+            else
+            {
+                vm.Model.LastOutcome = RunOutcome.Ok;
+                // 跨轮才做得完的活（板块成分股这种）把存量进度显示出来，别只说"完成"
+                vm.Model.LastMessage = result?.Progress;
+            }
         }
         catch (OperationCanceledException) { vm.Model.LastOutcome = RunOutcome.Cancelled; }
         catch (Exception ex)
@@ -1271,8 +1838,7 @@ public class MainViewModel : INotifyPropertyChanged
             if (vm.StatusLevel == 3) vm.StatusLevel = 0;   // 让 RecalcTimeline 能接管这一行
             vm.RefreshStatus();
             RecalcTimeline();
-            _planCts?.Dispose();
-            _planCts = null;
+            if (ownsCts) { _manualCts?.Dispose(); _manualCts = null; }
             Log($"===== 计划项【{vm.Name}】结束 =====");
         }
     }
@@ -1332,9 +1898,13 @@ public class MainViewModel : INotifyPropertyChanged
             IsBusy = false;
             RefreshDataStatus();
             RefreshFailedCodeCount();
-            // 自动重试保持原样：它不占 IsBusy、到点忙就顺延，跟计划天然不打架，
-            // 而它"等到当天 21:00 之后再试"的时机是计划排不出来的（数据源盘后逐步更新）。
-            ScheduleAutoRetry();
+            // 自动重试不占 IsBusy、到点忙就顺延，跟计划天然不打架，而它"等到当天 21:00 之后再试"
+            // 的时机是计划排不出来的（数据源盘后逐步更新）。
+            // ⚠ 2026-09-02：计划正在跑的时候**不在这里排**——那样每跑完一项就重排一次，
+            //   【拉取全部】拆成 13 项后一天要重排十几次。改成计划一轮收尾时统一排一次
+            //   （见 StartPlanAsync 传给 PlanRunner 的 onRoundFinished）。
+            //   手动点某一行【执行】时 IsPlanRunning 是 false，仍旧立刻排，行为不变。
+            if (!IsPlanRunning) ScheduleAutoRetry();
         }
     }
 
@@ -1369,6 +1939,23 @@ public class MainViewModel : INotifyPropertyChanged
 
             case FetchActionId.FetchEarningsSchedule:
                 return _orchestrator.RunFetchEarningsScheduleAsync(progress, ct);
+
+            case FetchActionId.FetchEarningsForecast:
+                return _orchestrator.RunFetchEarningsForecastAsync(progress, ct);
+
+            case FetchActionId.FetchLhbSeat:
+                return _orchestrator.RunFetchLhbSeatAsync(progress, ct);
+
+            case FetchActionId.FetchMarketEvents:
+                return _orchestrator.RunFetchMarketEventsAsync(progress, ct);
+
+            case FetchActionId.FetchStockBoardMap:
+                return _orchestrator.RunFetchStockBoardMapAsync(progress, ct);
+
+            case FetchActionId.FetchMoneyFlowDetail:
+                // 一只约 2 秒（限流器间隔占大头），按空窗剩余时间估本轮抓几只
+                return _orchestrator.RunFetchMoneyFlowDetailAsync(
+                    progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(2)));
 
             case FetchActionId.RebuildAdjSeries:
                 // 纯本地计算，一只十年约 50 毫秒；给足余量按 0.2 秒/只估
@@ -1420,12 +2007,104 @@ public class MainViewModel : INotifyPropertyChanged
                 if (endText.Length > 0 && !int.TryParse(endText, out endYear))
                     throw new InvalidOperationException($"结束年份格式不对：\"{endText}\"");
                 return _orchestrator.RunFetchYearAsync(
-                    SelectedSource, startYear, endYear, ParseAnnouncementKeywords(),
+                    SelectedSource, startYear, endYear, ParseAnnouncementKeywords(item.KeywordsText),
                     progress, ct, item.OverwriteQfq);
             }
 
             case FetchActionId.OptimizeDatabase:
                 return _orchestrator.RunOptimizeDatabaseAsync(progress, ct);
+
+            // ───── 【拉取全部】拆出来的 13 个原子项（2026-09-02）─────
+            // 它们调的是编排层 FetchOrchestrator.Steps.cs 里的单项入口，跟【拉取全部】内部走的是
+            // 同一段抓取逻辑（那边只是包了个壳、自己建 errors/stats），所以两边行为一致。
+
+            case FetchActionId.StepRoster:
+                return _orchestrator.RunStepRosterAndMarketCapAsync(SelectedSource, progress, ct);
+
+            case FetchActionId.StepNetInflow:
+                return _orchestrator.RunStepNetInflowAsync(progress, ct, SpecificDayOf(item));
+
+            case FetchActionId.StepAnnouncements:
+                return _orchestrator.RunStepAnnouncementsAsync(
+                    ParseAnnouncementKeywords(item.KeywordsText), progress, ct, specificDay: SpecificDayOf(item));
+
+            case FetchActionId.StepIndexBars:
+                return _orchestrator.RunStepIndexBarsAsync(
+                    SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
+
+            case FetchActionId.StepStockDayBars:
+                // 「只抓某一天」＝原【补指定历史日】那一路（不看水位线、不补断档）
+                return item.EffectiveMode == FetchMode.SpecificDay
+                    ? _orchestrator.RunStepStockDayBarsForDayAsync(
+                        SelectedSource, SpecificDayOf(item) ?? DateTime.Today, progress, ct)
+                    : _orchestrator.RunStepStockDayBarsAsync(
+                        SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
+
+            case FetchActionId.StepStockHfqBars:
+                return _orchestrator.RunStepStockHfqBarsAsync(
+                    SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
+
+            case FetchActionId.StepStockRawBars:
+                // 「首次整段回补」＝原【补不复权历史】：把每只补到跟前复权一样长，支持按空窗限量分批
+                return item.EffectiveMode == FetchMode.FirstBackfill
+                    ? _orchestrator.RunFetchRawBarsAsync(
+                        SelectedSource, progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(4)))
+                    : _orchestrator.RunStepStockRawBarsAsync(
+                        SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
+
+            case FetchActionId.StepEtfBars:
+                return _orchestrator.RunStepEtfBarsAsync(
+                    SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
+
+            case FetchActionId.StepDelistedTails:
+                return _orchestrator.RunStepDelistedTailsAsync(SelectedSource, progress, ct);
+
+            case FetchActionId.StepBoardIndex:
+                return _orchestrator.RunStepSynthesizeBoardIndexAsync(progress, ct);
+
+            case FetchActionId.StepMargin:
+                // 「首次整段回补」＝原【一键补齐每日历史】的融资那半边
+                return item.EffectiveMode == FetchMode.FirstBackfill
+                    ? _orchestrator.RunStepBackfillMarginAsync(progress, ct)
+                    : _orchestrator.RunStepMarginRecentAsync(ParseOptionalDate(item.DateText), progress, ct);
+
+            case FetchActionId.StepLhb:
+                return item.EffectiveMode == FetchMode.FirstBackfill
+                    ? _orchestrator.RunStepBackfillLhbAsync(progress, ct)
+                    : _orchestrator.RunStepLhbDayAsync(ParseOptionalDate(item.DateText), progress, ct);
+
+            case FetchActionId.StepDayCoverage:
+                return _orchestrator.RunStepDayCoverageCheckAsync(progress, ct);
+
+            // ───── 另外三处复合动作拆出来的（2026-09-02）─────
+
+            case FetchActionId.StepIndexCons:
+                return _orchestrator.RunStepIndexConsOnlyAsync(progress, ct);
+
+            case FetchActionId.StepIndexWeight:
+                return _orchestrator.RunStepIndexWeightOnlyAsync(progress, ct);
+
+            case FetchActionId.StepEtfIndexMap:
+                return _orchestrator.RunStepEtfIndexMapAsync(progress, ct);
+
+            case FetchActionId.StepBoards:
+                // 已退役，老计划里还排着的话仍按原样跑（列表+成分股）；
+                // FetchPlan.MigrateRetired 会把它换成下面那两项。
+                return _orchestrator.RunStepBoardsOnlyAsync(progress, ct);
+
+            case FetchActionId.StepBoardList:
+                return _orchestrator.RunStepBoardListAsync(progress, ct);
+
+            case FetchActionId.StepBoardMembers:
+                return _orchestrator.RunStepBoardMembersAsync(progress, ct);
+
+            case FetchActionId.StepFullAudit:
+                // 纯查库但很重（千万行级比对），推到线程池，别让界面假死
+                return Task.Run(() => _orchestrator.RunStepFullAuditAsync(progress, ct, item.ThoroughAudit), ct);
+
+            case FetchActionId.StepReparseBankPdf:
+                // 纯 CPU（PDF 解析/OCR），必须推到线程池，理由同 BankRegulatory 那一项
+                return Task.Run(() => _orchestrator.RunStepReparseBankReportsAsync(progress, ct), ct);
 
             default:
                 throw new InvalidOperationException($"还没实现的动作：{item.Action}");
@@ -1500,5 +2179,28 @@ public class MainViewModel : INotifyPropertyChanged
     {
         if (int.TryParse((rowValue ?? "").Trim(), out var fromRow) && fromRow > 0) return fromRow;
         return int.TryParse(LookbackYearsText.Trim(), out var y) && y > 0 ? y : 3;
+    }
+
+    /// <summary>
+    /// 计划行上那个"日期"格（可留空）。留空 = 用今天，这是融资余额/龙虎榜这类**按交易日**的项
+    /// 的日常用法；填了就是补那一天。格式不对直接抛——引擎会把这一项记成失败并写清原因，
+    /// 比默默按今天跑要好（那样人会以为补上了）。
+    /// </summary>
+    /// <summary>
+    /// 这一行在「只抓某一天」模式下要抓的日期：日期格填了就用它，留空＝今天。
+    /// 不是这个模式就返回 null（＝增量，不按天）。
+    /// </summary>
+    private static DateTime? SpecificDayOf(FetchPlanItem item) =>
+        item.EffectiveMode == FetchMode.SpecificDay
+            ? ParseOptionalDate(item.DateText) ?? DateTime.Today
+            : null;
+
+    private static DateTime? ParseOptionalDate(string? text)
+    {
+        var t = (text ?? "").Trim();
+        if (t.Length == 0) return null;
+        if (!DateOnly.TryParseExact(t, "yyyy-MM-dd", out var date))
+            throw new InvalidOperationException($"日期格式不对：\"{t}\"，要 yyyy-MM-dd");
+        return date.ToDateTime(TimeOnly.MinValue);
     }
 }

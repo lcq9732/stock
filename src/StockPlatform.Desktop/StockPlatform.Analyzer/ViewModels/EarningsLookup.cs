@@ -12,13 +12,19 @@ namespace StockPlatform.Analyzer.ViewModels;
 /// </summary>
 public static class EarningsLookup
 {
-    /// <summary>每只股票"下一次财报日"，键是 6 位代码。取不到就是空表。</summary>
+    /// <summary>
+    /// 每只股票该显示的那条财报日记录，键是 6 位代码。取不到就是空表。
+    ///
+    /// 优先"还没披露的下一期"，没有就退回"最近一期已披露"——两期都披露完、下期预约表还没发布的
+    /// 那段空窗里，后者是唯一能显示的东西（见 GetLatestByCode 的注释）。
+    /// 界面据 <see cref="EarningsScheduleRow.Pending"/> 区分这两种，别混为一谈。
+    /// </summary>
     public static Dictionary<string, EarningsScheduleRow> LoadUpcoming()
     {
         try
         {
             var paths = new AnalyzerPaths();
-            return new SqliteEarningsScheduleRepository(paths.CurrentDb).GetUpcomingByCode();
+            return new SqliteEarningsScheduleRepository(paths.CurrentDb).GetLatestByCode();
         }
         catch
         {

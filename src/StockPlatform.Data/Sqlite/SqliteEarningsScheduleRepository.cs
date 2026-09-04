@@ -1,3 +1,4 @@
+﻿using System.Globalization;
 using Microsoft.Data.Sqlite;
 using StockPlatform.Logic.Models;
 
@@ -125,6 +126,39 @@ public class SqliteEarningsScheduleRepository
         return map;
     }
 
+    /// <summary>
+    /// 每只股票在界面上该显示的那一条：**优先"还没披露的最早一期"**（那才是"下次财报"），
+    /// 没有就退回**"最近一期已披露"**。
+    ///
+    /// ⚠ 为什么要有这个退路（2026-09-02 用户反馈"库里明明有，列却是空的"）：
+    /// 接口只给最近两期，而这两期一旦都披露完，就进入一段**空窗**——下一期的预约表还没发布。
+    /// 光取"未披露"的话，这段空窗里全市场 5000 多只票只剩 3 只有值，整列几乎全空，
+    /// 看着像功能坏了。空窗期显示"最近一次财报是哪天出的"同样有用，只是要在界面上
+    /// 用颜色和提示区分开：**未披露的是预告，已披露的是回顾**（见 EarningsScheduleRow.Pending）。
+    /// </summary>
+    public Dictionary<string, EarningsScheduleRow> GetLatestByCode()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        // 排序即优先级：未披露的排前面（取最早那期），已披露的排后面（取最晚那期）
+        cmd.CommandText = $"""
+            SELECT {Cols} FROM EarningsSchedule
+            ORDER BY code,
+                     CASE WHEN actual_date IS NULL THEN 0 ELSE 1 END,
+                     CASE WHEN actual_date IS NULL THEN report_period END ASC,
+                     report_period DESC;
+            """;
+        using var r = cmd.ExecuteReader();
+        var map = new Dictionary<string, EarningsScheduleRow>(StringComparer.Ordinal);
+        while (r.Read())
+        {
+            var row = Read(r);
+            if (row.EffectiveDate is null) continue;
+            if (!map.ContainsKey(row.Code)) map[row.Code] = row;   // 每只票只留排序最靠前的那条
+        }
+        return map;
+    }
+
     /// <summary>某一个报告期的全部记录（复查时用来挑出还没披露的那些）。</summary>
     public List<EarningsScheduleRow> GetByPeriod(DateTime period)
     {
@@ -151,6 +185,43 @@ public class SqliteEarningsScheduleRepository
     }
 
     /// <summary>还没实际披露的记录数——就是"还要盯着看会不会改期"的那批。</summary>
+    /// <summary>
+    /// 每只票**已经实际披露**的最新报告期（截至 <paramref name="asOf"/>）。
+    ///
+    /// 给财务报表和金融监管指标判断"这只票现在到底有没有新数据可取"用的。原来两边都拿
+    /// <c>LatestExpectedReportPeriod</c>——**法定披露截止日**——一刀切，跟每家公司实际
+    /// 什么时候披露没关系：2026 年半年报法定截止 8/31，而 66% 的公司挤在 8/25–8/29 那五天
+    /// 披露，程序却要等 8/31 过完才认这一期，于是 5478 只同时涌进待补队列，按每轮 300 只
+    /// 要补三四天，数据到 9 月上旬才可用（2026-09-03 用户提出用本地的预约日表来判断）。
+    ///
+    /// 用的是 <c>actual_date</c>（实际披露日，巨潮官方数据）而不是预约日——预约日会改，
+    /// 实测有 12% 改过；实际披露日是既成事实，不会变。
+    ///
+    /// ⚠ 查不到记录的票（新股、B股、老退市股）**不在返回值里**，调用方必须退回原来的
+    ///   法定截止日判据。少取比多取危险得多。
+    /// </summary>
+    public Dictionary<string, DateTime> GetLatestDisclosedPeriodByCode(DateTime asOf)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT code, MAX(report_period) FROM EarningsSchedule
+            WHERE actual_date IS NOT NULL AND actual_date <> '' AND actual_date <= $asOf
+            GROUP BY code;
+            """;
+        cmd.Parameters.AddWithValue("$asOf", asOf.ToString(DateFormat, CultureInfo.InvariantCulture));
+        var map = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            if (r.IsDBNull(1)) continue;
+            if (DateTime.TryParse(r.GetString(1), CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out var period))
+                map[r.GetString(0)] = period.Date;
+        }
+        return map;
+    }
+
     public int PendingCount()
     {
         using var conn = Open();

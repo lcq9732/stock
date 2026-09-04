@@ -96,6 +96,38 @@ public class SqliteIndexRepository : IIndexConsRepository
         tx.Commit();
     }
 
+    /// <summary>
+    /// 每个指数本地最新的权重基准日（2026-09-02）——给"这一期已经抓过就别再抓"用，
+    /// 见 <see cref="IIndexConsRepository.GetLatestWeightDateByIndex"/>。
+    /// 拿不到基准日时写的是空串占位（见 ReplaceWeights），这里按"没有"处理、不参与判断。
+    /// </summary>
+    public Dictionary<string, DateTime> GetLatestWeightDateByIndex()
+    {
+        var result = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT index_code, MAX(as_of_date) FROM IndexWeight
+                WHERE as_of_date <> '' GROUP BY index_code;
+                """;
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (r.IsDBNull(1)) continue;
+                if (DateTime.TryParseExact(r.GetString(1), DateFormat,
+                        CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
+                    result[r.GetString(0)] = d;
+            }
+        }
+        catch
+        {
+            // 表还不存在（全新库）就当"一个都没有"，让调用方全量抓一遍
+        }
+        return result;
+    }
+
     public void ReplaceEtfIndexMap(IEnumerable<(string EtfCode, string? IndexCode, string MatchType)> rows)
     {
         using var conn = Open();

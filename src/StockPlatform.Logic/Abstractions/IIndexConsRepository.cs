@@ -15,6 +15,14 @@ public interface IIndexConsRepository
     /// <summary>用一次抓取结果替换某指数的成分权重（先删该 index_code 旧行再写）。</summary>
     void ReplaceWeights(string indexCode, IEnumerable<IndexWeightRow> rows);
 
+    /// <summary>
+    /// 每个指数**本地最新的权重基准日**（2026-09-02 新增）——给"这一期已经抓过了就别再抓"用。
+    ///
+    /// 中证的 closeweight.xls 是**月度**更新（基准日是月末那个交易日），而这一项原来每次跑都要
+    /// 硬抓 732 个指数，很容易把中证那边的反爬撞醒。有了这份"本地到哪一期"，月中再跑就能整批跳过。
+    /// </summary>
+    Dictionary<string, DateTime> GetLatestWeightDateByIndex();
+
     /// <summary>整体替换 ETF→指数映射表（清空再写）。indexCode 为 null 表示该 ETF 未匹配到指数。</summary>
     void ReplaceEtfIndexMap(IEnumerable<(string EtfCode, string? IndexCode, string MatchType)> rows);
 

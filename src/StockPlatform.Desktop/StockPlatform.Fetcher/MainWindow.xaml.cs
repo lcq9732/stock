@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Windows;
 // 同样是UseWindowsForms带来的歧义（见App.xaml.cs顶部注释）——MessageBox这个类名WPF/WinForms
 // 都有，显式取别名，确保下面几处MessageBox.Show()用的还是WPF那个（跟现有调用方式保持一致）。
@@ -167,21 +167,61 @@ public partial class MainWindow : Window
 
         var item = _dragItem;
         _dragItem = null;                  // 一次拖动只触发一次
-        System.Windows.DragDrop.DoDragDrop(PlanGrid, item, System.Windows.DragDropEffects.Move);
+        // 拖动源是**这一组的那张表**（2026-09-02 分组之后每组一张），不再是全局那一个 PlanGrid
+        if (sender is System.Windows.DependencyObject src)
+            System.Windows.DragDrop.DoDragDrop(src, item, System.Windows.DragDropEffects.Move);
     }
 
+    /// <summary>
+    /// 组内换位（2026-09-02 分组之后）。**只在同一组内挪**：拖到别的组上不动作——
+    /// 跨组挪意味着换重复规则和触发时刻，不该由一次拖动悄悄完成。
+    /// </summary>
     private void PlanGrid_Drop(object sender, System.Windows.DragEventArgs e)
     {
         if (DataContext is not MainViewModel vm) return;
         if (e.Data.GetData(typeof(PlanItemViewModel)) is not PlanItemViewModel dragged) return;
+        if ((sender as FrameworkElement)?.DataContext is not PlanGroupViewModel group) return;
 
-        int from = vm.PlanItems.IndexOf(dragged);
-        if (from < 0) return;
+        int from = group.Items.IndexOf(dragged);
+        if (from < 0) return;   // 从别的组拖过来的，忽略
 
         // 落点在哪一行上就插到哪一行的位置；落在空白处（表格下方）就放到最后
         var target = RowItemAt(e.OriginalSource as DependencyObject) as PlanItemViewModel;
-        int to = target != null ? vm.PlanItems.IndexOf(target) : vm.PlanItems.Count - 1;
-        vm.MovePlanItem(from, to);
+        int to = target != null ? group.Items.IndexOf(target) : group.Items.Count - 1;
+        vm.MovePlanItem(group, from, to);
+    }
+
+    /// <summary>
+    /// 滚轮落在任务表上要能滚动整页（2026-09-03 用户反馈："鼠标中键在 Grid 上是 Scroll 不了，
+    /// 需要放到 Scroll Bar 才可以"）。
+    ///
+    /// 为什么会这样：DataGrid 自带一个 ScrollViewer，滚轮事件一进它就被吃掉了；而这些表
+    /// 摆在外层 ScrollViewer 里、拿到的是无限高度，自己**根本不需要滚**——于是事件既没人用，
+    /// 也不会往上冒泡，鼠标只要停在表格上滚轮就没反应。分组之前整页只有一张表、它自己就是
+    /// 滚动的那个，所以没露出来。
+    ///
+    /// 这里把滚轮直接转交给外面那个 ScrollViewer。一格 <c>e.Delta</c>（120px，约四行）
+    /// 跟浏览器手感一致，比 WPF 默认的三行要跟手。
+    /// </summary>
+    private void PlanGrid_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        if (e.Handled) return;
+        var outer = OuterScrollViewer(sender as DependencyObject);
+        if (outer == null) return;
+        outer.ScrollToVerticalOffset(outer.VerticalOffset - e.Delta);
+        e.Handled = true;
+    }
+
+    /// <summary>从某个元素往上找第一个 ScrollViewer——DataGrid **内部**那个是它的子级，不会被找到。</summary>
+    private static System.Windows.Controls.ScrollViewer? OuterScrollViewer(DependencyObject? from)
+    {
+        int guard = 0;
+        while (from != null && guard++ < 200)
+        {
+            from = System.Windows.Media.VisualTreeHelper.GetParent(from);
+            if (from is System.Windows.Controls.ScrollViewer sv) return sv;
+        }
+        return null;
     }
 
     /// <summary>

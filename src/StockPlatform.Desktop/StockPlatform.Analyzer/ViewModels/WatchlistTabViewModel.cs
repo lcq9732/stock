@@ -193,12 +193,22 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     /// <summary>距财报还有几天（自然日）；没有日期为 null，已过去为负数。</summary>
     private int? DaysToEarnings => EffectiveEarningsDate is { } d ? (int)(d - DateTime.Today).TotalDays : null;
 
-    /// <summary>临近财报标红——跟晨检用同一个提前量（<see cref="MorningStockRowViewModel.EarningsWarnDays"/>），
-    /// 两处不能各定各的，否则这边红了那边不提醒。跨财报持仓是回测参数里没有的事件风险。</summary>
-    public Brush EarningsColor =>
-        DaysToEarnings is { } d && d >= 0 && d <= MorningStockRowViewModel.EarningsWarnDays
-            ? ThemeBrushes.Firebrick
-            : ThemeBrushes.Foreground;
+    /// <summary>
+    /// 三种颜色对应三种含义，别混：
+    ///   红  = 临近财报（提前量跟晨检共用 <see cref="MorningStockRowViewModel.EarningsWarnDays"/>，
+    ///        两处不能各定各的，否则这边红了那边不提醒）——跨财报持仓是回测参数里没有的事件风险；
+    ///   常色 = 将来某天要披露；
+    ///   **灰** = 日期已经过去了，这是**上一次**财报，不是下一次。
+    ///
+    /// 灰这一档是 2026-09-02 加的：接口只给最近两期，两期都披露完之后会有一段空窗（下期预约表还没发布），
+    /// 那时列里显示的是"最近一次已披露"。不压暗的话跟未来的预约日长得一模一样，很容易看成"下次财报在 8-29"。
+    /// </summary>
+    public Brush EarningsColor => DaysToEarnings switch
+    {
+        { } d when d >= 0 && d <= MorningStockRowViewModel.EarningsWarnDays => ThemeBrushes.Firebrick,
+        < 0 => ThemeBrushes.Gray,
+        _ => ThemeBrushes.Foreground,
+    };
 
     public string EarningsTooltip => DaysToEarnings switch
     {
@@ -209,7 +219,11 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
         > 0 and <= MorningStockRowViewModel.EarningsWarnDays =>
             $"还有 {DaysToEarnings} 天披露财报（{EffectiveEarningsDate:MM-dd}{EarningsSourceNote}）。\n短线法/回调法的参数是按普通交易日回测的，没区分财报窗口：预期打得越满，兑现日越容易利好出尽。",
         > 0 => $"{EffectiveEarningsDate:yyyy-MM-dd} 披露财报，还有 {DaysToEarnings} 天{EarningsSourceNote}。",
-        _ => $"{EffectiveEarningsDate:yyyy-MM-dd} 已披露。记得跑一次\"季度/不定期\"抓取，把新报告期入库——在那之前，各方法的财务条件用的还是上一期数据。",
+        // 日期已经过去 —— 这是**上一次**财报，不是下一次。列里压成灰色就是这个意思。
+        _ => $"⚠ 这是**上一次**财报（{EffectiveEarningsDate:yyyy-MM-dd} 已披露），不是下一次。\n"
+           + "下一期的预约表还没发布——接口只给最近两期，两期都披露完就会有这么一段空窗，"
+           + "等交易所放出下一期预约表，这里会自动换成新日期。\n"
+           + "另外记得跑一次\"季度/不定期\"抓取把新报告期入库，在那之前各方法的财务条件用的还是上一期数据。",
     };
 
     /// <summary>

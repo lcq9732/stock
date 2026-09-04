@@ -20,7 +20,19 @@ public record MarketCapEntry(string Code, double CirculatingMarketCap);
 /// 见 <see cref="StockPlatform.Logic.Abstractions.StockListEntry.LastPrice"/>）；逐只查询的
 /// EastMoney/Tencent 实现只取了市值字段、没取价格，所以是 null——它们目前都没有被使用，真要启用得先
 /// 补上这个信号，否则盘中抓的值会被记到上一个交易日。</summary>
+/// <param name="AllStocks">
+/// 这次扫描看到的**全市场标的**（代码+名称），2026-09-02 新增。
+///
+/// 为什么加它：新浪那个列表接口一次就同时给出名册和市值（<c>nmc</c> 字段），可原来的
+/// 【拉取全部】先用 <see cref="StockPlatform.Logic.Abstractions.IStockListProvider"/> 扫一遍拿名册、
+/// 市值这一步在 <see cref="StockPlatform.Logic.Abstractions.IMarketCapFetcher"/> 里面**又扫了一遍**
+/// 同一个接口——约 55 个请求白花。把扫描结果带出来，调用方就能一次扫描同时刷新名册和市值。
+///
+/// 只有"扫全市场列表拿市值"的实现（SinaListMarketCapFetcher）填得出；逐只查询的实现
+/// （EastMoney/Tencent）返回空列表，调用方看到空就回退到单独取名册的老路子。
+/// </param>
 public record MarketCapFetchResult(
     List<MarketCapEntry> Entries,
     List<(string Code, string Name)> NewlyDiscoveredCodes,
-    bool? QuotesAreLive = null);
+    bool? QuotesAreLive = null,
+    List<(string Code, string Name)>? AllStocks = null);

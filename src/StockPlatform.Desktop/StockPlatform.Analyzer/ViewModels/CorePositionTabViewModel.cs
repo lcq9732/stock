@@ -56,11 +56,14 @@ public class CorePositionRowViewModel : ISelectableRow, INotifyPropertyChanged
     private int? DaysToEarnings => AutoEarnings?.EffectiveDate is { } d
         ? (int)(d - DateTime.Today).TotalDays : null;
 
-    /// <summary>临近财报标个色。年报尤其要紧——分红方案跟它一起出。</summary>
-    public Brush EarningsColor =>
-        DaysToEarnings is { } d && d >= 0 && d <= MorningStockRowViewModel.EarningsWarnDays
-            ? ThemeBrushes.Firebrick
-            : ThemeBrushes.Foreground;
+    /// <summary>临近财报标个色；已经过去的压成灰（那是**上一次**财报，不是下一次）。
+    /// 年报尤其要紧——分红方案跟它一起出。含义同 WatchlistTabViewModel.EarningsColor。</summary>
+    public Brush EarningsColor => DaysToEarnings switch
+    {
+        { } d when d >= 0 && d <= MorningStockRowViewModel.EarningsWarnDays => ThemeBrushes.Firebrick,
+        < 0 => ThemeBrushes.Gray,
+        _ => ThemeBrushes.Foreground,
+    };
 
     public string EarningsTooltip
     {
@@ -77,7 +80,8 @@ public class CorePositionRowViewModel : ISelectableRow, INotifyPropertyChanged
             };
             string head = DaysToEarnings switch
             {
-                < 0 => $"{a.EffectiveDate:yyyy-MM-dd} 已披露",
+                < 0 => $"⚠ 这是**上一次**财报（{a.EffectiveDate:yyyy-MM-dd} 已披露），不是下一次；"
+                     + "下一期预约表还没发布",
                 0 => "今天披露财报",
                 { } d => $"还有 {d} 天披露财报（{a.EffectiveDate:MM-dd}）",
                 _ => $"{a.EffectiveDate:yyyy-MM-dd} 披露财报",

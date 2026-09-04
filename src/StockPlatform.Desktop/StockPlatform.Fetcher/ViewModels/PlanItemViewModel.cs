@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using StockPlatform.Scheduling;
 
@@ -13,9 +13,42 @@ public sealed record RepeatOption(RepeatKind Kind, string Text)
         new(RepeatKind.Weekly, "每周"),
         new(RepeatKind.Monthly, "每月"),
         new(RepeatKind.Once, "仅一次"),
-        new(RepeatKind.WhenIdle, "空闲时"),
         new(RepeatKind.Manual, "手动"),
     ];
+}
+
+/// <summary>
+/// "到期之后怎么跑"下拉里的一项（2026-09-02，见 <see cref="RunPacing"/>）。
+///
+/// 「空闲时」原来挤在重复规则里当一种"频率"，于是表达不了"每月 1 号到期、然后空闲时慢慢补"
+/// 这种组合——而那正是财务报表需要的。拆成两个下拉之后，"多久到期"和"急不急"各说各的。
+/// </summary>
+public sealed record PacingOption(RunPacing Value, string Text)
+{
+    public static readonly IReadOnlyList<PacingOption> All =
+    [
+        new(RunPacing.Immediate, "到点就跑"),
+        new(RunPacing.WhenIdle, "空闲时补"),
+    ];
+}
+
+/// <summary>
+/// "抓哪一段"下拉里的一项（2026-09-02，见 FetchMode）。
+/// 每一行只列**自己支持的**模式——不支持是有具体原因的（快照接口没有历史、
+/// 某些数据在老的【补指定历史日】里走的本来就是水位线增量），列出来只会让人选了没效果。
+/// </summary>
+public sealed record ModeOption(FetchMode Value, string Text)
+{
+    public static readonly IReadOnlyList<ModeOption> All =
+    [
+        new(FetchMode.Incremental, "增量"),
+        new(FetchMode.SpecificDay, "只抓某一天"),
+        new(FetchMode.FirstBackfill, "首次整段回补"),
+    ];
+
+    /// <summary>某个动作支持的那几项。</summary>
+    public static List<ModeOption> For(FetchMode supported) =>
+        All.Where(o => supported.HasFlag(o.Value)).ToList();
 }
 
 public sealed record WeekdayOption(DayOfWeek Value, string Text)
@@ -44,11 +77,55 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
     public FetchPlanItem Model { get; } = model;
     public FetchActionInfo Info => Model.Info;
 
+    /// <summary>
+    /// 这一行在计划里的**执行序号**（1 开始，2026-09-02）。拆细之后表里二十几行，
+    /// 没有序号很难说清"第几项跑"。它不进 json——顺序本来就是 Items 的顺序，
+    /// 存一份编号只会多一个可能对不上的真相（拖动排序后由 MainViewModel 统一重排）。
+    /// </summary>
+    private int _order;
+    public int Order
+    {
+        get => _order;
+        set { if (_order == value) return; _order = value; Raise(nameof(Order)); Raise(nameof(Number)); }
+    }
+
+    private int _groupIndex = 1;
+    /// <summary>所在组是第几组（1 开始）。跟 <see cref="Order"/> 一起拼成 <see cref="Number"/>。</summary>
+    public int GroupIndex
+    {
+        get => _groupIndex;
+        set { if (_groupIndex == value) return; _groupIndex = value; Raise(nameof(Number)); }
+    }
+
+    /// <summary>
+    /// 全表唯一的编号 <c>组号.序号</c>（2026-09-02）：日更组 1.01~1.18、季度组 2.xx、按需组 3.xx。
+    /// 有了它，"依赖"那一列才写得出"1.02"这种指向——光有组内序号会跨组重名。
+    ///
+    /// 序号补足**两位**：1.1 和 1.12 混在一列里左对齐时很容易看串行，1.01/1.12 就齐了。
+    /// </summary>
+    public string Number => $"{GroupIndex}.{Order:D2}";
+
+    private string _dependsText = "";
+    /// <summary>
+    /// 这一项依赖谁（显示成编号，如 <c>1.2</c>；硬前置带 <c>*</c>）。
+    /// 由 MainViewModel 在重编号时统一算好写进来——它才知道全表的编号分布。
+    /// </summary>
+    public string DependsText
+    {
+        get => _dependsText;
+        set { if (_dependsText == value) return; _dependsText = value; Raise(); }
+    }
+
     public string Name => Info.Name;
     public string DataSource => Info.DataSource;
     public string Note => Info.Note;
     public string FrequencyHint => Info.Frequency;
-    public string EstimateText => Describe(Info.Estimate);
+    /// <summary>
+    /// 预计耗时：跑过就用这一项自己最近几轮的**实测中位数**，没跑过才用目录里手填的估值
+    /// （见 FetchPlanItem.EffectiveEstimate）。手填值在拆细之后只是个数量级。
+    /// </summary>
+    public string EstimateText => Describe(Model.EffectiveEstimate)
+        + (Model.RecentDurationsSec.Count > 0 ? "" : "?");
 
     public bool Enabled
     {
@@ -83,19 +160,8 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
     /// </summary>
     public bool CannotEnable => !CanEnable;
 
-    /// <summary>"不早于"的时刻，空=接上一项。填错格式时保持原值不动（界面上会看到它弹回去）。</summary>
-    public string NotBeforeText
-    {
-        get => Model.NotBefore.HasValue ? Model.NotBefore.Value.ToString("HH\\:mm") : "";
-        set
-        {
-            if (!FetchPlan.TryParseTime(value, out var parsed)) { Raise(); return; }
-            if (Model.NotBefore == parsed) return;
-            Model.NotBefore = parsed;
-            Raise();
-            onChanged();
-        }
-    }
+    // 2026-09-02：子项不再有自己的「不早于」。时刻只在**组**上（PlanGroupViewModel.NotBeforeText）——
+    // 组里是串行跑的，给单项设时刻不起作用；要让某一项更晚开始，就把它单独拆成一组。
 
     /// <summary>
     /// **每一行自己一份**下拉选项，不共用 <see cref="RepeatOption.All"/> 那个静态列表。
@@ -113,83 +179,66 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
 
     public IReadOnlyList<WeekdayOption> WeekdayOptions { get; } = WeekdayOption.All.ToList();
 
-    /// <summary>
-    /// 下拉绑的是 <c>SelectedItem</c>（这个属性），不是 <c>SelectedValue</c>+<c>SelectedValuePath</c>。
-    /// 后者多绕一层"按路径取值再回填"，正是上面那个坑最容易发作的地方；直接给对象最稳。
-    /// </summary>
-    public RepeatOption SelectedRepeat
-    {
-        get => RepeatOptions.FirstOrDefault(o => o.Kind == Model.Repeat) ?? RepeatOptions[0];
-        set { if (value != null) Repeat = value.Kind; }
-    }
+    // ── 模式：抓哪一段（2026-09-02）──
+    // 跟 RepeatOptions 一样，**每行一份自己的列表**，绝不共用静态列表：共用会让十几个下拉
+    // 抢同一个 CollectionView 的当前项，选了新值写不回源（见上面 RepeatOptions 的注释）。
 
-    public WeekdayOption SelectedWeekday
-    {
-        get => WeekdayOptions.FirstOrDefault(o => o.Value == Model.Weekday) ?? WeekdayOptions[0];
-        set { if (value != null) Weekday = value.Value; }
-    }
+    public IReadOnlyList<ModeOption> ModeOptions { get; } = ModeOption.For(model.Info.SupportedModes);
 
-    public RepeatKind Repeat
+    /// <summary>只有一种模式可选的行（大多数）不显示这个下拉——摆一个只有一项的下拉纯属噪音。</summary>
+    public bool ShowMode => ModeOptions.Count > 1;
+
+    public ModeOption SelectedMode
     {
-        get => Model.Repeat;
+        get => ModeOptions.FirstOrDefault(o => o.Value == Model.EffectiveMode) ?? ModeOptions[0];
         set
         {
-            if (Model.Repeat == value) return;
-            Model.Repeat = value;
-            // 换成"手动"就顺手取消启用——两者互斥（见 CanEnable）。换回定期规则时不自动帮你勾上：
-            // 那是"要不要跑"的决定，得你自己点。
-            if (value == RepeatKind.Manual && Model.Enabled) Model.Enabled = false;
-            Raise();
-            Raise(nameof(SelectedRepeat));
-            Raise(nameof(Enabled));
-            Raise(nameof(CanEnable));
-            Raise(nameof(CannotEnable));
-            Raise(nameof(ShowWeekday));
-            Raise(nameof(ShowDayOfMonth));
-            Raise(nameof(ShowNotBefore));
+            if (value == null || Model.Mode == value.Value) return;
+            Model.Mode = value.Value;
+            Raise(nameof(SelectedMode));
+            Raise(nameof(NeedsDate));
+            Raise(nameof(EstimateText));
             onChanged();
         }
     }
 
-    public DayOfWeek Weekday
-    {
-        get => Model.Weekday;
-        set
-        {
-            if (Model.Weekday == value) return;
-            Model.Weekday = value;
-            Raise();
-            Raise(nameof(SelectedWeekday));
-            onChanged();
-        }
-    }
+    // ── 重复规则、星期几、每月几号：2026-09-02 起全在**组**上（见 PlanGroupViewModel）──
+    // 子行只读它们（显示用），不再各自可编辑：13 行日常任务摆 13 份一模一样的"每工作日"
+    // 正是拆细之后界面变乱的主因。
 
-    public string DayOfMonthText
-    {
-        get => Model.DayOfMonth.ToString();
-        set
-        {
-            if (!int.TryParse(value?.Trim(), out var d) || d is < 1 or > 31) { Raise(); return; }
-            if (Model.DayOfMonth == d) return;
-            Model.DayOfMonth = d;
-            Raise();
-            onChanged();
-        }
-    }
+    public RepeatKind Repeat => Model.Repeat;
 
-    public bool ShowWeekday => Model.Repeat == RepeatKind.Weekly;
-    public bool ShowDayOfMonth => Model.Repeat == RepeatKind.Monthly;
-
-    /// <summary>
-    /// 「不早于」这个参数对这一行有没有意义。只有**定时**项才有：
-    /// 空闲项由 PlanRunner.FindIdleTask 挑、根本不看 NotBefore（FindNext 里直接 continue 掉了），
-    /// 手动项也不参与自动调度——给它们摆一个时间框纯属误导。
-    /// </summary>
-    public bool ShowNotBefore => Model.Repeat is not (RepeatKind.Manual or RepeatKind.WhenIdle);
+    /// <summary>这一行的组是不是「空闲时补」那一档——状态列据此不显示"预计几点跑"（它没有固定时刻）。</summary>
+    public bool IsIdlePaced => Model.Pacing == RunPacing.WhenIdle;
 
     // ── 动作专属参数 ──
-    public bool NeedsDate => Info.Params.HasFlag(FetchActionParams.Date);
+
+    /// <summary>
+    /// 日期框显不显示：**只有「只抓某一天」这个模式才用得上它**（2026-09-02 修）。
+    ///
+    /// 之前的判据是"这个动作认日期 且 不是整段回补"，结果日常那些走增量的行（资金净流入、
+    /// 公告、前复权、融资、龙虎）全都摆着一个日期框——增量是按各自的水位线续抓，
+    /// 日期填了根本不起作用，看着却像"这里要我填点什么"。
+    ///
+    /// 顺带一提：日常缺了哪天不该靠人去填日期补，那是【全库数据体检】的活——
+    /// 它查出空洞、交给【重新拉取失败】去补，人不用判断缺了哪天。
+    /// </summary>
+    public bool NeedsDate => Info.Params.HasFlag(FetchActionParams.Date)
+                             && Model.EffectiveMode == FetchMode.SpecificDay;
     public bool NeedsYearRange => Info.Params.HasFlag(FetchActionParams.YearRange);
+
+    /// <summary>要不要显示「彻底体检」那个勾（只有【全库数据体检】有）。</summary>
+    public bool NeedsThorough => Info.Params.HasFlag(FetchActionParams.Thorough);
+
+    /// <summary>
+    /// 彻底体检：清空"确认数据源没有"的白名单、全部重查。
+    /// 默认不勾——那份白名单正是让体检能收敛的东西。
+    /// </summary>
+    public bool ThoroughAudit
+    {
+        get => Model.ThoroughAudit;
+        set { if (Model.ThoroughAudit == value) return; Model.ThoroughAudit = value; Raise(); onChanged(); }
+    }
     public bool NeedsLookback => Info.Params.HasFlag(FetchActionParams.LookbackYears);
 
     /// <summary>
@@ -211,9 +260,27 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
     /// <summary>是不是【拉取财务报表】那一行——参数格显示还差多少只没补。</summary>
     public bool IsFetchFinancials => Model.Action == FetchActionId.FetchFinancials;
 
+    /// <summary>【导入手工数据】那一行——参数格里显示"还有几项要手工填"。</summary>
+    public bool IsImportManual => Model.Action == FetchActionId.ImportManual;
+
     /// <summary>是不是【拉取财报预约日】那一行——参数格显示还有多少只没到披露日。</summary>
     public bool IsFetchEarnings => Model.Action == FetchActionId.FetchEarningsSchedule;
-    public bool NeedsAnyParam => NeedsDate || NeedsYearRange || NeedsLookback;
+    public bool IsFetchMoneyFlow => Model.Action == FetchActionId.FetchMoneyFlowDetail;
+    public bool NeedsKeywords => Info.Params.HasFlag(FetchActionParams.Keywords);
+    public bool NeedsAnyParam => NeedsDate || NeedsYearRange || NeedsLookback || NeedsKeywords || NeedsThorough;
+
+    /// <summary>
+    /// 这一行的数据要不要等收盘（2026-09-02）。计划自检拿它判断"这一组的时刻会不会太早"，
+    /// 界面上也用它给任务名配一句提示（见 DataReadiness）。
+    /// </summary>
+    public bool NeedsAfterClose => Info.Readiness == DataReadiness.AfterClose;
+
+    /// <summary>中标/订单公告关键词，逗号分隔。留空=用【手动】页那个框的值。</summary>
+    public string KeywordsText
+    {
+        get => Model.KeywordsText ?? "";
+        set { Model.KeywordsText = Blank(value); Raise(); onChanged(); }
+    }
 
     /// <summary>首次回看几年——只有「拉取全部」这一行会显示。留空=用【手动】页那个框的值。</summary>
     public string LookbackYearsText

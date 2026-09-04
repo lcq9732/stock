@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows;
@@ -201,7 +201,11 @@ public class ShortTermTabViewModel : INotifyPropertyChanged
                     // ETF/指数/板块没有财报；科创板与北交所不在回测样本内，结论不能外推过去。
                     if (!names.TryGetValue(code, out var name)) continue;
                     if (code.StartsWith("sh") || code.StartsWith("sz") || code.StartsWith("gn_") ||
-                        code.StartsWith("new_") || code.StartsWith("dy_")) continue;
+                        code.StartsWith("new_") || code.StartsWith("dy_") ||
+                        // BK 是东财板块代码（2026-09-03 板块源换成东财后新增的形态，如 BK1137）。
+                        // GetAllCodes 只认 6 位纯数字、本来就挡得住，这里是多一道防御——
+                        // 板块代码体系变过一次，下次再变时这行能少一个坑。
+                        code.StartsWith("BK", StringComparison.OrdinalIgnoreCase)) continue;
                     // 北交所有两套代码段：老的 8x/4x，以及后来启用的 920xxx——只排前者会漏掉
                     // 库里336个92开头的票（2026-08-13 修：新赣江920367就是这么混进结果的）。
                     if (code.StartsWith("688") || code.StartsWith("8") || code.StartsWith("4")

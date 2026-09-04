@@ -19,6 +19,9 @@
     <!-- 调度逻辑 2026-09-02 从 Fetcher 挪进独立类库之后，这里就是普通的类库引用了。
          原先引用 Fetcher（自包含单文件 exe）要撞 NETSDK1151，只能跟着标 SelfContained。 -->
     <ProjectReference Include="..\..\StockPlatform.Scheduling\StockPlatform.Scheduling.csproj" />
+    <!-- 2026-09-03：板块仓储改成"按来源替换"（东财/新浪两套并存）后加的引用。那段有 DELETE，
+         写错会误删主库里另一个来源的板块，必须有测试兜着。Data 是普通类库，不涉及 NETSDK1151。 -->
+    <ProjectReference Include="..\..\StockPlatform.Data\StockPlatform.Data.csproj" />
   </ItemGroup>
 
 </Project>

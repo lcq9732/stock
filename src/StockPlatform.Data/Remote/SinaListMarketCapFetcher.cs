@@ -48,7 +48,10 @@ public class SinaListMarketCapFetcher : IMarketCapFetcher
             .Where(s => !wanted.Contains(s.Code))
             .Select(s => (s.Code, s.Name))
             .ToList();
-        return new MarketCapFetchResult(entries, newlyDiscovered, IsMarketLive(allStocks));
+        // 扫描本来就把全市场的代码+名称都拿到了，一并带给调用方（2026-09-02）——这样
+        // "刷新名册"就不用再单独扫一遍同一个接口（省约 55 个请求，见 MarketCapFetchResult.AllStocks）。
+        return new MarketCapFetchResult(entries, newlyDiscovered, IsMarketLive(allStocks),
+            allStocks.Select(s => (s.Code, s.Name)).ToList());
     }
 
     /// <summary>

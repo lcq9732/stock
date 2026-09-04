@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Abstractions;
+﻿using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Data.Remote;
@@ -32,10 +32,12 @@ public class TencentThenSinaBarFetcher : IBarDataFetcher
         {
             return await _primary.FetchAsync(code, granularity, start, end, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw; // 用户点了"停止"，不是腾讯本身失败，不应该触发新浪回退
         }
+        // 注意 when：HttpClient 超时抛的也是这个异常（TaskCanceledException）。那不是"用户停了"，
+        // 那正是备胎该上场的时候——不加这个判据，腾讯一超时就整只股票失败，白瞎了新浪这条路。
         catch (Exception) when (granularity is Granularity.DayHfq or Granularity.DayRaw)
         {
             // 后复权和不复权都没有备胎：新浪只有前复权，回退过去会把前复权数据当成另一套口径存进库里，
