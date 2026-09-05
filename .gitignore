@@ -11,3 +11,8 @@ publish/
 # 想留快照就给程序传个目录名（相对名会落到 publish/factorlab-output-日期-说明）。结论写在
 # doc/factorlab-design.md（那个要提交）。下面这条保留：兼容偶尔在项目根跑时的输出。
 factorlab-output*/
+
+# vstest 的测试产物目录。平时是空的，一旦用 --blame-hang 排查挂住的测试，
+# 每跑一次就在这里留一个 ~150MB 的 testhost_*_hangdump.dmp（2026-09-05 攒到过 593MB）。
+# 全是排查用的临时 dump，看完就该删，绝不该进仓库。
+TestResults/

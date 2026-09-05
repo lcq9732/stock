@@ -237,7 +237,17 @@ public sealed record FetchActionInfo(
     /// 分批跑）。false 的动作只能整轮跑，空闲窗口装不下它的预计耗时时就不启动，
     /// 免得跑到一半被定时任务打断。
     /// </summary>
-    bool SupportsPartialRun = false)
+    bool SupportsPartialRun = false,
+    /// <summary>
+    /// 这一项实际占用哪些**数据源**（2026-09-04 新增）——判断"两个任务能不能同时跑"的依据。
+    ///
+    /// 为什么不用 <see cref="Quota"/>：那个只有四档，而且一多半项是 Mixed
+    /// （"横跨腾讯K线+新浪+交易所+巨潮"）。按它判的话【板块成分股】(东财 push2) 会跟
+    /// 【个股日K】(腾讯) 判成冲突——而这两个根本不抢同一个源，恰恰是最该并行的组合。
+    ///
+    /// null = 没标注，按 Quota 保守推导（Mixed 视为占用全部联网源，跟谁都冲突）。
+    /// </summary>
+    IReadOnlyList<DataSourceId>? Sources = null)
 {
     /// <summary>
     /// 这一项的数据什么时候才齐（2026-09-02）——决定它该不该卡「不早于」。
@@ -245,6 +255,88 @@ public sealed record FetchActionInfo(
     /// "哪些必须等收盘"要能一眼看全，散在二十几个条目里没人核得动。
     /// </summary>
     public DataReadiness Readiness => FetchTaskCatalog.ReadinessOf(Id);
+
+    /// <summary>
+    /// 实际占用的数据源。没标 <see cref="Sources"/> 的按 <see cref="Quota"/> 推导：
+    /// 本地项不占源（永远可并发），Mixed 保守当成占用全部联网源（宁可挡住，别撞配额）。
+    /// </summary>
+    public IReadOnlySet<DataSourceId> EffectiveSources => Sources is { Count: > 0 }
+        ? Sources.ToHashSet()
+        : Quota switch
+        {
+            QuotaGroup.Local => [],
+            QuotaGroup.Sina => [DataSourceId.Sina],
+            QuotaGroup.Exchange => [DataSourceId.Exchange],
+            _ => DataSourceCatalog.AllOnline.ToHashSet(),
+        };
+
+    /// <summary>占用的源，可读形式（给日志和界面）。</summary>
+    public string SourcesText => EffectiveSources.Count == 0
+        ? "本地计算（不占数据源）"
+        : string.Join("、", EffectiveSources.Select(DataSourceCatalog.NameOf));
+}
+
+/// <summary>
+/// 数据源编号（2026-09-04 新增）——占用表用它做键，判断两个任务抢不抢同一个源。
+///
+/// ════ 粒度按「限流边界」切，不按公司切 ════
+/// 东财三个域名各有各的反爬策略：实测**只有 push2 会弹图片验证码**（那个只能人来点），
+/// datacenter 和 push2his 都正常。把它们算成一个"东财"会白白挡掉能并行的组合——
+/// 而【板块成分股】(push2) 跟【分档资金流】(push2his) 并行正是最有价值的一对。
+/// </summary>
+public enum DataSourceId
+{
+    /// <summary>腾讯行情（K线主源）。</summary>
+    Tencent,
+    /// <summary>新浪（vip.stock / money.finance 按同一套配额算）。</summary>
+    Sina,
+    /// <summary>沪深交易所官网。</summary>
+    Exchange,
+    /// <summary>巨潮资讯。</summary>
+    Cninfo,
+    /// <summary>中证指数官网 OSS。</summary>
+    CsIndex,
+    /// <summary>东财行情侧 push2——**弹图片验证码的就是这个**，只能人工过。</summary>
+    EmPush2,
+    /// <summary>东财行情历史侧 push2his（分档资金流）。跟 push2 不同域名、不同限流。</summary>
+    EmPush2His,
+    /// <summary>东财数据中心 datacenter（业绩预告、龙虎榜席位、市场事件、个股题材）。</summary>
+    EmDataCenter,
+
+    /// <summary>
+    /// 东财 quote 站的静态资源（2026-09-05）——眼下只有板块名单那份 sidemenu_new.json。
+    ///
+    /// 单列一个源而不是并进 EmPush2：它跟 push2 **不是一回事**。push2 在这台机器上被网关拦、
+    /// 会弹图片验证码、限流极敏感；quote 是普通网页站点，一轮就一个请求、随便跑。
+    /// 并进去的话【概念和行业板块】会跟【板块成分股】互斥排队，而它们现在完全可以同时跑。
+    /// </summary>
+    EmQuote,
+}
+
+/// <summary>数据源编号 ↔ 可读名。程序里用编号，界面和日志上显示名字。</summary>
+public static class DataSourceCatalog
+{
+    /// <summary>全部联网源——没标注的 Mixed 项按这个算（保守，跟谁都冲突）。</summary>
+    public static readonly DataSourceId[] AllOnline =
+    [
+        DataSourceId.Tencent, DataSourceId.Sina, DataSourceId.Exchange, DataSourceId.Cninfo,
+        DataSourceId.CsIndex, DataSourceId.EmPush2, DataSourceId.EmPush2His, DataSourceId.EmDataCenter,
+        DataSourceId.EmQuote,
+    ];
+
+    public static string NameOf(DataSourceId id) => id switch
+    {
+        DataSourceId.Tencent => "腾讯",
+        DataSourceId.Sina => "新浪",
+        DataSourceId.Exchange => "交易所",
+        DataSourceId.Cninfo => "巨潮",
+        DataSourceId.CsIndex => "中证",
+        DataSourceId.EmPush2 => "东财 push2",
+        DataSourceId.EmPush2His => "东财 push2his",
+        DataSourceId.EmDataCenter => "东财 datacenter",
+        DataSourceId.EmQuote => "东财 quote",
+        _ => id.ToString(),
+    };
 }
 
 /// <summary>
@@ -294,14 +386,16 @@ public static class FetchTaskCatalog
             + "模式选「只抓某一天」就只搜那一天。\n"
             + "关键词就填在这一行的参数格里（逗号分隔），留空＝用【手动】页那个框里的值；两边都空就不抓。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.Date | FetchActionParams.Keywords,
-            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay),
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay,
+            Sources: [DataSourceId.Cninfo]),
 
         new(FetchActionId.StepIndexBars, "指数日K", "腾讯（回退新浪）", QuotaGroup.Mixed,
             TimeSpan.FromSeconds(30), "每工作日",
             "大盘指数日K（十几个标的，水位线增量）。\n"
             + "⚠ 它还是全库的**交易日锚**：\"最近一个已收盘交易日是哪天\"就是看上证指数最新一根日线"
             + "（快照类数据归属日、当日覆盖率体检都靠它），所以别把它关掉。",
-            FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears),
+            FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
+            Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.StepStockDayBars, "个股日K·前复权", "腾讯（回退新浪）", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(30), "每工作日",
@@ -314,7 +408,8 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.StepRoster],
             // 只有前复权这一路支持"补某一天"：后复权/不复权/ETF/指数在原来的【补指定历史日】里
             // 走的也一直是水位线增量，不是"只抓那天"。
-            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay),
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay,
+            Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.StepStockHfqBars, "个股日K·后复权", "腾讯（回退新浪）", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(30), "每工作日",
@@ -322,7 +417,8 @@ public static class FetchTaskCatalog
             + "⚠ 它是\"送转乘、分红加\"的混合式、会压低收益率（实测工商银行 ×0.625），**回测已经改用本地算的"
             + " day_adj**，这一条现在主要是对照和历史兼容。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
-            SoftDependsOn: [FetchActionId.StepRoster]),
+            SoftDependsOn: [FetchActionId.StepRoster],
+            Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.StepStockRawBars, "个股日K·不复权", "腾讯（回退新浪）", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(30), "每工作日",
@@ -333,19 +429,22 @@ public static class FetchTaskCatalog
             FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
             SoftDependsOn: [FetchActionId.StepRoster],
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
-            SupportsPartialRun: true),
+            SupportsPartialRun: true,
+            Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.StepEtfBars, "ETF日K", "新浪名单 + 腾讯K线", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(6), "每工作日",
             "全市场 ETF 的日K（约 1000 只，水位线增量）。代码带前缀存（sh510300），天然被挡在个股选股全集外。"
             + "名单和K线是两家，但\"没有名单就抓不了K线\"，所以是一项。",
-            FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears),
+            FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
+            Sources: [DataSourceId.Sina, DataSourceId.Tencent]),
 
         new(FetchActionId.StepDelistedTails, "退市股收尾", "两所官网 + 腾讯K线", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(2), "每工作日",
             "刷新退市名单，给\"本地跟踪过、但最后一根K线还早于终止日\"的票补完最后那几天。\n"
             + "股票一退市数据源就不再更新它，这几天不补就**永久缺失**，回测会有幸存者偏差。",
-            FetchActionParams.GlobalFetchOptions),
+            FetchActionParams.GlobalFetchOptions,
+            Sources: [DataSourceId.Exchange, DataSourceId.Tencent]),
 
         new(FetchActionId.StepBoardIndex, "板块指数合成", "本地计算·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(3), "每工作日",
@@ -404,7 +503,8 @@ public static class FetchTaskCatalog
             + "每轮拿它们去敲一遍最容易把反爬撞醒，而且一条数据也拿不到）。\n"
             + "稳态下每轮实际发出的请求接近 0，只有月初那一轮才会真抓中证系那两三百个。\n"
             + "在季度组里**排最后**：它最容易撞墙，排末尾的话即使自己进了熔断，前面那些数据也早落库了。",
-            SoftDependsOn: [FetchActionId.StepIndexCons]),
+            SoftDependsOn: [FetchActionId.StepIndexCons],
+            Sources: [DataSourceId.CsIndex]),
 
         new(FetchActionId.StepEtfIndexMap, "ETF指数映射", "本地计算·不联网", QuotaGroup.Local,
             TimeSpan.FromSeconds(20), "季度",
@@ -421,17 +521,21 @@ public static class FetchTaskCatalog
             + "而且列表一挂整项就退出，成分股一个都跑不成——可库里明明有上一次的板块名单，"
             + "照样能接着抓成分。' + N + '"
             + "老计划里排了它的，加载时会自动换成这两项。",
-            Retired: true),
+            Retired: true,
+            Sources: [DataSourceId.EmPush2]),
 
-        new(FetchActionId.StepBoardList, "概念和行业板块", "东财 push2", QuotaGroup.Mixed,
-            TimeSpan.FromMinutes(1), "每工作日",
-            "概念/题材板块 + 行业板块的**名单和行情快照**（约 10 个请求，很快）。' + N + '"
-            + "⚠ **2026-09-03 数据源从新浪换成东财**：新浪那套概念分类严重老化——175 个概念板块里"
-            + "没有存储芯片/算力/液冷/AI芯片/CPO/先进封装/人形机器人，占着位置的却是「融资融券」"
-            + "「社保重仓」「成渝特区」这类根本不是产业链的东西。东财 1000+ 个板块，主题一个不缺。' + N + '"
-            + "拿不到名单时**整轮放弃写库**，库里保留上一次的快照——板块是快照数据，"
-            + "「旧的」永远好过「半批的」。' + N + '"
-            + "⚠ 板块的涨跌幅/成交额不在这一步取，由【板块指数合成】用本地成分股日K算出来回填。"),
+        new(FetchActionId.StepBoardList, "概念和行业板块", "东财 quote（菜单JSON）", QuotaGroup.Mixed,
+            TimeSpan.FromSeconds(10), "每工作日",
+            "概念/题材板块 + 行业板块的**名单**，**一个请求拿全量**。' + N + '"
+            + "✅ **2026-09-05 改走行情中心左侧菜单那份静态 JSON**（sidemenu_new.json），"
+            + "从此**不碰 push2、不用浏览器通道、不会弹图片验证码**，也不再占用成分股那边的配额。' + N + '"
+            + "换之前逐条比对过：概念 504 个代码和名称跟 push2 官方名单**一个不差**，"
+            + "行业只多一个三级行业（BK1362 其他多元金融）——多出来是安全侧，不会误删。' + N + '"
+            + "拿不到或解析不了时**自动退回 push2 分页**（那条路会慢很多、可能要人过验证）；"
+            + "名单比库里少 5% 以上则**整轮放弃写库**，保留上一次的快照——"
+            + "板块是快照数据，「旧的」永远好过「半批的」。' + N + '"
+            + "⚠ 板块的涨跌幅/成交额不在这一步取，由【板块指数合成】用本地成分股日K算出来回填。",
+            Sources: [DataSourceId.EmQuote]),
 
         new(FetchActionId.StepBoardMembers, "板块成分股", "东财 push2", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(20), "每周·空闲时补",
@@ -443,7 +547,8 @@ public static class FetchTaskCatalog
             + "**跑不完是常态、也没关系**：每个板块单独落库并记进度，下一轮自动跳过已成功的"
             + "（7 天内抓过就算新鲜）；连续失败 10 个判定被限流、提前收尾。' + N + '"
             + "软依赖【板块列表】：列表没跑也能抓，用库里上次的名单，只是漏掉当天新增的板块。",
-            SoftDependsOn: [FetchActionId.StepBoardList]),
+            SoftDependsOn: [FetchActionId.StepBoardList],
+            Sources: [DataSourceId.EmPush2]),
 
         new(FetchActionId.StepFullAudit, "全库数据体检", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(15), "怀疑缺数据时",
@@ -524,7 +629,8 @@ public static class FetchTaskCatalog
             + "**建议重复规则设成「空闲时」**：分红季一天可能上百只，每只要重抓十年，让它在空档里慢慢补。\n"
             + "取过的不会重取；没取完不要紧，下一轮日常比对还会把它检出来。后复权不受除权影响，不用重取。",
             // 待重取名单是抓前复权时顺带比对出来的，所以要排在它后面
-            SoftDependsOn: [FetchActionId.StepStockDayBars], SupportsPartialRun: true),
+            SoftDependsOn: [FetchActionId.StepStockDayBars], SupportsPartialRun: true,
+            Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.FetchEarningsSchedule, "拉取财报预约日", "巨潮", QuotaGroup.Mixed,
             TimeSpan.FromSeconds(20), "每工作日",
@@ -536,7 +642,8 @@ public static class FetchTaskCatalog
             + "提前那半边尤其要紧——按原日期盯的话，财报已经出了你还不知道。\n"
             + "成本几乎为零：一期全市场 5500 条一个请求 0.3 秒就拿回来了，每次全量覆盖，不用管增量。"
             + "⚠ 数据源只给最近两期，所以有空窗：上一期都披露完、下一期预约表还没发布时，这一列会是空的。",
-            SupportsPartialRun: false),
+            SupportsPartialRun: false,
+            Sources: [DataSourceId.Cninfo]),
 
         new(FetchActionId.FetchEarningsForecast, "拉取业绩预告/快报", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(3), "每工作日（披露密集期尤其要跑）",
@@ -550,7 +657,8 @@ public static class FetchTaskCatalog
             + "从次日开始会漏掉当天后半段（主键去重，重抓不会产生重复行）。\n"
             + "首次全量约 20 万行、400 页、3 分钟；之后增量每次十几页。\n"
             + "⚠ 没有回退源——新浪/腾讯/交易所都不提供结构化预告，巨潮只有公告原文。东财不可用时整项跳过。",
-            SupportsPartialRun: false),
+            SupportsPartialRun: false,
+            Sources: [DataSourceId.EmDataCenter]),
 
         new(FetchActionId.FetchLhbSeat, "拉取龙虎榜席位", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(4), "每工作日",
@@ -566,7 +674,8 @@ public static class FetchTaskCatalog
             + "最新交易日接着走，不会从头再来。\n"
             + "之后增量每次只有 40 页出头，几分钟。\n"
             + "⚠ 没有回退源——新浪/交易所都不提供结构化的营业部明细。",
-            SupportsPartialRun: false),
+            SupportsPartialRun: false,
+            Sources: [DataSourceId.EmDataCenter]),
 
         new(FetchActionId.FetchMarketEvents, "拉取市场事件", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(25), "每工作日",
@@ -586,7 +695,8 @@ public static class FetchTaskCatalog
             + "四项各自独立失败：一项挂了不影响其余（覆盖面和重要性本来就不一样）。\n"
             + "首次全量约 110 万行、25 分钟；之后增量每次几十页。\n"
             + "⚠ 没有回退源——这四份数据新浪/腾讯/交易所/巨潮都不提供结构化版本。",
-            SupportsPartialRun: false),
+            SupportsPartialRun: false,
+            Sources: [DataSourceId.EmDataCenter]),
 
         new(FetchActionId.FetchMoneyFlowDetail, "拉取分档资金流", "东财", QuotaGroup.Mixed,
             TimeSpan.FromHours(3), "季度定期组·空闲时补",
@@ -601,7 +711,8 @@ public static class FetchTaskCatalog
             + "⚠ **只能按股票查**，没有「某天全市场」的入口，全市场一轮 5500+ 个请求、2 秒间隔约 3 小时。\n"
             + "断点续传按「这只票今天抓过没有」判断（接口是滚动窗口，没有增量入口，"
             + "不能像别的任务那样用数据日期做水位线）。跑不完下轮接着来，连续 15 只失败会判定被限流、提前收尾。",
-            SupportsPartialRun: true),
+            SupportsPartialRun: true,
+            Sources: [DataSourceId.EmPush2His]),
 
         new(FetchActionId.FetchRawBars, "补不复权历史", "腾讯（回退新浪）", QuotaGroup.Mixed,
             TimeSpan.FromHours(2), "一次性（补完就不用再跑了）",
@@ -614,7 +725,8 @@ public static class FetchTaskCatalog
             + "⚠ **已退役**（2026-09-02）：【个股日K·不复权】把模式设成「首次整段回补」就是这一项，"
             + "跑的是同一段代码。老计划里排了它的，加载时会自动换过去。",
             SupportsPartialRun: true,
-            Retired: true),
+            Retired: true,
+            Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.RebuildAdjSeries, "重算回测序列", "本地计算·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(20), "空闲时",
@@ -635,11 +747,13 @@ public static class FetchTaskCatalog
             + "⚠ **已退役**（2026-09-02）：拆成了【板块行情与成分】+【板块指数合成】两项——"
             + "抓取失败不再连累合成，改了合成算法也能单独重算、不用重抓一遍板块。"
             + "老计划里排了它的，加载时会自动换成这两项。",
-            Retired: true),
+            Retired: true,
+            Sources: [DataSourceId.EmPush2]),
 
         new(FetchActionId.FetchIndustry, "拉取行业分类", "交易所 + 新浪", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(2), "季度",
-            "证监会两级行业分类。行业极少变动，跟财报同频跑一次即可，整体覆盖写入、反复跑无副作用。"),
+            "证监会两级行业分类。行业极少变动，跟财报同频跑一次即可，整体覆盖写入、反复跑无副作用。",
+            Sources: [DataSourceId.Exchange, DataSourceId.Sina]),
 
         new(FetchActionId.FetchStockBoardMap, "拉取个股行业与题材", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(8), "季度",
@@ -654,7 +768,8 @@ public static class FetchTaskCatalog
             + "**走 datacenter，不碰 push2**：push2 要人工在浏览器过一道反爬验证、验证还会过期，"
             + "不适合无人值守。\n"
             + "这张表没有时间维度、是当下快照，所以每次全量重取（约 9.4 万行、188 页、几分钟）。"
-            + "先抓到第一批数据才清表——接口挂了的话库里旧的原样保留，不会被清空。"),
+            + "先抓到第一批数据才清表——接口挂了的话库里旧的原样保留，不会被清空。",
+            Sources: [DataSourceId.EmDataCenter]),
 
         new(FetchActionId.FetchIndexCons, "指数成分/权重", "新浪 + 中证", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(15), "季度",
@@ -662,7 +777,8 @@ public static class FetchTaskCatalog
             + "⚠ **已退役**（2026-09-02）：拆成了【指数成分名单】+【指数权重】+【ETF指数映射】三项——"
             + "成分和权重各自入库、各自能单独用，而中证那侧失败率高，合在一起时它会把整项标成失败。"
             + "老计划里排了它的，加载时会自动换成这三项。",
-            Retired: true),
+            Retired: true,
+            Sources: [DataSourceId.Sina, DataSourceId.CsIndex]),
 
         new(FetchActionId.FetchShareholder, "拉取股东数据", "新浪", QuotaGroup.Sina,
             TimeSpan.FromHours(1.5), "季度",

@@ -132,6 +132,8 @@
                         </Button>
                         <Button Content="东财验证" Command="{Binding VerifyEastMoneyCommand}" Width="80" Margin="16,0,0,0" Padding="8,4"
                                 ToolTip="打开一个东财页面，让你手工过一次它的人工验证。&#10;&#10;为什么需要：程序抓 push2（板块列表和成分股）用的是自己那套浏览器数据，跟你日常的 Chrome/Edge 是两套。&#10;那套刚建起来时在东财眼里是个生面孔，可能先要过验证才给数据。验证只能人来点，程序代替不了。&#10;&#10;过完验证直接关掉那个窗口就行，Cookie 会自动留下（存在 data\local\webview2，下次开程序还在）。&#10;&#10;它也是个排错窗口：板块一直抓不到时打开看看东财到底返回了什么——验证页、空白、还是正常数据。" />
+                        <Button Content="重新读取配置" Command="{Binding ReloadConfigCommand}" Width="100" Margin="6,0,0,0" Padding="8,4"
+                                ToolTip="改完 data\fetcher-settings.json 点一下就生效，不用重启程序。&#10;&#10;吃三项设置：&#10;　· BarSource —— 抓K线用哪家（腾讯/新浪/东财）&#10;　· BoardMemberChannel —— 板块成分股走 http 还是 browser&#10;　· Push2NetworkInterface —— 东财 push2 从哪块网卡出去&#10;&#10;哪一项变了、有没有生效，日志里会逐条写出来。&#10;&#10;⚠ 两种情况会有一项换不成，日志会说：&#10;　· 【手动】页有大任务在跑时，按钮是灰的（那些任务横跨所有数据源）；&#10;　· 正好有任务在用东财 push2 时，板块那两项要等它跑完再点一次（另外一项照常生效）。&#10;&#10;它只读文件、不会改写，你写在里面的注释不会丢。" />
                         <CheckBox Content="程序启动后自动开始" IsChecked="{Binding AutoStartPlanOnLaunch}"
                                   VerticalAlignment="Center" Margin="16,0,0,0"
                                   ToolTip="勾上后，下次打开程序会自动开始执行计划，不用手动点【开始执行计划】。无人值守用。&#10;开关记在 data/fetch-plan.json 里。" />
@@ -734,21 +736,61 @@ eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <StackPanel Grid.Row="0" VerticalAlignment="Center" Margin="4,0,0,4">
-                <!-- 运行状态和已用时（2026-09-04 从左上角挪过来）：原来它在页签栏右端，
-                     离运行日志隔着大半个窗口——而人盯日志的时候最想知道的就是"还在跑吗、跑多久了"。
-                     摆在日志正上方，一眼扫得到。 -->
-                <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="{Binding BusyText}" FontWeight="Bold" VerticalAlignment="Center" />
-                    <TextBlock Text="{Binding ElapsedText}" Margin="8,0,0,0" VerticalAlignment="Center"
-                               Foreground="{DynamicResource Theme.Foreground.Muted}" FontWeight="Bold" />
-                </StackPanel>
-                <TextBlock Text="{Binding PlanRunStateText}" FontWeight="Bold" Margin="0,2,0,0"
+            <!-- 高度规则（2026-09-05 改）：这一行本身是 Auto，真正定高的是下面这个 ScrollViewer
+                 的 MinHeight / MaxHeight，两个都由 SyncLogTop 按实际布局设：
+                   · MinHeight = 左边任务表的顶边位置——内容少时高度照旧，日志顶边跟任务表齐平；
+                   · 内容比它多（并发跑着两三项）时**这一行跟着长高**、把日志挤短一点，而不是
+                     像原来那样按一个固定高度把多出来的直接切掉：用户截图里只跑着一项就已经
+                     被拦腰切了半行，并发两三项时后面几行连同它们的【停止】按钮整个看不见，
+                     而这块又窄又不像能滚，滚动条根本没人会去找；
+                   · MaxHeight = 窗口的四成——万一同时跑起十几项，日志不至于被挤没，
+                     那时候才轮到 ScrollViewer 滚。 -->
+            <ScrollViewer x:Name="StatusPane" Grid.Row="0" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+            <StackPanel VerticalAlignment="Top" Margin="4,0,0,4">
+                <!-- 状态区（2026-09-04 从左上角挪过来）：人盯日志的时候最想知道的就是
+                     "还在跑吗、跑多久了"，摆在日志正上方一眼扫得到。
+
+                     ⚠ 2026-09-05 撤掉了原来打头的那句"空闲/运行中 已运行 x 分"：那个字只看
+                     IsBusy，而并发跑的任务只登记在占用表里、不动 IsBusy——于是三个任务跑着、
+                     日志在刷进度，顶上却写着"空闲"（用户截图）。而且那个"已运行"是全局的一份，
+                     并发之后根本说不清算的是谁。现在改成下面逐项列，各说各的用时。 -->
+                <TextBlock Text="{Binding PlanRunStateText}" FontWeight="Bold"
                            Foreground="{DynamicResource Theme.Foreground.Muted}" TextWrapping="Wrap" />
                 <TextBlock Text="{Binding PlanStatusText}" Margin="0,2,0,0"
                            Foreground="{DynamicResource Theme.Accent}" FontWeight="Bold"
                            TextWrapping="Wrap" ToolTip="{Binding PlanStatusText}" />
+
+                <!-- 正在执行的任务，一项一行（2026-09-05）。源不冲突的任务可以同时跑，
+                     所以这里可能同时列着两三项；没人在跑时 ItemsControl 是空的、不占地方。
+                     每行后面那个【停止】只掐这一项——【停止全部】会把并排跑着、可能已经
+                     跑了一个多小时的另一项也连坐。 -->
+                <TextBlock Text="正在执行" FontWeight="Bold" Margin="0,4,0,0"
+                           Visibility="{Binding HasRunningTasks, Converter={StaticResource BoolToVis}}" />
+                <ItemsControl ItemsSource="{Binding RunningTasks}" Margin="0,2,0,0"
+                              ToolTip="正在执行的任务和它占的数据源。想手动插一项时看这里：只要它用的数据源不在这几行里，就可以直接点【执行】跟当前任务并行跑；&#10;撞上了会弹窗告诉你被谁占着。&#10;计划自己遇到占用会静默让路，等占用结束后自动接着跑，不会记成失败。&#10;&#10;右边的【停止】只停这一项，其它正在跑的不受影响。">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <!-- 按钮靠右固定，文字占剩下的宽度并自动换行——任务名加上数据源
+                                 常常比这一栏还长，用 StackPanel 的话按钮会被挤出可视区。 -->
+                            <DockPanel LastChildFill="True" Margin="0,1,0,1">
+                                <Button DockPanel.Dock="Right" Content="{Binding StopButtonText}"
+                                        Command="{Binding StopCommand}"
+                                        Padding="6,0" Margin="6,0,0,0" MinWidth="44" FontSize="11"
+                                        VerticalAlignment="Center"
+                                        ToolTip="只停这一项（其它正在跑的任务不受影响）。已抓到的数据不会丢；点完要等它收尾，收完这一行才消失。" />
+                                <TextBlock DockPanel.Dock="Right" Text="{Binding ElapsedText}"
+                                           Margin="6,0,0,0" FontSize="11" VerticalAlignment="Center"
+                                           Foreground="{DynamicResource Theme.Foreground.Subtle}" />
+                                <TextBlock Text="{Binding Title}" FontSize="11" TextWrapping="Wrap"
+                                           VerticalAlignment="Center"
+                                           Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                            </DockPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </StackPanel>
+            </ScrollViewer>
 
             <GroupBox Grid.Row="1" Header="运行日志">
                 <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"

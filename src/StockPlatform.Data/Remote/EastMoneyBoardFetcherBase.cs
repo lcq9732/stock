@@ -1,0 +1,295 @@
+using System.Text.Json;
+using StockPlatform.Logic.Abstractions;
+using StockPlatform.Logic.Models;
+
+namespace StockPlatform.Data.Remote;
+
+/// <summary>
+/// 东财板块抓取的**业务逻辑**（2026-09-05 从 <see cref="EastMoneyBoardFetcher"/> 抽出来）——
+/// URL 怎么拼、怎么翻页、拿到的名单怎么跟接口自报的 total 对账，全在这里，只有一份。
+///
+/// ════ 为什么要抽这一层 ════
+/// 现在有两条取数通道并存，将来可能更多：
+///   · <see cref="EastMoneyBoardFetcher"/>——WebView2 浏览器通道优先，HttpClient 回退；
+///   · <see cref="EastMoneyBoardHttpFetcher"/>——纯 HttpClient。
+/// 两者的**业务逻辑一模一样**，差别只在"怎么把一个 URL 变成一段 JSON"。要是各写一份，
+/// 下面那几条用代价换来的规矩（f12 排序、total 对账、半截列表拒收）就会改一处漏一处——
+/// 而它们漏掉的后果都是**静默的数据损坏**，不会报错。
+///
+/// 所以子类只需要实现 <see cref="GetAsync"/> 一个方法：给个 URL，还回一段 JSON。
+///
+/// ════ 两条必须守住的规矩（都是实测踩出来的）════
+/// ① <b><c>fid</c> 必须用 <c>f12</c>（股票代码）排序，不能用 <c>f3</c>（涨跌幅）</b>——
+///    涨跌幅盘中实时变动，翻页期间排序在动，会跨页重复和遗漏。实测用 f3 抓 141 只的板块，
+///    两页 141 行去重后只剩 138 只。
+/// ② <b>抓到的条数跟接口自报的 <c>total</c> 对不上就整批丢弃</b>。差一只都说明名单不完整
+///    （分页丢了、或中途被限流截断）。宁可这一轮失败下轮重试，也不要把残缺名单写进库
+///    当成完整的——上游是快照语义，"这轮没返回的＝已下架"会连成分股一起删。
+///
+/// ════ 成分股为什么必须走 push2 的官方名单 ════
+/// 不能用 datacenter 的 <c>RPT_F10_CORETHEME_BOARDTYPE</c> 替代。2026-09-03 实测，代价很大
+/// 所以写清楚：F10 报表看着很美（188 页拿全市场 9.4 万条归属关系，还绕开了限流最凶的 push2），
+/// 但它是"个股的核心题材归属"而不是"板块的成分名单"，**会系统性漏股**——
+///   · 液冷服务器 BK1138：官方 170 只，F10 只有 166 只，漏掉美的集团、江苏神通、锦富技术、拓普集团；
+///   · PCB BK0877：官方 194 只，F10 漏 2 只。
+/// 两次都是 F10 ⊂ 官方名单、多出 0 只，是系统性缺失不是随机噪声。漏掉的还都是链上有实际业务的
+/// 大票，板块营收中位数这类指标会直接算错，而且**永远不会报错**。
+///
+/// ════ 板块列表这一步已经不走这儿了 ════
+/// <see cref="FetchBoardListAsync"/> / <see cref="FetchBoardListPageAsync"/> 从 2026-09-05 起
+/// 只是**回退路径**：主路改成了 <see cref="EastMoneySideMenuBoardListProvider"/>（行情中心
+/// 左侧菜单那份静态 JSON，一个请求拿全量、不碰 push2、不弹验证）。这里留着是为了万一
+/// 东财把那个文件挪走还能退回来抓。贵的、也是真正需要 push2 的，是逐板块抓成分股。
+/// </summary>
+public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
+{
+    /// <summary>push2 每页上限。传更大的值会被服务端忽略。</summary>
+    protected const int PageSize = 100;
+
+    /// <summary>
+    /// 板块列表最多翻这么多页。概念 + 行业各几百个，1200 的余量绰绰有余；真有一天超了，
+    /// 下面那道对账会明确报出来（"翻到页数上限仍没取完"），不会静默截断成半截列表。
+    /// </summary>
+    private const int MaxListPages = 12;
+
+    protected readonly RateLimiter Limiter;
+
+    public event Action<string>? OnStatus;
+
+    /// <summary>子类和内部发状态用——事件本身是 private 的，派生类碰不到。</summary>
+    protected void Report(string message) => OnStatus?.Invoke(message);
+
+    protected EastMoneyBoardFetcherBase(RateLimiter limiter)
+    {
+        Limiter = limiter;
+        Limiter.OnStatus += s => OnStatus?.Invoke(s);
+    }
+
+    /// <summary>
+    /// 取一个 URL 的 JSON——**子类之间唯一的差别就在这儿**。
+    /// 被限流/被拒时要抛 <see cref="RateLimitedException"/>，上游据此判断是"限流"而不是"没数据"。
+    /// </summary>
+    protected abstract Task<string> GetAsync(string url, CancellationToken ct);
+
+    /// <summary>这一轮实际走的是哪条路，给日志用。</summary>
+    public abstract string DescribeChannel();
+
+    /// <summary>
+    /// 开抓之前的准备（建浏览器、拿 Cookie 之类）。**要在真正开抓之前调一次**，
+    /// 别把那几秒混进第一个请求的计时里。纯 HttpClient 的实现不需要准备，返回 false。
+    /// </summary>
+    public virtual Task<bool> PrepareAsync(CancellationToken ct = default) => Task.FromResult(false);
+
+    /// <summary>当前走哪块网卡、有没有配对。调用方要在订阅 OnStatus 之后自己打进日志。</summary>
+    public virtual string DescribeBinding() => NetworkInterfaceBinder.Describe(null);
+
+    /// <summary>
+    /// 限流熔断还要等到几点；没在暂停就是 null。
+    /// 用来在暂停期里直接回绝新的抓取——实测暂停期内点【执行】会干等 8 分钟才报失败，
+    /// 那 8 分钟既没数据也看不出在等什么。
+    /// </summary>
+    public DateTime? PausedUntil => Limiter.PausedUntil;
+
+    // ─────────────── 板块列表（回退路径，主路是菜单 JSON）───────────────
+
+    private static string ListUrl(BoardType type, int page)
+    {
+        int t = type == BoardType.Concept ? 3 : 2;
+        return "https://push2.eastmoney.com/api/qt/clist/get"
+             + $"?pn={page}&pz={PageSize}&po=0&np=1&fltt=2&invt=2&fid=f12&fs=m:90+t:{t}"
+             + "&fields=f3,f6,f12,f14,f128,f140";
+    }
+
+    private static string Label(BoardType type) => type == BoardType.Concept ? "概念" : "行业";
+
+    /// <summary>
+    /// 抓**某一页**板块列表（2026-09-04 加，给页级断点续传用）。
+    ///
+    /// 为什么要能单独抓一页：push2 限流下一轮往往抓到第 5 页就被拒，而原来是整类作废、
+    /// 下轮从第 1 页重来——于是每轮白烧 5 页配额、再在同一个地方被拒，永远到不了第 6 页。
+    /// 拆到页粒度之后，调用方抓一页存一页、记下"下次从第几页接着来"。
+    /// </summary>
+    /// <returns>这一页的板块、接口自报的总数、这一页是不是最后一页。</returns>
+    public async Task<(List<Board> Items, int Total, bool IsLastPage)> FetchBoardListPageAsync(
+        BoardType type, int page, CancellationToken ct = default)
+    {
+        var now = DateTime.Now;
+        var body = await Limiter.RunAsync(() => GetAsync(ListUrl(type, page), ct), ct);
+
+        var items = new List<Board>();
+        int total = 0;
+
+        using var doc = JsonDocument.Parse(body);
+        if (!doc.RootElement.TryGetProperty("data", out var data) ||
+            data.ValueKind != JsonValueKind.Object)
+        {
+            // data 为 null 是 push2 限流的另一种表现（返回合法 JSON 但没内容）。
+            // 第 1 页就这样＝这一轮什么都没拿到，得让调用方知道是限流而不是"没有板块了"。
+            if (page == 1)
+                throw new RateLimitedException(
+                    $"东财{Label(type)}板块列表第 1 页没有内容——多半是被限流了（合法 JSON 但 data 为空）。");
+            return (items, 0, true);
+        }
+        if (data.TryGetProperty("total", out var tot) && tot.TryGetInt32(out var tv)) total = tv;
+        if (!data.TryGetProperty("diff", out var diff) || diff.ValueKind != JsonValueKind.Array)
+            return (items, total, true);
+
+        foreach (var item in diff.EnumerateArray())
+        {
+            var board = ToBoard(item, type, now);
+            if (board != null) items.Add(board);
+        }
+
+        // 这一页不满就是最后一页了
+        return (items, total, items.Count < PageSize);
+    }
+
+    /// <summary>
+    /// 板块列表（含涨跌幅/成交额/领涨股）。t:3=概念 t:2=行业，每页 100，约 5 页。
+    /// </summary>
+    public async Task<List<Board>> FetchBoardListAsync(BoardType type, CancellationToken ct = default)
+    {
+        var label = Label(type);
+        var result = new List<Board>();
+        var now = DateTime.Now;
+        int total = 0;
+
+        for (int page = 1; page <= MaxListPages; page++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var body = await Limiter.RunAsync(() => GetAsync(ListUrl(type, page), ct), ct);
+
+            using var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("data", out var data) ||
+                data.ValueKind != JsonValueKind.Object) break;
+            if (!data.TryGetProperty("diff", out var diff) || diff.ValueKind != JsonValueKind.Array) break;
+            if (data.TryGetProperty("total", out var tot) && tot.TryGetInt32(out var tv)) total = tv;
+
+            int n = 0;
+            foreach (var item in diff.EnumerateArray())
+            {
+                var board = ToBoard(item, type, now);
+                if (board == null) continue;
+                result.Add(board);
+                n++;
+            }
+            if (n < PageSize || (total > 0 && result.Count >= total)) break;
+        }
+
+        if (result.Count == 0)
+            throw new RateLimitedException($"东财{label}板块列表返回 0 个——多半是被限流了，本轮不更新板块。");
+
+        // 去重：翻页期间理论上不会变（按代码排序），但真出现重复也不能让它进库
+        var deduped = result.GroupBy(b => b.BoardCode).Select(g => g.First()).ToList();
+
+        // ── 收尾对账：条数跟接口自报的 total 对不上，就当**半截列表**处理，整轮放弃、不写库 ──
+        //
+        // 为什么这道检查必须有（2026-09-04）：上游 UpsertBoards 的语义是"这一轮没返回的板块
+        // ＝已下架"，会把它们连同 BoardMember、BoardMemberFetchState 一起删掉。而成分股是
+        // 逐板块抓的、约 2500 个请求、跨好几轮才攒得齐——一次半截的列表就能删掉几百个板块的
+        // 成分股，重抓要好几天，而且**全程不报错**。
+        //
+        // 半截是怎么来的：push2 限流最常见的表现是断连或空响应，那两种 GetAsync 已经抛异常了；
+        // 但它也会返回**合法 JSON 而 data 为 null**，那条路上面的循环只能 break，然后拿着前几页
+        // 就走到这里。判据是：**差一个都算不完整**。
+        if (total > 0 && deduped.Count != total)
+        {
+            throw new RateLimitedException(result.Count >= MaxListPages * PageSize
+                ? $"东财{label}板块列表翻到页数上限（{MaxListPages} 页 × {PageSize} 条）仍没取完："
+                  + $"接口报 {total} 个、只取到 {deduped.Count} 个。这不是限流，是 MaxListPages 该调大了。"
+                : $"东财{label}板块列表不完整：接口报 {total} 个，实际只取到 {deduped.Count} 个"
+                  + "（多半是翻页中途被限流——push2 除了断连，也会返回合法 JSON 但 data 为空）。"
+                  + "本轮不更新板块，库里保留上次的完整快照，下轮重试。");
+        }
+
+        Report($"东财{label}板块 {deduped.Count} 个（接口报 {total} 个）");
+        return deduped;
+    }
+
+    private static Board? ToBoard(JsonElement item, BoardType type, DateTime now)
+    {
+        var code = Str(item, "f12");
+        if (string.IsNullOrEmpty(code)) return null;
+        return new Board
+        {
+            BoardCode = code,
+            Type = type,
+            Name = Str(item, "f14"),
+            MemberCount = 0,                 // 由成分股抓取时按实际名单写
+            ChangePct = Num(item, "f3"),
+            Amount = Num(item, "f6"),
+            LeaderCode = Str(item, "f140"),
+            LeaderName = Str(item, "f128"),
+            AsOf = now,
+        };
+    }
+
+    // ─────────────── 成分股（这才是真正需要 push2 的那一步）───────────────
+
+    /// <summary>
+    /// 某个板块的官方成分股名单。按代码排序翻页——**不能按涨跌幅排序**，那会跨页重复/遗漏。
+    /// 返回的名单会跟接口报的 total 对账，对不上就抛异常（宁可这个板块本轮失败、下轮重试，
+    /// 也不要把一份残缺名单写进库当成完整的）。
+    /// </summary>
+    public async Task<List<string>> FetchMembersAsync(string boardCode, CancellationToken ct = default)
+    {
+        var codes = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int total = 0;
+
+        for (int page = 1; page <= 20; page++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var url = "https://push2.eastmoney.com/api/qt/clist/get" +
+                      $"?pn={page}&pz={PageSize}&po=0&np=1&fltt=2&invt=2&fid=f12&fs=b:{boardCode}" +
+                      "&fields=f12,f14";
+            var body = await Limiter.RunAsync(() => GetAsync(url, ct), ct);
+
+            using var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("data", out var data) ||
+                data.ValueKind != JsonValueKind.Object) break;      // 空板块，正常收尾
+            if (!data.TryGetProperty("diff", out var diff) || diff.ValueKind != JsonValueKind.Array) break;
+            if (data.TryGetProperty("total", out var tot) && tot.TryGetInt32(out var tv)) total = tv;
+
+            int n = 0;
+            foreach (var item in diff.EnumerateArray())
+            {
+                var c = Str(item, "f12");
+                if (c.Length > 0 && seen.Add(c)) codes.Add(c);
+                n++;
+            }
+            if (n < PageSize || (total > 0 && codes.Count >= total)) break;
+        }
+
+        // 跟接口自报的 total 对账。差一只都说明这份名单不完整——分页丢了、或者中途被限流截断。
+        if (total > 0 && codes.Count != total)
+            throw new RateLimitedException(
+                $"板块 {boardCode} 成分股不完整：接口报 {total} 只，实际取到 {codes.Count} 只。本轮不写入，下轮重试。");
+
+        return codes;
+    }
+
+    // ─────────────── JSON 取值：push2 同一个字段有时是数字有时是字符串 ───────────────
+
+    protected static string Str(JsonElement el, string prop)
+    {
+        if (!el.TryGetProperty(prop, out var v)) return "";
+        return v.ValueKind switch
+        {
+            JsonValueKind.String => v.GetString() ?? "",
+            JsonValueKind.Number => v.ToString(),
+            _ => "",
+        };
+    }
+
+    protected static double Num(JsonElement el, string prop)
+    {
+        if (!el.TryGetProperty(prop, out var v)) return 0;
+        return v.ValueKind switch
+        {
+            JsonValueKind.Number => v.TryGetDouble(out var d) ? d : 0,
+            JsonValueKind.String => double.TryParse(v.GetString(), out var d2) ? d2 : 0,
+            _ => 0,
+        };
+    }
+}

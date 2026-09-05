@@ -47,26 +47,28 @@ public class MainViewModel : INotifyPropertyChanged
     public NamedBarSource SelectedSource { get => _selectedSource; private set => Set(ref _selectedSource, value); }
 
     private bool _isBusy;
+    /// <summary>
+    /// 【手动】页那种横跨所有数据源的大任务正在跑。它只管手动页按钮的可用性——
+    /// 界面上"在跑什么"已经由 <see cref="RunningTasks"/> 逐项显示了。
+    ///
+    /// ⚠ 它**不代表"程序忙不忙"**：并发跑的任务只登记在占用表里、不动这个标志
+    /// （所以以前顶上那句"空闲"常常在有任务跑着的时候出现，2026-09-05 已经撤掉）。
+    /// </summary>
     public bool IsBusy
     {
         get => _isBusy;
-        private set { Set(ref _isBusy, value); Raise(nameof(BusyText)); }
+        private set => Set(ref _isBusy, value);
     }
-
-    /// <summary>状态行开头那句。以前直接绑 IsBusy 显示成"运行中：False"，看着像出了错。</summary>
-    public string BusyText => IsBusy ? "运行中" : "空闲";
-
-    /// <summary>Live "still alive" ticker shown next to 运行中, independent of log lines —
-    /// a long silent step (e.g. fetching the full stock list) shouldn't look indistinguishable
-    /// from a hung process.</summary>
-    private string _elapsedText = "";
-    public string ElapsedText { get => _elapsedText; private set => Set(ref _elapsedText, value); }
 
     private CancellationTokenSource? _cts;
     private readonly Services.WebView2JsonFetcher? _browserChannel;
+
+    /// <summary>
+    /// 照当时的配置文件重造一个板块成分股通道（App 传进来，见 <see cref="ReloadConfig"/>）。
+    /// 造法留在 App 那边——限流参数、浏览器通道这些装配细节不该漏进 ViewModel。
+    /// </summary>
+    private readonly Func<IBoardFetcher>? _recreateBoardFetcher;
     private bool _verifyingEastMoney;
-    private DispatcherTimer? _heartbeat;
-    private DateTime _runStartedAt;
     private readonly StreamWriter? _logFileWriter;
     private readonly FetchPaths _paths;
 
@@ -326,6 +328,9 @@ public class MainViewModel : INotifyPropertyChanged
 
     /// <summary>打开东财人工验证窗口（2026-09-04）。见 <see cref="VerifyEastMoneyAsync"/>。</summary>
     public RelayCommand VerifyEastMoneyCommand { get; }
+
+    /// <summary>【重新读取配置】——见 <see cref="ReloadConfig"/>。</summary>
+    public RelayCommand ReloadConfigCommand { get; }
     public RelayCommand RunPlanItemNowCommand { get; }
     public RelayCommand AddPlanTemplateCommand { get; }
     public RelayCommand RunPlanGroupNowCommand { get; }
@@ -336,9 +341,11 @@ public class MainViewModel : INotifyPropertyChanged
     /// 给 null 就是没有这个能力，按钮点了会说明原因。
     /// </param>
     public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources,
-                         Services.WebView2JsonFetcher? browserChannel = null)
+                         Services.WebView2JsonFetcher? browserChannel = null,
+                         Func<IBoardFetcher>? recreateBoardFetcher = null)
     {
         _browserChannel = browserChannel;
+        _recreateBoardFetcher = recreateBoardFetcher;
         _orchestrator = orchestrator;
         _paths = paths;
         AvailableSources = availableSources;
@@ -346,6 +353,11 @@ public class MainViewModel : INotifyPropertyChanged
         // faster on some machines (see doc/data-platform-design.md), Tencent+新浪 has proven
         // stable in practice. Falls back to the first source if "Tencent" isn't in the list.
         _selectedSource = ResolveBarSource(availableSources);
+        // 记下启动时这两项的值。【重新读取配置】拿它们跟新读到的比，日志才写得出"从什么变成什么"
+        // ——只报当前值的话，人分不清"我刚改的那下生效了没有"。App 造 boardFetcher 跟这里读的
+        // 是同一份文件、同一时刻，所以这份"已应用值"跟实际造出来的对象是对得上的。
+        _appliedBoardChannel = FetcherSettings.ReadBoardChannel(paths.SettingsPath);
+        _appliedNic = FetcherSettings.ReadString(paths.SettingsPath, "Push2NetworkInterface");
 
         // 每次程序启动开一份新的 fetch.log，但**上一轮那份先归档、不直接冲掉**（见
         // ArchivePreviousLog）。AutoFlush 让每行一写完就落盘，崩溃/被强制结束也不会丢最后那几行。
@@ -368,7 +380,9 @@ public class MainViewModel : INotifyPropertyChanged
         // 按钮是灰的、用户没法停一个正在等待的计划。"停止"表达的是"别再跑了"，就该停到底。
         StopCommand = new RelayCommand(
             _ => StopEverything("用户点了停止"),
-            _ => IsBusy || IsPlanRunning);
+            // 并发跑的任务不占 IsBusy（它们只登记在占用表里），所以这里也要看占用表，
+            // 否则手动并发跑着的时候【停止全部】是灰的、点不动。
+            _ => IsBusy || IsPlanRunning || Occupancy.AnyRunning);
         RetryFailedCommand = new RelayCommand(async _ => await RunRetryFailedAsync(), _ => !IsBusy && HasFailed);
         FetchBoardsCommand = new RelayCommand(async _ => await RunFetchBoardsAsync(), _ => !IsBusy);
         BackfillDailyCommand = new RelayCommand(async _ => await RunBackfillDailyHistoryAsync(), _ => !IsBusy);
@@ -396,6 +410,10 @@ public class MainViewModel : INotifyPropertyChanged
         // 跟【执行】【停止全部】同一个原则：永远可点，点了被拒也要在日志里说清楚为什么，
         // 别做成一个灰着的、点下去毫无反应的按钮。
         VerifyEastMoneyCommand = new RelayCommand(async _ => await VerifyEastMoneyAsync(), _ => true);
+        // 手动页那几个大按钮在跑时不给点：它们横跨所有数据源，这时候换任何东西都可能
+        // 换到正在用的对象底下。计划在跑不挡——按源记账的并发下，多数计划项跟配置里这几项
+        // 毫不相干，为了改个网卡去停整个计划不合理（真冲突的那一项在 ReloadConfig 里单独挡）。
+        ReloadConfigCommand = new RelayCommand(_ => ReloadConfig(), _ => !IsBusy);
         // 每行一个【执行】按钮，参数就是那一行——比"先选中再点右边的按钮"少一步
         RunPlanItemNowCommand = new RelayCommand(
             async p => await RunPlanItemNowAsync(p as PlanItemViewModel),
@@ -413,6 +431,9 @@ public class MainViewModel : INotifyPropertyChanged
         _logFlushTimer = new DispatcherTimer { Interval = LogFlushInterval };
         _logFlushTimer.Tick += (_, _) => FlushPendingLogLines();
         _logFlushTimer.Start();
+
+        // 占用表一变就刷界面那行。回调可能来自后台线程，切回 UI 线程再动绑定属性。
+        Occupancy.Changed += () => OnUi(SyncRunningTasks);
 
         RefreshDataStatus();
         RefreshFailedCodeCount();
@@ -575,6 +596,96 @@ public class MainViewModel : INotifyPropertyChanged
     private static void OnUi(Action action)
         => System.Windows.Application.Current?.Dispatcher.Invoke(action);
 
+    /// <summary>
+    /// 数据源占用表（2026-09-04）——计划和手动执行**共用这一份**，是"能不能并发"的唯一依据。
+    ///
+    /// 原来靠一个全局 IsBusy："有任务在跑就一律不许再开"。可【板块成分股】走东财 push2、
+    /// 要人守着过图片验证码，【个股日K】走腾讯要跑一个半小时——两个压根不抢同一个源，
+    /// 却只能排队，板块几天都追不上时效性（1000 个板块跑一天才拿下 207 个）。
+    /// 换成按源记账后，源不重叠就能同时跑。
+    /// </summary>
+    public SourceOccupancy Occupancy { get; } = new();
+
+    /// <summary>
+    /// 界面上「正在执行」那几行（2026-09-05）——占用表的镜像，每行带自己的用时和【停止】。
+    ///
+    /// 为什么要镜像而不是每次重建整个列表：行里有"停止中"这种**界面自己的状态**，
+    /// 整表重建会把它冲掉，用户点完【停止】按钮又变回可点的样子，像是没生效。
+    /// 所以按 Id 增删，已有的行原样留着（见 <see cref="SyncRunningTasks"/>）。
+    /// </summary>
+    public ObservableCollection<RunningTaskViewModel> RunningTasks { get; } = [];
+
+    /// <summary>有任务在跑——界面据此显示/隐藏「正在执行」那个小标题。
+    /// 没人在跑时整块不占地方（不再写一句"空闲"，见 <see cref="IsBusy"/> 的注释）。</summary>
+    public bool HasRunningTasks => RunningTasks.Count > 0;
+
+    /// <summary>每秒走一次，只干一件事：刷新上面那几行的用时。没人在跑时停掉。</summary>
+    private DispatcherTimer? _runningTimer;
+
+    /// <summary>
+    /// 把占用表的变化搬进 <see cref="RunningTasks"/>：新登记的加进去，跑完的移走，
+    /// 还在的原样保留（保住"停止中"的状态和开始时刻）。必须在 UI 线程上调。
+    ///
+    /// ⚠ 只动占用表来的行——【手动】页那种大任务的行不在占用表里，由
+    /// <see cref="BeginManualRow"/>/<see cref="EndManualRow"/> 自己管，这里碰它会把它抹掉。
+    /// </summary>
+    private void SyncRunningTasks()
+    {
+        var live = Occupancy.Snapshot();
+        var liveIds = live.Select(t => t.Id).ToHashSet();
+
+        for (int i = RunningTasks.Count - 1; i >= 0; i--)
+            if (RunningTasks[i].FromOccupancy && !liveIds.Contains(RunningTasks[i].Id))
+                RunningTasks.RemoveAt(i);
+
+        var have = RunningTasks.Select(v => v.Id).ToHashSet();
+        foreach (var t in live)
+            if (!have.Contains(t.Id))
+                RunningTasks.Add(RunningTaskViewModel.FromTask(t, StopRunningTask));
+
+        AfterRunningTasksChanged();
+    }
+
+    /// <summary>列表增删之后：刷新占位提示，并按需开关那个每秒刷用时的定时器。</summary>
+    private void AfterRunningTasksChanged()
+    {
+        Raise(nameof(HasRunningTasks));
+
+        // 定时器按需开关：一直开着一个每秒 tick 只为刷新一块空白区域没意义
+        if (RunningTasks.Count > 0)
+        {
+            if (_runningTimer == null)
+            {
+                _runningTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                _runningTimer.Tick += (_, _) =>
+                {
+                    foreach (var v in RunningTasks) v.UpdateElapsed();
+                };
+            }
+            _runningTimer.Start();
+        }
+        else _runningTimer?.Stop();
+    }
+
+    /// <summary>
+    /// 单独停掉某一项（每行后面那个【停止】，2026-09-05）。跟【停止全部】的区别要说清楚：
+    /// 并发跑着两三项时，另一项可能已经跑了一个多小时，不该被连坐。
+    /// </summary>
+    private void StopRunningTask(RunningTaskViewModel row)
+    {
+        if (row.Stopping) return;
+        if (!row.Cancel())
+        {
+            Log($"【{row.Name}】刚好已经跑完了，不用停。");
+            return;
+        }
+        row.Stopping = true;
+        Log($"已向【{row.Name}】发出停止信号，等它收尾（已抓到的数据不会丢）。其它正在跑的任务不受影响。"
+          + (row.FromOccupancy
+                ? "如果它是计划里的一项，计划会当这一项被取消、接着跑后面的项——要连计划一起停用【停止全部】。"
+                : ""));
+    }
+
     private int _refreshingCounts;
 
     /// <summary>
@@ -633,26 +744,121 @@ public class MainViewModel : INotifyPropertyChanged
         });
     }
 
-    private void StartHeartbeat()
+    /// <summary>
+    /// 【手动】页的大任务开跑：往「正在执行」列表里加一行（2026-09-05，替掉原来的心跳
+    /// ElapsedText）。这类任务**不进占用表**——它横跨所有数据源，登记进去只会把自己挡在门外——
+    /// 所以这里手工加、跑完手工去（见 <see cref="EndManualRow"/>），不然它跑着的时候
+    /// 界面上一行都没有，看着像什么都没在干。
+    /// </summary>
+    private RunningTaskViewModel BeginManualRow(string name, CancellationTokenSource cts)
     {
-        _runStartedAt = DateTime.Now;
-        ElapsedText = "已运行 0 秒";
-        _heartbeat = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        _heartbeat.Tick += (_, _) =>
+        var row = RunningTaskViewModel.FromManualRun(name, cts, StopRunningTask);
+        OnUi(() =>
         {
-            var elapsed = DateTime.Now - _runStartedAt;
-            ElapsedText = elapsed.TotalHours >= 1
-                ? $"已运行 {(int)elapsed.TotalHours} 小时 {elapsed.Minutes} 分 {elapsed.Seconds} 秒"
-                : elapsed.TotalMinutes >= 1
-                    ? $"已运行 {(int)elapsed.TotalMinutes} 分 {elapsed.Seconds} 秒"
-                    : $"已运行 {elapsed.Seconds} 秒";
-        };
-        _heartbeat.Start();
+            RunningTasks.Add(row);
+            AfterRunningTasksChanged();
+        });
+        return row;
+    }
+
+    /// <summary>手动大任务收工：把那一行去掉。**必须放在 finally 里**，否则它会永远挂在界面上。</summary>
+    private void EndManualRow(RunningTaskViewModel? row)
+    {
+        if (row == null) return;
+        OnUi(() =>
+        {
+            RunningTasks.Remove(row);
+            AfterRunningTasksChanged();
+        });
     }
 
     // ── 空闲自动补的定时器 ──
 
     // ── 界面设置的持久化 ──
+
+    /// <summary>板块通道／push2 网卡当前**真正生效**的值（不是文件里的值），见 <see cref="ReloadConfig"/>。</summary>
+    private string _appliedBoardChannel;
+    private string? _appliedNic;
+
+    /// <summary>
+    /// 【重新读取配置】（2026-09-05）：不重启程序，把 <c>data/fetcher-settings.json</c> 的改动吃进来。
+    ///
+    /// ════ 三项配置，两种生效方式 ════
+    /// · <c>BarSource</c>——只是"下一轮抓 K 线用列表里的哪一个"。三个源的对象启动时就都造好了，
+    ///   换的是个引用，所以随时能换。正在跑的那一轮不受影响：它早把对象传进去了。
+    /// · <c>BoardMemberChannel</c> / <c>Push2NetworkInterface</c>——决定**造哪个类、构造参数是什么**，
+    ///   光重读文件不换对象等于没改。所以这里要重造一个 fetcher 塞回 orchestrator。
+    ///
+    /// ════ 为什么板块那两项可能"这次没换成" ════
+    /// 重造对象要求**没有任务正在用它**。手动页的大按钮由命令的 CanExecute 挡住了（那些横跨
+    /// 所有数据源）；但计划是**按数据源并发**跑的（见 SourceOccupancy），完全可能这会儿正有一项
+    /// 占着东财 push2 抓成分股——跑到一半把它脚下的对象换掉，事件订阅和限流器状态都会错乱。
+    /// 这种时候就跳过这一项、把话说清楚，而不是拒绝整个重载：另外两项该生效还是得生效。
+    ///
+    /// 有意不做的事：不改写配置文件（那会洗掉用户的注释，见 FetcherSettings 类注释），
+    /// 也不碰浏览器通道（重建它等于丢掉攒下的 Cookie 身份，而这几项设置也不影响它）。
+    /// </summary>
+    private void ReloadConfig()
+    {
+        Log("===== 【重新读取配置】开始 =====");
+        Log($"　配置文件：{_paths.SettingsPath}");
+
+        if (!File.Exists(_paths.SettingsPath))
+        {
+            // 正常情况下启动时 EnsureTemplate 就写出来了，走到这儿多半是人手删了
+            Log("　⚠ 配置文件不存在，所有设置继续用代码里的默认值。重启程序会自动写一份带说明的模板。");
+            Log("===== 【重新读取配置】结束 =====");
+            return;
+        }
+
+        // ── ① K 线数据源 ──
+        var oldBar = SelectedSource.Name;
+        SelectedSource = ResolveBarSource(AvailableSources);
+        Log($"　K线数据源 BarSource：{ChangeText(oldBar, SelectedSource.Name)}");
+
+        // ── ② 板块成分股通道 + push2 网卡 ──
+        var newChannel = FetcherSettings.ReadBoardChannel(_paths.SettingsPath);
+        var newNic = FetcherSettings.ReadString(_paths.SettingsPath, "Push2NetworkInterface");
+        bool boardChanged = newChannel != _appliedBoardChannel
+                         || !string.Equals(newNic, _appliedNic, StringComparison.Ordinal);
+
+        if (!boardChanged)
+        {
+            Log($"　板块通道 BoardMemberChannel：{ChangeText(_appliedBoardChannel, newChannel)}");
+            Log($"　push2 网卡 Push2NetworkInterface：{ChangeText(NicText(_appliedNic), NicText(newNic))}");
+        }
+        else if (_recreateBoardFetcher is null)
+        {
+            // 兜底：App 没传重造委托（测试里构造的 ViewModel 就是这样）。宁可说清楚也别假装换了。
+            Log("　⚠ 板块通道这次没换：程序没有提供重造通道的能力（改动会在下次启动时生效）。");
+        }
+        else if (Occupancy.Snapshot().FirstOrDefault(t => t.Sources.Contains(DataSourceId.EmPush2))
+                 is { } busy)
+        {
+            // 跑到一半换掉它脚下的对象，事件订阅和限流熔断计数都会错乱，不如等
+            Log($"　⚠ 板块通道这次没换：【{busy.Name}】正在用东财 push2。"
+              + "等它跑完再点一次【重新读取配置】就会生效（另外两项已经生效了）。");
+        }
+        else
+        {
+            _orchestrator.ReplaceBoardFetcher(_recreateBoardFetcher());
+            Log($"　板块通道 BoardMemberChannel：{ChangeText(_appliedBoardChannel, newChannel)}");
+            Log($"　push2 网卡 Push2NetworkInterface：{ChangeText(NicText(_appliedNic), NicText(newNic))}");
+            // 只有真的换成了才更新"已应用值"——没换成的话下次点还得再报一次差异
+            _appliedBoardChannel = newChannel;
+            _appliedNic = newNic;
+        }
+
+        Log("===== 【重新读取配置】结束 =====");
+    }
+
+    /// <summary>"旧 → 新 ✔ 已生效"或者"值（没变）"。人一眼要能看出自己刚改的那下算不算数。</summary>
+    private static string ChangeText(string oldValue, string newValue)
+        => oldValue == newValue ? $"{newValue}（没变）" : $"{oldValue} → {newValue}  ✔ 已生效";
+
+    /// <summary>网卡没配就是走默认路由，日志里得写出来——空字符串看着像读失败。</summary>
+    private static string NicText(string? nic)
+        => string.IsNullOrWhiteSpace(nic) ? "（默认路由）" : nic;
 
     /// <summary>
     /// 定下这一次运行用哪个 K 线源：配置文件里指定了就用它，没有/认不出来就用腾讯。
@@ -660,20 +866,9 @@ public class MainViewModel : INotifyPropertyChanged
     /// </summary>
     private NamedBarSource ResolveBarSource(List<NamedBarSource> sources)
     {
-        string? want = null;
-        try
-        {
-            if (File.Exists(_paths.SettingsPath))
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(_paths.SettingsPath));
-                if (doc.RootElement.TryGetProperty("BarSource", out var v) && v.ValueKind == JsonValueKind.String)
-                    want = v.GetString();
-            }
-        }
-        catch
-        {
-            // 配置读不了就用默认，不该拦住程序启动
-        }
+        // 走 FetcherSettings 读（2026-09-05）：配置文件现在是**带 // 注释的 JSONC**，
+        // 用普通的 JsonDocument.Parse 会当场抛异常 → 整份配置被忽略 → BarSource 静默失效。
+        var want = FetcherSettings.ReadString(_paths.SettingsPath, "BarSource");
 
         var picked = sources.FirstOrDefault(
             s => string.Equals(s.Name, want, StringComparison.OrdinalIgnoreCase));
@@ -722,10 +917,8 @@ public class MainViewModel : INotifyPropertyChanged
     {
         try
         {
-            if (!File.Exists(_paths.SettingsPath)) return false;
-            using var doc = JsonDocument.Parse(File.ReadAllText(_paths.SettingsPath));
-            return doc.RootElement.TryGetProperty("AutoFillFinancialsWhenIdle", out var v)
-                && v.ValueKind is JsonValueKind.True && v.GetBoolean();
+            return FetcherSettings.ReadBool(
+                _paths.SettingsPath, "AutoFillFinancialsWhenIdle");
         }
         catch
         {
@@ -733,27 +926,15 @@ public class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>迁移完就把老键去掉，免得下次启动又迁一遍、把用户后来的修改盖回去。</summary>
-    private void ClearLegacyIdleFinancialSetting()
-    {
-        try
-        {
-            File.WriteAllText(_paths.SettingsPath,
-                JsonSerializer.Serialize(new Dictionary<string, object>(),
-                    new JsonSerializerOptions { WriteIndented = true }));
-        }
-        catch
-        {
-            // 清不掉只会导致下次启动多迁一次，不值得打扰用户
-        }
-    }
-
-    private void StopHeartbeat()
-    {
-        _heartbeat?.Stop();
-        _heartbeat = null;
-        ElapsedText = "";
-    }
+    /// <summary>
+    /// 迁移完就把老键去掉，免得下次启动又迁一遍、把用户后来的修改盖回去。
+    ///
+    /// ⚠ 2026-09-05 修：原来这里是 <c>File.WriteAllText(路径, "{}")</c>——**把整个设置文件
+    /// 清空**，用户配的 BarSource、Push2NetworkInterface 一起没了，而且不报错。
+    /// （那多半就是这个文件后来变成 0 字节的原因。）现在只删这一个键，其余原样保留。
+    /// </summary>
+    private void ClearLegacyIdleFinancialSetting() =>
+        FetcherSettings.RemoveKey(_paths.SettingsPath, "AutoFillFinancialsWhenIdle");
 
     /// <summary>自动重试最多连着做几轮——够把"数据源晚点才更新"这种情况磨平，又不会没完没了。</summary>
     private const int AutoRetryMaxRounds = 3;
@@ -887,8 +1068,8 @@ public class MainViewModel : INotifyPropertyChanged
     private async Task RunOperationAsync(string name, Func<IProgress<string>, CancellationToken, Task<FetchResult>> action)
     {
         IsBusy = true;
-        StartHeartbeat();
         _cts = new CancellationTokenSource();
+        var row = BeginManualRow(name, _cts);
         Log($"===== 【{name}】开始 =====");
         try
         {
@@ -907,7 +1088,7 @@ public class MainViewModel : INotifyPropertyChanged
         finally
         {
             _scheduledStartAt = null;
-            StopHeartbeat();
+            EndManualRow(row);
             _cts?.Dispose();
             _cts = null;
             RefreshDataStatus();
@@ -1078,8 +1259,9 @@ public class MainViewModel : INotifyPropertyChanged
         }
 
         IsBusy = true;
-        StartHeartbeat();
         _cts = new CancellationTokenSource();
+        // 等待期间也算"在执行"：那段时间同样只能点【停止】把它撤掉，界面上得看得见它排着
+        var row = BeginManualRow($"{label}（定时 {ScheduleTimeText}）", _cts);
         try
         {
             var target = DateTime.Today.Add(t.ToTimeSpan());
@@ -1111,7 +1293,7 @@ public class MainViewModel : INotifyPropertyChanged
         }
         finally
         {
-            StopHeartbeat();
+            EndManualRow(row);
             _cts?.Dispose();
             _cts = null;
             RefreshDataStatus();
@@ -1661,6 +1843,28 @@ public class MainViewModel : INotifyPropertyChanged
     ///   · 自动重试有自己的定时器，不取消的话过一小时它又自己跑起来。
     /// 已经写进数据库的部分不回滚，下次跑会跳过已有数据。
     /// </summary>
+    /// <summary>停止信号发出去之后，在后台等各任务收尾完毕（占用表清空），然后如实回话。</summary>
+    private async void WaitStopFinishedAsync(int signalled)
+    {
+        Log($"已向 {signalled} 个正在跑的任务发出停止信号，等它们收尾（已抓到的数据不会丢）…");
+        // 超时给得宽：收尾里可能要写几万行库。但**必须有上限**——卡在不响应
+        // CancellationToken 的同步调用里的任务谁也掐不动，不能让界面永远停在"正在收尾"。
+        bool clean = await Occupancy.WaitAllStoppedAsync(TimeSpan.FromMinutes(3));
+        if (clean)
+        {
+            Log("✔ 全部停止：所有任务都已收尾退出。");
+        }
+        else
+        {
+            var left = Occupancy.Snapshot();
+            Log($"⚠ 等了 3 分钟还有 {left.Count} 个任务没退出："
+              + string.Join("、", left.Select(t => $"【{t.Name}】"))
+              + "。它们可能卡在不响应停止的调用里（比如死等一把数据库锁），"
+              + "占用的数据源暂时也放不出来。要彻底清掉只能重启程序。");
+        }
+        OnUi(SyncRunningTasks);
+    }
+
     private void StopEverything(string why)
     {
         bool somethingRunning = IsPlanRunning || IsBusy || _planCts != null || _manualCts != null;
@@ -1673,7 +1877,17 @@ public class MainViewModel : INotifyPropertyChanged
         _planCts?.Cancel();
         _manualCts?.Cancel();
         _cts?.Cancel();
+        // 占用表里每一项都带着自己的 CTS（并发跑的那几个就在这儿），逐个叫停。
+        int signalled = Occupancy.CancelAll();
         CancelAutoRetry(why);
+
+        // ════ "点了停止"和"真的停干净了"是两件事（2026-09-04 按用户要求分开）════
+        // 任务收到取消信号后还要收尾（把已抓的写库、记下"下次从哪接"），而它们是在自己的
+        // finally 里才从占用表移除的——所以**占用表清空 == 全部收尾完毕**，不需要每个任务
+        // 再手写一个返回 bool 的 Stop 方法（40 个手写方法漏一个就永远等不到那个 true）。
+        //
+        // 这里不阻塞 UI：后台等，等到了再回话。
+        if (signalled > 0) WaitStopFinishedAsync(signalled);
 
         // 什么都没在跑也要回话——按钮以前在这种时候是禁用的，点下去毫无反应，
         // 深色主题下还看不出它是灰的。宁可说一句"没什么可停的"，也别静默。
@@ -1717,7 +1931,14 @@ public class MainViewModel : INotifyPropertyChanged
         try
         {
             Log("正在打开东财验证窗口……第一次要几秒（启动浏览器内核 + 打开东财页面）。");
-            await _browserChannel.ShowForManualVerificationAsync();
+
+            // ⚠ 一定要带超时（2026-09-05 加）：这个调用要是永不返回，下面的 finally 就走不到，
+            //    _verifyingEastMoney 永远卡在 true，之后**每次点按钮都只回一句"正在打开中"**，
+            //    人看到的就是"这个按钮彻底废了"。实测撞过一次（WebView2 初始化里的死锁）。
+            //    根因已经修掉，但这道保险要留着：卡住的原因可以有很多，按钮不能跟着一起废。
+            //    90 秒——WebView2 首次初始化通常几秒到十几秒，留足余量。
+            await _browserChannel.ShowForManualVerificationAsync()
+                                 .WaitAsync(TimeSpan.FromSeconds(90));
             Log("验证窗口已打开：按页面提示过一次验证，完了直接关掉那个窗口即可，"
               + "Cookie 会留在 data/local/webview2，后面的板块抓取会带着它走。");
         }
@@ -1778,6 +1999,24 @@ public class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>把选中的那一项**立刻**跑一次（不走队列，也不影响它的重复规则）。</summary>
+    /// <summary>弹一句提示，同时写进日志——日志留痕，弹窗保证人当场看见。</summary>
+    private void Notify(string title, string message)
+    {
+        Log($"{title}：{message.Replace('\n', ' ')}");
+        OnUi(() => System.Windows.MessageBox.Show(
+            message, title, System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information));
+    }
+
+    /// <summary>问一句是/否。只在**手动**路径上用——自动跑时没人点，问了会把计划卡死。</summary>
+    private bool Confirm(string title, string message)
+    {
+        bool yes = false;
+        OnUi(() => yes = System.Windows.MessageBox.Show(
+            message, title, System.Windows.MessageBoxButton.YesNo,
+            System.Windows.MessageBoxImage.Question) == System.Windows.MessageBoxResult.Yes);
+        return yes;
+    }
+
     private async Task RunPlanItemNowAsync(PlanItemViewModel? vm)
     {
         if (vm == null) return;
@@ -1788,10 +2027,49 @@ public class MainViewModel : INotifyPropertyChanged
         //
         // 原来这里连同按钮的 CanExecute 一起判了 IsPlanRunning，于是计划一开着按钮就是禁用的，
         // 点下去什么都不发生、也不说为什么——深色主题下连"它是灰的"都看不出来（用户："点执行没反应"）。
+        //
+        // 2026-09-04 起拦截分三道，全部**当场弹窗告知**（自动侧则是静默让路，见 PlanRunner.IsSourceBusy）：
+        //   ① 【手动】页的大任务在跑——那些横跨所有数据源，跟谁都不能并发；
+        //   ② 要用的数据源被占——同时抓会一起撞限流；
+        //   ③ 前置今天还没跑成功——问一句要不要照样跑。
         if (IsBusy)
         {
-            Log($"【{vm.Name}】没有执行：另一个任务正在跑，等它结束再点（要停当前任务用【停止全部】）。");
+            Notify($"【{vm.Name}】没有执行",
+                "【手动】页有大任务正在跑，它横跨所有数据源，不能并发。\n等它结束再点（要停当前任务用【停止全部】）。");
             return;
+        }
+
+        // ② 数据源占用检查
+        var need = vm.Model.Info.EffectiveSources;
+        foreach (var t in Occupancy.Snapshot())
+        {
+            var clash = need.Where(t.Sources.Contains).Select(DataSourceCatalog.NameOf).ToList();
+            if (clash.Count == 0) continue;
+            Notify($"【{vm.Name}】不能现在跑",
+                $"它要用的数据源【{string.Join("、", clash)}】已被【{t.Name}】占用"
+              + $"（{(DateTime.Now - t.StartedAt).TotalMinutes:F0} 分钟前开始）。\n\n"
+              + "同时抓会一起撞数据源的限流，所以这一项没有执行。\n"
+              + "等那一项结束后再点；或者挑一个**用别的数据源**的任务，那个可以跟它并行跑。");
+            return;
+        }
+
+        // ③ 前置没完成就问一句。只在手动路径上问——自动跑时没人点，问了会把整份计划卡住。
+        //    "今天有没有跑成功"用的是 AlreadyRanOn，跟"今天还要不要再跑"同一个判据。
+        if (vm.Model.Info.DependsOn is { } dep)
+        {
+            var depItem = _plan?.AllItems.FirstOrDefault(x => x.Action == dep);
+            if (depItem != null && !depItem.AlreadyRanOn(DateTime.Now))
+            {
+                var depName = FetchTaskCatalog.Info(dep).Name;
+                if (!Confirm($"【{vm.Name}】的前置没完成",
+                        $"它依赖【{depName}】，而那一项今天还没跑成功。\n\n"
+                      + "现在跑可能取不到要的数据。还是要执行吗？"))
+                {
+                    Log($"【{vm.Name}】没有执行：前置【{depName}】今天还没跑成功，你选了不执行。");
+                    return;
+                }
+                Log($"【{vm.Name}】的前置【{depName}】今天还没跑成功，你选了照样执行。");
+            }
         }
 
         Log($"===== 手动执行计划项【{vm.Name}】 =====");
@@ -1860,51 +2138,91 @@ public class MainViewModel : INotifyPropertyChanged
         // （2026-09-01 用户反馈："这个其实是没开始做的，是在等前一个完成"）。
         var row = PlanItems.FirstOrDefault(x => ReferenceEquals(x.Model, item));
         bool warned = false;
-        while (IsBusy && !ct.IsCancellationRequested)
-        {
-            if (!warned)
-            {
-                progress.Report("　有别的任务正在跑，这一项先排队等它结束（任务严格串行，不会并发抓取）…");
-                SetRowState(row, "⏸ 排队等待", 3);
-                // 顶上那条总状态也是 PlanRunner "挑中就报"的，同样会写成"正在执行"——改掉，
-                // 否则界面说在跑财务报表、日志却在刷不复权历史的进度，对不上（2026-09-01 用户反馈）。
-                OnUi(() => PlanStatusText = $"【{row?.Name ?? "下一项"}】排队中——等当前任务结束");
-                warned = true;
-            }
-            await Task.Delay(TimeSpan.FromSeconds(10), ct);
-        }
-        ct.ThrowIfCancellationRequested();
 
-        if (warned)
-        {
-            progress.Report($"　前一个任务结束了，开始【{row?.Name ?? item.Action.ToString()}】。");
-            OnUi(() => PlanStatusText = $"正在执行【{row?.Name ?? item.Action.ToString()}】");
-        }
-        SetRowState(row, "▶ 执行中…", 3);       // 到这儿才是真的开跑
-
-        // 计划任务也走 _cts：【停止】按钮取消的就是它
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        IsBusy = true;
-        StartHeartbeat();
+        // ════ 排队等的是「同一个数据源」，不再是「任何任务」（2026-09-04 改）════
+        // 原来等的是全局 IsBusy——只要有任务在跑就排队，"任务严格串行，不会并发抓取"。
+        // 可【板块成分股】走东财 push2、要人守着过图片验证码，【个股日K】走腾讯要跑一个半小时，
+        // 两个压根不抢同一个源却只能排队，板块几天都追不上时效性（1000 个板块跑一天拿下 207 个）。
+        // 现在按源记账：源不重叠直接并发，重叠的才排队。
+        //
+        // IsBusy 仍然要等——它现在只代表【手动】页那几个大按钮（拉取全部/区间/失败重取），
+        // 那些横跨所有数据源，跟谁都不能并发。
+        RunningTask? lease = null;
+        var itemCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
-            return await DispatchPlanActionAsync(item, deadline, progress, _cts.Token);
+            while (!ct.IsCancellationRequested)
+            {
+                if (!IsBusy)
+                {
+                    lease = Occupancy.TryAcquire(item.Info.Name, item.Info.EffectiveSources,
+                        manual: !IsPlanRunning, itemCts, out var blockedBy, out var blockedSource);
+                    if (lease != null) break;
+                    if (!warned)
+                    {
+                        progress.Report($"　{DataSourceCatalog.NameOf(blockedSource!.Value)} 正被"
+                                      + $"【{blockedBy!.Name}】占用，这一项先排队等它结束"
+                                      + "（源不冲突的任务是可以同时跑的）…");
+                        SetRowState(row, "⏸ 排队等待", 3);
+                        // 顶上那条总状态也是 PlanRunner "挑中就报"的，同样会写成"正在执行"——改掉，
+                        // 否则界面说在跑财务报表、日志却在刷别的进度，对不上（2026-09-01 用户反馈）。
+                        //
+                        // ⚠ 一定要写清**在等谁、等哪个源**（2026-09-05）：只写"等占用同一数据源的
+                        //    任务结束"时，底下「正在执行」列着的那项恰好同名（比如自己先手动点了
+                        //    【执行】、计划又轮到同一项），界面就成了"X 排队中"配"X 正在执行"，
+                        //    看着像是程序自相矛盾（用户截图）。带上占用者和源名就读得懂了。
+                        var blockedName = DataSourceCatalog.NameOf(blockedSource!.Value);
+                        var blockerName = blockedBy!.Name;
+                        OnUi(() => PlanStatusText =
+                            $"【{row?.Name ?? "下一项"}】排队中——{blockedName} 正被【{blockerName}】占着，等它结束");
+                        warned = true;
+                    }
+                }
+                else if (!warned)
+                {
+                    progress.Report("　【手动】页有大任务正在跑（它横跨所有数据源），这一项先排队等它结束…");
+                    SetRowState(row, "⏸ 排队等待", 3);
+                    OnUi(() => PlanStatusText = $"【{row?.Name ?? "下一项"}】排队中——等当前任务结束");
+                    warned = true;
+                }
+                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+            }
+            ct.ThrowIfCancellationRequested();
+
+            if (warned)
+            {
+                progress.Report($"　可以开工了，开始【{row?.Name ?? item.Action.ToString()}】。");
+                OnUi(() => PlanStatusText = $"正在执行【{row?.Name ?? item.Action.ToString()}】");
+            }
+            SetRowState(row, "▶ 执行中…", 3);       // 到这儿才是真的开跑
+
+            try
+            {
+                return await DispatchPlanActionAsync(item, deadline, progress, itemCts.Token);
+            }
+            finally
+            {
+                // 用时和【停止】都由「正在执行」里那一行负责（它就是上面 TryAcquire 拿到的
+                // 占用表项），这里不用再管——原来那个全局心跳已经撤掉（2026-09-05）。
+                RefreshDataStatus();
+                RefreshFailedCodeCount();
+                // 自动重试到点忙就顺延，跟计划天然不打架，而它"等到当天 21:00 之后再试"
+                // 的时机是计划排不出来的（数据源盘后逐步更新）。
+                // ⚠ 2026-09-02：计划正在跑的时候**不在这里排**——那样每跑完一项就重排一次，
+                //   【拉取全部】拆成 13 项后一天要重排十几次。改成计划一轮收尾时统一排一次
+                //   （见 StartPlanAsync 传给 PlanRunner 的 onRoundFinished）。
+                //   手动点某一行【执行】时 IsPlanRunning 是 false，仍旧立刻排，行为不变。
+                if (!IsPlanRunning) ScheduleAutoRetry();
+            }
         }
         finally
         {
-            StopHeartbeat();
-            _cts?.Dispose();
-            _cts = null;
-            IsBusy = false;
-            RefreshDataStatus();
-            RefreshFailedCodeCount();
-            // 自动重试不占 IsBusy、到点忙就顺延，跟计划天然不打架，而它"等到当天 21:00 之后再试"
-            // 的时机是计划排不出来的（数据源盘后逐步更新）。
-            // ⚠ 2026-09-02：计划正在跑的时候**不在这里排**——那样每跑完一项就重排一次，
-            //   【拉取全部】拆成 13 项后一天要重排十几次。改成计划一轮收尾时统一排一次
-            //   （见 StartPlanAsync 传给 PlanRunner 的 onRoundFinished）。
-            //   手动点某一行【执行】时 IsPlanRunning 是 false，仍旧立刻排，行为不变。
-            if (!IsPlanRunning) ScheduleAutoRetry();
+            // ⚠ 释放占用必须在这一层的 finally：排队中被取消、执行中抛异常、正常收工，
+            //    哪条路出去都要放开源——漏一次那个源就永久锁死，之后所有同源任务都被挡。
+            //    "收尾做完才释放"也正是【停止全部】判断"全部停干净了"的依据
+            //    （见 SourceOccupancy.WaitAllStoppedAsync）。
+            Occupancy.Release(lease);
+            itemCts.Dispose();
         }
     }
 

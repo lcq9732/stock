@@ -25,12 +25,22 @@ public partial class MainWindow : Window
     /// </summary>
     private void SyncLogTop()
     {
-        if (PlanTableBox == null || RootGrid == null || LogTopRow == null) return;
+        if (PlanTableBox == null || RootGrid == null || StatusPane == null) return;
         if (!PlanTableBox.IsVisible) return;        // 切到【手动】页时任务表不可见，保持上一次的高度
         try
         {
             double y = PlanTableBox.TranslatePoint(new System.Windows.Point(0, 0), RootGrid).Y;
-            if (y > 0 && y < RootGrid.ActualHeight) LogTopRow.Height = new GridLength(y);
+            if (y <= 0 || y >= RootGrid.ActualHeight) return;
+
+            // ⚠ 设的是 Min/MaxHeight，不是行高（2026-09-05 改）。原来这里写
+            //    LogTopRow.Height = y，等于把状态区**钉死**在这个高度上：并发之后
+            //    「正在执行」是几行取决于同时跑着几项，多出来的行被这条固定高度直接切掉——
+            //    用户截图里只跑着一项，那一行就已经被切得只剩上半截。现在 y 只当下限，
+            //    内容更多时这一行（Height=Auto）自己长高，日志相应短一点。
+            if (Math.Abs(StatusPane.MinHeight - y) > 0.5) StatusPane.MinHeight = y;
+            // 上限兜底：同时跑起十几项时不能把日志挤没，超过这个高度才让状态区自己滚。
+            double max = Math.Max(y, RootGrid.ActualHeight * 0.4);
+            if (Math.Abs(StatusPane.MaxHeight - max) > 0.5) StatusPane.MaxHeight = max;
         }
         catch { /* 布局还没算完，下一轮 LayoutUpdated 会再来 */ }
     }

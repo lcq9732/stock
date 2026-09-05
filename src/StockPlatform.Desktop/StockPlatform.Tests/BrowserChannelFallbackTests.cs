@@ -52,7 +52,7 @@ public class BrowserChannelFallbackTests
     public async Task 没配浏览器通道时安静地走普通抓取()
     {
         var f = New(null);
-        Assert.False(await f.PrepareBrowserAsync());
+        Assert.False(await f.PrepareAsync());
         Assert.Contains("普通 HTTP", f.DescribeChannel());
     }
 
@@ -61,7 +61,7 @@ public class BrowserChannelFallbackTests
     {
         // 这条得能在日志里看出来——否则"今天怎么快了/慢了"没法归因
         var f = New(new FakeBrowser(ready: true));
-        Assert.True(await f.PrepareBrowserAsync());
+        Assert.True(await f.PrepareAsync());
         Assert.Contains("浏览器通道", f.DescribeChannel());
     }
 
@@ -69,7 +69,7 @@ public class BrowserChannelFallbackTests
     public async Task 通道初始化返回失败时退回普通抓取()
     {
         var f = New(new FakeBrowser(ready: false));
-        Assert.False(await f.PrepareBrowserAsync());
+        Assert.False(await f.PrepareAsync());
         Assert.Contains("普通 HTTP", f.DescribeChannel());
     }
 
@@ -81,7 +81,7 @@ public class BrowserChannelFallbackTests
         var f = New(new FakeBrowser(ready: true, throwOnReady: new InvalidOperationException("没装运行时")));
         f.OnStatus += msgs.Add;
 
-        Assert.False(await f.PrepareBrowserAsync());     // 返回 false，不是抛出去
+        Assert.False(await f.PrepareAsync());     // 返回 false，不是抛出去
         Assert.Contains("普通 HTTP", f.DescribeChannel());
         // 而且要说一声，不能静默降级——否则没人知道为什么变慢了
         Assert.Contains(msgs, m => m.Contains("浏览器通道") && m.Contains("退回"));
@@ -92,6 +92,6 @@ public class BrowserChannelFallbackTests
     {
         // 点了停止就该立刻停，不该被"退回普通抓取"吞掉、继续跑下去
         var f = New(new FakeBrowser(ready: true, throwOnReady: new OperationCanceledException()));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => f.PrepareBrowserAsync());
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => f.PrepareAsync());
     }
 }

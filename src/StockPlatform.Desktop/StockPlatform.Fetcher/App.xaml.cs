@@ -64,6 +64,11 @@ public partial class App : Application
 
         var paths = new FetchPaths();
 
+        // 设置文件不存在/是空的就写一份**带注释的模板**（2026-09-05）——界面上没有这些开关，
+        // 改配置就是改那个文件，可原来它光秃秃一片，人根本不知道有哪些旋钮可拧。
+        // 已有内容一个字都不动。见 FetcherSettings 类注释。
+        FetcherSettings.EnsureTemplate(paths.SettingsPath);
+
         // Each source gets its own rate limiter — they're independent servers with independent
         // budgets. Each source also bundles the stock-list provider it should use for the
         // "获取全市场股票列表" step, so switching sources routes BOTH steps away from a vendor
@@ -153,6 +158,9 @@ public partial class App : Application
         // Cookie 存 data/local/webview2，跨次启动留着，省得每次开程序都被当成生面孔。
         var browserChannel = new Services.WebView2JsonFetcher(
             System.IO.Path.Combine(AppContext.BaseDirectory, "data", "local", "webview2"));
+        // 建出来就登记给 OnExit 销毁——漏了这一句的话下面那段释放代码是空转，
+        // msedgewebview2 子进程会残留（2026-09-05 发现：字段从来没被赋过值）。
+        _browserChannelToDispose = browserChannel;
 
         // 限流参数按 2026-09-04 的实测日志定（跟"能不能访问"是两回事——那个由本地网关决定，
         // 这里说的是访问得到之后东财自己的限流）：
@@ -170,17 +178,20 @@ public partial class App : Application
         //   · 导航取数本身还要等页面加载（1~3 秒），所以实际间隔比设定值更宽。
         //
         // 1350 个成分股请求约 2.5 小时。板块是逐个落库的，跨几轮抓完没关系。
-        var boardFetcher = new EastMoneyBoardFetcher(
-            new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(4),
-                            batchSize: 30, restDuration: TimeSpan.FromSeconds(60),
-                            jitter: 0.3,
-                            // ⚠ 这里**不重试**（2026-09-04 实测踩到）：浏览器通道内部已经自己重试
-                            // 3 次了（5 秒、15 秒，为的是等验证脚本跑完）。外层再重试 3 次的话，
-                            // 一个逻辑请求会变成 3×3＝9 个实际请求——被限流的时候等于火上浇油，
-                            // 而且日志里看着像"试了很多次"，其实全是自己打自己。
-                            retryDelays: []),
-            bindNetworkInterface: ReadSetting(paths.SettingsPath, "Push2NetworkInterface"),
-            browser: browserChannel);
+        // ── 成分股走哪条通道（2026-09-05）──
+        // fetcher-settings.json 里的 "BoardMemberChannel"：
+        //   · "browser"（默认）＝ WebView2 浏览器通道，稳妥，但**会弹图片验证码、要人守着**；
+        //   · "http"           ＝ 纯 HttpClient，快、不弹验证。
+        //
+        // 为什么不直接把默认改成 http：2026-09-04 实测"HttpClient 第 7 个请求就被切"才有的
+        // 浏览器通道；09-05 在同一台机器复测，普通 HttpClient 连发 110 个零失败——那个前提
+        // 看着已经不成立了，**可那次是周六（非交易日）**，而验证码都是交易日撞上的。
+        // 所以两条路并存、配置切换：交易日盘中跑一次 doc/push2-reachability-probe.ps1，
+        // 全过就把这里的默认值改成 "http"，那 2500 个成分股请求从此不用人守着。
+        // 构造抽进了 CreateBoardFetcher（2026-09-05）：【重新读取配置】按钮要在运行期照着
+        // 新配置再造一个，两边必须是同一段代码，否则改了这里忘了那里，热重载出来的通道
+        // 参数会跟启动时的悄悄不一样。
+        IBoardFetcher boardFetcher = CreateBoardFetcher(paths, browserChannel);
 
         // datacenter 客户端给业绩预告/龙虎榜席位等报表用（跟 push2 是不同域名、独立限流）
         var emDataCenter = new EastMoneyDataCenterClient(
@@ -293,9 +304,19 @@ public partial class App : Application
         var boardMapRepository = new SqliteStockBoardMapRepository(paths.CurrentDb);
         boardMapRepository.EnsureSchema();
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository);
+        // 板块**名单**的主源（2026-09-05）：行情中心左侧菜单那份静态 JSON，一个请求拿全量。
+        // 走普通 HttpClient——quote 域名在这台机器上是通的（被网关拦的只有 push2），
+        // 所以这一项不再需要浏览器通道、也不会弹图片验证码。成分股仍旧走上面的 boardFetcher。
+        // 不给它限流器：一轮就一个请求，没有需要节流的东西。
+        var sideMenuBoardList = new EastMoneySideMenuBoardListProvider();
 
-        var viewModel = new MainViewModel(paths, orchestrator, sources, browserChannel);
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList);
+
+        // 最后那个委托是给【重新读取配置】用的：按下时照当时的配置文件重造板块通道。
+        // 传委托而不是把 App 的方法暴露出去，是为了让 MainViewModel 不用知道 browserChannel
+        // 和限流参数这些装配细节——它只管"按现在的配置再给我一个"。
+        var viewModel = new MainViewModel(paths, orchestrator, sources, browserChannel,
+                                          () => CreateBoardFetcher(paths, browserChannel));
         var window = new MainWindow { DataContext = viewModel };
         // 显式认定主窗口：ShutdownMode=OnMainWindowClose 全靠它认对是哪一个。
         // 不设的话 WPF 会拿"第一个 Show 出来的窗口"当主窗口——现在还轮得到它，
@@ -331,19 +352,58 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// 读 data/fetcher-settings.json 里的一个字符串设置。读不到就返回 null——
-    /// 配置文件坏了不该拦住程序启动（跟 MainViewModel.ResolveBarSource 一个路子）。
+    /// 照当前的 <c>fetcher-settings.json</c> 造一个板块成分股取数通道。
+    ///
+    /// 启动时装配走这里，运行期点【重新读取配置】也走这里（见
+    /// <see cref="ViewModels.MainViewModel.ReloadConfig"/>）——**必须是同一段代码**，
+    /// 不然两条路的限流参数会各改各的，热重载出来的通道跟启动时的悄悄不一样。
+    ///
+    /// 吃两个设置：
+    ///   · <c>BoardMemberChannel</c>＝ <c>"http"</c>（默认）纯 HttpClient，快、不弹验证码；
+    ///     <c>"browser"</c> 走 WebView2 浏览器通道，稳妥但**会弹图片验证码、要人守着**。
+    ///     为什么两条路并存：2026-09-04 实测"HttpClient 第 7 个请求就被切"才做的浏览器通道；
+    ///     09-05 同一台机器复测 HttpClient 连发 110 个零失败——可那天是周六，而验证码都是
+    ///     交易日撞上的。所以交易日盘中先跑一次 doc/push2-reachability-probe.ps1 再决定。
+    ///   · <c>Push2NetworkInterface</c>＝ 把 push2 的请求钉在某块网卡上（公司网关按域名拦过它）。
+    ///
+    /// <paramref name="browser"/> 是**共享**的浏览器通道，重载时不重建：它拉着一串
+    /// msedgewebview2 子进程和落盘的 Cookie，重建等于把攒下的"熟面孔"身份丢掉，
+    /// 而这两个设置也压根不影响它。
     /// </summary>
-    private static string? ReadSetting(string settingsPath, string key)
+    private static IBoardFetcher CreateBoardFetcher(FetchPaths paths, Services.WebView2JsonFetcher browser)
     {
-        try
-        {
-            if (!System.IO.File.Exists(settingsPath)) return null;
-            using var doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(settingsPath));
-            return doc.RootElement.TryGetProperty(key, out var v)
-                && v.ValueKind == System.Text.Json.JsonValueKind.String
-                ? v.GetString() : null;
-        }
-        catch { return null; }
+        var bindNic = ReadSetting(paths.SettingsPath, "Push2NetworkInterface");
+        var boardChannel = FetcherSettings.ReadBoardChannel(paths.SettingsPath);
+
+        return boardChannel == "http"
+            // 纯 HttpClient：没有页面加载那 1~3 秒，也不用等验证脚本，所以能跑得比浏览器通道快。
+            // 2 秒间隔比实测通过的 1.2 秒更保守——那次实测毕竟是非交易日。
+            // 每 50 个歇 60 秒 ≈ 2500 个请求两小时出头，是浏览器通道的一半时间。
+            ? new EastMoneyBoardHttpFetcher(
+                new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
+                                batchSize: 50, restDuration: TimeSpan.FromSeconds(60),
+                                jitter: 0.3, retryDelays: []),
+                bindNetworkInterface: bindNic)
+            : new EastMoneyBoardFetcher(
+                new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(4),
+                                batchSize: 30, restDuration: TimeSpan.FromSeconds(60),
+                                jitter: 0.3,
+                                // ⚠ 这里**不重试**（2026-09-04 实测踩到）：浏览器通道内部已经自己重试
+                                // 3 次了（5 秒、15 秒，为的是等验证脚本跑完）。外层再重试 3 次的话，
+                                // 一个逻辑请求会变成 3×3＝9 个实际请求——被限流的时候等于火上浇油，
+                                // 而且日志里看着像"试了很多次"，其实全是自己打自己。
+                                retryDelays: []),
+                bindNetworkInterface: bindNic,
+                browser: browser);
     }
+
+    /// <summary>
+    /// 读 data/fetcher-settings.json 里的一个字符串设置。读不到就返回 null——
+    /// 配置文件坏了不该拦住程序启动。
+    ///
+    /// 实现挪进了 <see cref="Services.FetcherSettings"/>（2026-09-05）：那份文件现在是
+    /// **带 // 注释的 JSONC**，得用允许注释的解析选项读，不然整份配置会被当成坏文件忽略掉。
+    /// </summary>
+    private static string? ReadSetting(string settingsPath, string key) =>
+        FetcherSettings.ReadString(settingsPath, key);
 }

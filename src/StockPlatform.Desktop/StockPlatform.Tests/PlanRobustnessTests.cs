@@ -127,19 +127,47 @@ public class PlanRobustnessTests
     /// </summary>
     private static async Task RunUntilStopped(PlanRunner runner, CancellationToken ct)
     {
-        try { await runner.RunAsync(ct); }
-        catch (OperationCanceledException) { }
+        // ⚠ 一定要有超时兜底，别让它无限等下去（2026-09-05 踩过，代价是几个小时）：
+        //    调度循环是 while(!ct.IsCancellationRequested)，而 ct 只会被 execute 委托里的
+        //    cts.Cancel() 触发——只要**一项都没被挑中**，execute 就永远不会被调用，
+        //    这里就永久干等。现象极难认：dotnet test 没有任何输出地挂着（实测挂过 2 小时以上，
+        //    CPU 几乎为 0），看起来像是 testhost 不退出，其实是测试自己没跑完。
+        //    超时就断言失败，把"计划没收工"变成一条看得懂的错误。
+        var run = Task.Run(async () =>
+        {
+            try { await runner.RunAsync(ct); }
+            catch (OperationCanceledException) { }
+        });
+
+        // 这些用例本该毫秒级跑完（硬超时都设成几百毫秒），10 秒是很宽的余量。
+        if (await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(10))) != run)
+            Assert.Fail("计划跑了 10 秒还没收工——多半是一项都没被挑中，调度循环在空等。"
+                      + "先看 NewHarness 里那个组的 Repeat today 该不该跑。");
+
+        await run;
     }
 
-    /// <summary>两项、一个组、都已到点——够用来看"第一项出事之后第二项还跑不跑"。</summary>
-    private static Harness NewHarness()
+    /// <summary>
+    /// 两项、一个组、都已到点——够用来看"第一项出事之后第二项还跑不跑"。
+    ///
+    /// <para><paramref name="repeat"/> 默认 <see cref="RepeatKind.EveryWorkday"/>，是给那些
+    /// 只做**纯日期判断**（传固定 now、直接问 AlreadyRanOn/DueAnchorAt）的用例用的——它们要的
+    /// 就是日更语义。</para>
+    ///
+    /// <para>⚠ 真的把 <see cref="PlanRunner"/> 跑起来的用例必须传
+    /// <see cref="RepeatKind.Once"/>：调度循环内部用的是真实的 <c>DateTime.Now</c>，没法注入，
+    /// 而日更项**周末不该跑**——2026-09-05（周六）就是这么挂的：一项都没被挑中，
+    /// execute 从没被调用，cts 永远不会被取消，测试永久干等。
+    /// 「仅一次」的项从没跑过就算待办，跟今天星期几无关，这些用例关心的也不是重复周期。</para>
+    /// </summary>
+    private static Harness NewHarness(RepeatKind repeat = RepeatKind.EveryWorkday)
     {
         var dir = Path.Combine(Path.GetTempPath(), "planrobust-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         var group = new FetchPlanGroup
         {
             Name = "测试组", Enabled = true,
-            Repeat = RepeatKind.EveryWorkday, Pacing = RunPacing.Immediate,
+            Repeat = repeat, Pacing = RunPacing.Immediate,
         };
         var a = new FetchPlanItem { Action = FetchActionId.StepStockDayBars, Enabled = true, Owner = group };
         var b = new FetchPlanItem { Action = FetchActionId.StepNetInflow, Enabled = true, Owner = group };
@@ -160,7 +188,7 @@ public class PlanRobustnessTests
     [Fact]
     public async Task 抓取超时只算这一项失败_计划继续往下跑()
     {
-        var h = NewHarness();
+        var h = NewHarness(RepeatKind.Once);
         try
         {
             using var cts = new CancellationTokenSource();
@@ -194,7 +222,7 @@ public class PlanRobustnessTests
     [Fact]
     public async Task 超时失败的项当天不会被反复重挑()
     {
-        var h = NewHarness();
+        var h = NewHarness(RepeatKind.Once);
         try
         {
             using var cts = new CancellationTokenSource();
@@ -225,7 +253,7 @@ public class PlanRobustnessTests
     [Fact]
     public async Task 真的按了停止就不再挑下一项()
     {
-        var h = NewHarness();
+        var h = NewHarness(RepeatKind.Once);
         try
         {
             using var cts = new CancellationTokenSource();
@@ -262,6 +290,7 @@ public class PlanRobustnessTests
         var h = NewHarness();
         try
         {
+            换成每周今天(h);
             // 第一项当成换版之前就跑完了
             var day = DateTime.Today;
             h.First.LastOutcome = RunOutcome.Ok;
@@ -286,9 +315,10 @@ public class PlanRobustnessTests
     [Fact]
     public async Task 今日清单在全跑完时明说没有了()
     {
-        var h = NewHarness();
+        var h = NewHarness(RepeatKind.Once);
         try
         {
+            换成每周今天(h);
             var day = DateTime.Today;
             foreach (var it in new[] { h.First, h.Second })
             {
@@ -305,6 +335,22 @@ public class PlanRobustnessTests
             Assert.DoesNotContain("还要跑", 清单.Replace("今天没有还要跑的了", ""));
         }
         finally { try { Directory.Delete(h.Dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// 把 harness 的组从「每工作日」换成「每周·今天」——**只给那两个"今日清单"测试用**。
+    ///
+    /// 为什么要换：每工作日的项从 2026-09-04 起多了一个**收盘到点**（收盘后要再跑一轮，
+    /// 见 FetchPlanGroup.MarketClose），于是"早上跑过算不算今天完成"在 17:00 前后答案不同，
+    /// 拿它做清单测试就成了看运行时刻的脆弱测试（实测 17:00 一过就红）。
+    /// 清单要验的是"已完成和还要跑分开算"，跟收盘规则无关，换个不带收盘到点的周期最干净。
+    /// 收盘规则本身由下面那几个传固定 now 的测试覆盖。
+    /// </summary>
+    private static void 换成每周今天(Harness h)
+    {
+        var g = h.First.Owner!;
+        g.Repeat = RepeatKind.Weekly;
+        g.Weekday = DateTime.Today.DayOfWeek;
     }
 
     /// <summary>启动计划、抓下开头那份清单（跑到第一项就停，清单是在那之前打的）。</summary>
@@ -427,7 +473,7 @@ public class PlanRobustnessTests
     [Fact]
     public async Task 卡住不返回的项被掐断_计划继续往下跑()
     {
-        var h = NewHarness();
+        var h = NewHarness(RepeatKind.Once);
         try
         {
             using var cts = new CancellationTokenSource();
@@ -459,7 +505,7 @@ public class PlanRobustnessTests
     [Fact]
     public async Task 手动停止不会被误判成超时()
     {
-        var h = NewHarness();
+        var h = NewHarness(RepeatKind.Once);
         try
         {
             using var cts = new CancellationTokenSource();
@@ -481,5 +527,134 @@ public class PlanRobustnessTests
             Assert.Equal(RunOutcome.Cancelled, h.First.LastOutcome);
         }
         finally { try { Directory.Delete(h.Dir, true); } catch { } }
+    }
+
+    // ── 「每工作日」的收盘到点（2026-09-04）────────────────────────────────────────
+    // 收盘前跑到的当日数据是不完整的（K线未定盘、龙虎榜/资金流盘后才发布），所以每工作日的项
+    // 在收盘后必须再跑一轮。原来只要跑过一轮就算"今天做完了"——早上开机自动跑一遍，收盘后
+    // 就再也不跑了，当天数据永远停在盘中那个残缺状态（用户 17:04 看到"共32项已完成30项"，
+    // 那30项绝大多数是早上跑的）。
+    //
+    // 这几个测试全部传**固定的 now**，不看真实时钟。
+
+    /// <summary>周五 2026-09-04。下面几个测试共用。</summary>
+    private static readonly DateTime 周五 = new(2026, 9, 4);
+
+    private static FetchPlanItem 每工作日项(DateTime 上轮开始, TimeOnly? 不早于 = null)
+    {
+        var g = new FetchPlanGroup
+        {
+            Name = "每日组", Enabled = true, Pacing = RunPacing.Immediate,
+            Repeat = RepeatKind.EveryWorkday, NotBefore = 不早于,
+        };
+        var it = new FetchPlanItem
+        {
+            Action = FetchActionId.StepNetInflow, Enabled = true, Owner = g,
+            LastOutcome = RunOutcome.Ok, LastNothingToDo = true,
+            LastStart = 上轮开始, LastEnd = 上轮开始.AddMinutes(30),
+        };
+        g.Items.Add(it);
+        return it;
+    }
+
+    [Fact]
+    public void 收盘前跑过的_收盘后还算没跑()
+    {
+        var it = 每工作日项(周五.AddHours(9));                        // 早上 9 点跑完
+        Assert.True(it.AlreadyRanOn(周五.AddHours(10)));              // 上午问：这一轮确实跑过了
+        Assert.False(it.AlreadyRanOn(周五.AddHours(17).AddMinutes(5)));// 收盘后问：还得再跑一轮
+    }
+
+    [Fact]
+    public void 收盘后跑过的_才算今天做完()
+    {
+        var it = 每工作日项(周五.AddHours(17).AddMinutes(10));         // 17:10 跑的
+        Assert.True(it.AlreadyRanOn(周五.AddHours(18)));
+        Assert.True(it.AlreadyRanOn(周五.AddHours(23)));
+    }
+
+    /// <summary>设定时刻本来就在收盘后的，不该多插一个收盘到点——否则它每天要多跑一趟。</summary>
+    [Fact]
+    public void 设定时刻已在收盘后_不额外多跑一轮()
+    {
+        var it = 每工作日项(周五.AddHours(18).AddMinutes(5), new TimeOnly(18, 0));
+        Assert.True(it.AlreadyRanOn(周五.AddHours(19)));
+        Assert.True(it.AlreadyRanOn(周五.AddHours(23)));
+    }
+
+    /// <summary>
+    /// 收盘那一轮跨了午夜也不能重复跑：周五 17:30 开工、周六凌晨 2 点还在跑完的状态，
+    /// 周六问"跑过了吗"必须是"跑过了"（周末不开新一轮）。
+    /// </summary>
+    [Fact]
+    public void 收盘那轮跨到周末_不会重复跑()
+    {
+        var it = 每工作日项(周五.AddHours(17).AddMinutes(30));
+        Assert.True(it.AlreadyRanOn(周五.AddDays(1).AddHours(2)));    // 周六凌晨
+    }
+
+    // ── 定期任务（每周/每月）的「跑成功才算这一期做完」（2026-09-04 核对用户规则）──
+    // 规则原话：在设置日期之后跑成功了就可以不跑，没跑成功的要继续，到下个设置日期需要再跑。
+
+    /// <summary>每周一 18:00 的项。<paramref name="上轮开始"/> / <paramref name="结局"/> 描述它上次跑成什么样。</summary>
+    private static FetchPlanItem 每周一项(DateTime 上轮开始, RunOutcome 结局)
+    {
+        var g = new FetchPlanGroup
+        {
+            Name = "周更组", Enabled = true, Pacing = RunPacing.Immediate,
+            Repeat = RepeatKind.Weekly, Weekday = DayOfWeek.Monday, NotBefore = new TimeOnly(18, 0),
+        };
+        var it = new FetchPlanItem
+        {
+            Action = FetchActionId.FetchIndexCons, Enabled = true, Owner = g,
+            LastOutcome = 结局, LastNothingToDo = 结局 == RunOutcome.Ok,
+            LastStart = 上轮开始, LastEnd = 上轮开始.AddMinutes(20),
+        };
+        g.Items.Add(it);
+        return it;
+    }
+
+    private static readonly DateTime 本周一 = new(2026, 8, 31);
+    private static readonly DateTime 下周一 = new(2026, 9, 7);
+
+    /// <summary>设定日期之后跑成功了 → 这一期剩下的日子都不用再跑。</summary>
+    [Fact]
+    public void 定期任务_本期跑成功后不再跑()
+    {
+        var it = 每周一项(本周一.AddHours(19), RunOutcome.Ok);
+        Assert.True(it.AlreadyRanOn(本周一.AddHours(20)));            // 当晚
+        Assert.True(it.AlreadyRanOn(本周一.AddDays(1)));              // 周二
+        Assert.True(it.AlreadyRanOn(本周一.AddDays(4)));              // 周五
+    }
+
+    /// <summary>没跑成功的要继续——失败**不等于**这一期做完了，次日还得来。</summary>
+    [Fact]
+    public void 定期任务_失败后继续尝试()
+    {
+        var 失败了 = 每周一项(本周一.AddHours(19), RunOutcome.Failed);
+        Assert.False(失败了.AlreadyRanOn(本周一.AddDays(1)));          // 周二：还没做完，要继续
+        Assert.False(失败了.AlreadyFailedOn(本周一.AddDays(1)));       // 而且不该被"今天失败过"挡住
+        Assert.True(失败了.AlreadyFailedOn(本周一));                   // 只挡失败当天，避免连撞同一个错
+
+        // 被停止的同理：那既不算跑过也不算失败，得接着跑
+        var 被停了 = 每周一项(本周一.AddHours(19), RunOutcome.Cancelled);
+        Assert.False(被停了.AlreadyRanOn(本周一.AddDays(1)));
+    }
+
+    /// <summary>到下个设定日期，即便上期跑成功过，也要重新跑。</summary>
+    [Fact]
+    public void 定期任务_到下一期要重新跑()
+    {
+        var it = 每周一项(本周一.AddHours(19), RunOutcome.Ok);
+        Assert.True(it.AlreadyRanOn(下周一.AddHours(17)));             // 下周一 18:00 前还算上期做完了
+        Assert.False(it.AlreadyRanOn(下周一.AddHours(19)));            // 过了设定时刻 → 新一期，要重跑
+    }
+
+    /// <summary>设定日期当天但**还没到设定时刻** → 不能提前跑（上期成功的状态还管着）。</summary>
+    [Fact]
+    public void 定期任务_设定时刻之前不提前跑()
+    {
+        var it = 每周一项(本周一.AddHours(19), RunOutcome.Ok);
+        Assert.True(it.AlreadyRanOn(下周一.AddHours(10)));
     }
 }

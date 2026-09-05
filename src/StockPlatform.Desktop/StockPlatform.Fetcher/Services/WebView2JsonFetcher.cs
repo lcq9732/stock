@@ -60,6 +60,14 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
     private bool _initTried;
 
     /// <summary>
+    /// 承载窗口被真正 Close 掉了吗（2026-09-05）。WPF 的 Window 一旦 Closed 就作废——
+    /// 再 Show() 直接抛 InvalidOperationException，表现是【东财验证】从此再也打不开。
+    /// 正常路径上 <see cref="HideInsteadOfClose"/> 会拦下关闭，这个标志只在出意外时置位，
+    /// 供 <see cref="ShowForManualVerificationAsync"/> 认出来并整个重建通道。
+    /// </summary>
+    private volatile bool _hostClosed;
+
+    /// <summary>
     /// 人工验证的"我弄好了"信号：验证窗口被关掉时置位（2026-09-04）。
     /// 抓取线程自动过不去时会打开窗口、然后等在这上面，人关掉窗口就接着跑——
     /// 不用回去重新点执行、也不用重排队。
@@ -142,6 +150,12 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
                 if (_host is { WindowState: WindowState.Minimized }) MinimizeToTray();
             };
 
+            // 窗口真被关掉了就记一笔（2026-09-05）。正常路径上 HideInsteadOfClose 会拦住关闭，
+            // 走到这儿说明出了意外（拦截器被解绑、或者 Teardown）。WPF 的 Window 一旦 Closed
+            // 就作废，再 Show() 直接抛——所以要留个标志，让 ShowForManualVerificationAsync
+            // 认出这个死掉的通道并整个重建，而不是从此再也打不开验证窗口。
+            _host.Closed += (_, _) => { _hostClosed = true; IsReady = false; };
+
             _view = new WebView2();
             _host.Content = _view;
             _host.Show();
@@ -193,7 +207,11 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
             // 走的就是正式取数那条路（停在 quote 页面里发 JSONP），所以这一次成功＝后面都能用。
             try
             {
-                var probe = await FetchWithAutoVerifyAsync(Push2ProbePage, ct);
+                // allowManualVerify: false —— 这一发**绝不能**去请人过验证：那条路会绕回
+                // ShowForManualVerificationAsync → EnsureReadyAsync，而 _initLock 正被
+                // 外层的 EnsureReadyAsync 拿着，必定死锁（2026-09-05 实测，点【东财验证】
+                // 后整个按钮就废了）。探针只是"看一眼能不能取数"，失败也不影响通道建立。
+                var probe = await FetchWithAutoVerifyAsync(Push2ProbePage, ct, allowManualVerify: false);
                 _log?.Invoke($"浏览器通道已就绪（WebView2），push2 可取数（试拉回 {probe.Length} 字节）。");
             }
             catch (OperationCanceledException) { throw; }
@@ -380,13 +398,28 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
     /// 等待时间逐次拉长（2 秒 → 4 秒），一共试 3 次。再不行就抛出去，让上层按限流处理、
     /// 下一轮再来——真是被限流的话再怎么重试也没用，硬撑只会撞得更狠。
     /// </summary>
-    private async Task<string> FetchWithAutoVerifyAsync(string url, CancellationToken ct)
+    /// <param name="allowManualVerify">
+    /// 自动过不去时能不能**请人来过验证**。默认能；<b>初始化阶段的探针必须传 false</b>。
+    ///
+    /// ⚠ 2026-09-05 死锁实录：请人工那条路会调 <see cref="ShowForManualVerificationAsync"/>，
+    /// 而它开头要 <see cref="EnsureReadyAsync"/>。初始化时 <c>IsReady</c> 还是 false、
+    /// <c>_initLock</c> 又正被 EnsureReadyAsync 自己拿着，于是：
+    ///   EnsureReadyAsync → InitAsync → 探针 → 请人工 → ShowForManualVerification
+    ///   → EnsureReadyAsync → 抢同一把 _initLock（SemaphoreSlim 不可重入）→ **永久卡死**。
+    /// 表现是点【东财验证】后什么都不发生：窗口不出来、日志停在"正在打开…"再无下文，
+    /// 连那个防抖标志都因为 finally 走不到而永远为 true，之后每次点都只回一句"正在打开中"。
+    /// 探针失败本来就不影响通道建立（见 InitAsync 那段注释），所以它压根不需要请人。
+    /// </param>
+    private async Task<string> FetchWithAutoVerifyAsync(
+        string url, CancellationToken ct, bool allowManualVerify = true)
     {
         // 重试 2 次而不是 3 次（2026-09-04）：撞上验证时每多打一发就多冲一次验证页，
         // 而且请求本身还在耗配额。宁可早点把人叫来。
         const int MaxTries = 2;
         string last = "";
         string lastError = "";
+        // 页面上这会儿是不是正显示着验证——决定请人之前要不要再动页面（见下面 break 处）
+        bool challengeShowing = false;
 
         for (int attempt = 1; attempt <= MaxTries; attempt++)
         {
@@ -409,6 +442,15 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
             //    人永远看不到、也就永远过不了验证，请求却一直在打，越打限得越死。
             if (!ok && attempt == 1)
             {
+                // 导航**之前**先看一眼：验证也可能是在 JSONP 这一步就直接弹在当前页上的，
+                // 那样下面这次导航就是把它冲掉的那一下。
+                challengeShowing = await LooksLikeChallengeAsync(ct);
+                if (challengeShowing)
+                {
+                    _log?.Invoke("浏览器通道：当前页面上已经摆着人工验证了——不动它，直接请人。");
+                    break;
+                }
+
                 try
                 {
                     var viaNav = await NavigateAndReadAsync(url, ct);
@@ -422,6 +464,19 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex) { lastError = $"{why}；导航取数也不行（{ex.Message}）"; }
+
+                // ⚠ 验证图片就是这一步导航之后冒出来的（2026-09-05 用户反馈"出现验证图片，
+                //    这时就不要 Refresh 页面，要不然人就验证不了"）。原来这里无条件
+                //    BackToSeedPage——等于刚把验证叫出来、下一行就把它冲走，人只看见闪一下。
+                //    所以：先看看页面现在是不是验证页，是就**什么都别动**，直接去请人。
+                challengeShowing = await LooksLikeChallengeAsync(ct);
+                if (challengeShowing)
+                {
+                    _log?.Invoke("浏览器通道：页面上出现了人工验证（图片/滑块）——"
+                               + "保住这个页面不动了，接下来请人来过一下。");
+                    break;      // 不回 seed、不再重试：再发请求只会把这一页冲掉
+                }
+
                 await BackToSeedPageAsync(ct);
             }
 
@@ -444,12 +499,22 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
         //    导航回退又常在连接层就挂了，两边都是空，于是永远走不到请人那一步。
         //    现在只要连试都不行就请人；配额问题请人也解决不了，所以靠 ShouldAskHuman 限流，
         //    别一失败就弹窗。
-        if (ShouldAskHuman() && await WaitForManualVerifyAsync(last, ct))
+        // 最后再确认一次现场：第二次 JSONP 失败之后页面也可能已经变成验证页了，
+        // 这一眼决定下面还要不要再导航（要是已经在验证页上，多导航一次就白等了）。
+        if (!challengeShowing) challengeShowing = await LooksLikeChallengeAsync(ct);
+
+        // ⚠ allowManualVerify 必须在最前面短路：初始化探针走到这儿再去请人的话，
+        //    会绕回 ShowForManualVerificationAsync → EnsureReadyAsync，死锁在 _initLock 上
+        //    （详见上面参数注释里的死锁实录）。
+        if (allowManualVerify
+            && ShouldAskHuman(challengeShowing)
+            && await WaitForManualVerifyAsync(url, last, challengeShowing, ct))
         {
             var afterHuman = await NavigateAndReadAsync(url, ct);
             if (afterHuman.Contains("\"data\"") || afterHuman.Contains("\"rc\""))
             {
                 _log?.Invoke("人工验证之后取数恢复正常，继续抓取。");
+                await BackToSeedPageAsync(ct);   // 回页面上，下一个请求还走 JSONP
                 return afterHuman;
             }
             _log?.Invoke("⚠ 人工验证之后还是拿不到数据——可能不是验证的问题，这一轮先放过。");
@@ -628,10 +693,16 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
     /// </summary>
     private static readonly TimeSpan AskHumanCooldown = TimeSpan.FromMinutes(20);
 
+    /// <summary>页面上确实摆着验证时的冷却（2026-09-05）。这是**看见的事实**、不是猜，
+    /// 压着不请人只会让后面每个请求都在验证页上白撞；留 2 分钟只为防连环弹窗。</summary>
+    private static readonly TimeSpan AskHumanCooldownWhenChallenged = TimeSpan.FromMinutes(2);
+
     /// <summary>这会儿该不该请人来过验证。</summary>
-    private bool ShouldAskHuman()
+    /// <param name="challengeShowing">页面上已经看见验证了（不是靠失败次数猜的）。</param>
+    private bool ShouldAskHuman(bool challengeShowing = false)
     {
-        if (DateTime.Now - _lastAskedHuman < AskHumanCooldown) return false;
+        var cooldown = challengeShowing ? AskHumanCooldownWhenChallenged : AskHumanCooldown;
+        if (DateTime.Now - _lastAskedHuman < cooldown) return false;
         _lastAskedHuman = DateTime.Now;
         return true;
     }
@@ -643,7 +714,10 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
     /// 进熔断、整项跳过、今天可能不再来，人回来还得重新点执行。而这里挂着的话，
     /// 人关掉窗口的那一刻抓取就从断点继续，一个请求都不浪费。
     /// </summary>
-    private async Task<bool> WaitForManualVerifyAsync(string lastBody, CancellationToken ct)
+    /// <param name="url">这次没取到的那个接口地址——页面上还没有验证时，导航到它把验证叫出来。</param>
+    /// <param name="challengeShowing">页面上已经摆着验证了：那就**一步都别动**，直接给人看。</param>
+    private async Task<bool> WaitForManualVerifyAsync(
+        string url, string lastBody, bool challengeShowing, CancellationToken ct)
     {
         // 等人期间整条通道停手：这段时间任何自动请求都只会把验证页冲掉、白耗配额。
         // （调用方持着 _navLock，所以别的板块的请求本来就在排队等，这个标记是双保险，
@@ -658,6 +732,18 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
             ? "自动重试了 3 次都被拒，多半是东财弹了**图片验证码**——那个只能人来点，程序过不了。"
             : $"自动重试了 3 次仍拿不到数据，东财返回的是：{Truncate(lastBody, 100)}");
         _log?.Invoke("已弹出验证窗口，请在里面把滑块拼图拖到缺口位置。");
+
+        // 页面上还没有验证的话（JSONP 被拒时当前页往往还是那个正常的行情页），
+        // **在把窗口摆到人面前之前**导航一次，让东财把验证吐出来；已经在验证页上就不动。
+        // 这是这条路径上最后一次导航——之后到人关窗口为止，谁都不许再碰这个页面
+        // （_awaitingHuman 挡着，见 GetJsonAsync / BackToSeedPageAsync）。
+        if (!challengeShowing)
+        {
+            _log?.Invoke("页面上还没看到验证，先导航到那个接口地址把它叫出来（之后不再刷新）…");
+            try { await NavigateAndReadAsync(url, ct); }
+            catch (OperationCanceledException) { throw; }
+            catch { /* 拿不到内容正是预期：验证页/被拒都算，人看得见就行 */ }
+        }
 
         // 往托盘弹一条气泡：抓取常常是夜里或你在忙别的时候跑的，
         // 程序挂在这儿等你，你却不知道——日志写得再清楚，没人看也是白写。
@@ -696,11 +782,73 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
     private volatile bool _awaitingHuman;
 
     /// <summary>
+    /// 判"当前页面是不是要人来过的验证页"的特征词（2026-09-05）。
+    ///
+    /// 挑的是**验证页才会有、正常行情页不会有**的词：行情页上确实会出现"验证码"
+    /// （登录框里就有"验证码登录"），所以那个词单独不算数，必须配合"安全验证/滑块/
+    /// 拖动/拼图"这类只有挑战页才写的说法，或者地址里带 captcha。
+    /// 宁可漏判也别误判：漏判最多回到原来的行为（回 seed 重试），
+    /// 误判却会让抓取白等人 15 分钟。
+    /// </summary>
+    private static readonly string[] ChallengeMarkers =
+    [
+        "captcha", "安全验证", "滑块", "拖动滑块", "拖动下方滑块", "拼图",
+        "完成验证", "请完成", "人机验证", "点击按钮开始验证", "verifycode", "geetest", "nc_wrapper",
+    ];
+
+    /// <summary>
+    /// 当前页面看着像不像正摆着一道要人过的验证。必须在 UI 线程调。
+    ///
+    /// 判出来是 true 的唯一后果是"**别再碰这个页面**、把它原样给人看"——所以判错的代价
+    /// 不对称：漏判＝维持原状，误判＝抓取停下来等人。据此把特征词收得比较紧
+    /// （见 <see cref="ChallengeMarkers"/>），拿不准一律当不是。
+    /// </summary>
+    private async Task<bool> LooksLikeChallengeAsync(CancellationToken ct)
+    {
+        try
+        {
+            var core = _view?.CoreWebView2;
+            if (core == null) return false;
+
+            // 只取标题 + 正文前 600 字：验证页本来就没什么内容，取多了反而容易被
+            // 页脚那些"用户协议/验证码登录"之类的字带偏。
+            const string js = """
+                (function () {
+                  var t = document.title || '';
+                  var b = document.body ? (document.body.innerText || '') : '';
+                  return (location.href + ' | ' + t + ' | ' + b.slice(0, 600));
+                })()
+                """;
+            var raw = await core.ExecuteScriptAsync(js).WaitAsync(TimeSpan.FromSeconds(5), ct);
+            if (string.IsNullOrEmpty(raw) || raw == "null") return false;
+
+            string text;
+            try { text = JsonSerializer.Deserialize<string>(raw) ?? ""; }
+            catch { text = raw; }
+
+            // 已经是数据了就不可能是验证页——这一条挡掉大部分误判
+            if (text.Contains("\"data\"") || text.Contains("\"rc\"")) return false;
+
+            return ChallengeMarkers.Any(m => text.Contains(m, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (OperationCanceledException) { throw; }
+        catch
+        {
+            // 页面卡着、脚本跑不了——判不出来就当不是（维持原来的行为）
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 回到东财页面上——JSONP 要在它的上下文里发才带得上 Referer。
     /// 导航取数会把浏览器带走，用完必须回来。
     /// </summary>
     private async Task BackToSeedPageAsync(CancellationToken ct)
     {
+        // ⚠ 正在等人过验证时**绝对不能导航**（2026-09-05）：那一下会把人正在看的验证图片
+        //    冲掉，人就再也验证不了了。等人期间本来也没有请求要发，回不回 seed 无所谓。
+        if (_awaitingHuman) return;
+
         try
         {
             var core = _view!.CoreWebView2;
@@ -785,6 +933,33 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
     /// </summary>
     public async Task ShowForManualVerificationAsync(CancellationToken ct = default)
     {
+        // ⚠ 先把"只试一次"那道闸门放开（2026-09-05 修，用户报"点了验证按钮没反应"）。
+        //
+        // EnsureReadyAsync 里有 `if (_initTried) return false;`——初始化失败过一次，
+        // 这个进程内就再也不试了。那条规矩对**自动抓取**是对的（每次重试都要几秒，
+        // 失败的原因通常也不会自己好），但对**人主动点按钮**是错的：
+        // 抓取时初始化失败过一次之后，人再怎么点验证按钮都只会走到下面那行抛异常，
+        // 表现就是"点了没反应"——而人点这个按钮，往往正是因为抓取失败想来看看怎么回事。
+        //
+        // 人点按钮＝明确的重试意图，值得再花那几秒。自动抓取那条路不受影响，仍然只试一次。
+        _initTried = false;
+
+        // 上次那个窗口被真关掉了（正常路径拦得住，走到这儿说明出过意外）——整个通道重建。
+        // 不重建的话 _host 是个已 Closed 的 Window，下面 Show() 必抛，验证窗口从此打不开。
+        if (_hostClosed)
+        {
+            _log?.Invoke("上次的验证窗口已被关闭，正在重建浏览器通道……");
+            await _ui.InvokeAsync(() =>
+            {
+                try { if (_view?.CoreWebView2 != null) _view.CoreWebView2.WebMessageReceived -= OnWebMessage; } catch { }
+                try { _view?.Dispose(); } catch { }
+                _view = null;
+                _host = null;
+            }).Task;
+            _hostClosed = false;
+            IsReady = false;
+        }
+
         if (!await EnsureReadyAsync(ct))
             throw new InvalidOperationException("浏览器通道起不来，没法打开验证窗口——原因看日志。");
 
@@ -824,23 +999,58 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
         }).Task;
     }
 
+    /// <summary>
+    /// 人点验证窗口的关闭按钮时：**拦下来只藏起来，绝不真关**。
+    ///
+    /// ⚠ 2026-09-05 修了两处会让【东财验证】按钮永久失效的写法（用户报"关闭时报错，
+    ///    然后再点就打不开了"）：
+    ///
+    /// ① <b>原来在 Closing 事件处理器里同步调 Hide()/Show()</b>。WPF 不允许在窗口正在关闭的
+    ///    事件里这么摆布它，会抛异常——而异常一抛，后面的 <c>TrySetResult</c> 就不执行了：
+    ///    等在 <see cref="WaitForManualVerifyAsync"/> 里的抓取线程收不到"人弄好了"的信号，
+    ///    只能一直等到 15 分钟超时。现在改成排到事件处理完之后再做（BeginInvoke）。
+    ///
+    /// ② <b>原来它把自己解绑了</b>（<c>_host.Closing -= HideInsteadOfClose</c>）。于是人第二次
+    ///    点关闭时没人拦，窗口**真的被 Close 掉**——而 WPF 的 Window 一旦 Closed 就作废了，
+    ///    再 <c>Show()</c> 直接抛 InvalidOperationException，验证窗口从此再也打不开。
+    ///    现在不解绑：这个窗口在整个进程生命周期里只藏不关，只有 <see cref="Teardown"/>
+    ///    才会解绑并真正关掉它。
+    /// </summary>
     private void HideInsteadOfClose(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         if (_host == null) return;
+
+        // 拦下这次关闭。窗口对象必须留着——被真 Close 掉就再也 Show 不起来了。
+        // **不解绑自己**，否则下一次关闭就没人拦了。
         e.Cancel = true;
-        _host.Closing -= HideInsteadOfClose;
-        _host.Hide();
+
+        // 告诉正等着的抓取线程"人弄好了，接着跑"。放在最前面：它最要紧，
+        // 后面收窗口的动作出什么岔子都不能耽误这一步。
+        _manualVerifyDone?.TrySetResult(true);
+
         // 挪回屏幕外缩回 1×1，恢复成后台通道的样子。**同样不动 WindowStyle**——
         // 切它在 WPF 里不可靠，而且这里也没必要，反正窗口在屏幕外面。
-        _host.ShowInTaskbar = false;
-        _host.Width = 1;
-        _host.Height = 1;
-        _host.Left = -32000;
-        _host.Top = -32000;
-        _host.Show();
-        _log?.Invoke("东财验证窗口已收起，浏览器通道继续可用（Cookie 已留在 data/local/webview2）。");
-        // 告诉正等着的抓取线程："人弄好了，接着跑"
-        _manualVerifyDone?.TrySetResult(true);
+        // 排到 Closing 处理完之后再动手，别在事件里摆布正在关闭的窗口。
+        var host = _host;
+        host.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            try
+            {
+                host.Hide();
+                host.ShowInTaskbar = false;
+                host.Width = 1;
+                host.Height = 1;
+                host.Left = -32000;
+                host.Top = -32000;
+                host.Show();
+                _log?.Invoke("东财验证窗口已收起，浏览器通道继续可用（Cookie 已留在 data/local/webview2）。");
+            }
+            catch (Exception ex)
+            {
+                // 收不回去顶多是屏幕上留个小窗口，抓取照常——绝不能让它把通道带塌
+                _log?.Invoke($"收起验证窗口时出了点岔子（{ex.Message}），不影响抓取。");
+            }
+        }), DispatcherPriority.Background);
     }
 
     private void Teardown()

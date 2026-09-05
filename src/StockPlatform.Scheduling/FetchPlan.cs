@@ -410,6 +410,18 @@ public sealed class FetchPlanGroup
     };
 
     /// <summary>
+    /// A股收盘时刻（2026-09-04 新增）——「每工作日」的任务在这之后必须再跑一轮，
+    /// 因为收盘前跑到的当日数据是不完整的（K线未定盘、龙虎榜/资金流盘后才发布）。
+    /// 见 <see cref="DueAnchorAt"/> 里 EveryWorkday 那一段。
+    ///
+    /// 15:00 是真实收盘，这里用 17:00：盘后数据（龙虎榜、融资余额、资金流）要到傍晚才齐，
+    /// 15:05 就跑等于白跑一趟。
+    /// </summary>
+    public static readonly TimeOnly MarketClose = new(17, 0);
+
+    private static TimeSpan MarketCloseOffset => MarketClose.ToTimeSpan();
+
+    /// <summary>
     /// 「当期锚点」：**最近一个已经过去的到点时刻**，也就是"当前这一轮是什么时候开工的"。
     /// 返回 null 表示这一期还没轮到（手动项永远是 null）。
     ///
@@ -437,18 +449,37 @@ public sealed class FetchPlanGroup
 
             case RepeatKind.EveryWorkday:
             {
-                // ① 本期（今天）已经到点——正常情况，就是它
-                var today = now.Date + offset;
-                if (today <= now && now.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday))
-                    return today;
+                // 每个工作日有**两个**到点（2026-09-04 按用户要求）：设定的时刻，加上收盘。
+                //
+                // 为什么必须补收盘这一个：收盘前跑到的当日数据是不完整的（当天K线还没定盘、
+                // 龙虎榜和资金流盘后才出），可原来只要跑过一轮就算"今天做完了"——早上开机
+                // 自动跑一遍，收盘后就再也不跑了，当天数据永远停在盘中那个残缺状态。
+                // 用户 17:04 看到的「共 32 项、已完成 30 项」就是这么来的：那 30 项绝大多数
+                // 是早上跑的，按收盘口径它们今天都还得再跑一遍。
+                //
+                // 补成"两个到点"而不是"把设定时刻推到 17:00"，是因为白天那一轮照样有用
+                // （盘中要看行情、要补历史），要的只是**收盘后再来一遍**。
+                // 两个到点也天然不会来回重跑：白天跑完，锚点还是早上那个，AlreadyRanOn 为真；
+                // 过了 17:00 锚点前移到收盘，上一轮的开始时间落在它之前，于是自然进入新一轮。
+                //
+                // 设定时刻本来就在收盘后（比如「不早于 18:00」）时不补——那一轮已经满足要求了，
+                // 再插一个 17:00 只会让它每天多跑一趟。
+                var offsets = new List<TimeSpan> { offset };
+                if (offset < MarketCloseOffset) offsets.Add(MarketCloseOffset);
 
-                // ② 今天还没到点（或今天是周末）——那就看**上一轮还在不在进行中**
-                for (int back = 1; back <= 7; back++)
+                for (int back = 0; back <= 7; back++)
                 {
                     var d = now.Date.AddDays(-back);
                     if (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
-                    var t = d + offset;
-                    if (t <= now) return StartedSince(t) ? t : null;
+
+                    // 同一天里取**最靠后的那个已过去的到点**：17:05 时该对齐到收盘那一轮，
+                    // 而不是早上那一轮，否则收盘后这次重跑判不出来。
+                    var passed = offsets.Select(o => d + o).Where(t => t <= now)
+                                        .OrderByDescending(t => t).ToList();
+                    if (passed.Count == 0) continue;
+
+                    // 今天已经到过点 = 当前就在这一轮里；更早的日子只有"上一轮还没跑完"才算数
+                    return back == 0 ? passed[0] : (StartedSince(passed[0]) ? passed[0] : null);
                 }
                 return null;
             }

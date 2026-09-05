@@ -73,8 +73,20 @@ public partial class FetchOrchestrator
     private readonly IMarketCapFetcher _marketCapFetcher;
     private readonly INetInflowFetcher _netInflowFetcher;
     private readonly AnnouncementFetchOrchestrator _announcementOrchestrator;
-    private readonly IBoardFetcher _boardFetcher;
+    /// <summary>
+    /// ⚠ 不是 readonly：<see cref="ReplaceBoardFetcher"/> 会在运行期换掉它（【重新读取配置】按钮）。
+    /// 这一条是 <c>BoardMemberChannel</c>/<c>Push2NetworkInterface</c> 两个设置的落点——
+    /// 它们决定的是**造哪个类、用什么限流参数**，光重读文件不换对象是不生效的。
+    /// </summary>
+    private IBoardFetcher _boardFetcher;
     private readonly IBoardRepository _boardRepository;
+
+    /// <summary>
+    /// 板块名单的主源（2026-09-05）：东财行情中心左侧菜单那份静态 JSON，一个请求拿全量、
+    /// 不碰 push2、不会弹验证。给了就优先走它，拿不到才退回 <see cref="_boardFetcher"/> 的
+    /// push2 分页。详见 <see cref="Remote.EastMoneySideMenuBoardListProvider"/>。
+    /// </summary>
+    private readonly Remote.EastMoneySideMenuBoardListProvider? _sideMenuBoardList;
     private readonly IStockListProvider? _etfListProvider;
     private readonly IIndexConsProvider _indexConsProvider;
     private readonly IIndexWeightProvider _indexWeightProvider;
@@ -209,8 +221,10 @@ public partial class FetchOrchestrator
         Remote.EastMoneyMarketEventProvider? marketEventProvider = null,
         IMarketEventRepository? marketEventRepository = null,
         Remote.EastMoneyStockBoardMapProvider? boardMapProvider = null,
-        IStockBoardMapRepository? boardMapRepository = null)
+        IStockBoardMapRepository? boardMapRepository = null,
+        Remote.EastMoneySideMenuBoardListProvider? sideMenuBoardList = null)
     {
+        _sideMenuBoardList = sideMenuBoardList;
         _boardMapProvider = boardMapProvider;
         _boardMapRepository = boardMapRepository;
         _moneyFlowProvider = moneyFlowProvider;
@@ -281,12 +295,25 @@ public partial class FetchOrchestrator
     public IReadOnlyList<(string Source, DateTime Until)> GetPausedSources()
     {
         var list = new List<(string, DateTime)>();
-        if (_boardFetcher is Remote.EastMoneyBoardFetcher emb && emb.PausedUntil is { } a)
+        if (_boardFetcher is Remote.EastMoneyBoardFetcherBase emb && emb.PausedUntil is { } a)
             list.Add(("东财 push2", a));
         if (_moneyFlowProvider?.PausedUntil is { } b)
             list.Add(("东财 push2his", b));
         return list;
     }
+
+    /// <summary>
+    /// 换掉板块成分股的取数通道（2026-09-05，给【重新读取配置】用）。
+    ///
+    /// 为什么非换对象不可：<c>BoardMemberChannel</c> 决定的是 <see cref="Remote.EastMoneyBoardHttpFetcher"/>
+    /// 还是 <see cref="Remote.EastMoneyBoardFetcher"/>，<c>Push2NetworkInterface</c> 是构造参数——
+    /// 两个都是"造的时候就定死"的东西，重读一遍配置文件不换对象等于没改。
+    ///
+    /// ⚠ 只能在**没有任务在跑**的时候调。抓取过程里 <c>OnStatus</c> 是临时订阅、用完就退订的
+    /// （见 FetchBoardsCoreAsync），跑到一半换掉字段会让那个 -= 退订到新对象上、旧对象的
+    /// 事件挂着不放。调用方（MainViewModel.ReloadConfig）已经用 IsBusy 挡住了。
+    /// </summary>
+    public void ReplaceBoardFetcher(IBoardFetcher fetcher) => _boardFetcher = fetcher;
 
     /// <summary>板块成分股这一轮之后的存量进度，给界面显示用（见 FetchResult.Progress）。</summary>
     private string? _memberProgressText;
@@ -297,7 +324,7 @@ public partial class FetchOrchestrator
     /// </summary>
     private string? Push2PausedReason()
     {
-        if (_boardFetcher is not Remote.EastMoneyBoardFetcher emb) return null;
+        if (_boardFetcher is not Remote.EastMoneyBoardFetcherBase emb) return null;
         if (emb.PausedUntil is not { } until) return null;
         var mins = Math.Max(1, (int)Math.Ceiling((until - DateTime.Now).TotalMinutes));
         return $"东财 push2 限流熔断中，预计 {until:HH:mm} 恢复（还有约 {mins} 分钟）";
@@ -315,6 +342,37 @@ public partial class FetchOrchestrator
     private async Task<string?> FetchBoardListCoreAsync(
         ConcurrentBag<string> errors, IProgress<string>? progress, CancellationToken ct)
     {
+        _boardRepository.EnsureSchema();
+
+        // ══ 主路（2026-09-05）：行情中心左侧菜单那份静态 JSON，一个请求拿全量、不碰 push2 ══
+        //
+        // 换过来的理由和等价性实测见 EastMoneySideMenuBoardListProvider 的类注释（概念 504 个
+        // 代码名称一个不差，行业只多一个三级行业）。收益不在"省下这 10 个请求"，而在于
+        // 这一项从此**不需要人守着过图片验证码**，整轮 push2 配额也全留给了成分股。
+        //
+        // push2 那条路留着当回退：万一东财哪天把这个文件挪走或改结构，还能退回去抓。
+        if (_sideMenuBoardList != null)
+        {
+            void ForwardMenu(string s) => progress?.Report(s);
+            _sideMenuBoardList.OnStatus += ForwardMenu;
+            try
+            {
+                var all = await _sideMenuBoardList.FetchBoardListAsync(ct);
+                return CommitBoardListFromMenu(all, errors, progress);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                // 取不到/解析不了才退回 push2。**护栏拒绝不走到这儿**——那是
+                // CommitBoardListFromMenu 自己返回原因，数据可疑时再去烧 push2 配额没有意义。
+                progress?.Report($"⚠ 板块菜单取数失败（{ex.Message}）——"
+                               + "退回 push2 分页抓取，会慢很多、而且可能要人过图片验证。");
+                errors.Add($"板块菜单取数失败，已退回 push2：{ex.Message}");
+            }
+            finally { _sideMenuBoardList.OnStatus -= ForwardMenu; }
+        }
+
+        // ══ 回退：push2 clist 分页（约 10 个请求，会撞验证码）══
         if (Push2PausedReason() is { } paused)
         {
             progress?.Report($"{paused}，本轮不开工。库里保留上一次的板块名单。");
@@ -325,18 +383,18 @@ public partial class FetchOrchestrator
         _boardFetcher.OnStatus += Forward;
         try
         {
-            if (_boardFetcher is Remote.EastMoneyBoardFetcher em2)
+            if (_boardFetcher is Remote.EastMoneyBoardFetcherBase em2)
             {
                 // 浏览器通道初始化要几秒（建 WebView2 + 打开东财页面拿 Cookie），
                 // 放在这儿而不是第一个请求里，免得把那几秒算进限流节奏
-                await em2.PrepareBrowserAsync(ct);
+                await em2.PrepareAsync(ct);
                 progress?.Report(em2.DescribeChannel() + "；" + em2.DescribeBinding());
             }
 
             _boardRepository.EnsureSchema();
 
             // 按页续传 + 凑齐才提交——循环本体和它藏过的两个 bug 见 BoardListFetchLoop
-            if (_boardFetcher is not Remote.EastMoneyBoardFetcher pager)
+            if (_boardFetcher is not Remote.EastMoneyBoardFetcherBase pager)
             {
                 progress?.Report("当前板块数据源不支持按页续传，跳过板块列表。");
                 return "板块数据源不支持按页续传";
@@ -367,6 +425,70 @@ public partial class FetchOrchestrator
     }
 
     /// <summary>
+    /// 把菜单拿到的**全量名单**提交进正表（2026-09-05）：按类走护栏 → 暂存区 → 一次事务搬过去。
+    ///
+    /// 为什么还要绕暂存区那一道（明明一次就拿全了）：<c>CommitStaged</c> 里的"清僵尸 + 写入"
+    /// 是在同一个事务里做的，直接调 <c>UpsertBoards</c> 也一样，但走同一条路能保证两种数据源
+    /// 提交出来的正表状态完全一致，也顺手清掉 push2 那条路可能留下的暂存内容。
+    /// </summary>
+    /// <returns>一类都没提交时返回原因（调用方当作"本轮没开工"）；提交了就返回 null。</returns>
+    private string? CommitBoardListFromMenu(
+        List<Board> all, ConcurrentBag<string> errors, IProgress<string>? progress)
+    {
+        int committedTotal = 0;
+        var rejected = new List<string>();
+
+        foreach (var (type, label) in new[]
+                 { (BoardType.Concept, "概念/题材"), (BoardType.Industry, "行业") })
+        {
+            var items = all.Where(b => b.Type == type).ToList();
+            var existing = _boardRepository.QueryBoards(type);
+
+            // 护栏：名单掉得太多就不写。正表是快照语义，少掉的会被当成已下架，
+            // 连 BoardMember 和 BoardMemberFetchState 一起删——而成分股跨好几轮才攒得齐。
+            if (Remote.EastMoneySideMenuBoardListProvider.CheckAgainstExisting(
+                    type, items.Count, existing.Count) is { } why)
+            {
+                rejected.Add(label);
+                errors.Add(why);
+                progress?.Report("⚠ " + why);
+                continue;
+            }
+
+            // ⚠ 菜单里**没有行情**，而 CommitStaged 是拿暂存区的值去覆盖正表的。不把库里现有的
+            //   涨跌幅/成交额带上，就会把【板块指数合成】刚回填的值清成 0，直到下次合成跑完——
+            //   热度页会有一段时间全是 0。领涨股同理（虽然眼下没人读它）。
+            //   新板块在库里没有旧值，保持 0，等合成那一步补上。
+            var carry = existing.ToDictionary(
+                b => b.BoardCode, b => (b.ChangePct, b.Amount, b.LeaderCode, b.LeaderName));
+            foreach (var b in items)
+                if (carry.TryGetValue(b.BoardCode, out var q))
+                    (b.ChangePct, b.Amount, b.LeaderCode, b.LeaderName) = q;
+
+            _boardRepository.ClearStaged(type);
+            _boardRepository.StageBoards(items);
+            var (committed, pruned) = _boardRepository.CommitStaged(type);
+
+            // push2 那条路可能留着页级断点。菜单一次拿全之后它就作废了——留着的话，
+            // 万一下轮退回 push2，会从一个半截的暂存区接着抓。
+            _boardRepository.ClearListState(type);
+
+            committedTotal += committed;
+            progress?.Report($"{label}板块已更新：{committed} 个"
+                           + (pruned > 0 ? $"（清掉 {pruned} 条下架板块的残留）" : "") + "。");
+        }
+
+        if (committedTotal == 0)
+            return $"板块名单没通过护栏（{string.Join("、", rejected)}），本轮不更新，库里保留上次的快照";
+
+        progress?.Report(
+            $"板块列表更新完成：共 {committedTotal} 个，取自东财行情中心菜单，**整轮没用到 push2**。"
+            + (rejected.Count > 0
+                ? $" ⚠ {string.Join("、", rejected)}没通过护栏，那一类保持上次的快照。" : ""));
+        return null;
+    }
+
+    /// <summary>
     /// 逐个板块抓**官方成分名单**（2026-09-04 从原来的板块任务里拆出来）。约 2500 个请求，
     /// 是 push2 上最耗配额的一项。
     ///
@@ -391,9 +513,9 @@ public partial class FetchOrchestrator
         _boardFetcher.OnStatus += Forward;
         try
         {
-            if (_boardFetcher is Remote.EastMoneyBoardFetcher em3)
+            if (_boardFetcher is Remote.EastMoneyBoardFetcherBase em3)
             {
-                await em3.PrepareBrowserAsync(ct);
+                await em3.PrepareAsync(ct);
                 progress?.Report(em3.DescribeChannel() + "；" + em3.DescribeBinding());
             }
 

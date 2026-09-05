@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using StockPlatform.Scheduling;
@@ -170,19 +170,50 @@ public sealed class PlanGroupViewModel(FetchPlanGroup model, Action onChanged) :
         set { if (_timelineText == value) return; _timelineText = value; Raise(); }
     }
 
-    /// <summary>整组的进度，按**子项**汇总（组本身没有运行结果，见类注释）。</summary>
+    /// <summary>
+    /// 组头那行进度，按**子项**汇总（组本身没有运行结果，见类注释）。
+    ///
+    /// ════ 说的是「今天要做多少」，不是「过去做了多少」（2026-09-04 用户指出）════
+    /// 这一行原来数的是"完成时间落在今天的项"，日更组 18:00 开工跑到次日凌晨，白天看到的
+    /// 就成了昨晚那一轮的残影——刚启动计划，组头写着"14/20 完成"，而今晚这 20 项一个都还没跑。
+    /// 按收盘重跑规则，今天到点后它们全都要重跑，所以那个数字对"今天"毫无意义。
+    ///
+    /// 现在分两种情形，跟运行日志的清单同一套判断：
+    ///   ① 今天的到点还没到 → 说"今天要跑 N 项"，不报任何完成数；
+    ///   ② 今天这一轮已经开始 → 报这一轮的进度"今天 X/N 完成"。
+    /// </summary>
     public string ProgressText
     {
         get
         {
-            var today = DateTime.Today;
-            int on = Items.Count(i => i.Enabled);
+            var now = DateTime.Now;
+            var enabled = Items.Where(i => i.Enabled).ToList();
+            int on = enabled.Count;
             if (on == 0) return "";
-            int done = Items.Count(i => i.Enabled && i.Model.LastOutcome == RunOutcome.Ok
-                                        && (i.Model.LastStart ?? i.Model.LastEnd)?.Date == today);
-            int failed = Items.Count(i => i.Enabled && i.Model.LastOutcome == RunOutcome.Failed
-                                          && (i.Model.LastStart ?? i.Model.LastEnd)?.Date == today);
-            if (done == 0 && failed == 0) return "";
+
+            // 今天这一轮开始了没有——锚点落在今天就是开始了（同 PlanRunner.LogTodayPlan）
+            var anchor = enabled.Select(i => i.Model.DueAnchorAt(now))
+                                .Where(x => x is { } v && v != DateTime.MinValue)
+                                .Select(x => x!.Value).DefaultIfEmpty().Max();
+            bool 今轮已开始 = anchor != default && anchor.Date == now.Date;
+
+            if (!今轮已开始)
+            {
+                var 起跑 = enabled.Select(i => i.Model.DueTimeOn(now))
+                                  .Where(t => t.Date == now.Date).DefaultIfEmpty().Min();
+                return 起跑 != default ? $"今天 {起跑:HH\\:mm} 起 {on} 项" : $"今天 {on} 项";
+            }
+
+            int done = 0, failed = 0;
+            foreach (var i in enabled)
+            {
+                if (i.Model.AlreadyRanOn(now)) { done++; continue; }
+                // 这一轮里失败的（AlreadyFailedOn 本身按自然日算，这里要"本轮失败过"）
+                if (i.Model.LastOutcome == RunOutcome.Failed
+                    && i.Model.DueAnchorAt(now) is { } a
+                    && (i.Model.LastStart ?? i.Model.LastEnd) is { } t && t >= a) failed++;
+            }
+            if (done == 0 && failed == 0) return $"今天 {on} 项在跑";
             return $"今天 {done}/{on} 完成" + (failed > 0 ? $"、{failed} 失败" : "");
         }
     }

@@ -43,8 +43,15 @@ public sealed class PlanRunner(
     Action<string> log,
     Action<PlanRunnerState> onState,
     Action? onRoundFinished = null,
-    TimeSpan? hardBudgetOverride = null)
+    TimeSpan? hardBudgetOverride = null,
+    SourceOccupancy? occupancy = null)
 {
+    /// <summary>
+    /// 数据源占用表（2026-09-04）——手动执行能不能跟计划并发，就看这里。
+    /// 外面不传就自己建一个：那样等于只有计划自己在记账，行为跟以前一致。
+    /// </summary>
+    public SourceOccupancy Occupancy { get; } = occupancy ?? new SourceOccupancy();
+
     /// <summary>测试专用：直接指定单项硬超时，跳过 <see cref="HardBudgetFor"/> 的换算。
     /// 生产代码一律不传——真实预算是分钟到小时级，单元测试等不起。</summary>
     private readonly TimeSpan? _hardBudgetOverride = hardBudgetOverride;
@@ -118,6 +125,7 @@ public sealed class PlanRunner(
                 {
                     _hadWork = true;
                     await ExecuteOneAsync(due, null, ct);
+                    if (StalledOnRepeat(due, now)) await Task.Delay(Reevaluate, ct);
                     continue;
                 }
 
@@ -138,7 +146,12 @@ public sealed class PlanRunner(
                 // ③ 空窗交给「空闲时」那类项。有下一个到点时刻就必须在它之前收尾。
                 DateTime? deadline = next is { } t ? t - IdleSafetyMargin : null;
                 var filler = FindIdleTask(now, deadline);
-                if (filler != null) { await ExecuteOneAsync(filler, deadline, ct); continue; }
+                if (filler != null)
+                {
+                    await ExecuteOneAsync(filler, deadline, ct);
+                    if (StalledOnRepeat(filler, now)) await Task.Delay(Reevaluate, ct);
+                    continue;
+                }
 
                 // ④ 没得跑，睡一会儿再看。最多睡一分钟，这样中途改计划能很快生效。
                 if (next is { } dueAt)
@@ -191,6 +204,41 @@ public sealed class PlanRunner(
         _ => int.MaxValue,          // 手动/空闲不走这条路
     };
 
+    /// <summary>比这还快跑完的一轮，算"根本没干活"。</summary>
+    private static readonly TimeSpan StallThreshold = TimeSpan.FromSeconds(1);
+
+    /// <summary>同一项连着这么多轮瞬间跑完，就当它卡住了。</summary>
+    private const int StallTolerance = 5;
+
+    private FetchPlanItem? _stallItem;
+    private int _stallCount;
+
+    /// <summary>
+    /// 空转闸。主循环挑中一项、跑完就 <c>continue</c>，中间**没有任何延迟**——正常情况没问题，
+    /// 因为跑一项总要花时间、跑完状态也会推进。可要是某条提前 return 的分支没把状态记全，
+    /// 这一项就会被反复挑中、立刻返回、再挑中，一秒空转几千轮，把日志和计划文件写爆磁盘
+    /// （2026-09-05：前置失败的跳过项因 <c>LastStart</c> 停在昨天，一夜刷出 1.6GB 日志、界面卡死）。
+    ///
+    /// 这里认出这种模式，先歇一分钟再评估，并往日志里留一行线索。真在干活的项不会被误伤——
+    /// 哪怕连着被挑中（比如分批补的那些），每一轮都实实在在耗时，计数就归零了。
+    /// </summary>
+    private bool StalledOnRepeat(FetchPlanItem item, DateTime startedAt)
+    {
+        if (DateTime.Now - startedAt >= StallThreshold || !ReferenceEquals(item, _stallItem))
+        {
+            _stallItem = item;
+            _stallCount = 0;
+            return false;
+        }
+
+        if (++_stallCount < StallTolerance) return false;
+
+        log($"⚠ 【{item.Info.Name}】连着 {_stallCount} 轮瞬间跑完、状态没有推进，"
+          + "先歇一分钟再评估（这多半是个 bug，看看它上一条结果的说明）。");
+        _stallCount = 0;
+        return true;
+    }
+
     /// <summary>
     /// 挑当下**已经该跑**的那一项：先按频次优先级分档，同档内按**表格里的排列顺序**。
     ///
@@ -221,6 +269,16 @@ public sealed class PlanRunner(
     /// 这一项现在就该跑：本期该跑、本期没跑过、今天没失败过、「不早于」已经到点，
     /// 而且它是**到点就跑**那一档——「空闲时补」的不进定时队列，走空窗那条路。
     /// </summary>
+    /// <summary>这一项要用的源，有没有被**别人**占着（自己正在跑的那份不算）。</summary>
+    private bool IsSourceBusy(FetchPlanItem item)
+    {
+        var need = item.Info.EffectiveSources;
+        if (need.Count == 0) return false;              // 本地计算，永远不冲突
+        foreach (var t in Occupancy.Snapshot())
+            if (t.Sources.Overlaps(need)) return true;
+        return false;
+    }
+
     private bool IsDueNow(FetchPlanItem item, DateTime now)
         => item.Pacing == RunPacing.Immediate && IsPending(item, now);
 
@@ -243,6 +301,11 @@ public sealed class PlanRunner(
         // 前置今天失败了：第一次放过去让 ExecuteOneAsync 记一条"跳过"并说明原因，之后就静默
         // 掠过——否则每分钟一轮评估就会往报告里刷一行。前置后来补跑成功的话，这里自然放行。
         if (DependencyFailedToday(item) && item.AlreadySkippedOn(now)) return false;
+        // 数据源正被别人占着（多半是用户手动跑了同源的一项）——**这一轮让路，什么状态都不记**。
+        // 关键是不能记成"跳过/失败"：占用是临时的，记了状态这一项今天就再也不跑了。
+        // 调度循环本来每分钟重扫一次，天然适合这种暂时让路（2026-09-04 用户定的规则：
+        // 自动侧遇冲突静默不执行，不通知）。
+        if (IsSourceBusy(item)) return false;
         return true;
     }
 
@@ -371,6 +434,11 @@ public sealed class PlanRunner(
         if (DependencyFailedToday(item))
         {
             var depName = FetchTaskCatalog.Info(info.DependsOn!.Value).Name;
+            // ⚠ 必须把上一轮遗留的开始时刻清掉。AlreadySkippedOn 靠 (LastStart ?? LastEnd) 判
+            //    "今天记过跳过了没有"，而跳过这条路压根不执行、不会给 LastStart 赋值——留着昨天
+            //    的旧值，它就永远答"今天还没记过"，于是这一项每一轮都被重新挑中、立刻跳过、再挑中，
+            //    循环零延迟空转（2026-09-05：一夜刷出 1.6GB 日志，计划文件被重写几万次，界面卡死）。
+            item.LastStart = null;
             Finish(item, RunOutcome.Skipped, 0,
                 $"跳过：前置的【{depName}】今天失败了，现在跑也取不到要的数");
             log($"⏭ 跳过【{info.Name}】——前置的【{depName}】今天失败了。"
@@ -380,18 +448,6 @@ public sealed class PlanRunner(
 
         WarnIfSoftDependencyStale(item);
 
-        item.LastStart = DateTime.Now;
-        item.LastEnd = null;
-        item.LastOutcome = RunOutcome.None;
-        item.LastMessage = null;
-        store.Save(plan);
-        onState(new PlanRunnerState(true, item, null, null, $"正在执行【{info.Name}】"));
-        log($"▶ 计划：开始【{info.Name}】（数据源 {info.DataSource}，预计 {Describe(item.EffectiveEstimate)}"
-          + (item.RecentDurationsSec.Count > 0 ? "，按这一项自己最近几轮的实测算" : "") + "）"
-          + (deadline.HasValue
-                ? $"——空闲补一轮，要在 {deadline:HH:mm} 前收尾（后面有定时任务）"
-                : item.Pacing == RunPacing.WhenIdle ? "——空闲补一轮" : ""));
-
         // 硬超时兜底：到点强制掐断这一项，让计划能自己往下走（见 HardBudgetFor 的说明）。
         // ⚠ CancellationToken 是**协作式**的：任务内部得真的在检查它才掐得动。
         //    卡在网络重试循环、卡在 foreach 里等 ct 的都能掐；要是卡在一个压根不接受 ct 的
@@ -399,6 +455,22 @@ public sealed class PlanRunner(
         var budget = HardBudgetFor(item);
         using var timeoutCts = new CancellationTokenSource(budget);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+        // 数据源占用的**登记**不在这里做，而在执行入口 ExecutePlanItemAsync 里
+        // （那是计划和手动共用的唯一入口，登记一处就覆盖两条路，不会重复占用）。
+        // 这一层只负责挑选阶段的让路，见 IsSourceBusy。
+
+        item.LastStart = DateTime.Now;
+        item.LastEnd = null;
+        item.LastOutcome = RunOutcome.None;
+        item.LastMessage = null;
+        store.Save(plan);
+        onState(new PlanRunnerState(true, item, null, null, $"正在执行【{info.Name}】"));
+        log($"▶ 计划：开始【{info.Name}】（数据源 {info.DataSource}，占用 {info.SourcesText}，预计 {Describe(item.EffectiveEstimate)}"
+          + (item.RecentDurationsSec.Count > 0 ? "，按这一项自己最近几轮的实测算" : "") + "）"
+          + (deadline.HasValue
+                ? $"——空闲补一轮，要在 {deadline:HH:mm} 前收尾（后面有定时任务）"
+                : item.Pacing == RunPacing.WhenIdle ? "——空闲补一轮" : ""));
 
         try
         {
@@ -536,17 +608,59 @@ public sealed class PlanRunner(
             return;
         }
 
-        // 「今天该跑」不等于「今天还要跑」：已经跑完的、今天失败了等明天的、前置没成而跳过的，
-        // 都还留在今天的清单里，但**不会再执行**。不分开的话这份清单会写着"今天要跑 28 项"、
-        // 预计加起来十几个小时——2026-09-02 换了新版 exe 接着跑那一晚就是这样，其实一多半
-        // 在换版之前就做完了，看着像今晚还有一整夜的活（用户反馈）。
+        // ════ 这份清单回答的是「今天要做什么」，不是「过去做了什么」（2026-09-04 用户指出）════
+        // 之前它报的是**当前轮次**的完成情况。可每日组设在 18:00、一跑跨午夜，于是白天大半时间里
+        // "当前轮次"是昨晚那一轮——刚启动计划就告诉你"昨晚那轮已完成 30 项"，对"今天要跑什么"
+        // 一点用没有；更糟的是按收盘重跑规则，今晚那 32 项**全都要重跑**，"已完成 30"直接是误导。
+        //
+        // 所以分两种情形：
+        //   ① 今天的到点还没到 → 报"今天几点起要跑几项、大概多久"，这才是刚启动时想知道的；
+        //   ② 今天的到点已过、正在这一轮里 → 报进度（已完成多少、还剩多少），那时进度才有意义。
+        var anchors = due.Select(i => i.DueAnchorAt(now))
+                         .Where(a => a is { } v && v != DateTime.MinValue)
+                         .Select(a => a!.Value).ToList();
+        DateTime? 轮次 = anchors.Count > 0 ? anchors.Max() : null;
+        bool 今轮已开始 = 轮次 is { } t0 && t0.Date == now.Date;
+
+        var sb = new StringBuilder();
+        if (!今轮已开始)
+        {
+            // ── ① 今天的轮次还没开始 ──
+            var 起跑 = due.Select(i => i.DueTimeOn(now)).Where(t => t.Date == now.Date)
+                          .DefaultIfEmpty(now).Min();
+            var 总预计 = due.Aggregate(TimeSpan.Zero, (sum, i) => sum + i.EffectiveEstimate);
+            sb.Append($"今天的计划：{起跑:HH:mm} 起要跑 {due.Count} 项（串起来预计约 {Describe(总预计)}）");
+
+            // 上一轮的欠账单独提一句——早上要手工补的就是这些，但它不该占标题
+            if (轮次 is { } prev)
+            {
+                var 上轮没跑成 = due.Where(i => !i.AlreadyRanOn(now)).ToList();
+                if (上轮没跑成.Count > 0)
+                    sb.Append($"。上一轮（{prev:MM-dd HH:mm} 起）有 {上轮没跑成.Count} 项没跑成，"
+                            + "今天这一轮会一起重跑");
+            }
+            sb.Append('：');
+
+            foreach (var i in due)
+                sb.Append("\n    ")
+                  .Append(Pad(i.NotBefore.HasValue ? i.NotBefore.Value.ToString("HH\\:mm") : "接上一项", 10))
+                  .Append(i.Info.Name)
+                  .Append($"（{i.Info.DataSource}，预计 {Describe(i.EffectiveEstimate)}）");
+            log(sb.ToString());
+            return;
+        }
+
+        // ── ② 已经在今天这一轮里：报进度 ──
+        // 已经跑完的、今天失败了等明天的、前置没成而跳过的，都还留在清单里但**不会再执行**。
+        // 不分开的话清单会写着"今天要跑 28 项"、预计十几个小时——2026-09-02 换版接着跑那一晚
+        // 就是这样，其实一多半在换版之前就做完了，看着像今晚还有一整夜的活（用户反馈）。
         var 已完成 = due.Where(i => i.AlreadyRanOn(now)).ToHashSet();
         var 已失败 = due.Where(i => !已完成.Contains(i) && i.AlreadyFailedOn(now)).ToHashSet();
         var 已跳过 = due.Where(i => !已完成.Contains(i) && !已失败.Contains(i) && i.AlreadySkippedOn(now)).ToHashSet();
         var 还要跑 = due.Where(i => !已完成.Contains(i) && !已失败.Contains(i) && !已跳过.Contains(i)).ToList();
         var 剩余预计 = 还要跑.Aggregate(TimeSpan.Zero, (sum, i) => sum + i.EffectiveEstimate);
 
-        var head = new StringBuilder($"今天的计划共 {due.Count} 项");
+        var head = new StringBuilder($"今天这一轮（{轮次:HH:mm} 起）共 {due.Count} 项");
         if (已完成.Count > 0) head.Append($"，已完成 {已完成.Count} 项");
         if (已失败.Count > 0) head.Append($"，失败等明天 {已失败.Count} 项");
         if (已跳过.Count > 0) head.Append($"，跳过 {已跳过.Count} 项");
@@ -554,7 +668,7 @@ public sealed class PlanRunner(
             ? $"，还要跑 {还要跑.Count} 项（串起来预计约 {Describe(剩余预计)}）："
             : "，今天没有还要跑的了：");
 
-        var sb = new StringBuilder(head.ToString());
+        sb.Append(head);
         foreach (var i in due)
         {
             sb.Append("\n    ");
