@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
@@ -26,7 +26,7 @@ namespace StockPlatform.Data.Remote;
 ///    （分页丢了、或中途被限流截断）。宁可这一轮失败下轮重试，也不要把残缺名单写进库
 ///    当成完整的——上游是快照语义，"这轮没返回的＝已下架"会连成分股一起删。
 ///
-/// ════ 成分股为什么必须走 push2 的官方名单 ════
+/// ════ 成分股为什么必须走 clist 的官方名单 ════
 /// 不能用 datacenter 的 <c>RPT_F10_CORETHEME_BOARDTYPE</c> 替代。2026-09-03 实测，代价很大
 /// 所以写清楚：F10 报表看着很美（188 页拿全市场 9.4 万条归属关系，还绕开了限流最凶的 push2），
 /// 但它是"个股的核心题材归属"而不是"板块的成分名单"，**会系统性漏股**——
@@ -39,12 +39,45 @@ namespace StockPlatform.Data.Remote;
 /// <see cref="FetchBoardListAsync"/> / <see cref="FetchBoardListPageAsync"/> 从 2026-09-05 起
 /// 只是**回退路径**：主路改成了 <see cref="EastMoneySideMenuBoardListProvider"/>（行情中心
 /// 左侧菜单那份静态 JSON，一个请求拿全量、不碰 push2、不弹验证）。这里留着是为了万一
-/// 东财把那个文件挪走还能退回来抓。贵的、也是真正需要 push2 的，是逐板块抓成分股。
+/// 东财把那个文件挪走还能退回来抓。贵的是逐板块抓成分股——那一步现在打
+/// <see cref="DefaultMemberHost"/>（pushguest），不再碰 push2。
+/// **回退路径这两个方法还留在 push2 上**：pushguest 支不支持 <c>fs=m:90+t:2</c> 没验证过，
+/// 而没验证的东西不该悄悄换上去；真要退回来用，那时再当场验。
 /// </summary>
 public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
 {
-    /// <summary>push2 每页上限。传更大的值会被服务端忽略。</summary>
+    /// <summary>每页上限。传更大的值会被服务端忽略。</summary>
     protected const int PageSize = 100;
+
+    /// <summary>
+    /// 成分股接口的默认域名（2026-09-05 从 <c>push2</c> 换成这个）。
+    ///
+    /// 行情中心的板块页 <c>gridlist.html#boards2-90.BKxxxx</c> **点翻页时打的就是它**，
+    /// push2 只在首屏被打一次（顶部那张资金流小表）。同一个路径、同一套参数，
+    /// 但走另一组前端（61.129.129.196，IIS），不在公司网关的域名拦截名单里。
+    ///
+    /// 2026-09-05 实测（浏览器直接导航到接口地址，5 个请求）：
+    ///   · 不带 <c>cb</c> 回调参数 → 返回**纯 JSON**，结构跟 push2 完全一样（total + diff）；
+    ///   · <c>pz=100</c> 生效（网页端自己锁死 20，我们不受这个限制）；
+    ///   · <c>fid=f12&amp;po=0</c> 支持，返回严格按代码升序——翻页规矩照旧成立；
+    ///   · <c>ut</c> / <c>wbp2u</c> / <c>dect</c> / <c>timil</c> / Cookie / Referer 一个都不用带。
+    /// 逐条等价性：BK1629 三页 282 只，跟库里前一天 push2 抓的 282 只**完全一致**
+    /// （无缺失、无多余、无跨页重复）；BK0877 报 198、两页 100+98 衔接无重叠。
+    ///
+    /// ⚠ 没验证的是**连续几百个请求会不会被限流**——很可能跟 push2 共用后端风控。
+    /// 所以节流一点没放松，反而按"人在网页上翻页"的节奏又慢了一档，见
+    /// <see cref="PauseBetweenBoardsAsync"/>。
+    /// </summary>
+    public const string DefaultMemberHost = "pushguest.eastmoney.com";
+
+    /// <summary>成分股接口走哪个域名。可由 <c>fetcher-settings.json</c> 的 <c>BoardMemberHost</c> 覆盖。</summary>
+    protected string MemberHost { get; }
+
+    /// <summary>换一个板块之前歇多久的**基准值**（实际是它的 0.5~1.5 倍随机）。</summary>
+    private readonly TimeSpan _boardSwitchPause;
+
+    /// <summary>已经抓过至少一个板块了吗——第一个板块前面不用歇。用 int 是为了 Interlocked。</summary>
+    private int _anyBoardDone;
 
     /// <summary>
     /// 板块列表最多翻这么多页。概念 + 行业各几百个，1200 的余量绰绰有余；真有一天超了，
@@ -59,9 +92,20 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
     /// <summary>子类和内部发状态用——事件本身是 private 的，派生类碰不到。</summary>
     protected void Report(string message) => OnStatus?.Invoke(message);
 
-    protected EastMoneyBoardFetcherBase(RateLimiter limiter)
+    /// <param name="memberHost">
+    /// 成分股接口的域名；留空＝<see cref="DefaultMemberHost"/>。
+    /// 留这个口子是为了出事能一行配置退回 <c>push2.eastmoney.com</c>，不用改代码重新发布。
+    /// </param>
+    /// <param name="boardSwitchPause">
+    /// **换板块**时额外歇多久（默认 8 秒，实际按 0.5~1.5 倍随机）。测试传 <c>TimeSpan.Zero</c> 关掉。
+    /// 为什么单独有这么一档，见 <see cref="PauseBetweenBoardsAsync"/>。
+    /// </param>
+    protected EastMoneyBoardFetcherBase(RateLimiter limiter, string? memberHost = null,
+                                        TimeSpan? boardSwitchPause = null)
     {
         Limiter = limiter;
+        MemberHost = string.IsNullOrWhiteSpace(memberHost) ? DefaultMemberHost : memberHost.Trim();
+        _boardSwitchPause = boardSwitchPause ?? TimeSpan.FromSeconds(8);
         Limiter.OnStatus += s => OnStatus?.Invoke(s);
     }
 
@@ -123,7 +167,7 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
         if (!doc.RootElement.TryGetProperty("data", out var data) ||
             data.ValueKind != JsonValueKind.Object)
         {
-            // data 为 null 是 push2 限流的另一种表现（返回合法 JSON 但没内容）。
+            // data 为 null 是限流的另一种表现（返回合法 JSON 但没内容）。
             // 第 1 页就这样＝这一轮什么都没拿到，得让调用方知道是限流而不是"没有板块了"。
             if (page == 1)
                 throw new RateLimitedException(
@@ -189,7 +233,7 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
         // 逐板块抓的、约 2500 个请求、跨好几轮才攒得齐——一次半截的列表就能删掉几百个板块的
         // 成分股，重抓要好几天，而且**全程不报错**。
         //
-        // 半截是怎么来的：push2 限流最常见的表现是断连或空响应，那两种 GetAsync 已经抛异常了；
+        // 半截是怎么来的：限流最常见的表现是断连或空响应，那两种 GetAsync 已经抛异常了；
         // 但它也会返回**合法 JSON 而 data 为 null**，那条路上面的循环只能 break，然后拿着前几页
         // 就走到这里。判据是：**差一个都算不完整**。
         if (total > 0 && deduped.Count != total)
@@ -198,7 +242,7 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
                 ? $"东财{label}板块列表翻到页数上限（{MaxListPages} 页 × {PageSize} 条）仍没取完："
                   + $"接口报 {total} 个、只取到 {deduped.Count} 个。这不是限流，是 MaxListPages 该调大了。"
                 : $"东财{label}板块列表不完整：接口报 {total} 个，实际只取到 {deduped.Count} 个"
-                  + "（多半是翻页中途被限流——push2 除了断连，也会返回合法 JSON 但 data 为空）。"
+                  + "（多半是翻页中途被限流——除了断连，也会返回合法 JSON 但 data 为空）。"
                   + "本轮不更新板块，库里保留上次的完整快照，下轮重试。");
         }
 
@@ -224,7 +268,7 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
         };
     }
 
-    // ─────────────── 成分股（这才是真正需要 push2 的那一步）───────────────
+    // ─────────────── 成分股（整轮里最贵的一步：一个板块一到几个请求）───────────────
 
     /// <summary>
     /// 某个板块的官方成分股名单。按代码排序翻页——**不能按涨跌幅排序**，那会跨页重复/遗漏。
@@ -237,10 +281,12 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int total = 0;
 
+        await PauseBetweenBoardsAsync(ct);
+
         for (int page = 1; page <= 20; page++)
         {
             ct.ThrowIfCancellationRequested();
-            var url = "https://push2.eastmoney.com/api/qt/clist/get" +
+            var url = $"https://{MemberHost}/api/qt/clist/get" +
                       $"?pn={page}&pz={PageSize}&po=0&np=1&fltt=2&invt=2&fid=f12&fs=b:{boardCode}" +
                       "&fields=f12,f14";
             var body = await Limiter.RunAsync(() => GetAsync(url, ct), ct);
@@ -269,7 +315,35 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
         return codes;
     }
 
-    // ─────────────── JSON 取值：push2 同一个字段有时是数字有时是字符串 ───────────────
+    /// <summary>
+    /// **换板块之前**多歇一会儿（2026-09-05 加）——把请求节奏做成"人在网页上翻页"的样子。
+    ///
+    /// 为什么光有 <see cref="RateLimiter"/> 的固定间隔不够：真人翻页的节奏是**不均匀**的。
+    /// 同一个板块里连点几次下一页很快（几秒一次），但换一个板块要回菜单、重新点开、
+    /// 等首屏——中间那一下明显更长。而我们原来是从头到尾一个匀速间隔，
+    /// 上千个请求排成一条完全等距的队列，恰恰是机器行为里最好认的特征。
+    ///
+    /// 所以分两档：页与页之间由 RateLimiter 管（带 ±30% 抖动），板块与板块之间再加这一档。
+    /// 代价是一轮多花半小时上下，换来的是节奏上没有明显的机器特征——
+    /// 而 <see cref="DefaultMemberHost"/> 那个新域名会不会限流还没验证过，这时候宁可慢。
+    ///
+    /// ⚠ **不模拟首屏那次 push2 请求**：真人打开板块页时，浏览器会先打一次 push2 的资金流
+    /// 小表再打成分股列表。照抄的话等于白白往 push2 上加一倍请求——而躲开 push2 正是
+    /// 换域名的目的。两个域名各算各的账，不会因为"少了那一次"露馅。
+    /// 同理 <c>pz=100</c> 也没改回网页端的 20：那会让请求数直接乘以 5，
+    /// 为了"更像人"把请求数翻五倍是笔亏本买卖。
+    /// </summary>
+    private async Task PauseBetweenBoardsAsync(CancellationToken ct)
+    {
+        // 第一个板块前面不用歇：这时候还没发过请求，歇了只是让人干等
+        if (Interlocked.Exchange(ref _anyBoardDone, 1) == 0) return;
+        if (_boardSwitchPause <= TimeSpan.Zero) return;
+
+        var factor = 0.5 + Random.Shared.NextDouble();      // 0.5~1.5 倍，别每次都是同一个数
+        await Task.Delay(_boardSwitchPause * factor, ct);
+    }
+
+    // ─────────────── JSON 取值：同一个字段有时是数字有时是字符串 ───────────────
 
     protected static string Str(JsonElement el, string prop)
     {

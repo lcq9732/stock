@@ -618,7 +618,24 @@ public static class FetchTaskCatalog
             + "最多 3 轮），它跟计划不冲突，这一项是给你想在固定时刻强制重试一次时用的。",
             FetchActionParams.GlobalFetchOptions,
             // 它消费的名单是前面那些步骤产生的，尤其是体检查出的"今天还缺谁"
-            SoftDependsOn: [FetchActionId.StepDayCoverage]),
+            SoftDependsOn: [FetchActionId.StepDayCoverage],
+            // ⚠ 必须显式声明源（2026-09-05）。不写的话 Mixed 会兜底成**全部 9 个联网源**
+            //    （见 FetchTaskInfo.EffectiveSources 的"保守"分支），于是它一跑，
+            //    计划里没有任何一项能通过 IsSourceBusy——实测把计划停摆了 2 小时 41 分，
+            //    期间【拉取分档资金流】【拉取财务报表】排队 30 分钟后被硬超时掐断记成"失败"，
+            //    而它们其实一个请求都没发。
+            //
+            //    这三个是按它真正会调的东西数出来的：
+            //      · Tencent  ── K线主源（TencentThenSinaBarFetcher）
+            //      · Sina     ── K线回退、流通市值、资金净流入、指数成分、股东、分红，全在新浪
+            //      · CsIndex  ── 指数权重（中证 OSS）
+            //    收窄之后，用 push2 / push2his / datacenter / quote 的那些项就能跟它并行跑。
+            //
+            //    ⚠ 唯一的例外：把 BarSource 配成 "EastMoney" 时 K线会走 push2his
+            //    （EastMoneyBarFetcher 打的是 push2his.eastmoney.com/api/qt/stock/kline/get），
+            //    那种配置下这里就少声明了一个源。眼下不管它——东财在本机网络下常年连不上，
+            //    默认也不是它；真要长期用东财当K线源，这里得把 EmPush2His 加回来。
+            Sources: [DataSourceId.Tencent, DataSourceId.Sina, DataSourceId.CsIndex]),
 
         new(FetchActionId.RepairQfq, "重取前复权", "腾讯（回退新浪）", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(30), "空闲时",

@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using StockPlatform.Data.Remote;
 using StockPlatform.Logic.Models;
@@ -24,9 +24,14 @@ public class BoardFetcherChannelParityTests
     private sealed class ScriptedHandler(params string[] responses) : HttpMessageHandler
     {
         private int _n;
+
+        /// <summary>实际请求过的 URL，按顺序。用来钉住域名和翻页参数。</summary>
+        public List<string> Urls { get; } = [];
+
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            Urls.Add(request.RequestUri!.ToString());
             var body = _n < responses.Length ? responses[_n] : responses[^1];
             _n++;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
@@ -41,10 +46,12 @@ public class BoardFetcherChannelParityTests
 
     /// <summary>浏览器通道版，但**不给浏览器**——于是它走 HttpClient 回退，跟 http 版可比。</summary>
     private static EastMoneyBoardFetcher Browser(params string[] responses) =>
-        new(NoWait(), new HttpClient(new ScriptedHandler(responses)));
+        new(NoWait(), new HttpClient(new ScriptedHandler(responses)),
+            boardSwitchPause: TimeSpan.Zero);
 
     private static EastMoneyBoardHttpFetcher Http(params string[] responses) =>
-        new(NoWait(), new HttpClient(new ScriptedHandler(responses)));
+        new(NoWait(), new HttpClient(new ScriptedHandler(responses)),
+            boardSwitchPause: TimeSpan.Zero);
 
     /// <summary>一页成分股：total 报 <paramref name="total"/>，这一页给 <paramref name="count"/> 只。</summary>
     private static string MemberPage(int total, int count, int startIndex)
@@ -126,11 +133,97 @@ public class BoardFetcherChannelParityTests
         Assert.False(await Http(MemberPage(1, 1, 1)).PrepareAsync());
     }
 
+    // ─────────────── 域名（2026-09-05 从 push2 换到 pushguest）───────────────
+
+    [Fact]
+    public async Task 成分股_默认打pushguest_并且带着翻页那三条规矩()
+    {
+        var handler = new ScriptedHandler(MemberPage(150, 100, 1), MemberPage(150, 50, 101));
+        await new EastMoneyBoardHttpFetcher(NoWait(), new HttpClient(handler),
+                                            boardSwitchPause: TimeSpan.Zero)
+            .FetchMembersAsync("BK0477");
+
+        Assert.Equal(2, handler.Urls.Count);
+        foreach (var url in handler.Urls)
+        {
+            Assert.StartsWith("https://pushguest.eastmoney.com/api/qt/clist/get", url);
+            Assert.Contains("fid=f12", url);      // 按代码排序，不能按涨跌幅——见基类注释
+            Assert.Contains("pz=100", url);       // 网页端锁死 20，我们不受这个限制
+            Assert.Contains("fs=b:BK0477", url);
+        }
+        Assert.Contains("pn=1", handler.Urls[0]);
+        Assert.Contains("pn=2", handler.Urls[1]);
+    }
+
+    [Fact]
+    public async Task 成分股_域名可以一行配置退回push2()
+    {
+        var handler = new ScriptedHandler(MemberPage(1, 1, 1));
+        await new EastMoneyBoardHttpFetcher(NoWait(), new HttpClient(handler),
+                                            memberHost: "push2.eastmoney.com",
+                                            boardSwitchPause: TimeSpan.Zero)
+            .FetchMembersAsync("BK0477");
+
+        Assert.StartsWith("https://push2.eastmoney.com/api/qt/clist/get", handler.Urls[0]);
+    }
+
+    [Fact]
+    public async Task 板块列表_是回退路径_故意还留在push2上()
+    {
+        // pushguest 支不支持 fs=m:90+t:2 没验证过，没验证的东西不该悄悄换上去。
+        // 这条测试是提醒：哪天要一起换，得先当场验一次，而不是顺手改。
+        var handler = new ScriptedHandler(ListPage(1, 1, 1));
+        await new EastMoneyBoardHttpFetcher(NoWait(), new HttpClient(handler),
+                                            boardSwitchPause: TimeSpan.Zero)
+            .FetchBoardListAsync(BoardType.Concept);
+
+        Assert.StartsWith("https://push2.eastmoney.com/api/qt/clist/get", handler.Urls[0]);
+    }
+
+    // ─────────────── 节奏：换板块要比翻页慢一档 ───────────────
+
+    [Fact]
+    public async Task 换板块要多歇一会_但第一个板块不用等()
+    {
+        // 用 400 毫秒当基准（实际是 0.5~1.5 倍随机，即 200~600 毫秒），测试才跑得完
+        var fetcher = new EastMoneyBoardHttpFetcher(
+            NoWait(), new HttpClient(new ScriptedHandler(MemberPage(1, 1, 1))),
+            boardSwitchPause: TimeSpan.FromMilliseconds(400));
+
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        await fetcher.FetchMembersAsync("BK0001");
+        var first = t0.Elapsed;
+
+        var t1 = System.Diagnostics.Stopwatch.StartNew();
+        await fetcher.FetchMembersAsync("BK0002");
+        var second = t1.Elapsed;
+
+        // 第一个板块前面歇是白歇——那会儿还没发过请求，只是让人干等
+        Assert.True(first < TimeSpan.FromMilliseconds(150), $"第一个板块不该等，实际等了 {first}");
+        // 第二个要等到随机区间的下限以上
+        Assert.True(second >= TimeSpan.FromMilliseconds(180), $"换板块该歇一会儿，实际只有 {second}");
+    }
+
+    [Fact]
+    public async Task 换板块的停顿不影响抓回来的名单()
+    {
+        var pages = new[] { MemberPage(150, 100, 1), MemberPage(150, 50, 101) };
+        var withPause = new EastMoneyBoardHttpFetcher(
+            NoWait(), new HttpClient(new ScriptedHandler(pages)),
+            boardSwitchPause: TimeSpan.FromMilliseconds(1));
+
+        Assert.Equal(await Http(pages).FetchMembersAsync("BK0477"),
+                     await withPause.FetchMembersAsync("BK0477"));
+    }
+
     [Fact]
     public void 两条通道的日志能区分()
     {
         // 出问题时人得能从日志一眼看出这轮走的是哪条路
         Assert.Contains("HttpClient", Http(MemberPage(1, 1, 1)).DescribeChannel());
         Assert.Contains("HTTP", Browser(MemberPage(1, 1, 1)).DescribeChannel());
+        // 域名也要报出来：换过一次之后，日志不写清楚就没法从事后的日志判断当时打的是哪个
+        Assert.Contains("pushguest", Http(MemberPage(1, 1, 1)).DescribeChannel());
+        Assert.Contains("pushguest", Browser(MemberPage(1, 1, 1)).DescribeChannel());
     }
 }

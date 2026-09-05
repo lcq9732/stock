@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Runtime.CompilerServices;
 using System.Windows.Threading;
 using StockPlatform.Data.Orchestration;
+using StockPlatform.Data.Remote;
 using StockPlatform.Scheduling;
 using StockPlatform.Logic.Abstractions;
 
@@ -358,6 +359,7 @@ public class MainViewModel : INotifyPropertyChanged
         // 是同一份文件、同一时刻，所以这份"已应用值"跟实际造出来的对象是对得上的。
         _appliedBoardChannel = FetcherSettings.ReadBoardChannel(paths.SettingsPath);
         _appliedNic = FetcherSettings.ReadString(paths.SettingsPath, "Push2NetworkInterface");
+        _appliedMemberHost = FetcherSettings.ReadBoardMemberHost(paths.SettingsPath);
 
         // 每次程序启动开一份新的 fetch.log，但**上一轮那份先归档、不直接冲掉**（见
         // ArchivePreviousLog）。AutoFlush 让每行一写完就落盘，崩溃/被强制结束也不会丢最后那几行。
@@ -607,6 +609,16 @@ public class MainViewModel : INotifyPropertyChanged
     public SourceOccupancy Occupancy { get; } = new();
 
     /// <summary>
+    /// 「这一项现在能不能开跑」的裁决（2026-09-05）——让路还是抢占，全在
+    /// <see cref="SourceAdmission"/> 里，那个类不依赖 UI 所以能完整测。
+    /// 这边只负责把它的结论渲染成界面上的文字。
+    /// </summary>
+    private SourceAdmission? _admissionField;
+
+    private SourceAdmission _admission =>
+        _admissionField ??= new SourceAdmission(Occupancy, Log);
+
+    /// <summary>
     /// 界面上「正在执行」那几行（2026-09-05）——占用表的镜像，每行带自己的用时和【停止】。
     ///
     /// 为什么要镜像而不是每次重建整个列表：行里有"停止中"这种**界面自己的状态**，
@@ -643,7 +655,46 @@ public class MainViewModel : INotifyPropertyChanged
             if (!have.Contains(t.Id))
                 RunningTasks.Add(RunningTaskViewModel.FromTask(t, StopRunningTask));
 
+        SyncPlanRowsWithOccupancy(live);
         AfterRunningTasksChanged();
+    }
+
+    /// <summary>
+    /// 把「谁在跑」反映到计划页对应的行上（2026-09-05）。
+    ///
+    /// 为什么需要：同一项任务有两个入口——计划页那一行的【执行】，和【手动】页的按钮。
+    /// 走计划页时 <see cref="RunPlanItemNowAsync"/> 会把行状态改成"▶ 执行中…"；
+    /// 走【手动】页时没人管那一行，它还挂着上一次的结果，于是界面上
+    /// 「正在执行 已跑 2 小时 41 分」配着那一行的「✘ 01:33 失败」，看着像程序在自相矛盾。
+    ///
+    /// 占用表是唯一知道"现在到底谁在跑"的地方，所以从它反推：在跑的标上，跑完的清掉标记
+    /// （清掉之后 RecalcTimeline 会重画成上次的结果）。
+    /// </summary>
+    private void SyncPlanRowsWithOccupancy(IReadOnlyList<RunningTask> live)
+    {
+        if (PlanItems.Count == 0) return;
+        var running = live.Select(t => t.Name).ToHashSet();
+
+        foreach (var vm in PlanItems)
+        {
+            if (running.Contains(vm.Name))
+            {
+                // 已经是"执行中/排队等待"这类进行态就别覆盖——那些文案比这里的更具体
+                if (vm.StatusLevel != 3)
+                {
+                    vm.StatusText = "▶ 执行中…";
+                    vm.StatusLevel = 3;
+                    vm.RefreshStatus();
+                }
+            }
+            else if (vm.StatusLevel == 3)
+            {
+                // 跑完了但没人改回来（典型是从【手动】页跑的）——清掉进行态，
+                // 让下一次重画恢复成这一项真正的上次结果
+                vm.StatusLevel = 0;
+                vm.RefreshStatus();
+            }
+        }
     }
 
     /// <summary>列表增删之后：刷新占位提示，并按需开关那个每秒刷用时的定时器。</summary>
@@ -776,9 +827,10 @@ public class MainViewModel : INotifyPropertyChanged
 
     // ── 界面设置的持久化 ──
 
-    /// <summary>板块通道／push2 网卡当前**真正生效**的值（不是文件里的值），见 <see cref="ReloadConfig"/>。</summary>
+    /// <summary>板块通道／网卡／成分股域名当前**真正生效**的值（不是文件里的值），见 <see cref="ReloadConfig"/>。</summary>
     private string _appliedBoardChannel;
     private string? _appliedNic;
+    private string? _appliedMemberHost;
 
     /// <summary>
     /// 【重新读取配置】（2026-09-05）：不重启程序，把 <c>data/fetcher-settings.json</c> 的改动吃进来。
@@ -819,13 +871,16 @@ public class MainViewModel : INotifyPropertyChanged
         // ── ② 板块成分股通道 + push2 网卡 ──
         var newChannel = FetcherSettings.ReadBoardChannel(_paths.SettingsPath);
         var newNic = FetcherSettings.ReadString(_paths.SettingsPath, "Push2NetworkInterface");
+        var newHost = FetcherSettings.ReadBoardMemberHost(_paths.SettingsPath);
         bool boardChanged = newChannel != _appliedBoardChannel
-                         || !string.Equals(newNic, _appliedNic, StringComparison.Ordinal);
+                         || !string.Equals(newNic, _appliedNic, StringComparison.Ordinal)
+                         || !string.Equals(newHost, _appliedMemberHost, StringComparison.OrdinalIgnoreCase);
 
         if (!boardChanged)
         {
             Log($"　板块通道 BoardMemberChannel：{ChangeText(_appliedBoardChannel, newChannel)}");
             Log($"　push2 网卡 Push2NetworkInterface：{ChangeText(NicText(_appliedNic), NicText(newNic))}");
+            Log($"　成分股域名 BoardMemberHost：{ChangeText(HostText(_appliedMemberHost), HostText(newHost))}");
         }
         else if (_recreateBoardFetcher is null)
         {
@@ -844,9 +899,11 @@ public class MainViewModel : INotifyPropertyChanged
             _orchestrator.ReplaceBoardFetcher(_recreateBoardFetcher());
             Log($"　板块通道 BoardMemberChannel：{ChangeText(_appliedBoardChannel, newChannel)}");
             Log($"　push2 网卡 Push2NetworkInterface：{ChangeText(NicText(_appliedNic), NicText(newNic))}");
+            Log($"　成分股域名 BoardMemberHost：{ChangeText(HostText(_appliedMemberHost), HostText(newHost))}");
             // 只有真的换成了才更新"已应用值"——没换成的话下次点还得再报一次差异
             _appliedBoardChannel = newChannel;
             _appliedNic = newNic;
+            _appliedMemberHost = newHost;
         }
 
         Log("===== 【重新读取配置】结束 =====");
@@ -855,6 +912,11 @@ public class MainViewModel : INotifyPropertyChanged
     /// <summary>"旧 → 新 ✔ 已生效"或者"值（没变）"。人一眼要能看出自己刚改的那下算不算数。</summary>
     private static string ChangeText(string oldValue, string newValue)
         => oldValue == newValue ? $"{newValue}（没变）" : $"{oldValue} → {newValue}  ✔ 已生效";
+
+    /// <summary>成分股域名没配就是走代码默认，日志里要写成人看得懂的样子而不是空字符串。</summary>
+    private static string HostText(string? host)
+        => string.IsNullOrWhiteSpace(host)
+            ? $"（默认 {EastMoneyBoardFetcherBase.DefaultMemberHost}）" : host;
 
     /// <summary>网卡没配就是走默认路由，日志里得写出来——空字符串看着像读失败。</summary>
     private static string NicText(string? nic)
@@ -1764,7 +1826,11 @@ public class MainViewModel : INotifyPropertyChanged
 
         var runner = new PlanRunner(
             _plan, _planStore!, _paths,
-            ExecutePlanItemAsync,
+            // fromPlan: true —— 这条是**计划**在跑，定时项遇到数据源被手工任务占着时可以抢占
+            // （见 AcquireOrPreemptAsync）。手动点【执行】那条路走的是同一个方法但传 false，
+            // 只让路不抢占：人点的东西不该被另一个人点的东西掐掉。
+            (item, deadline, progress, ct) =>
+                ExecutePlanItemAsync(item, deadline, progress, ct, fromPlan: true),
             Log,
             state =>
             {
@@ -1775,11 +1841,20 @@ public class MainViewModel : INotifyPropertyChanged
                 System.Windows.Application.Current?.Dispatcher.Invoke(() =>
                 {
                     PlanStatusText = state.Text;
+
+                    // ⚠ 正在跑的项不能清标记（2026-09-05 修）。
+                    //    下面那句"先把进行中的标记清掉"原本是无差别清空的，可 StatusLevel==3
+                    //    不只属于"计划当前这一项"——**手动插的任务也占着它**。手动任务不在
+                    //    计划的执行序列里（state.Current 不是它），标记一清就退回上次的结果，
+                    //    于是界面成了「顶上说已跑 2 小时 41 分，那一行却写着凌晨 01:33 失败」。
+                    //    占用表是唯一知道"现在到底谁在跑"的地方，从它反推最可靠。
+                    var runningNames = Occupancy.Snapshot().Select(t => t.Name).ToHashSet();
+
                     // 先把"进行中"的标记清掉，再给当前那一行打上——否则上一轮正在跑的那行会
                     // 一直挂着"执行中"，RecalcTimeline 认得 StatusLevel==3 就不覆盖它了。
                     foreach (var vm in PlanItems)
                     {
-                        if (vm.StatusLevel == 3) vm.StatusLevel = 0;
+                        if (vm.StatusLevel == 3 && !runningNames.Contains(vm.Name)) vm.StatusLevel = 0;
                         if (state.Current == vm.Model)
                         {
                             vm.StatusText = "▶ 执行中…";
@@ -2130,8 +2205,81 @@ public class MainViewModel : INotifyPropertyChanged
     ///   ② 【空闲时自动补财务】正在跑就先叫停它（它本来就是"捡空档跑"的，计划优先）；
     ///   ③ 置 IsBusy 保护整段执行，跑完清掉并照常排一次自动重试。
     /// </summary>
+    // ── 抢占：计划的定时项优先于手工任务（2026-09-05 用户定的规则）────────────────
+    //
+    // 缘起：用户手动跑了一项占满数据源的任务（那时【重新拉取失败】没声明 Sources，
+    // Mixed 兜底成全部 9 个源），跑了 2 小时 41 分，期间计划里的项全部让路——
+    // 界面还一直显示"今天没有待执行的项了"。计划实际停摆了小半天。
+    //
+    // 规则（讨论后定的，跟最初设想有三处不同，理由写在各自的常量上）：
+    //   · 只有**定时项**抢占。空闲项（WhenIdle）语义就是"有空才补"，
+    //     没理由为它掐掉用户主动点的任务——今天被误伤的两项恰好都是空闲项。
+    //   · 等被抢占者收尾最多 PreemptWaitLimit，**不是 30 分钟**：实测正常停止是秒级
+    //     （限流等待、网络请求全带 ct），只有【优化数据库】的大索引是分钟级。
+    //   · 等不到就**放弃这一轮**，绝不"不管它、硬上"：停不下来只可能是死锁，
+    //     那时候硬启动第二个任务等于主动制造数据竞争——占用机制存在的全部意义就是防这个。
+
+
+    /// <summary>
+    /// 拿数据源占用；拿不到时按规则决定**抢占**还是**让路**。
+    /// </summary>
+    /// <returns>
+    /// (拿到的占用, 说明)。占用为 null 表示这一轮不跑，说明就是记进 SkippedReason 的原因；
+    /// 占用不为 null 而说明也不为 null，表示中间等过/抢过，调用方据此多打一行"可以开工了"。
+    /// </returns>
+    /// <summary>
+    /// 拿数据源占用；拿不到时按规则决定抢占还是让路。
+    ///
+    /// **决策本身在 <see cref="SourceAdmission"/> 里**（2026-09-05 挪过去的）——那个类不依赖 UI，
+    /// 所以让路/抢占/超时/被第三方截胡这几条路径都能用假任务在毫秒级测完。
+    /// 这里只剩两件事：把结果渲染成界面上的文字，以及记那几行给人看的日志。
+    /// </summary>
+    private async Task<(RunningTask? Lease, string? Note)> AcquireOrPreemptAsync(
+        FetchPlanItem item, PlanItemViewModel? row, IProgress<string> progress,
+        CancellationTokenSource itemCts, bool fromPlan, CancellationToken ct)
+    {
+        var rowName = row?.Name ?? "下一项";
+
+        // 抢占开始时把行状态和顶部文案改掉——这一段可能要等上两分钟，
+        // 不说的话界面看着像卡住了。SourceAdmission 不碰 UI，所以钩子放这儿。
+        void OnPreemptStart(string blockerName)
+        {
+            SetRowState(row, "⏫ 抢占中…", 3);
+            OnUi(() => PlanStatusText = $"【{rowName}】正在抢占——停止【{blockerName}】…");
+        }
+
+        var r = await _admission.AcquireAsync(
+            item.Info.Name, item.Info.EffectiveSources,
+            isTimedItem: item.Pacing == RunPacing.Immediate,
+            fromPlan: fromPlan,
+            manualBigTaskRunning: IsBusy,
+            itemCts, progress, ct, OnPreemptStart);
+
+        switch (r.Kind)
+        {
+            case AdmissionKind.Acquired:
+                return (r.Lease, null);
+
+            case AdmissionKind.AcquiredAfterPreempt:
+                return (r.Lease, r.Reason);
+
+            case AdmissionKind.PreemptTimedOut:
+                OnUi(() => PlanStatusText =
+                    $"⚠【{r.Blocker}】停不下来（已等 {SourceAdmission.DefaultWaitLimit.TotalMinutes:0} 分钟），"
+                    + "可能卡死了——计划暂时跑不了");
+                return (null, r.Reason);
+
+            default:    // GaveWay
+                if (r.Blocker != null && r.BlockedSource is { } src)
+                    OnUi(() => PlanStatusText =
+                        $"【{rowName}】让路中——{DataSourceCatalog.NameOf(src)} 被【{r.Blocker}】占着");
+                return (null, r.Reason);
+        }
+    }
+
     private async Task<FetchResult> ExecutePlanItemAsync(
-        FetchPlanItem item, DateTime? deadline, IProgress<string> progress, CancellationToken ct)
+        FetchPlanItem item, DateTime? deadline, IProgress<string> progress, CancellationToken ct,
+        bool fromPlan = false)
     {
         // PlanRunner 是**挑中**这一项就回调报告"当前项 = 它"的，而下面这个等待循环可能让它在这儿
         // 排上十几分钟。不区分的话状态列会写着「▶ 执行中…」，其实一个请求都还没发
@@ -2151,43 +2299,19 @@ public class MainViewModel : INotifyPropertyChanged
         var itemCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
-            while (!ct.IsCancellationRequested)
-            {
-                if (!IsBusy)
-                {
-                    lease = Occupancy.TryAcquire(item.Info.Name, item.Info.EffectiveSources,
-                        manual: !IsPlanRunning, itemCts, out var blockedBy, out var blockedSource);
-                    if (lease != null) break;
-                    if (!warned)
-                    {
-                        progress.Report($"　{DataSourceCatalog.NameOf(blockedSource!.Value)} 正被"
-                                      + $"【{blockedBy!.Name}】占用，这一项先排队等它结束"
-                                      + "（源不冲突的任务是可以同时跑的）…");
-                        SetRowState(row, "⏸ 排队等待", 3);
-                        // 顶上那条总状态也是 PlanRunner "挑中就报"的，同样会写成"正在执行"——改掉，
-                        // 否则界面说在跑财务报表、日志却在刷别的进度，对不上（2026-09-01 用户反馈）。
-                        //
-                        // ⚠ 一定要写清**在等谁、等哪个源**（2026-09-05）：只写"等占用同一数据源的
-                        //    任务结束"时，底下「正在执行」列着的那项恰好同名（比如自己先手动点了
-                        //    【执行】、计划又轮到同一项），界面就成了"X 排队中"配"X 正在执行"，
-                        //    看着像是程序自相矛盾（用户截图）。带上占用者和源名就读得懂了。
-                        var blockedName = DataSourceCatalog.NameOf(blockedSource!.Value);
-                        var blockerName = blockedBy!.Name;
-                        OnUi(() => PlanStatusText =
-                            $"【{row?.Name ?? "下一项"}】排队中——{blockedName} 正被【{blockerName}】占着，等它结束");
-                        warned = true;
-                    }
-                }
-                else if (!warned)
-                {
-                    progress.Report("　【手动】页有大任务正在跑（它横跨所有数据源），这一项先排队等它结束…");
-                    SetRowState(row, "⏸ 排队等待", 3);
-                    OnUi(() => PlanStatusText = $"【{row?.Name ?? "下一项"}】排队中——等当前任务结束");
-                    warned = true;
-                }
-                await Task.Delay(TimeSpan.FromSeconds(10), ct);
-            }
+            var (acquired, giveUpReason) =
+                await AcquireOrPreemptAsync(item, row, progress, itemCts, fromPlan, ct);
             ct.ThrowIfCancellationRequested();
+
+            if (acquired == null)
+            {
+                // 让路：**不算失败**。记成 Skipped 之后 AlreadyRanOn 仍然是 false，
+                // 调度循环下一分钟重扫时源要是空了就自然接上（跟挑选阶段的让路同一个语义）。
+                SetRowState(row, "⏸ 让路中", 0);
+                return new FetchResult { SkippedReason = giveUpReason };
+            }
+            lease = acquired;
+            warned = giveUpReason != null;
 
             if (warned)
             {

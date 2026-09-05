@@ -1,10 +1,14 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http;
 
 namespace StockPlatform.Data.Remote;
 
 /// <summary>
 /// 东财板块抓取——**纯 HttpClient**，不碰浏览器（2026-09-05 新增）。
+///
+/// ⚠ 下面整段讲的都是**打 push2** 时的实测。2026-09-05 起成分股默认改打
+/// <see cref="EastMoneyBoardFetcherBase.DefaultMemberHost"/>（pushguest），
+/// 那个域名的限流脾气**还没验证过**，所以这些结论只当历史背景看，别拿来推断新域名。
 /// 业务逻辑（URL、翻页、total 对账）全在 <see cref="EastMoneyBoardFetcherBase"/>，
 /// 这个类只负责一件事：怎么把一个 URL 变成一段 JSON。
 ///
@@ -49,8 +53,10 @@ public class EastMoneyBoardHttpFetcher : EastMoneyBoardFetcherBase
     /// 换一条没限制的链路就能通，见 <see cref="NetworkInterfaceBinder"/>。
     /// </param>
     public EastMoneyBoardHttpFetcher(RateLimiter limiter, HttpClient? httpClient = null,
-                                     string? bindNetworkInterface = null)
-        : base(limiter)
+                                     string? bindNetworkInterface = null,
+                                     string? memberHost = null,
+                                     TimeSpan? boardSwitchPause = null)
+        : base(limiter, memberHost, boardSwitchPause)
     {
         _bindNetworkInterface = bindNetworkInterface;
         _http = httpClient ?? new HttpClient(
@@ -67,7 +73,7 @@ public class EastMoneyBoardHttpFetcher : EastMoneyBoardFetcherBase
         _http.Timeout = TimeSpan.FromSeconds(25);
     }
 
-    public override string DescribeChannel() => "push2 走纯 HttpClient（不用浏览器、不会弹验证）";
+    public override string DescribeChannel() => $"{MemberHost} 走纯 HttpClient（不用浏览器、不会弹验证）";
 
     public override string DescribeBinding() => NetworkInterfaceBinder.Describe(_bindNetworkInterface);
 
@@ -80,7 +86,7 @@ public class EastMoneyBoardHttpFetcher : EastMoneyBoardFetcherBase
             // 空响应是 push2 限流的一种表现（另一种是直接断连，走下面的 catch）。
             // 不能当成"没数据"返回上去——上游会把它当成"这个板块是空的"写进库。
             if (string.IsNullOrWhiteSpace(body))
-                throw new RateLimitedException("东财 push2 返回空响应（典型的限流表现）。");
+                throw new RateLimitedException($"东财 {MemberHost} 返回空响应（典型的限流表现）。");
             return body;
         }
         catch (RateLimitedException) { throw; }
@@ -89,7 +95,7 @@ public class EastMoneyBoardHttpFetcher : EastMoneyBoardFetcherBase
         {
             // push2 限流时不返回 HTTP 错误码，而是直接断开连接
             throw new RateLimitedException(
-                $"东财 push2 连接被断开：{ex.InnerException?.Message ?? ex.Message}"
+                $"东财 {MemberHost} 连接被断开：{ex.InnerException?.Message ?? ex.Message}"
                 + "（这条是纯 HttpClient 通道；如果盘中持续这样，说明老的限流结论仍然成立，"
                 + "把 fetcher-settings.json 的 BoardMemberChannel 改回 \"browser\"）", ex);
         }

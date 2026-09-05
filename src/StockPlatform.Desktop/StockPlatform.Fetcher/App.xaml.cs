@@ -364,7 +364,9 @@ public partial class App : Application
     ///     为什么两条路并存：2026-09-04 实测"HttpClient 第 7 个请求就被切"才做的浏览器通道；
     ///     09-05 同一台机器复测 HttpClient 连发 110 个零失败——可那天是周六，而验证码都是
     ///     交易日撞上的。所以交易日盘中先跑一次 doc/push2-reachability-probe.ps1 再决定。
-    ///   · <c>Push2NetworkInterface</c>＝ 把 push2 的请求钉在某块网卡上（公司网关按域名拦过它）。
+    ///   · <c>Push2NetworkInterface</c>＝ 把请求钉在某块网卡上（公司网关按域名拦过 push2）。
+    ///   · <c>BoardMemberHost</c>＝ 成分股打哪个域名，默认 pushguest（2026-09-05 换的，
+    ///     就是板块页点翻页时真正打的那个）；出事能一行配置退回 push2。
     ///
     /// <paramref name="browser"/> 是**共享**的浏览器通道，重载时不重建：它拉着一串
     /// msedgewebview2 子进程和落盘的 Cookie，重建等于把攒下的"熟面孔"身份丢掉，
@@ -374,16 +376,29 @@ public partial class App : Application
     {
         var bindNic = ReadSetting(paths.SettingsPath, "Push2NetworkInterface");
         var boardChannel = FetcherSettings.ReadBoardChannel(paths.SettingsPath);
+        var memberHost = FetcherSettings.ReadBoardMemberHost(paths.SettingsPath);
+
+        // ── 节奏按"人在网页上翻页"来（2026-09-05，跟着换 pushguest 一起加的）──
+        // 两档而不是一档匀速：页与页之间快（RateLimiter 的间隔 ± 抖动），换板块时慢
+        // （boardSwitchPause，实际 0.5~1.5 倍随机）。真人就是这样——同一个板块里连点几下
+        // 下一页，换板块要回菜单重新点开、等首屏。原来从头到尾一个固定间隔，
+        // 上千个请求排成完全等距的队列，恰恰是机器行为里最好认的特征。
+        //
+        // 账：1000 个板块、pz=100 之下平均一个板块一页出头 ≈ 1300 个请求，
+        // 换板块 6 秒 × 1000 ≈ 1.7 小时，加上页间间隔和批次休息，一轮 3 小时上下——
+        // 比浏览器通道原来的 4 小时还快些，而且不用人守着点验证码。
+        const int BoardSwitchSeconds = 6;
 
         return boardChannel == "http"
             // 纯 HttpClient：没有页面加载那 1~3 秒，也不用等验证脚本，所以能跑得比浏览器通道快。
             // 2 秒间隔比实测通过的 1.2 秒更保守——那次实测毕竟是非交易日。
-            // 每 50 个歇 60 秒 ≈ 2500 个请求两小时出头，是浏览器通道的一半时间。
             ? new EastMoneyBoardHttpFetcher(
                 new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
                                 batchSize: 50, restDuration: TimeSpan.FromSeconds(60),
                                 jitter: 0.3, retryDelays: []),
-                bindNetworkInterface: bindNic)
+                bindNetworkInterface: bindNic,
+                memberHost: memberHost,
+                boardSwitchPause: TimeSpan.FromSeconds(BoardSwitchSeconds))
             : new EastMoneyBoardFetcher(
                 new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(4),
                                 batchSize: 30, restDuration: TimeSpan.FromSeconds(60),
@@ -394,7 +409,9 @@ public partial class App : Application
                                 // 而且日志里看着像"试了很多次"，其实全是自己打自己。
                                 retryDelays: []),
                 bindNetworkInterface: bindNic,
-                browser: browser);
+                browser: browser,
+                memberHost: memberHost,
+                boardSwitchPause: TimeSpan.FromSeconds(BoardSwitchSeconds));
     }
 
     /// <summary>

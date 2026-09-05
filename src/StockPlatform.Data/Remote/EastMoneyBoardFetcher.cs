@@ -5,6 +5,11 @@ namespace StockPlatform.Data.Remote;
 
 /// <summary>
 /// 东财板块抓取——**走 WebView2 浏览器通道**（HttpClient 只当回退）。
+///
+/// ⚠ 下面整段"push2 第 7 个请求就被切"的实测，讲的是**打 push2** 那会儿的事。
+/// 2026-09-05 起成分股默认改打 <see cref="EastMoneyBoardFetcherBase.DefaultMemberHost"/>
+/// （pushguest，行情中心板块页翻页时真正打的那个），新域名的脾气还没验证，
+/// 所以这条浏览器通道**暂时仍是默认**——它顺带能测出新域名会不会弹图片验证码。
 /// 业务逻辑（URL、翻页、total 对账）全在 <see cref="EastMoneyBoardFetcherBase"/>，
 /// 这个类只负责一件事：怎么把一个 URL 变成一段 JSON。
 ///
@@ -44,8 +49,10 @@ public class EastMoneyBoardFetcher : EastMoneyBoardFetcherBase
     /// </param>
     public EastMoneyBoardFetcher(RateLimiter limiter, HttpClient? httpClient = null,
                                  string? bindNetworkInterface = null,
-                                 IBrowserJsonFetcher? browser = null)
-        : base(limiter)
+                                 IBrowserJsonFetcher? browser = null,
+                                 string? memberHost = null,
+                                 TimeSpan? boardSwitchPause = null)
+        : base(limiter, memberHost, boardSwitchPause)
     {
         _browser = browser;
         _http = httpClient ?? new HttpClient(
@@ -82,8 +89,8 @@ public class EastMoneyBoardFetcher : EastMoneyBoardFetcherBase
     }
 
     public override string DescribeChannel() => _browser is { IsReady: true }
-        ? "push2 走浏览器通道（Edge 内核）"
-        : "push2 走普通 HTTP 抓取" + (_browser == null ? "" : "（浏览器通道没就绪）");
+        ? $"{MemberHost} 走浏览器通道（Edge 内核）"
+        : $"{MemberHost} 走普通 HTTP 抓取" + (_browser == null ? "" : "（浏览器通道没就绪）");
 
     /// <summary>
     /// 当前走哪块网卡、有没有配对。**调用方要在订阅 OnStatus 之后自己打进日志**——
@@ -102,14 +109,14 @@ public class EastMoneyBoardFetcher : EastMoneyBoardFetcherBase
             {
                 var viaBrowser = await _browser.GetJsonAsync(url, ct);
                 if (!string.IsNullOrWhiteSpace(viaBrowser)) return viaBrowser;
-                throw new RateLimitedException("东财 push2 经浏览器通道返回空（典型的限流表现）。");
+                throw new RateLimitedException($"东财 {MemberHost} 经浏览器通道返回空（典型的限流表现）。");
             }
             catch (RateLimitedException) { throw; }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 throw new RateLimitedException(
-                    $"东财 push2 经浏览器通道取数失败：{ex.Message}", ex);
+                    $"东财 {MemberHost} 经浏览器通道取数失败：{ex.Message}", ex);
             }
         }
 
@@ -117,7 +124,7 @@ public class EastMoneyBoardFetcher : EastMoneyBoardFetcherBase
         {
             var body = await _http.GetStringAsync(url, ct);
             if (string.IsNullOrWhiteSpace(body))
-                throw new RateLimitedException("东财 push2 返回空响应（典型的限流表现）。");
+                throw new RateLimitedException($"东财 {MemberHost} 返回空响应（典型的限流表现）。");
             return body;
         }
         catch (RateLimitedException) { throw; }
@@ -126,7 +133,7 @@ public class EastMoneyBoardFetcher : EastMoneyBoardFetcherBase
         {
             // push2 限流时不是返回 HTTP 错误码，而是直接断开连接
             throw new RateLimitedException(
-                $"东财 push2 连接被断开：{ex.InnerException?.Message ?? ex.Message}"
+                $"东财 {MemberHost} 连接被断开：{ex.InnerException?.Message ?? ex.Message}"
                 + "（push2 限流很敏感，可在浏览器访问一次 quote.eastmoney.com 过人工验证后重试）", ex);
         }
     }

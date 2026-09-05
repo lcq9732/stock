@@ -77,6 +77,7 @@ public class FetcherSettingsTests : IDisposable
     [InlineData("BarSource", "EastMoney")]
     [InlineData("Push2NetworkInterface", "Wi-Fi")]
     [InlineData("BoardMemberChannel", "http")]
+    [InlineData("BoardMemberHost", "push2.eastmoney.com")]
     public void 取消注释后的配置行能被读出来(string key, string value)
     {
         // 模拟用户的操作：把模板里那一行前面的 // 去掉
@@ -224,5 +225,38 @@ public class FetcherSettingsTests : IDisposable
         // 对不上，用户看到的"当前配置"就是错的——而这种错没有任何报错。
         FetcherSettings.EnsureTemplate(Path_);
         Assert.Equal("browser", FetcherSettings.ReadBoardChannel(Path_));
+    }
+
+    // ── ⑦ 成分股域名（2026-09-05 从 push2 换成 pushguest）──
+
+    [Fact]
+    public void 成分股域名没配时返回null_由代码里的默认值兜底()
+    {
+        // 返回 null 而不是返回 "pushguest..."：默认值只有一处（EastMoneyBoardFetcherBase），
+        // 这里再写一份的话，以后改默认值就得记得改两个地方。
+        File.WriteAllText(Path_, """{ "BarSource": "Sina" }""");
+        Assert.Null(FetcherSettings.ReadBoardMemberHost(Path_));
+
+        Assert.Null(FetcherSettings.ReadBoardMemberHost(Path.Combine(_dir, "没有这个文件.json")));
+
+        // 空串/纯空格＝没配，不能当成"域名就叫空字符串"拿去拼 URL
+        File.WriteAllText(Path_, """{ "BoardMemberHost": "   " }""");
+        Assert.Null(FetcherSettings.ReadBoardMemberHost(Path_));
+    }
+
+    [Fact]
+    public void 成分股域名配了就照配的来_并去掉手改时多敲的空格()
+    {
+        File.WriteAllText(Path_, """{ "BoardMemberHost": "  push2.eastmoney.com  " }""");
+        Assert.Equal("push2.eastmoney.com", FetcherSettings.ReadBoardMemberHost(Path_));
+    }
+
+    [Fact]
+    public void 模板里成分股域名那行是注释掉的_默认走代码里的pushguest()
+    {
+        // 模板里这一行必须是注释状态：写死在文件里的话，以后代码改了默认域名，
+        // 用户这份旧文件反而会把老域名盖回去。
+        FetcherSettings.EnsureTemplate(Path_);
+        Assert.Null(FetcherSettings.ReadBoardMemberHost(Path_));
     }
 }

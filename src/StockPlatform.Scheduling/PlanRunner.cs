@@ -166,8 +166,12 @@ public sealed class PlanRunner(
                 }
                 else
                 {
-                    onState(new PlanRunnerState(true, null, null, null,
-                        "计划已在待命——今天没有待执行的项了，到点会自动接着跑"));
+                    // ⚠ "没挑到项"有两种，界面上必须分得开（2026-09-05 用户反馈）：
+                    //    真的没活了 vs 有活但数据源被占着。原来一律报"今天没有待执行的项了"，
+                    //    而实际情况是用户手动跑的任务占着源、好几个空闲项正等着——
+                    //    人看着以为活都干完了，其实计划已经停摆了几小时。
+                    var blocked = FindBlockedBySource(now);
+                    onState(new PlanRunnerState(true, null, null, null, DescribeIdle(blocked)));
                     await Task.Delay(Reevaluate, ct);
                 }
             }
@@ -288,6 +292,18 @@ public sealed class PlanRunner(
     /// 而是等 <see cref="FindIdleTask"/> 在空窗里挑（见 <see cref="RunPacing"/>）。
     /// </summary>
     private bool IsPending(FetchPlanItem item, DateTime now)
+        => IsPendingIgnoringSource(item, now) && !IsSourceBusy(item);
+
+    /// <summary>
+    /// 跟 <see cref="IsPending"/> 一样，但**不看数据源占不占**（2026-09-05 拆出来）。
+    ///
+    /// 为什么要拆：源占用是**临时**的（多半是用户手动跑了同源的一项），跟"今天该不该跑"
+    /// 完全是两码事。混在一起判的后果是界面分不清这两种情况——
+    /// 空闲项明明还欠着、只是在等数据源，界面却报「今天没有待执行的项了」，
+    /// 人看着以为活都干完了，实际上有几项正被自己手动跑的任务挡着（2026-09-05 用户反馈）。
+    /// 拆开之后 <see cref="FindBlockedBySource"/> 才有办法把"在等谁"说出来。
+    /// </summary>
+    private bool IsPendingIgnoringSource(FetchPlanItem item, DateTime now)
     {
         if (!item.EffectiveEnabled) return false;
         if (item.Repeat == RepeatKind.Manual) return false;
@@ -301,12 +317,68 @@ public sealed class PlanRunner(
         // 前置今天失败了：第一次放过去让 ExecuteOneAsync 记一条"跳过"并说明原因，之后就静默
         // 掠过——否则每分钟一轮评估就会往报告里刷一行。前置后来补跑成功的话，这里自然放行。
         if (DependencyFailedToday(item) && item.AlreadySkippedOn(now)) return false;
-        // 数据源正被别人占着（多半是用户手动跑了同源的一项）——**这一轮让路，什么状态都不记**。
-        // 关键是不能记成"跳过/失败"：占用是临时的，记了状态这一项今天就再也不跑了。
-        // 调度循环本来每分钟重扫一次，天然适合这种暂时让路（2026-09-04 用户定的规则：
-        // 自动侧遇冲突静默不执行，不通知）。
-        if (IsSourceBusy(item)) return false;
         return true;
+    }
+
+    /// <summary>
+    /// 空窗时那句状态文案：有项在等数据源就说清在等谁，否则才是真的"没活了"（2026-09-05）。
+    /// </summary>
+    private static string DescribeIdle(
+        List<(FetchPlanItem Item, RunningTask Blocker, DataSourceId Source)> blocked)
+    {
+        if (blocked.Count == 0)
+            return "计划已在待命——今天没有待执行的项了，到点会自动接着跑";
+
+        // 多半都被同一个任务挡着（它占了好几个源），所以按占用者归并，别刷一长串
+        var first = blocked[0];
+        var blockers = blocked.Select(b => b.Blocker.Name).Distinct().ToList();
+        var sources = blocked.Select(b => DataSourceCatalog.NameOf(b.Source)).Distinct().ToList();
+
+        return $"计划让路中——{blocked.Count} 项在等数据源"
+             + $"（{string.Join("、", sources)} 被【{string.Join("、", blockers)}】占着，"
+             + $"等它结束就自动接着跑）：{first.Item.Info.Name}"
+             + (blocked.Count > 1 ? $" 等 {blocked.Count} 项" : "");
+    }
+
+    /// <summary>
+    /// 这一轮**只差数据源**的项：别的条件都满足了，就是要用的源正被别人占着（2026-09-05）。
+    ///
+    /// 让路本身是对的（占用是临时的，记成失败/跳过反而会让这一项今天再也不跑）——
+    /// 但**不能不作声**：调度循环让完路就去睡，界面只剩一句「今天没有待执行的项了」，
+    /// 而实际上有几项正等着用户手动跑的那个任务释放数据源。有了这份名单，
+    /// 界面就能说清"在等谁、等哪个源、有几项在等"。
+    /// </summary>
+    /// <returns>(项, 占着它要的源的那个任务, 撞上的第一个源)，按计划顺序。</returns>
+    private List<(FetchPlanItem Item, RunningTask Blocker, DataSourceId Source)> FindBlockedBySource(DateTime now)
+    {
+        var result = new List<(FetchPlanItem, RunningTask, DataSourceId)>();
+        var running = Occupancy.Snapshot();
+        if (running.Count == 0) return result;
+
+        foreach (var item in plan.AllItems)
+        {
+            if (!IsPendingIgnoringSource(item, now)) continue;
+
+            // 定时项还要真的到点了才算"在等"——今天晚些时候才跑的项不该算进来
+            if (item.Pacing == RunPacing.Immediate && item.DueAnchorAt(now) is null) continue;
+            // 空闲项还在冷却里也不算
+            if (item.Pacing == RunPacing.WhenIdle
+                && _idleNextAllowed.TryGetValue(item.Action, out var next) && now < next) continue;
+
+            var need = item.Info.EffectiveSources;
+            if (need.Count == 0) continue;
+
+            foreach (var t in running)
+            {
+                DataSourceId? clash = null;
+                foreach (var s in need)
+                    if (t.Sources.Contains(s)) { clash = s; break; }
+                if (clash is null) continue;
+                result.Add((item, t, clash.Value));
+                break;      // 报第一个撞上的就够了，界面不需要罗列全部
+            }
+        }
+        return result;
     }
 
     /// <summary>

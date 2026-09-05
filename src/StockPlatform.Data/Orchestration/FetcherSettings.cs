@@ -63,6 +63,19 @@ public static class FetcherSettings
     public static string ReadBoardChannel(string settingsPath) =>
         (ReadString(settingsPath, "BoardMemberChannel") ?? "browser").Trim().ToLowerInvariant();
 
+    /// <summary>
+    /// 成分股接口走哪个域名；没配就返回 null，由
+    /// <c>EastMoneyBoardFetcherBase.DefaultMemberHost</c>（pushguest）兜底。
+    ///
+    /// 留这个开关是为了出事能一行配置退回 <c>push2.eastmoney.com</c>——
+    /// pushguest 是 2026-09-05 才换上的，连续几百个请求会不会被限流还没验证过。
+    /// </summary>
+    public static string? ReadBoardMemberHost(string settingsPath)
+    {
+        var v = ReadString(settingsPath, "BoardMemberHost")?.Trim();
+        return string.IsNullOrEmpty(v) ? null : v;
+    }
+
     /// <summary>读一个 true/false 设置；读不到就当 false。</summary>
     public static bool ReadBool(string settingsPath, string key)
     {
@@ -168,6 +181,15 @@ public static class FetcherSettings
           //  所以短脉冲跑得通 ≠ 一整轮跑得完，默认仍然用 browser。
           "BoardMemberChannel": "browser",
           //"BoardMemberChannel": "http",
+
+          // ── 板块成分股打哪个域名 ────────────────────────────────────────
+          //  不配（保持注释）＝ pushguest.eastmoney.com【默认】
+          //
+          //  pushguest 是行情中心板块页**点翻页时真正打的那个接口**（push2 只在首屏被打一次）。
+          //  同一个路径、同一套参数，但走另一组前端，不在公司网关的域名拦截名单里。
+          //  2026-09-05 逐条比对过：BK1629 三页 282 只跟前一天 push2 抓的完全一致。
+          //  ⚠ 还没验证连续几百个请求会不会被限流——真被限了就把下面那行放出来退回 push2。
+          //"BoardMemberHost": "push2.eastmoney.com",
 
           // ── K线数据源 ──────────────────────────────────────────────────
           //"BarSource": "Tencent",   // 腾讯为主，某只票拿不到时自动回退新浪重试这一只【默认】
