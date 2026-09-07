@@ -1,10 +1,38 @@
 namespace StockPlatform.Logic.Models;
 
-/// <summary>板块类型：概念/题材板块 vs 行业板块。</summary>
+/// <summary>板块类型：概念/题材、行业分类、地域。</summary>
 public enum BoardType
 {
     Concept,   // 概念/题材（如"存储芯片""液冷服务器"）
     Industry,  // 行业分类
+    /// <summary>
+    /// 地域板块（如"广东板块""浙江板块"），2026-09-06 加。
+    ///
+    /// 为什么以前没有：原来的两个数据源都给不了——push2 要按 <c>t:1</c> 单独抓一轮，
+    /// 菜单 JSON（sidemenu_new.json）里压根没有这一类。现在成分股和名单都走东财终端
+    /// 落在本地的那份文件，地域板块本来就在里面（31 个、5,556 条成分），白捡的。
+    ///
+    /// ⚠ 加了这个值之后，凡是 <c>type == Concept ? A : B</c> 这种二选一的写法都会把地域
+    /// 错判成行业，而且编译器不提醒。中文名一律走 <see cref="BoardTypeNames.Label"/>，
+    /// 遍历一律用 <c>Enum.GetValues&lt;BoardType&gt;()</c>，别再写死两个。
+    /// </summary>
+    Region,
+}
+
+/// <summary>
+/// 板块类型的中文名。散在各处的 <c>type == Concept ? "概念" : "行业"</c> 统一到这儿
+/// （2026-09-06 加地域时）：那种写法在只有两类时没毛病，加第三类之后每一处都会把地域
+/// 显示成"行业"——而且编译器一声不吭。
+/// </summary>
+public static class BoardTypeNames
+{
+    public static string Label(this BoardType t) => t switch
+    {
+        BoardType.Concept => "概念/题材",
+        BoardType.Industry => "行业",
+        BoardType.Region => "地域",
+        _ => t.ToString(),
+    };
 }
 
 /// <summary>

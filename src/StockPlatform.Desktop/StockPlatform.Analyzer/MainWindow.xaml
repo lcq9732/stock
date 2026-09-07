@@ -1396,6 +1396,7 @@
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
                         <RadioButton Content="概念/题材" GroupName="BoardType" IsChecked="{Binding ShowConcept}" VerticalAlignment="Center" />
                         <RadioButton Content="行业" GroupName="BoardType" IsChecked="{Binding ShowIndustry}" VerticalAlignment="Center" Margin="12,0,0,0" />
+                        <RadioButton Content="地域" GroupName="BoardType" IsChecked="{Binding ShowRegion}" VerticalAlignment="Center" Margin="12,0,0,0" />
                         <TextBlock Text="查询板块：" VerticalAlignment="Center" Margin="16,0,0,0" />
                         <TextBox Width="150" Margin="2,0" VerticalContentAlignment="Center"
                                  Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"

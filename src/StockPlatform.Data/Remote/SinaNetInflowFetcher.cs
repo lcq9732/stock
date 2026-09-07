@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -39,6 +39,16 @@ public class SinaNetInflowFetcher : INetInflowFetcher
         add => _rateLimiter.OnStatus += value;
         remove => _rateLimiter.OnStatus -= value;
     }
+
+    /// <summary>2010-03-01——这个源能给出的最早一天（实测：600519 回包 3964 行，最早就是这天；
+    /// 库里 NetInflow 的 MIN(period_start) 也正是它）。资金流不像K线能追到 1990，因为逐笔成交
+    /// 的分档披露本身就是 2010 年前后才有的。
+    ///
+    /// ⚠ 这个源**一次返回整只票的全部历史**、窗口在客户端裁，所以"起点填早了"不是多抓几天而是
+    /// **整只票白抓一遍**：本地最早已经是 2010-03-01，起点填 1990 就让每只票都算出
+    /// [1990, 2010-02-28] 的缺口、一只都跳不过——全市场一轮约 1 小时 45 分，全烧在必然为空的
+    /// 那二十年上。起点抬到这天之后，已补齐的票才跳得掉。</summary>
+    public DateOnly EarliestAvailable => new(2010, 3, 1);
 
     static SinaNetInflowFetcher()
     {

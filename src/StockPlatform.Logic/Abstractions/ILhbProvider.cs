@@ -8,6 +8,10 @@ public interface ILhbProvider
 {
     event Action<string>? OnStatus;
 
+    /// <summary>这份数据**最早存在**的那一天——早于它的日子源上根本没有，请求也是白发。
+    /// 回补的起点会被抬到这一天（见 FetchOrchestrator.BackfillDailyAsync）。</summary>
+    DateOnly EarliestAvailable { get; }
+
     /// <summary>抓某个交易日的龙虎榜记录（同股同日可能多条，按上榜指标区分）。</summary>
     Task<List<LhbRow>> GetDailyAsync(DateOnly date, CancellationToken ct = default);
 }

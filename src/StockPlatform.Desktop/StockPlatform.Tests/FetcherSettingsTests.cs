@@ -56,7 +56,7 @@ public class FetcherSettingsTests : IDisposable
         FetcherSettings.EnsureTemplate(Path_);
 
         // 默认值要真的能读出来，而不是"文件里写着但读不到"
-        Assert.Equal("browser", FetcherSettings.ReadString(Path_, "BoardMemberChannel"));
+        Assert.Equal("page", FetcherSettings.ReadString(Path_, "BoardMemberChannel"));
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public class FetcherSettingsTests : IDisposable
         File.WriteAllText(Path_, "");
         FetcherSettings.EnsureTemplate(Path_);
 
-        Assert.Equal("browser", FetcherSettings.ReadString(Path_, "BoardMemberChannel"));
+        Assert.Equal("page", FetcherSettings.ReadString(Path_, "BoardMemberChannel"));
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public class FetcherSettingsTests : IDisposable
         File.WriteAllText(Path_, "{ 这不是 JSON");
         FetcherSettings.EnsureTemplate(Path_);
 
-        Assert.Equal("browser", FetcherSettings.ReadString(Path_, "BoardMemberChannel"));
+        Assert.Equal("page", FetcherSettings.ReadString(Path_, "BoardMemberChannel"));
     }
 
     // ── ④ 删键：只删一个，别清空 ──
@@ -170,12 +170,12 @@ public class FetcherSettingsTests : IDisposable
             {
               // 中间的说明
               "BarSource": "Sina",   // 行尾的说明
-              "BoardMemberChannel": "browser",
+              "BoardMemberChannel": "page",
             }
             """);
 
         Assert.Equal("Sina", FetcherSettings.ReadString(Path_, "BarSource"));
-        Assert.Equal("browser", FetcherSettings.ReadString(Path_, "BoardMemberChannel"));
+        Assert.Equal("page", FetcherSettings.ReadString(Path_, "BoardMemberChannel"));
     }
 
     [Fact]
@@ -193,6 +193,7 @@ public class FetcherSettingsTests : IDisposable
 
     [Theory]
     [InlineData("\"http\"", "http")]
+    [InlineData("\"page\"", "page")]
     [InlineData("\"browser\"", "browser")]
     [InlineData("\"HTTP\"", "http")]              // 大小写不该影响
     [InlineData("\"  browser  \"", "browser")]    // 手改配置很容易多敲空格
@@ -208,14 +209,14 @@ public class FetcherSettingsTests : IDisposable
     }
 
     [Fact]
-    public void 板块通道没配或文件缺失时都是browser()
+    public void 板块通道没配或文件缺失时都是page()
     {
         // 没配这个键
         File.WriteAllText(Path_, """{ "BarSource": "Sina" }""");
-        Assert.Equal("browser", FetcherSettings.ReadBoardChannel(Path_));
+        Assert.Equal("page", FetcherSettings.ReadBoardChannel(Path_));
 
         // 文件根本不存在：也得给出默认值，不能抛
-        Assert.Equal("browser", FetcherSettings.ReadBoardChannel(Path.Combine(_dir, "没有这个文件.json")));
+        Assert.Equal("page", FetcherSettings.ReadBoardChannel(Path.Combine(_dir, "没有这个文件.json")));
     }
 
     [Fact]
@@ -224,7 +225,7 @@ public class FetcherSettingsTests : IDisposable
         // 模板把 BoardMemberChannel 写成了唯一一个**不注释**的键。它要是跟代码里的默认值
         // 对不上，用户看到的"当前配置"就是错的——而这种错没有任何报错。
         FetcherSettings.EnsureTemplate(Path_);
-        Assert.Equal("browser", FetcherSettings.ReadBoardChannel(Path_));
+        Assert.Equal("page", FetcherSettings.ReadBoardChannel(Path_));
     }
 
     // ── ⑦ 成分股域名（2026-09-05 从 push2 换成 pushguest）──

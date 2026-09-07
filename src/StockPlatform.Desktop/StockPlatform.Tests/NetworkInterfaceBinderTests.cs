@@ -1,4 +1,4 @@
-using StockPlatform.Data.Remote;
+﻿using StockPlatform.Data.Remote;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -77,8 +77,10 @@ public class NetworkInterfaceBinderTests
     }
 
     [Fact]
-    public void 没配网卡时说的是走默认路由()
-        => Assert.Contains("默认路由", NetworkInterfaceBinder.Describe(null));
+    public void 没配网卡时不说话()
+        // 走默认路由是常态，日志里说它等于什么都没说（还得解释一句"没配哪个键"）。
+        // 空串＝调用方整行跳过；真配了网卡才有信息量，那才是执行时的事实。
+        => Assert.Equal("", NetworkInterfaceBinder.Describe(null));
 
     [Fact]
     public void 网卡不存在时说明会退回默认路由并列出可选的()

@@ -20,6 +20,11 @@ namespace StockPlatform.Tests;
 ///
 /// 所以这里钉两件事：① 被占住时状态文案要说清在等谁；② 占用一解除，项要立刻能跑。
 /// </summary>
+/// <remarks>
+/// 进 <see cref="BoardChannelCollection"/>：这里读的 <c>EffectiveSources</c> 会随
+/// <see cref="FetchTaskCatalog.BoardChannel"/> 变，不能跟改那个静态值的测试并行跑。
+/// </remarks>
+[Collection(BoardChannelCollection.Name)]
 public class PlanSourceBlockedTests
 {
     private sealed record Harness(FetchPlan Plan, FetchPlanStore Store, FetchPaths Paths,

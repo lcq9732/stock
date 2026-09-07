@@ -32,29 +32,7 @@ public class EastMoneyMarketEventProvider
         IProgress<string>? progress = null, CancellationToken ct = default)
         => await RunSlicedAsync(
             "RPT_DATA_BLOCKTRADE", "TRADE_DATE", EastMoneyQuerySlicer.ByMonth(start, end),
-            "大宗交易", el =>
-            {
-                var code = Str(el, "SECURITY_CODE");
-                var d = Date(el, "TRADE_DATE");
-                if (code.Length == 0 || d == null) return null;
-                return new BlockTrade
-                {
-                    Code = code,
-                    Name = Str(el, "SECURITY_NAME_ABBR"),
-                    TradeDate = d.Value,
-                    DailyRank = (int)(Num(el, "DAILY_RANK") ?? 0),
-                    DealPrice = Num(el, "DEAL_PRICE"),
-                    DealVolume = Num(el, "DEAL_VOLUME"),
-                    DealAmount = Num(el, "DEAL_AMT"),
-                    PremiumRatio = Num(el, "PREMIUM_RATIO"),
-                    ClosePrice = Num(el, "CLOSE_PRICE"),
-                    ChangeRate = Num(el, "CHANGE_RATE"),
-                    TurnoverRate = Num(el, "TURNOVER_RATE"),
-                    BuyerName = Str(el, "BUYER_NAME"),
-                    SellerName = Str(el, "SELLER_NAME"),
-                    FetchedAt = DateTime.Now,
-                };
-            }, onBatch, progress, ct);
+            "大宗交易", ParseBlockTrade, onBatch, progress, ct);
 
     /// <summary>机构调研。约 28 万行，按年切片。</summary>
     public async Task<int> FetchOrgSurveysAsync(
@@ -143,6 +121,12 @@ public class EastMoneyMarketEventProvider
                     FreeRatio = Num(el, "FREE_RATIO"),
                     TotalRatio = Num(el, "TOTALSHARES_RATIO") ?? Num(el, "TOTAL_RATIO"),
                     HolderCount = (int?)Num(el, "BATCH_HOLDER_NUM"),
+                    // FREE_SHARES 是解禁**前**的已流通股数（FreeRatio 的分母），别跟
+                    // CURRENT_FREE_SHARES（本次解禁股数，上面的 LiftShares）弄混。
+                    PreFreeShares = Num(el, "FREE_SHARES"),
+                    NonFreeShares = Num(el, "NON_FREE_SHARES"),
+                    Before20Change = Num(el, "B20_ADJCHRATE"),
+                    After20Change = Num(el, "A20_ADJCHRATE"),
                     FetchedAt = DateTime.Now,
                 });
             }
@@ -161,28 +145,78 @@ public class EastMoneyMarketEventProvider
         IProgress<string>? progress = null, CancellationToken ct = default)
         => await RunSlicedAsync(
             "RPT_SHARE_HOLDER_INCREASE", "NOTICE_DATE", EastMoneyQuerySlicer.ByYear(start, end),
-            "股东增减持", el =>
-            {
-                var code = Str(el, "SECURITY_CODE");
-                var d = Date(el, "NOTICE_DATE");
-                if (code.Length == 0 || d == null) return null;
-                return new HolderChange
-                {
-                    Code = code,
-                    Name = Str(el, "SECURITY_NAME_ABBR"),
-                    NoticeDate = d.Value,
-                    HolderName = Str(el, "HOLDER_NAME"),
-                    Direction = Str(el, "DIRECTION"),
-                    ChangeShares = Num(el, "CHANGE_NUM_SYMBOL") ?? Num(el, "CHANGE_NUM"),
-                    ChangeRatio = Num(el, "CHANGE_RATE"),
-                    AfterShares = Num(el, "AFTER_HOLDER_NUM"),
-                    AfterRatio = Num(el, "HOLD_RATIO"),
-                    StartDate = Date(el, "START_DATE"),
-                    EndDate = Date(el, "END_DATE"),
-                    AveragePrice = Num(el, "TRADE_AVERAGE_PRICE"),
-                    FetchedAt = DateTime.Now,
-                };
-            }, onBatch, progress, ct);
+            "股东增减持", ParseHolderChange, onBatch, progress, ct);
+
+    /// <summary>
+    /// 大宗交易一行的解析。提成命名方法（而不是留在 lambda 里）是为了能被测试直接调用——
+    /// 这张表的字段有几个单位/基准不一致的坑（见 <see cref="BlockTrade.DiscountRatio"/>），
+    /// 靠实抓样本的单元测试钉住比靠注释可靠。
+    /// </summary>
+    private static BlockTrade? ParseBlockTrade(JsonElement el)
+    {
+        var code = Str(el, "SECURITY_CODE");
+        var d = Date(el, "TRADE_DATE");
+        if (code.Length == 0 || d == null) return null;
+        return new BlockTrade
+        {
+            Code = code,
+            Name = Str(el, "SECURITY_NAME_ABBR"),
+            TradeDate = d.Value,
+            DailyRank = (int)(Num(el, "DAILY_RANK") ?? 0),
+            DealPrice = Num(el, "DEAL_PRICE"),
+            DealVolume = Num(el, "DEAL_VOLUME"),
+            DealAmount = Num(el, "DEAL_AMT"),
+            PremiumRatio = Num(el, "PREMIUM_RATIO"),
+            ClosePrice = Num(el, "CLOSE_PRICE"),
+            ChangeRate = Num(el, "CHANGE_RATE"),
+            TurnoverRate = Num(el, "TURNOVER_RATE"),
+            BuyerName = Str(el, "BUYER_NAME"),
+            SellerName = Str(el, "SELLER_NAME"),
+            BuyerCode = Str(el, "BUYER_CODE"),
+            SellerCode = Str(el, "SELLER_CODE"),
+            DiscountRatio = Num(el, "DISCOUNT_RATIO"),
+            FreeSharesRatio = Num(el, "FREE_SHARES_RATIO"),
+            TotalSharesRatio = Num(el, "TOTAL_SHARES_RATIO"),
+            // 滞后字段：抓当天必为 null，靠增量往前推 30 天重抓才填得上，见模型注释。
+            ChangeRate1D = Num(el, "CHANGE_RATE_1DAYS"),
+            ChangeRate5D = Num(el, "CHANGE_RATE_5DAYS"),
+            ChangeRate10D = Num(el, "CHANGE_RATE_10DAYS"),
+            ChangeRate20D = Num(el, "CHANGE_RATE_20DAYS"),
+            FetchedAt = DateTime.Now,
+        };
+    }
+
+    /// <summary>股东增减持一行的解析。提成命名方法的理由同 <see cref="ParseBlockTrade"/>。</summary>
+    private static HolderChange? ParseHolderChange(JsonElement el)
+    {
+        var code = Str(el, "SECURITY_CODE");
+        var d = Date(el, "NOTICE_DATE");
+        if (code.Length == 0 || d == null) return null;
+        return new HolderChange
+        {
+            Code = code,
+            Name = Str(el, "SECURITY_NAME_ABBR"),
+            NoticeDate = d.Value,
+            HolderName = Str(el, "HOLDER_NAME"),
+            Direction = Str(el, "DIRECTION"),
+            ChangeShares = Num(el, "CHANGE_NUM_SYMBOL") ?? Num(el, "CHANGE_NUM"),
+            // ⚠ 不是 CHANGE_RATE——那是**公告日的股价涨跌幅**，跟增减持方向无关
+            // （实测 2026-08-25 起 200 条：34 只"增持"里 15 只为负、166 只"减持"里 97 只为正，
+            // 还有增持而值为 0 的）。AFTER_CHANGE_RATE 才是变动占总股本的比例：
+            // 002203 增持 1519.76 万股 ÷ 0.663142% = 22.9 亿总股本，与实际吻合。
+            ChangeRatio = Num(el, "AFTER_CHANGE_RATE"),
+            AfterShares = Num(el, "AFTER_HOLDER_NUM"),
+            AfterRatio = Num(el, "HOLD_RATIO"),
+            StartDate = Date(el, "START_DATE"),
+            EndDate = Date(el, "END_DATE"),
+            AveragePrice = Num(el, "TRADE_AVERAGE_PRICE"),
+            ChangeFreeRatio = Num(el, "CHANGE_FREE_RATIO"),
+            ClosePrice = Num(el, "CLOSE_PRICE"),
+            RealPrice = Num(el, "REAL_PRICE"),
+            ChangeRateQuotes = Num(el, "CHANGE_RATE_QUOTES"),
+            FetchedAt = DateTime.Now,
+        };
+    }
 
     /// <summary>分片抓取的公共骨架：切片 → 翻页 → 解析 → 整片回调落库。</summary>
     private async Task<int> RunSlicedAsync<T>(

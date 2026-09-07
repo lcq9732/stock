@@ -41,17 +41,29 @@ public class BoardListPartialSaveTests : IDisposable
         try { File.Delete(_db); } catch { }
     }
 
-    /// <summary>造第 page 页的板块（每页 100 个，最后一页 4 个），模拟东财 504 个概念板块。</summary>
+    /// <summary>
+    /// 造第 page 页的板块（每页 100 个），模拟东财的板块名单。
+    ///
+    /// ⚠ 每一类**必须用不同的代码前缀**：2026-09-06 加地域那一类时踩过——原来写的是
+    /// <c>Concept ? "BK1" : "BK9"</c>，地域落进 else，生成的代码跟行业一模一样，
+    /// 于是同一批板块被提交了两遍，三个用例一起变红。加类型时别忘了这里。
+    /// </summary>
     private static (List<Board> Items, int Total, bool IsLast) Page(BoardType type, int page, int total = 504)
     {
         int size = 100;
         int from = (page - 1) * size;
         int n = Math.Max(0, Math.Min(size, total - from));
-        var prefix = type == BoardType.Concept ? "BK1" : "BK9";
+        var prefix = type switch
+        {
+            BoardType.Concept => "BK1",
+            BoardType.Industry => "BK9",
+            BoardType.Region => "BK5",
+            _ => "BK0",
+        };
         var items = Enumerable.Range(from + 1, n).Select(i => new Board
         {
             BoardCode = prefix + i.ToString("0000"),
-            Name = (type == BoardType.Concept ? "概念" : "行业") + i,
+            Name = type.Label() + i,
             Type = type,
             AsOf = DateTime.Now,
         }).ToList();
@@ -61,12 +73,19 @@ public class BoardListPartialSaveTests : IDisposable
     /// <summary>一个可编程的假数据源：指定哪些 (类型,页) 会失败。</summary>
     private static Func<BoardType, int, CancellationToken, Task<(List<Board>, int, bool)>> Source(
         Func<BoardType, int, bool> fails, int conceptTotal = 504, int industryTotal = 86,
-        List<string>? calls = null)
+        int regionTotal = 31, List<string>? calls = null)
         => (t, page, _) =>
         {
             calls?.Add($"{t}:{page}");
             if (fails(t, page)) throw new InvalidOperationException("被限流");
-            return Task.FromResult(Page(t, page, t == BoardType.Concept ? conceptTotal : industryTotal));
+            int total = t switch
+            {
+                BoardType.Concept => conceptTotal,
+                BoardType.Industry => industryTotal,
+                BoardType.Region => regionTotal,
+                _ => 0,
+            };
+            return Task.FromResult(Page(t, page, total));
         };
 
     [Fact]
@@ -111,7 +130,7 @@ public class BoardListPartialSaveTests : IDisposable
         Assert.DoesNotContain("Concept:5", calls);
         Assert.Contains("Concept:6", calls);
 
-        Assert.Equal(504 + 86, committed);
+        Assert.Equal(504 + 86 + 31, committed);
         Assert.Empty(unfinished);
         Assert.Equal(504, repo.QueryBoards(BoardType.Concept).Count);
         Assert.Equal(0, repo.CountStaged(BoardType.Concept));         // 提交后暂存区清空
@@ -126,9 +145,10 @@ public class BoardListPartialSaveTests : IDisposable
             Source((t, p) => t == BoardType.Concept && p >= 3),
             repo, m => _out.WriteLine(m), _ => { });
 
-        Assert.Equal(86, committed);                                   // 行业那 86 个提交了
-        Assert.Equal(["概念/题材"], unfinished);
+        Assert.Equal(86 + 31, committed);                              // 行业 86 + 地域 31 都提交了
+        Assert.Equal(["概念/题材"], unfinished);                        // 只有概念这一类没凑齐
         Assert.Equal(86, repo.QueryBoards(BoardType.Industry).Count);
+        Assert.Equal(31, repo.QueryBoards(BoardType.Region).Count);    // 概念挂了不影响地域
         Assert.Empty(repo.QueryBoards(BoardType.Concept));             // 概念还没凑齐，正表里没有
         Assert.Equal(200, repo.CountStaged(BoardType.Concept));        // 但前 2 页存着
     }
@@ -169,7 +189,7 @@ public class BoardListPartialSaveTests : IDisposable
             Source((_, p) => p == 1), repo, m => _out.WriteLine(m), _ => { });
 
         Assert.Equal(0, committed);
-        Assert.Equal(2, unfinished.Count);
+        Assert.Equal(3, unfinished.Count);          // 概念/行业/地域三类都没凑齐
         Assert.Equal(0, repo.CountStaged(BoardType.Concept));
         Assert.Equal(1, repo.GetListState(BoardType.Concept)!.Value.NextPage);
     }

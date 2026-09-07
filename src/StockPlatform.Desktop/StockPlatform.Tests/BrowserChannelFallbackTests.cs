@@ -53,7 +53,7 @@ public class BrowserChannelFallbackTests
     {
         var f = New(null);
         Assert.False(await f.PrepareAsync());
-        Assert.Contains("普通 HTTP", f.DescribeChannel());
+        Assert.Contains("HTTP 直连", f.DescribeChannel());
     }
 
     [Fact]
@@ -70,7 +70,7 @@ public class BrowserChannelFallbackTests
     {
         var f = New(new FakeBrowser(ready: false));
         Assert.False(await f.PrepareAsync());
-        Assert.Contains("普通 HTTP", f.DescribeChannel());
+        Assert.Contains("HTTP 直连", f.DescribeChannel());
     }
 
     [Fact]
@@ -82,7 +82,7 @@ public class BrowserChannelFallbackTests
         f.OnStatus += msgs.Add;
 
         Assert.False(await f.PrepareAsync());     // 返回 false，不是抛出去
-        Assert.Contains("普通 HTTP", f.DescribeChannel());
+        Assert.Contains("HTTP 直连", f.DescribeChannel());
         // 而且要说一声，不能静默降级——否则没人知道为什么变慢了
         Assert.Contains(msgs, m => m.Contains("浏览器通道") && m.Contains("退回"));
     }

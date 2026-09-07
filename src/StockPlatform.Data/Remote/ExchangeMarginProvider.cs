@@ -27,6 +27,11 @@ public class ExchangeMarginProvider : IMarginProvider
         remove => _rateLimiter.OnStatus -= value;
     }
 
+    /// <summary>2010-03-31——融资融券**首批试点开市当天**（6家券商、90只标的）。两融这个业务在这天
+    /// 之前不存在，所以两所也没有任何一天的明细可发。回补历史时从本地K线最早那天（1990-12-19）起跑
+    /// 会白白空跑 4700 多个交易日，故把起点钉在这里。</summary>
+    public DateOnly EarliestAvailable => new(2010, 3, 31);
+
     static ExchangeMarginProvider()
     {
         Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);

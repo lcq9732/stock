@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Remote;
 
@@ -110,11 +111,16 @@ public class EastMoneyMoneyFlowProvider
     }
 
     /// <summary>
-    /// 东财的 secid 前缀：沪市/科创 1，深市/创业板/北交 0。
-    /// 6/9 开头是沪市（含 688 科创板），其余（0/3 深市、4/8 北交）都是 0。
+    /// 东财的 secid 前缀。**交给 <see cref="MarketClassifier"/> 判，别再在这儿自己写一份**——
+    /// 这里原来是 "6 或 9 开头＝沪市 1.，其余 0."，而 <b>920xxx 是北交所</b>（2024-2025 代码迁移
+    /// 之后北交所基本都是 92 开头），被当成沪市之后请求发出去是 <c>1.920000</c>，
+    /// 东财回 <c>rc:100 / data:null</c>——**没有异常、没有报错，就是没数据**。
+    ///
+    /// 后果是全库 342 只 920 开头的票**一行分档资金流都抓不到**，而界面上只表现为
+    /// "还有 342 只从没抓过"这个数字一直不动，谁也看不出是 secid 拼错了
+    /// （2026-09-06 查出来；同样形状的坑 K线那边早就踩过，MarketClassifier 就是那次建的）。
     /// </summary>
-    internal static string SecId(string code) =>
-        (code.Length > 0 && (code[0] == '6' || code[0] == '9') ? "1." : "0.") + code;
+    public static string SecId(string code) => MarketClassifier.EastMoneySecIdPrefix(code) + code;
 
     private static double? D(string s) =>
         double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;

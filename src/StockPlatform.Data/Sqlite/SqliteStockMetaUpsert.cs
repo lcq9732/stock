@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 
 namespace StockPlatform.Data.Sqlite;
 
@@ -64,6 +64,35 @@ public static class SqliteStockMetaUpsert
 
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT code, name FROM StockMeta WHERE type = 'stock' OR type IS NULL ORDER BY code;";
+        var result = new List<(string, string)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            result.Add((reader.GetString(0), reader.IsDBNull(1) ? "" : reader.GetString(1)));
+        return result;
+    }
+
+    /// <summary>
+    /// 按 type 取标的。<see cref="GetAll"/> 只给个股（它被 20 多处共用，选股页、Mobile 都靠它补名称，
+    /// 混进别的类型会污染候选池，所以那个方法不能动），需要别的组合就用这个。
+    ///
+    /// 眼下唯一的用途是**分红送配抓取**：它要的是 stock + delisted。退市股的分红以前一直没抓过——
+    /// 2026-09-06 查出来 2016 年后 617 条除权缺口里 562 条（91%）是退市股，而新浪明明有数据
+    /// （实测 600705 有 36 条到 1996 年、600837 有 26 条到 1995 年）。回测要消除幸存者偏差，
+    /// 恰恰最需要退市股的完整复权。
+    /// </summary>
+    public static List<(string Code, string Name)> GetByTypes(string dbFilePath, params string[] types)
+    {
+        if (types.Length == 0) return new List<(string, string)>();
+        using var conn = new SqliteConnection($"Data Source={dbFilePath}");
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var cmd = conn.CreateCommand();
+        // 老库 type 为 NULL 的行算作个股（跟 GetAll 的口径保持一致）
+        var ps = types.Select((_, i) => $"$t{i}").ToList();
+        var nullClause = types.Contains("stock") ? " OR type IS NULL" : "";
+        cmd.CommandText = $"SELECT code, name FROM StockMeta WHERE type IN ({string.Join(",", ps)}){nullClause} ORDER BY code;";
+        for (int i = 0; i < types.Length; i++) cmd.Parameters.AddWithValue($"$t{i}", types[i]);
         var result = new List<(string, string)>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read())

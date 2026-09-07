@@ -309,7 +309,8 @@ public partial class FetchOrchestrator
     /// </summary>
     public async Task<FetchResult> RunStepBackfillMarginAsync(
         IProgress<string>? progress, CancellationToken ct = default) =>
-        await RunStepBackfillDailyOneAsync("融资余额", ct2 => _marginRepository.GetTradeDates(),
+        await RunStepBackfillDailyOneAsync("融资余额", _marginProvider.EarliestAvailable,
+            ct2 => _marginRepository.GetTradeDates(),
             async d =>
             {
                 var rows = await _marginProvider.GetDetailAsync(d, ct);
@@ -322,7 +323,8 @@ public partial class FetchOrchestrator
     /// <summary>见 <see cref="RunStepBackfillMarginAsync"/>——龙虎榜那一半。</summary>
     public async Task<FetchResult> RunStepBackfillLhbAsync(
         IProgress<string>? progress, CancellationToken ct = default) =>
-        await RunStepBackfillDailyOneAsync("龙虎榜", ct2 => _lhbRepository.GetTradeDates(),
+        await RunStepBackfillDailyOneAsync("龙虎榜", _lhbProvider.EarliestAvailable,
+            ct2 => _lhbRepository.GetTradeDates(),
             async d =>
             {
                 var rows = await _lhbProvider.GetDailyAsync(d, ct);
@@ -334,6 +336,7 @@ public partial class FetchOrchestrator
 
     private async Task<FetchResult> RunStepBackfillDailyOneAsync(
         string label,
+        DateOnly earliestAvailable,
         Func<CancellationToken, HashSet<DateOnly>> haveDates,
         Func<DateOnly, Task<int>> fetchOne,
         Action<Action<string>> subscribe, Action<Action<string>> unsubscribe,
@@ -350,7 +353,8 @@ public partial class FetchOrchestrator
                 ?? throw new InvalidOperationException(
                     "本地还没有K线数据，无法确定补齐起点——请先跑一次【个股日K·前复权】");
             await BackfillDailyAsync(label, DateOnly.FromDateTime(earliest),
-                DateOnly.FromDateTime(DateTime.Today), haveDates(ct), fetchOne, errors, progress, sw, ct);
+                DateOnly.FromDateTime(DateTime.Today), haveDates(ct), fetchOne, errors, progress, sw,
+                earliestAvailable, ct);
         }
         finally { unsubscribe(Forward); }
         return FinishFetchRun(errors, $"{label}·整段回补", Array.Empty<string>(), failed, progress);
@@ -743,8 +747,11 @@ public partial class FetchOrchestrator
             // ── 补不靠网络的那两个面：只报数，说清楚该跑哪一项 ──
             var localHints = AuditLocalOnlyScopes(audit, CodesOf, cutoff, thorough, progress, ct);
 
+            // ── 覆盖形状（起点晚了 / 尾巴停了）：FindGaps 天生看不见的两种形状 ──
+            localHints.AddRange(AuditCoverageShape(repo, CodesOf, cutoff, progress, ct));
+
             // ── K线之外的日频表（资金流/融资余额/龙虎榜/东财三张）──
-            localHints.AddRange(AuditDailyTables(cutoff, progress, ct));
+            localHints.AddRange(AuditDailyTables(cutoff, thorough, progress, ct));
 
             int delisted = CodesOf(SqliteStockMetaUpsert.TypeDelisted).Count;
             if (delisted > 0)
@@ -870,6 +877,110 @@ public partial class FetchOrchestrator
 
         return lines;
     }
+
+    /// <summary>尾巴落后超过这么多个交易日的标的不算"漏抓"：长期停牌的在市股票（*ST 那些）
+    /// 一停就是几个月甚至几年，全报出来只会把真正的"最近几天没跑成"淹掉。</summary>
+    private const int AuditTailSuspectLimit = 10;
+
+    /// <summary>
+    /// **覆盖形状体检**（2026-09-06 新增）——查 <see cref="SqliteMissingBarRepository.FindGaps"/>
+    /// 天生看不见的两种形状：起点比该有的晚一大截、尾巴停在几天前。判据是纯函数，
+    /// 放在 <see cref="CoverageShapeAuditor"/> 里单独测。
+    ///
+    /// ════ 为什么尾巴要分"全局"和"个别票"两档 ════
+    /// **全局**：某个口径所有票里最新的那一根都落后了 → 这一项最近根本没跑成（漏排、连续失败），
+    /// 这是几乎零误报的信号，也是最该立刻处理的。
+    /// **个别票**：只有几只落后 → 多半是那几只当天没抓到；但长期停牌的在市股票也长这样，
+    /// 所以只数落后在 <see cref="AuditTailSuspectLimit"/> 个交易日以内的，再久的当停牌处理。
+    /// </summary>
+    private List<string> AuditCoverageShape(
+        SqliteBarRepository repo, Func<string, List<string>> codesOf, DateTime cutoff,
+        IProgress<string>? progress, CancellationToken ct)
+    {
+        var lines = new List<string>();
+        progress?.Report("体检 覆盖形状：起点/尾巴跟交易日历对照…");
+
+        var calendar = repo.Query(MarketIndexCatalog.ShanghaiCompositeSymbol, Granularity.Day)
+            .Select(b => b.PeriodStart.Date)
+            .Where(d => d <= cutoff.Date)
+            .OrderBy(d => d)
+            .ToList();
+        if (calendar.Count == 0)
+        {
+            lines.Add("　覆盖形状：本地上证指数日线为空，没有交易日历可比，跳过");
+            return lines;
+        }
+
+        var stocks = codesOf(SqliteStockMetaUpsert.TypeStock).ToHashSet(StringComparer.Ordinal);
+
+        // 每个口径的最早/最晚日各查一次就够——一次 GROUP BY 要扫一千多万行，
+        // 下面 day 这一套会被个股/ETF/指数三个面用到，不缓存就是白扫三遍。
+        var earliestCache = new Dictionary<string, Dictionary<string, DateTime>>(StringComparer.Ordinal);
+        var latestCache = new Dictionary<string, Dictionary<string, DateTime>>(StringComparer.Ordinal);
+        Dictionary<string, DateTime> Earliest(string gran) =>
+            earliestCache.TryGetValue(gran, out var v) ? v
+                : earliestCache[gran] = repo.GetEarliestPeriodStartByCode(gran);
+        Dictionary<string, DateTime> Latest(string gran) =>
+            latestCache.TryGetValue(gran, out var v) ? v
+                : latestCache[gran] = repo.GetLatestPeriodStartByCode(gran);
+
+        // ① 起点：以前复权为基准，后复权/不复权比它晚太多就是"整段没补上"
+        var baseEarliest = Only(Earliest(Granularity.Day), stocks);
+        foreach (var (gran, label) in
+                 new[] { (Granularity.DayHfq, "个股·后复权"), (Granularity.DayRaw, "个股·不复权") })
+        {
+            ct.ThrowIfCancellationRequested();
+            var late = CoverageShapeAuditor.FindLateStarts(
+                calendar, baseEarliest, Only(Earliest(gran), stocks));
+            if (late.Count == 0) continue;
+
+            var worst = late.OrderByDescending(g => g.TradingDays).Take(3)
+                .Select(g => $"{g.Code} 晚 {g.TradingDays} 天");
+            lines.Add($"　{label}：{late.Count} 只的历史起点比前复权晚 "
+                    + $"{CoverageShapeAuditor.DefaultLateStartThreshold} 个交易日以上（{string.Join("、", worst)}…）"
+                    + "——**不进待补名单**（整段回补该走【拉取区间数据】，逐段重试跑不完）");
+        }
+
+        // ② 尾巴：先看全局（这一项是不是最近没跑成），再看个别票
+        foreach (var (type, gran, label) in AuditFetchableScopes)
+        {
+            ct.ThrowIfCancellationRequested();
+            var codes = codesOf(type).ToHashSet(StringComparer.Ordinal);
+            if (codes.Count == 0) continue;
+
+            var latest = Only(Latest(gran), codes);
+            if (latest.Count == 0) continue;
+
+            var globalLatest = latest.Values.Max().Date;
+            int behind = calendar.Count - 1 - calendar.FindLastIndex(d => d <= globalLatest);
+            if (behind > 0)
+            {
+                lines.Add($"　{label}：**整个口径最新只到 {globalLatest:yyyy-MM-dd}、落后 {behind} 个交易日**"
+                        + "——这一项最近没跑成（漏排或连续失败），先去看它的运行记录");
+                continue;   // 全局都落后时，逐票再数一遍没有意义
+            }
+
+            var tails = CoverageShapeAuditor.FindLateTails(
+                calendar, latest, Only(Earliest(gran), codes))
+                .Where(g => g.TradingDays <= AuditTailSuspectLimit)
+                .ToList();
+            if (tails.Count == 0) continue;
+
+            var worst = tails.OrderByDescending(g => g.TradingDays).Take(3)
+                .Select(g => $"{g.Code} 停在 {g.Actual:MM-dd}");
+            lines.Add($"　{label}：{tails.Count} 只的最新一根停在 {AuditTailSuspectLimit} 个交易日以内的过去"
+                    + $"（{string.Join("、", worst)}…）——多半是临时停牌，长于这个的不计（那是长期停牌）");
+        }
+
+        return lines;
+    }
+
+    /// <summary>只留这一批代码的那些项——GetEarliestPeriodStartByCode 是按口径查全库的，
+    /// 里面混着 ETF、指数和板块指数的代码。</summary>
+    private static Dictionary<string, DateTime> Only(
+        Dictionary<string, DateTime> byCode, HashSet<string> codes) =>
+        byCode.Where(kv => codes.Contains(kv.Key))
+              .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
 
     /// <summary>补两轮还拿不到，就判定"数据源确实没有"（多半是停牌），写进白名单、以后体检跳过。</summary>
     private const int AuditMaxTries = 2;
@@ -1010,7 +1121,8 @@ public partial class FetchOrchestrator
     /// 判据和补法见 <see cref="SqliteDailyTableAuditor"/>：只认"某个交易日一行都没有"和
     /// "行数不到中位数两成"，**只报不补**（各表补法不同，塞进统一重试里既补不对也说不清）。
     /// </summary>
-    private List<string> AuditDailyTables(DateTime cutoff, IProgress<string>? progress, CancellationToken ct)
+    private List<string> AuditDailyTables(
+        DateTime cutoff, bool thorough, IProgress<string>? progress, CancellationToken ct)
     {
         var lines = new List<string>();
         var auditor = new SqliteDailyTableAuditor(_paths.CurrentDb);
@@ -1034,17 +1146,27 @@ public partial class FetchOrchestrator
                 continue;
             }
 
+            // 资金净流入的空日进待补名单，交给【重新拉取失败】一轮补掉（见 Manifest.MissingNetInflowDays）
+            var queued = spec.Table == "NetInflow"
+                ? QueueMissingNetInflowDays(r.EmptyDays, thorough)
+                : 0;
+
             string span = $"{r.From:yyyy-MM-dd}~{r.To:yyyy-MM-dd} 共 {r.TradingDays} 个交易日"
                         + $"（每日约 {r.MedianRows} 行）";
-            if (r.EmptyDays.Count == 0 && r.ThinDays.Count == 0)
+            if (r.EmptyDays.Count == 0 && r.ThinDays.Count == 0 && r.TailMissingDays.Count == 0)
             {
                 lines.Add($"　{spec.Label}：{span}，齐");
                 continue;
             }
 
             var parts = new List<string>();
+            // 尾部滞后放最前面：它是"这一项最近根本没跑成"，比十年前少几行紧急得多
+            if (r.TailMissingDays.Count > 0)
+                parts.Add($"**最新只到 {r.To:yyyy-MM-dd}、落后 {r.TailMissingDays.Count} 个交易日**"
+                        + $"（{FormatDays(r.TailMissingDays)}）");
             if (r.EmptyDays.Count > 0)
-                parts.Add($"{r.EmptyDays.Count} 天一行都没有（{FormatDays(r.EmptyDays)}）");
+                parts.Add($"{r.EmptyDays.Count} 天一行都没有（{FormatDays(r.EmptyDays)}）"
+                        + (queued > 0 ? $"，其中 {queued} 天已记入待补名单" : ""));
             if (r.ThinDays.Count > 0)
                 parts.Add($"{r.ThinDays.Count} 天行数明显偏少、疑似只抓了一半"
                         + $"（{FormatDays(r.ThinDays.Select(t => t.Day).ToList())}）");
@@ -1052,6 +1174,36 @@ public partial class FetchOrchestrator
         }
 
         return lines;
+    }
+
+    /// <summary>
+    /// 把资金净流入的空日写进待补名单（2026-09-06）。已经在名单里的保留原有 Tries——
+    /// 跟 K 线空洞一个道理，别把补过一轮的计数清零，否则永远收敛不到"数据源确实没有"。
+    /// </summary>
+    /// <param name="thorough">「彻底体检」：连之前判定"数据源确实没有"的那些天也一起重查。</param>
+    /// <returns>这一轮实际记进名单的天数。</returns>
+    private int QueueMissingNetInflowDays(List<DateTime> emptyDays, bool thorough)
+    {
+        lock (_dbLock)
+        {
+            var manifest = _manifestStore.Load();
+            if (thorough) manifest.ConfirmedNetInflowDays = [];
+
+            var confirmed = manifest.ConfirmedNetInflowDays.Select(d => d.Date).ToHashSet();
+            var triesByDay = manifest.MissingNetInflowDays
+                .GroupBy(m => m.Day.Date)
+                .ToDictionary(g => g.Key, g => g.Max(m => m.Tries));
+
+            manifest.MissingNetInflowDays = emptyDays
+                .Select(d => d.Date)
+                .Where(d => !confirmed.Contains(d))
+                .Distinct()
+                .OrderBy(d => d)
+                .Select(d => new MissingDayRetry { Day = d, Tries = triesByDay.GetValueOrDefault(d) })
+                .ToList();
+            _manifestStore.Save(manifest);
+            return manifest.MissingNetInflowDays.Count;
+        }
     }
 
     /// <summary>日期列表转成人读的一行，超过 <see cref="AuditMaxListedDays"/> 个就截断。</summary>

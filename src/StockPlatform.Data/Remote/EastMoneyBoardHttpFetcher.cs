@@ -73,7 +73,7 @@ public class EastMoneyBoardHttpFetcher : EastMoneyBoardFetcherBase
         _http.Timeout = TimeSpan.FromSeconds(25);
     }
 
-    public override string DescribeChannel() => $"{MemberHost} 走纯 HttpClient（不用浏览器、不会弹验证）";
+    public override string DescribeChannel() => $"成分股：HttpClient 直连 {MemberHost}";
 
     public override string DescribeBinding() => NetworkInterfaceBinder.Describe(_bindNetworkInterface);
 

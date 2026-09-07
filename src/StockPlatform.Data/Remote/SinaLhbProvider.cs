@@ -28,6 +28,12 @@ public class SinaLhbProvider : ILhbProvider
         remove => _rateLimiter.OnStatus -= value;
     }
 
+    /// <summary>2002-01-01——两所"公开信息制度"（龙虎榜）开始披露的年份。⚠ 跟融资融券的 2010 无关，
+    /// 龙虎榜比两融早八年。取制度起点而非更晚的保守值，是因为抓不到只会返回空列表、不报错，代价仅是
+    /// 多试几百天；而起点定晚了那几年就**永久抓不回来**。新浪那个页面究竟能翻到哪年没实测过，跑一遍
+    /// 看日志里前几年是不是全空即可，若确认为空可以再往后调。</summary>
+    public DateOnly EarliestAvailable => new(2002, 1, 1);
+
     static SinaLhbProvider()
     {
         Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);

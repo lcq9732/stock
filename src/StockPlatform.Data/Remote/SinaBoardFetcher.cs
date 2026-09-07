@@ -67,6 +67,8 @@ public class SinaBoardFetcher : IBoardFetcher
     {
         [BoardType.Concept] = "http://money.finance.sina.com.cn/q/view/newFLJK.php?param=class",
         [BoardType.Industry] = "http://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php",
+        // 地域板块新浪没有对应接口。这个类本来就是"东财全挂了才手工换回来"的备用，
+        // 缺一类也比编一份假名单强——下面显式抛，不让它悄悄变成空列表。
     };
 
     public Task<List<Board>> FetchBoardListAsync(BoardType type, CancellationToken ct = default) =>
@@ -74,7 +76,10 @@ public class SinaBoardFetcher : IBoardFetcher
 
     private async Task<List<Board>> FetchBoardListInternalAsync(BoardType type, CancellationToken ct)
     {
-        var body = await GetGbkAsync(ListUrls[type], ct);
+        if (!ListUrls.TryGetValue(type, out var listUrl))
+            throw new NotSupportedException(
+                $"新浪没有{type.Label()}板块的接口——这个源只有概念和行业两类。");
+        var body = await GetGbkAsync(listUrl, ct);
         var now = DateTime.Now;
 
         int open = body.IndexOf('{');
@@ -110,6 +115,9 @@ public class SinaBoardFetcher : IBoardFetcher
         }
         return result;
     }
+
+    /// <summary>跟东财那几条走网络的通道一样按 7 天算（见 <see cref="IBoardFetcher.MemberFreshFor"/>）。</summary>
+    public TimeSpan MemberFreshFor => TimeSpan.FromDays(7);
 
     public Task<List<string>> FetchMembersAsync(string boardCode, CancellationToken ct = default) =>
         _rateLimiter.RunAsync(() => FetchMembersInternalAsync(boardCode, ct), ct);

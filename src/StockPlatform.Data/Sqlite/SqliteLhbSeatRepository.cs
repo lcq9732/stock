@@ -48,14 +48,16 @@ public class SqliteLhbSeatRepository : ILhbSeatRepository
         cmd.CommandText = """
             INSERT OR REPLACE INTO LhbSeat
                 (trade_date, code, name, is_buy, seat_code, seat_name, buy, sell, net,
-                 explanation, rise_prob_3day, times_3day, trade_id, seq, close_price, change_rate, fetched_at)
+                 explanation, rise_prob_3day, times_3day, trade_id, seq, close_price, change_rate, fetched_at,
+                 buy_ratio, sell_ratio, change_type)
             VALUES ($td, $code, $name, $isbuy, $seat, $seatname, $buy, $sell, $net,
-                    $expl, $prob, $times, $tid, $seq, $close, $chg, $fetched);
+                    $expl, $prob, $times, $tid, $seq, $close, $chg, $fetched,
+                    $bratio, $sratio, $ctype);
             """;
         var p = new Dictionary<string, SqliteParameter>();
         foreach (var n in new[] { "$td", "$code", "$name", "$isbuy", "$seat", "$seatname", "$buy",
                                   "$sell", "$net", "$expl", "$prob", "$times", "$tid", "$seq", "$close",
-                                  "$chg", "$fetched" })
+                                  "$chg", "$fetched", "$bratio", "$sratio", "$ctype" })
         {
             var par = cmd.CreateParameter(); par.ParameterName = n; cmd.Parameters.Add(par); p[n] = par;
         }
@@ -79,6 +81,9 @@ public class SqliteLhbSeatRepository : ILhbSeatRepository
             p["$close"].Value = (object?)s.ClosePrice ?? DBNull.Value;
             p["$chg"].Value = (object?)s.ChangeRate ?? DBNull.Value;
             p["$fetched"].Value = s.FetchedAt.ToString(TimeFormat, CultureInfo.InvariantCulture);
+            p["$bratio"].Value = (object?)s.BuyRatio ?? DBNull.Value;
+            p["$sratio"].Value = (object?)s.SellRatio ?? DBNull.Value;
+            p["$ctype"].Value = s.ChangeType;
             cmd.ExecuteNonQuery();
         }
         tx.Commit();

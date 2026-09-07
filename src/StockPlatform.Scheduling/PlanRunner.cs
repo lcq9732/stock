@@ -538,7 +538,7 @@ public sealed class PlanRunner(
         item.LastMessage = null;
         store.Save(plan);
         onState(new PlanRunnerState(true, item, null, null, $"正在执行【{info.Name}】"));
-        log($"▶ 计划：开始【{info.Name}】（数据源 {info.DataSource}，占用 {info.SourcesText}，预计 {Describe(item.EffectiveEstimate)}"
+        log($"▶ 计划：开始【{info.Name}】（数据源 {info.DataSourceText}，占用 {info.SourcesText}，预计 {Describe(item.EffectiveEstimate)}"
           + (item.RecentDurationsSec.Count > 0 ? "，按这一项自己最近几轮的实测算" : "") + "）"
           + (deadline.HasValue
                 ? $"——空闲补一轮，要在 {deadline:HH:mm} 前收尾（后面有定时任务）"
@@ -717,7 +717,7 @@ public sealed class PlanRunner(
                 sb.Append("\n    ")
                   .Append(Pad(i.NotBefore.HasValue ? i.NotBefore.Value.ToString("HH\\:mm") : "接上一项", 10))
                   .Append(i.Info.Name)
-                  .Append($"（{i.Info.DataSource}，预计 {Describe(i.EffectiveEstimate)}）");
+                  .Append($"（{i.Info.DataSourceText}，预计 {Describe(i.EffectiveEstimate)}）");
             log(sb.ToString());
             return;
         }
@@ -753,7 +753,7 @@ public sealed class PlanRunner(
             else
                 sb.Append(Pad(i.NotBefore.HasValue ? i.NotBefore.Value.ToString("HH\\:mm") : "接上一项", 10))
                   .Append(i.Info.Name)
-                  .Append($"（{i.Info.DataSource}，预计 {Describe(i.EffectiveEstimate)}）");
+                  .Append($"（{i.Info.DataSourceText}，预计 {Describe(i.EffectiveEstimate)}）");
         }
         log(sb.ToString());
 

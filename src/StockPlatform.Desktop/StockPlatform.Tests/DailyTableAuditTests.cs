@@ -160,4 +160,102 @@ public class DailyTableAuditTests : IDisposable
         foreach (var spec in SqliteDailyTableAuditor.DailyTables)
             Assert.Null(Record.Exception(() => _auditor.Check(spec, Anchor, Cutoff)));
     }
+
+    // ───────────────── 尾部滞后（2026-09-06 加）─────────────────
+    // 起因：龙虎榜停在 09-01、落后 3 个交易日，体检一个字都没报——因为区间上界取的是
+    // "表里最新那天"，尾巴上的缺口天生落在体检视野之外。
+
+    /// <summary>融资余额的 LagDays 是 1（交易所 T+1 发布），所以要落后 2 天以上才该报。</summary>
+    [Fact]
+    public void 尾巴停在几天前_报出来()
+    {
+        InsertMargin(Cal[0], 100);
+        InsertMargin(Cal[1], 100);
+        InsertMargin(Cal[2], 100);
+
+        var r = _auditor.Check(Margin, Anchor, Cutoff)!;
+
+        Assert.Equal([Cal[3], Cal[4]], r.TailMissingDays);
+        Assert.Empty(r.EmptyDays);        // 尾巴不该同时算成"空日"，那会重复报
+    }
+
+    [Fact]
+    public void 落后在允许范围内_不报()
+    {
+        foreach (var d in Cal[..4]) InsertMargin(d, 100);   // 只差最后一天＝T+1 的正常滞后
+
+        Assert.Empty(_auditor.Check(Margin, Anchor, Cutoff)!.TailMissingDays);
+    }
+
+    // ───────────────── 清淡日豁免（2026-09-06 加）─────────────────
+    // 起因：大宗交易那 6 个"偏少日"全是熔断日和长假前后——市场本身就没怎么交易，
+    // 任何行数判据都会报，而它们根本没什么可补的。
+
+    /// <summary>把交易日历上某一天的成交额改掉（日历默认每天 amount=1）。</summary>
+    private void SetCalendarAmount(DateTime day, double amount)
+    {
+        using var conn = new SqliteConnection($"Data Source={_dbPath}");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "UPDATE Bar SET amount = $a WHERE code = $c AND granularity = 'day' AND period_start = $d;";
+        cmd.Parameters.AddWithValue("$a", amount);
+        cmd.Parameters.AddWithValue("$c", Anchor);
+        cmd.Parameters.AddWithValue("$d", day.ToString("yyyy-MM-dd HH:mm:ss"));
+        cmd.ExecuteNonQuery();
+    }
+
+    [Fact]
+    public void 全市场那天本来就没怎么交易_行数少也不报()
+    {
+        foreach (var d in Cal) SetCalendarAmount(d, 1000);
+        SetCalendarAmount(Cal[2], 100);        // 熔断/半天休市：成交额只有平时一成
+
+        InsertMargin(Cal[0], 100);
+        InsertMargin(Cal[1], 100);
+        InsertMargin(Cal[2], 5);
+        InsertMargin(Cal[3], 100);
+        InsertMargin(Cal[4], 100);
+
+        Assert.Empty(_auditor.Check(Margin, Anchor, Cutoff)!.ThinDays);
+    }
+
+    [Fact]
+    public void 市场正常成交却只抓到零头_照报()
+    {
+        // 半拉子轮次跟清淡日的区别就在这里：那天市场是正常交易的
+        foreach (var d in Cal) SetCalendarAmount(d, 1000);
+
+        InsertMargin(Cal[0], 100);
+        InsertMargin(Cal[1], 100);
+        InsertMargin(Cal[2], 5);
+        InsertMargin(Cal[3], 100);
+        InsertMargin(Cal[4], 100);
+
+        Assert.Equal([(Cal[2], 5)], _auditor.Check(Margin, Anchor, Cutoff)!.ThinDays);
+    }
+
+    // ───────────────── 滚动窗口（2026-09-06 加）─────────────────
+
+    /// <summary>
+    /// 东财资金流明细只给最近 120 天，而本地表里还留着更早那些"逐只回补时先抓的几只票"的
+    /// 零星行（实测 2025-12-26 那天只有 1 只票）。不按窗口裁的话，这些尾巴会被当成
+    /// 47 天"只抓了一半"——2026-09-06 那次体检就是这么误报的。
+    /// </summary>
+    [Fact]
+    public void 数据源窗口之外的零星行_不算偏少()
+    {
+        var windowed = Margin with { WindowDays = 3 };   // 日历共 5 天 → 只体检最后 3 天
+
+        InsertMargin(Cal[0], 1);        // 窗口外的回补尾巴
+        InsertMargin(Cal[2], 100);
+        InsertMargin(Cal[3], 100);
+        InsertMargin(Cal[4], 100);
+
+        var r = _auditor.Check(windowed, Anchor, Cutoff)!;
+
+        Assert.Equal(Cal[2], r.From);
+        Assert.Empty(r.ThinDays);
+        Assert.Empty(r.EmptyDays);      // Cal[1] 也在窗口外，不该算缺
+    }
 }

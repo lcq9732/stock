@@ -128,6 +128,39 @@ public class SqliteNetInflowRepository : INetInflowRepository
         return result;
     }
 
+    /// <summary>
+    /// 这几个交易日各自有多少行（2026-09-06 新增）——给"补整天缺失的那几天"复查用：
+    /// 补完一轮之后哪几天真的有数据了、哪几天还是空的，决定要不要再来一轮。
+    /// 一天一行都没有的日期不会出现在返回里。
+    /// </summary>
+    public Dictionary<DateTime, int> CountRowsByDay(IEnumerable<DateTime> days)
+    {
+        var result = new Dictionary<DateTime, int>();
+        var wanted = days.Select(d => d.Date).Distinct().ToList();
+        if (wanted.Count == 0) return result;
+
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        var names = new List<string>(wanted.Count);
+        for (int i = 0; i < wanted.Count; i++)
+        {
+            names.Add($"$d{i}");
+            cmd.Parameters.AddWithValue($"$d{i}", wanted[i].ToString(DateFormat, CultureInfo.InvariantCulture));
+        }
+        cmd.CommandText =
+            $"SELECT period_start, COUNT(*) FROM NetInflow WHERE period_start IN ({string.Join(",", names)}) "
+            + "GROUP BY period_start;";
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(0)) continue;
+            var day = DateTime.ParseExact(reader.GetString(0), DateFormat, CultureInfo.InvariantCulture);
+            result[day.Date] = reader.GetInt32(1);
+        }
+        return result;
+    }
+
     public List<NetInflow> Query(string code, DateTime? start = null, DateTime? end = null)
     {
         using var conn = Open();

@@ -48,9 +48,10 @@ public static class BoardListFetchLoop
         int committedTotal = 0;
         var unfinished = new List<string>();
 
-        foreach (var (type, label) in new[]
-                 { (BoardType.Concept, "概念/题材"), (BoardType.Industry, "行业") })
+        // 遍历所有类型（2026-09-06 加地域时改）——写死两个的话，新加的类型会静悄悄地漏掉。
+        foreach (var type in Enum.GetValues<BoardType>())
         {
+            var label = type.Label();
             ct.ThrowIfCancellationRequested();
 
             // ── 决定这一类从第几页开始 ──

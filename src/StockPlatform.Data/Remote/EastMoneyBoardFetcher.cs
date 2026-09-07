@@ -89,8 +89,8 @@ public class EastMoneyBoardFetcher : EastMoneyBoardFetcherBase
     }
 
     public override string DescribeChannel() => _browser is { IsReady: true }
-        ? $"{MemberHost} 走浏览器通道（Edge 内核）"
-        : $"{MemberHost} 走普通 HTTP 抓取" + (_browser == null ? "" : "（浏览器通道没就绪）");
+        ? $"成分股：浏览器通道（Edge 内核）→ {MemberHost}"
+        : $"成分股：HTTP 直连 {MemberHost}" + (_browser == null ? "" : "（浏览器通道没就绪）");
 
     /// <summary>
     /// 当前走哪块网卡、有没有配对。**调用方要在订阅 OnStatus 之后自己打进日志**——

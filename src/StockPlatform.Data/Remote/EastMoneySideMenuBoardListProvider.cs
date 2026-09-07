@@ -184,7 +184,7 @@ public sealed class EastMoneySideMenuBoardListProvider
         var shrink = (existing - fetched) / (double)existing;
         if (shrink <= MaxShrinkRatio) return null;
 
-        var label = type == BoardType.Concept ? "概念/题材" : "行业";
+        var label = type.Label();
         return $"{label}板块名单比库里少了 {shrink:P1}（菜单 {fetched} 个 / 库里 {existing} 个）——"
              + "掉这么多不像是正常增减，本轮不更新，库里保留上次的完整快照。";
     }

@@ -128,6 +128,12 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
     public virtual string DescribeBinding() => NetworkInterfaceBinder.Describe(null);
 
     /// <summary>
+    /// 走 push2 的通道一律 7 天：一轮三小时起、还随时被限流，宁可让数据陈一周也不重抓。
+    /// <see cref="EastMoneyTerminalBoardFetcher"/> 覆盖成 0——它读本地文件，没有节流的理由。
+    /// </summary>
+    public virtual TimeSpan MemberFreshFor => TimeSpan.FromDays(7);
+
+    /// <summary>
     /// 限流熔断还要等到几点；没在暂停就是 null。
     /// 用来在暂停期里直接回绝新的抓取——实测暂停期内点【执行】会干等 8 分钟才报失败，
     /// 那 8 分钟既没数据也看不出在等什么。
@@ -138,13 +144,21 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
 
     private static string ListUrl(BoardType type, int page)
     {
-        int t = type == BoardType.Concept ? 3 : 2;
+        // 东财的板块类型编号：t:1=地域 t:2=行业 t:3=概念。
+        // ⚠ 别写成 `Concept ? 3 : 2` —— 加了地域之后那样会把地域当成行业去抓。
+        int t = type switch
+        {
+            BoardType.Concept => 3,
+            BoardType.Industry => 2,
+            BoardType.Region => 1,
+            _ => throw new NotSupportedException($"push2 没有 {type} 这一类板块的 fs 参数。"),
+        };
         return "https://push2.eastmoney.com/api/qt/clist/get"
              + $"?pn={page}&pz={PageSize}&po=0&np=1&fltt=2&invt=2&fid=f12&fs=m:90+t:{t}"
              + "&fields=f3,f6,f12,f14,f128,f140";
     }
 
-    private static string Label(BoardType type) => type == BoardType.Concept ? "概念" : "行业";
+    private static string Label(BoardType type) => type.Label();
 
     /// <summary>
     /// 抓**某一页**板块列表（2026-09-04 加，给页级断点续传用）。
@@ -275,7 +289,7 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
     /// 返回的名单会跟接口报的 total 对账，对不上就抛异常（宁可这个板块本轮失败、下轮重试，
     /// 也不要把一份残缺名单写进库当成完整的）。
     /// </summary>
-    public async Task<List<string>> FetchMembersAsync(string boardCode, CancellationToken ct = default)
+    public virtual async Task<List<string>> FetchMembersAsync(string boardCode, CancellationToken ct = default)
     {
         var codes = new List<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -307,12 +321,31 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
             if (n < PageSize || (total > 0 && codes.Count >= total)) break;
         }
 
-        // 跟接口自报的 total 对账。差一只都说明这份名单不完整——分页丢了、或者中途被限流截断。
-        if (total > 0 && codes.Count != total)
-            throw new RateLimitedException(
-                $"板块 {boardCode} 成分股不完整：接口报 {total} 只，实际取到 {codes.Count} 只。本轮不写入，下轮重试。");
+        return ReconcileMembers(boardCode, codes, total);
+    }
 
-        return codes;
+    /// <summary>
+    /// 去重 + 跟接口自报的 <paramref name="total"/> 对账。**差一只都算不完整**，直接抛。
+    ///
+    /// 为什么单独抽出来（2026-09-05）：现在有两条形态完全不同的取数路——自己拼 URL 翻页的
+    /// <see cref="FetchMembersAsync"/>，和操作页面翻页的 <c>EastMoneyBoardPageFetcher</c>。
+    /// 它们怎么拿数据毫不相干，但**这道对账必须一模一样**：上游 UpsertBoards 是快照语义，
+    /// "这轮没返回的＝已下架"会把板块连同 BoardMember 一起删，一份半截名单就能悄悄删掉
+    /// 几百只成分股、而且全程不报错。共用一份，就不会出现"改了一处漏了另一处"。
+    /// </summary>
+    protected static List<string> ReconcileMembers(
+        string boardCode, IReadOnlyList<string> codes, int total)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var deduped = new List<string>();
+        foreach (var c in codes)
+            if (!string.IsNullOrWhiteSpace(c) && seen.Add(c)) deduped.Add(c);
+
+        if (total > 0 && deduped.Count != total)
+            throw new RateLimitedException(
+                $"板块 {boardCode} 成分股不完整：接口报 {total} 只，实际取到 {deduped.Count} 只。本轮不写入，下轮重试。");
+
+        return deduped;
     }
 
     /// <summary>
@@ -333,7 +366,7 @@ public abstract class EastMoneyBoardFetcherBase : IBoardFetcher
     /// 同理 <c>pz=100</c> 也没改回网页端的 20：那会让请求数直接乘以 5，
     /// 为了"更像人"把请求数翻五倍是笔亏本买卖。
     /// </summary>
-    private async Task PauseBetweenBoardsAsync(CancellationToken ct)
+    protected async Task PauseBetweenBoardsAsync(CancellationToken ct)
     {
         // 第一个板块前面不用歇：这时候还没发过请求，歇了只是让人干等
         if (Interlocked.Exchange(ref _anyBoardDone, 1) == 0) return;

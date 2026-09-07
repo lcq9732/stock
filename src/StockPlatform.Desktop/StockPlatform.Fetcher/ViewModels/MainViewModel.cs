@@ -165,7 +165,7 @@ public class MainViewModel : INotifyPropertyChanged
         : PendingEarnings > 0 ? $"待披露 {PendingEarnings} 只" : "本期已披露完";
 
     private (int Todo, int Never)? _pendingMoneyFlow;
-    /// <summary>分档资金流还剩多少只没轮到。null = 还没算出来。</summary>
+    /// <summary>分档资金流还有多少只的 120 天历史没补齐。null = 还没算出来。</summary>
     public (int Todo, int Never)? PendingMoneyFlow
     {
         get => _pendingMoneyFlow;
@@ -173,17 +173,39 @@ public class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 这一项的文案跟别的"还差多少"不一样，**故意不说"待抓 N 只"**：接口是 120 天滚动窗口、
-    /// 每天只能抓百来只，跑满全市场要两个月，所以"今天还剩 5800 只"是常态而不是落后。
-    /// 有信息量的是"从没抓过"那个数——它归零才算铺满一轮，之后就只是轮换维护。
+    /// 这一项的文案说的是**补历史那条路还剩多少活**（2026-09-06 改）。
+    ///
+    /// 原来写的是"今天待抓 N 只"，那是按"今天抓过没有"算的；自从加了全市场快照通道
+    /// （每天一次、几十秒把当天全市场写全），每只票每天都被写过，那个数会永远显示 5900 只、
+    /// 看着像永远落后，其实当天数据早就齐了。真正还差的只有历史：接口只给 120 个交易日，
+    /// 只能一只只补，补齐一只就少一只，归零之后日常就全靠快照了。
     /// </summary>
     public string PendingMoneyFlowText =>
-        PendingMoneyFlow is not { } m ? "待抓数还没算出来"
-        // 一轮还没铺满时这两个数常常相等（今天抓过的都是新铺的），相等就别重复报一遍
-        : m.Never > 0 && m.Never == m.Todo ? $"还有 {m.Never} 只从没抓过"
-        : m.Never > 0 ? $"还有 {m.Never} 只从没抓过（今天待抓 {m.Todo} 只）"
-        : m.Todo > 0 ? $"已铺满一轮，今天待轮换 {m.Todo} 只"
-        : "今天已全部抓过";
+        PendingMoneyFlow is not { } m ? "待补数还没算出来"
+        // 一轮还没铺开时这两个数常常相等（不齐的就是一行都没有的），相等就别重复报一遍
+        : m.Never > 0 && m.Never == m.Todo ? $"还有 {m.Never} 只没有历史"
+        : m.Never > 0 ? $"还有 {m.Todo} 只历史不全（其中 {m.Never} 只一行都没有）"
+        : m.Todo > 0 ? $"还有 {m.Todo} 只历史不全"
+        : "历史已补齐，日常走当日快照";
+
+    private (int Todo, int Never, int Total)? _pendingBoardMembers;
+    /// <summary>板块成分股还剩多少个板块要抓。null = 还没算出来。</summary>
+    public (int Todo, int Never, int Total)? PendingBoardMembers
+    {
+        get => _pendingBoardMembers;
+        private set { Set(ref _pendingBoardMembers, value); Raise(nameof(PendingBoardMembersText)); }
+    }
+
+    /// <summary>
+    /// 这一项跟【分档资金流】一样是跨轮才做得完的活（1031 个板块 ≈ 2500 个 push2 请求），
+    /// 但判据是"7 天内抓过没有"而不是"今天抓过没有"——所以补完一轮之后它**会**归零，
+    /// 停在某个数不动才说明抓不动了，值得报出来。
+    /// </summary>
+    public string PendingBoardMembersText =>
+        PendingBoardMembers is not { } b ? "待抓数还没算出来"
+        : b.Todo == 0 ? $"{b.Total} 个板块都是最近抓的"
+        : b.Never > 0 ? $"待抓 {b.Todo}/{b.Total} 个板块（{b.Never} 个从没抓过）"
+        : $"待抓 {b.Todo}/{b.Total} 个板块";
 
     private int _pendingFinancials = -1;   // -1 = 还没算出来，别跟"0 已补齐"混为一谈
     /// <summary>还有多少只股票的财务报表没补（报告期落后、或科目集版本落后于当前 v4）。</summary>
@@ -440,10 +462,10 @@ public class MainViewModel : INotifyPropertyChanged
         RefreshDataStatus();
         RefreshFailedCodeCount();
         LoadPlan();
-        // 界面上没有数据源选项了，那就在日志里说清楚这一轮用的是哪个、怎么换（见 SelectedSource）
-        Log($"K线数据源：{SelectedSource.Name}"
-          + (SelectedSource.Name == "Tencent" ? "（腾讯为主，单只拿不到时自动回退新浪）" : "")
-          + "。要换源改 data/fetcher-settings.json 里的 BarSource。");
+        // 界面上没有数据源选项了，日志里得说明这一轮用的是哪个。
+        // 只写事实，不写"它是怎么回事""想换去改哪个文件"——那些属于配置文件里的说明，
+        // 写进运行日志只会挤掉真正的执行记录（2026-09-06 用户指出）。
+        Log($"K线数据源：{SelectedSource.Name}");
     }
 
     /// <summary>归档日志保留份数——每天抓一轮的话约两个月。</summary>
@@ -779,6 +801,9 @@ public class MainViewModel : INotifyPropertyChanged
                 // 这一个只查一条 GROUP BY，比上面几项便宜得多，放在这里不会拖慢刷新
                 (int Todo, int Never)? flow = null;
                 try { flow = _orchestrator.GetPendingMoneyFlowCount(); } catch { }
+                // 三个 COUNT(*) 走 BoardMemberFetchState（千把行）和 Board，同样很便宜
+                (int Todo, int Never, int Total)? boards = null;
+                try { boards = _orchestrator.GetPendingBoardMemberCount(); } catch { }
                 System.Windows.Application.Current?.Dispatcher.Invoke(() =>
                 {
                     if (failed is not null) FailedRetry = failed;
@@ -789,6 +814,7 @@ public class MainViewModel : INotifyPropertyChanged
                     if (earn is { } v5) PendingEarnings = v5;
                     if (manual is { } v6) ManualFill = v6;
                     if (flow is { } v7) PendingMoneyFlow = v7;
+                    if (boards is { } v8) PendingBoardMembers = v8;
                 });
             }
             finally { Interlocked.Exchange(ref _refreshingCounts, 0); }
@@ -887,16 +913,18 @@ public class MainViewModel : INotifyPropertyChanged
             // 兜底：App 没传重造委托（测试里构造的 ViewModel 就是这样）。宁可说清楚也别假装换了。
             Log("　⚠ 板块通道这次没换：程序没有提供重造通道的能力（改动会在下次启动时生效）。");
         }
-        else if (Occupancy.Snapshot().FirstOrDefault(t => t.Sources.Contains(DataSourceId.EmPush2))
-                 is { } busy)
+        else if (Occupancy.Snapshot().FirstOrDefault(BoardFetcherInUse) is { } busy)
         {
             // 跑到一半换掉它脚下的对象，事件订阅和限流熔断计数都会错乱，不如等
-            Log($"　⚠ 板块通道这次没换：【{busy.Name}】正在用东财 push2。"
+            Log($"　⚠ 板块通道这次没换：【{busy.Name}】正在用它。"
               + "等它跑完再点一次【重新读取配置】就会生效（另外两项已经生效了）。");
         }
         else
         {
             _orchestrator.ReplaceBoardFetcher(_recreateBoardFetcher());
+            // 换过通道之后，板块那两行的"数据源"列可能要从"东财行情"变成"本地文件"
+            // （FetchTaskCatalog.BoardChannel 在造通道时已经跟着换了），重播一次绑定
+            foreach (var vm in PlanItems) vm.RefreshStatus();
             Log($"　板块通道 BoardMemberChannel：{ChangeText(_appliedBoardChannel, newChannel)}");
             Log($"　push2 网卡 Push2NetworkInterface：{ChangeText(NicText(_appliedNic), NicText(newNic))}");
             Log($"　成分股域名 BoardMemberHost：{ChangeText(HostText(_appliedMemberHost), HostText(newHost))}");
@@ -908,6 +936,22 @@ public class MainViewModel : INotifyPropertyChanged
 
         Log("===== 【重新读取配置】结束 =====");
     }
+
+    /// <summary>
+    /// 这个正在跑的任务，是不是**正用着板块 fetcher**——决定【重新读取配置】能不能把它换掉。
+    ///
+    /// 判据有两条，缺一不可（2026-09-06 补的第二条）：
+    ///   · 占着东财 push2 的——那是走网络的三条通道（page/browser/http）在抓成分股；
+    ///   · **名字就是板块那两项的**——terminal 通道下它们读本地文件、在占用表里按
+    ///     "不占源"登记（见 <see cref="FetchTaskCatalog.IsLocalOnlyNow"/>），
+    ///     光看 push2 会漏掉，于是跑到一半被热换掉对象。
+    ///
+    /// 名字取自目录、不写字面量：目录里改了显示名，这里得跟着变，比字符串常量可靠。
+    /// </summary>
+    private static bool BoardFetcherInUse(RunningTask t)
+        => t.Sources.Contains(DataSourceId.EmPush2)
+        || t.Name == FetchTaskCatalog.Info(FetchActionId.StepBoardMembers).Name
+        || t.Name == FetchTaskCatalog.Info(FetchActionId.StepBoardList).Name;
 
     /// <summary>"旧 → 新 ✔ 已生效"或者"值（没变）"。人一眼要能看出自己刚改的那下算不算数。</summary>
     private static string ChangeText(string oldValue, string newValue)
@@ -2395,7 +2439,10 @@ public class MainViewModel : INotifyPropertyChanged
                 return _orchestrator.RunFetchStockBoardMapAsync(progress, ct);
 
             case FetchActionId.FetchMoneyFlowDetail:
-                // 一只约 2 秒（限流器间隔占大头），按空窗剩余时间估本轮抓几只
+                // 估的是**补历史**那一段：一只约 2 秒（限流器间隔占大头），按空窗剩余时间估几只。
+                // 前面还有个全市场快照（约 60 个请求、一两分钟），它不受这个数控制——
+                // 快照是"一整天要么有要么没有"的事，抓一半没有意义。空窗短的话就是快照跑完、
+                // 补历史抓不了几只，下轮接着来。
                 return _orchestrator.RunFetchMoneyFlowDetailAsync(
                     progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(2)));
 

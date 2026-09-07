@@ -68,19 +68,46 @@ public class BoardTabViewModel : INotifyPropertyChanged
         set { if (_filterText == value) return; _filterText = value; Raise(nameof(FilterText)); ApplyFilter(); }
     }
 
-    private bool _showConcept = true;
-    /// <summary>true=概念/题材，false=行业。绑到两个单选按钮（见 MainWindow.xaml）。</summary>
+    private BoardType _boardType = BoardType.Concept;
+
+    /// <summary>
+    /// 三个单选按钮各自的镜像属性（2026-09-06 从"概念/行业"两态改成三态，加了地域板块）。
+    ///
+    /// 原来是一个 bool 加一个取反的镜像，两类时够用；加第三类之后取反没有意义了，
+    /// 改成存类型本身、每个按钮一个镜像。
+    ///
+    /// ⚠ setter 只处理 <c>value == true</c>：RadioButton 在**失去**选中时也会推一个 false
+    /// 过来，如果照单全收，切换的那一瞬间会先被"取消选中"的 false 打回去，
+    /// 表现是点了没反应。这是 WPF 单选按钮双向绑定的老坑。
+    /// </summary>
     public bool ShowConcept
     {
-        get => _showConcept;
-        set { if (_showConcept == value) return; _showConcept = value; Raise(nameof(ShowConcept)); Raise(nameof(ShowIndustry)); LoadBoards(); }
+        get => _boardType == BoardType.Concept;
+        set { if (value) SetBoardType(BoardType.Concept); }
     }
 
-    /// <summary>行业单选按钮的镜像属性（跟 ShowConcept 互斥），省得为两个 RadioButton 写反转转换器。</summary>
+    /// <summary>见 <see cref="ShowConcept"/>。</summary>
     public bool ShowIndustry
     {
-        get => !_showConcept;
-        set => ShowConcept = !value;
+        get => _boardType == BoardType.Industry;
+        set { if (value) SetBoardType(BoardType.Industry); }
+    }
+
+    /// <summary>见 <see cref="ShowConcept"/>。地域板块 2026-09-06 起才有（东财终端本地文件带来的）。</summary>
+    public bool ShowRegion
+    {
+        get => _boardType == BoardType.Region;
+        set { if (value) SetBoardType(BoardType.Region); }
+    }
+
+    private void SetBoardType(BoardType type)
+    {
+        if (_boardType == type) return;
+        _boardType = type;
+        Raise(nameof(ShowConcept));
+        Raise(nameof(ShowIndustry));
+        Raise(nameof(ShowRegion));
+        LoadBoards();
     }
 
     private BoardRowViewModel? _selectedBoard;
@@ -121,7 +148,7 @@ public class BoardTabViewModel : INotifyPropertyChanged
             return;
         }
 
-        var type = _showConcept ? BoardType.Concept : BoardType.Industry;
+        var type = _boardType;
         foreach (var b in _boardRepository.QueryBoards(type))
             _all.Add(new BoardRowViewModel
             {
@@ -133,7 +160,7 @@ public class BoardTabViewModel : INotifyPropertyChanged
                 LeaderName = b.LeaderName,
             });
 
-        _boardTypeLabel = _showConcept ? "概念/题材" : "行业";
+        _boardTypeLabel = _boardType.Label();
         _asOf = asOf.Value;
         ApplyFilter();
     }

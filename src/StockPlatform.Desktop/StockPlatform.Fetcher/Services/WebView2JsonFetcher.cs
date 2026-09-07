@@ -31,23 +31,61 @@ namespace StockPlatform.Fetcher.Services;
 /// </summary>
 public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
 {
-    /// <summary>先打开这个页面：拿到 eastmoney 的同源环境和服务器种的 Cookie。</summary>
-    private const string SeedPage = "https://quote.eastmoney.com/center/gridlist.html";
+    /// <summary>
+    /// seed 页和探针用哪个板块（2026-09-05）。
+    ///
+    /// 具体是哪个板块**不重要**，重要的是这类页面（板块成分股页）自己打的就是 pushguest；
+    /// 行情中心的默认页（沪深京 A 股个股列表）打的是 push2，那是完全另一个域名。
+    /// 万一这个板块哪天下架，页面会退回默认列表——那时候换一个代码即可，
+    /// 挑个不会消失的大板块就行。BK1265 是当初逐条比对验证过的那个。
+    /// </summary>
+    private const string SeedBoardCode = "BK1265";
 
     /// <summary>
-    /// **push2 自己域名下**的一个真实请求，人工验证要在这个页面上过（2026-09-04）。
+    /// 先打开这个页面：拿到 eastmoney 的同源环境和服务器种的 Cookie。
+    ///
+    /// ⚠ **必须是板块成分股页，不能是行情中心默认页**（2026-09-05 改，之前就是错的）。
+    /// 默认页是沪深京 A 股个股列表，它自己轮询刷新报价、打的全是 <c>push2</c>——
+    /// 挂在那儿等于我们一边费劲躲开 push2，一边让 seed 页替我们不停地打它，还是同一个 IP。
+    /// 而板块页（<c>#boards2-90.BKxxxx</c>）点翻页时打的正是
+    /// <see cref="MemberHost"/>（pushguest），跟我们真正要发的请求是同一个域名、同一套上下文。
+    /// </summary>
+    private static string SeedPage =>
+        $"https://quote.eastmoney.com/center/gridlist.html#boards2-90.{SeedBoardCode}";
+
+    /// <summary>
+    /// **我们真正要打的那个域名下**的一个真实请求，人工验证要在这个页面上过（2026-09-04）。
     ///
     /// 为什么不能只开 quote 首页：Cookie 是按域名走的。quote.eastmoney.com 种的 Cookie
-    /// 不会跟着发到 push2.eastmoney.com（除非它显式种在 .eastmoney.com 上）。
-    /// 而我们要打的是 push2——实测浏览器通道被拒时报的是 err（请求根本没被受理），
-    /// 不是 timeout（拿回了验证页），符合"这个域名压根不认你"的表现。
+    /// 不会跟着发到取数域名（除非它显式种在 .eastmoney.com 上）。
+    /// 实测浏览器通道被拒时报的是 err（请求根本没被受理），不是 timeout（拿回了验证页），
+    /// 符合"这个域名压根不认你"的表现。
     ///
     /// 直接开 API URL 而不是某个人看的页面：浏览器会把返回内容原样显示出来，
     /// 是 JSON 就说明通了，是验证页就当场能点——一个页面同时当验证入口和探针。
+    ///
+    /// ⚠ **跟着 <see cref="MemberHost"/> 走，不能写死**（2026-09-05）：域名现在是可配置的
+    /// （<c>fetcher-settings.json</c> 的 <c>BoardMemberHost</c>），探针写死的话就会出现
+    /// "配置退回 push2、探针却在探 pushguest"这种对不上——而且这种错不会报，
+    /// 只表现为"预热说没事、真抓全失败"。
     /// </summary>
-    private const string Push2ProbePage =
-        "https://push2.eastmoney.com/api/qt/clist/get"
-        + "?pn=1&pz=20&po=0&np=1&fltt=2&invt=2&fid=f12&fs=m:90+t:3&fields=f12,f14";
+    private string ProbePage => BuildProbePage(MemberHost, SeedBoardCode);
+
+    /// <summary>探针 URL 的拼法，单独抽出来是为了能测。用的是**成分股**形态（<c>fs=b:</c>），
+    /// 跟正式取数一模一样——探一个跟实际不同形态的请求，探通了也说明不了什么。</summary>
+    internal static string BuildProbePage(string host, string boardCode) =>
+        $"https://{host}/api/qt/clist/get"
+        + $"?pn=1&pz=20&po=0&np=1&fltt=2&invt=2&fid=f12&fs=b:{boardCode}&fields=f12,f14";
+
+    /// <summary>
+    /// 取数打哪个域名——决定探针探谁，也决定日志里写谁。默认
+    /// <see cref="StockPlatform.Data.Remote.EastMoneyBoardFetcherBase.DefaultMemberHost"/>。
+    ///
+    /// 可写是因为它会随【重新读取配置】变（见 App.CreateBoardFetcher）：浏览器通道本身
+    /// **不重建**（重建等于把攒下的 Cookie 和"熟面孔"身份丢掉），所以只能把新值塞进来。
+    /// </summary>
+    public string MemberHost { get; set; } =
+        StockPlatform.Data.Remote.EastMoneyBoardFetcherBase.DefaultMemberHost;
 
     private readonly Dispatcher _ui;
     private readonly string _userDataFolder;
@@ -211,19 +249,19 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
                 // ShowForManualVerificationAsync → EnsureReadyAsync，而 _initLock 正被
                 // 外层的 EnsureReadyAsync 拿着，必定死锁（2026-09-05 实测，点【东财验证】
                 // 后整个按钮就废了）。探针只是"看一眼能不能取数"，失败也不影响通道建立。
-                var probe = await FetchWithAutoVerifyAsync(Push2ProbePage, ct, allowManualVerify: false);
-                _log?.Invoke($"浏览器通道已就绪（WebView2），push2 可取数（试拉回 {probe.Length} 字节）。");
+                var probe = await FetchWithAutoVerifyAsync(ProbePage, ct, allowManualVerify: false);
+                _log?.Invoke($"浏览器通道已就绪（WebView2），{MemberHost} 可取数（试拉回 {probe.Length} 字节）。");
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 // 取不到不代表通道废了——可能只是这一刻被限流。通道留着，抓取时按正常节奏重试。
-                _log?.Invoke($"⚠ 浏览器通道起来了，但试取 push2 没成功：{ex.Message}。"
+                _log?.Invoke($"⚠ 浏览器通道起来了，但试取 {MemberHost} 没成功：{ex.Message}。"
                            + "先按这条通道跑，一直失败的话点【东财验证】看看东财返回的是什么。");
             }
 
             IsReady = true;
-            _log?.Invoke("浏览器通道已就绪（WebView2）——push2 的请求改从 Edge 内核发出去。"
+            _log?.Invoke($"浏览器通道已就绪（WebView2）——{MemberHost} 的请求改从 Edge 内核发出去。"
                        + "实测同一 IP 同一接口：浏览器 90% 成功、27 个/分钟，"
                        + "普通 HttpClient 第 7 个请求就被切。");
             return true;
@@ -790,10 +828,23 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
     /// 宁可漏判也别误判：漏判最多回到原来的行为（回 seed 重试），
     /// 误判却会让抓取白等人 15 分钟。
     /// </summary>
+    /// <summary>
+    /// 验证页/验证浮层的特征词。
+    ///
+    /// ⚠ 这些是**全文**扫描的（2026-09-06 从"前 600 字"改的），所以每个词都得足够具体，
+    /// 不能用"验证"这种单字——页脚有"验证码登录"、帮助链接里也有"安全验证"字样，
+    /// 全文扫到就会把正常页面误判成验证页，然后永远等人。
+    ///
+    /// 实测东财用的是**滑块拼图浮层**，浮层上的原话是
+    /// 「拖动下方滑块完成拼图」和「拖动左边滑块完成上方拼图」。
+    /// </summary>
     private static readonly string[] ChallengeMarkers =
     [
-        "captcha", "安全验证", "滑块", "拖动滑块", "拖动下方滑块", "拼图",
-        "完成验证", "请完成", "人机验证", "点击按钮开始验证", "verifycode", "geetest", "nc_wrapper",
+        // 东财实测用的（2026-09-06 截图确认）
+        "完成拼图", "拖动下方滑块", "拖动左边滑块", "拖动滑块",
+        // 通用验证组件的痕迹
+        "captcha", "geetest", "nc_wrapper", "verifycode",
+        "人机验证", "点击按钮开始验证",
     ];
 
     /// <summary>
@@ -810,13 +861,23 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
             var core = _view?.CoreWebView2;
             if (core == null) return false;
 
-            // 只取标题 + 正文前 600 字：验证页本来就没什么内容，取多了反而容易被
-            // 页脚那些"用户协议/验证码登录"之类的字带偏。
+            // ⚠ 必须扫**全文**（2026-09-06 改）：原来只取正文前 600 字，而东财的验证是
+            //    **浮层**，页面本身照常渲染——前 600 字全是顶部那排导航
+            //    （网站首页/加收藏/移动客户端/东方财富/…/大盘星图/自选股/特色行情…），
+            //    浮层上"拖动下方滑块完成拼图"那句排在很后面，600 字根本够不着。
+            //    结果每次都判成"不是验证页"，然后走到"找不到表头"报一个误导人的失败。
+            //
+            //    配套的是特征词改成了具体短语（见 ChallengeMarkers），所以扫全文不会误判。
+            //    截 2 万字是防超长页面把脚本卡住，验证浮层的文字远在这之前。
             const string js = """
                 (function () {
                   var t = document.title || '';
                   var b = document.body ? (document.body.innerText || '') : '';
-                  return (location.href + ' | ' + t + ' | ' + b.slice(0, 600));
+                  // 页面内容本身就是接口返回的 JSON / JSONP（导航取数那条路）＝拿到数据了，
+                  // 由调用方据此直接判"不是验证页"。用**形态**判断，不能用"正文里有没有 data 字样"：
+                  // 板块页的内联脚本里到处都是 data，扫全文必然撞上（2026-09-06）。
+                  var isJson = /^\s*(\{|jQuery\w*\s*\()/.test(b);
+                  return (isJson ? 'ISJSON ' : 'ISPAGE ') + location.href + ' | ' + t + ' | ' + b.slice(0, 20000);
                 })()
                 """;
             var raw = await core.ExecuteScriptAsync(js).WaitAsync(TimeSpan.FromSeconds(5), ct);
@@ -826,8 +887,8 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
             try { text = JsonSerializer.Deserialize<string>(raw) ?? ""; }
             catch { text = raw; }
 
-            // 已经是数据了就不可能是验证页——这一条挡掉大部分误判
-            if (text.Contains("\"data\"") || text.Contains("\"rc\"")) return false;
+            // 页面内容就是接口返回的 JSON＝已经拿到数据了，不可能是验证页
+            if (text.StartsWith("ISJSON", StringComparison.Ordinal)) return false;
 
             return ChallengeMarkers.Any(m => text.Contains(m, StringComparison.OrdinalIgnoreCase));
         }

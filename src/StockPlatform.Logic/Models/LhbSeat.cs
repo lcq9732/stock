@@ -58,5 +58,31 @@ public class LhbSeat
     public double? ClosePrice { get; set; }
     public double? ChangeRate { get; set; }
 
+    /// <summary>
+    /// 该席位买入/卖出额占该股当日总成交额的比例（东财 <c>TOTAL_BUYRIO</c>/<c>TOTAL_SELLRIO</c>）。
+    ///
+    /// ⚠ 是**小数**不是百分数：0.0103 表示 1.03%。跟同样取自接口原值的 <see cref="ChangeRate"/>
+    /// （-2.92 表示 -2.92%）口径不一致，混用会差 100 倍。
+    ///
+    /// 为什么值得单独存：同样是"某席位买了 3300 万"，占当日成交 1% 和占 30% 是两回事——
+    /// 前者是噪音，后者才说明这个席位主导了当天的盘面。绝对金额脱离成交规模没法横向比较。
+    ///
+    /// 接口另外还给 ACCUM_AMOUNT（当日总成交额），**没有存**：它跟本字段是同一个信息，
+    /// 当日总成交额 = <see cref="Buy"/> / BuyRatio 就能反推；而 ACCUM_AMOUNT 在同股同日的
+    /// 每一行席位上重复出现，177 万行存下来纯属冗余。
+    /// </summary>
+    public double? BuyRatio { get; set; }
+    /// <summary>见 <see cref="BuyRatio"/>。卖方榜才有值。</summary>
+    public double? SellRatio { get; set; }
+
+    /// <summary>
+    /// 上榜类型代码（东财 <c>CHANGE_TYPE</c>，形如 "137001004001"）。
+    ///
+    /// 跟 <see cref="Explanation"/> 是同一件事的两种表示，但那个是中文长句
+    /// （"有价格涨跌幅限制的日换手率达到20%的前五只证券"），按它做榜单类型统计只能字符串匹配，
+    /// 东财改一个字或加一种榜就全错。这个码是稳定的，要分类用它。
+    /// </summary>
+    public string ChangeType { get; set; } = "";
+
     public DateTime FetchedAt { get; set; }
 }

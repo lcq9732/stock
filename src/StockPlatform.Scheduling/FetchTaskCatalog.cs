@@ -259,8 +259,14 @@ public sealed record FetchActionInfo(
     /// <summary>
     /// 实际占用的数据源。没标 <see cref="Sources"/> 的按 <see cref="Quota"/> 推导：
     /// 本地项不占源（永远可并发），Mixed 保守当成占用全部联网源（宁可挡住，别撞配额）。
+    ///
+    /// ⚠ 板块那两项的源**由运行期配置决定**，见 <see cref="FetchTaskCatalog.BoardChannel"/>：
+    /// 通道选 terminal 时它们只读本地文件、一个请求都不发，这里必须返回空集，
+    /// 否则会被别的东财任务挡在"它根本不会去打的源"上。
     /// </summary>
-    public IReadOnlySet<DataSourceId> EffectiveSources => Sources is { Count: > 0 }
+    public IReadOnlySet<DataSourceId> EffectiveSources =>
+        FetchTaskCatalog.IsLocalOnlyNow(Id) ? []
+        : Sources is { Count: > 0 }
         ? Sources.ToHashSet()
         : Quota switch
         {
@@ -269,6 +275,14 @@ public sealed record FetchActionInfo(
             QuotaGroup.Exchange => [DataSourceId.Exchange],
             _ => DataSourceCatalog.AllOnline.ToHashSet(),
         };
+
+    /// <summary>
+    /// 数据源那一列显示什么（2026-09-06）。多数项就是目录里写死的
+    /// <see cref="DataSource"/>；板块那两项在 terminal 通道下改说本地文件——
+    /// 否则会出现"数据源：东财行情，占用：本地计算（不占数据源）"这种自相矛盾的一行。
+    /// </summary>
+    public string DataSourceText =>
+        FetchTaskCatalog.IsLocalOnlyNow(Id) ? "东财终端本地文件（不联网）" : DataSource;
 
     /// <summary>占用的源，可读形式（给日志和界面）。</summary>
     public string SourcesText => EffectiveSources.Count == 0
@@ -459,7 +473,8 @@ public static class FetchTaskCatalog
             "两融余额。两所是 T+1 发布，所以按\"以今天为终点回看最近几个交易日、跳过本地已有的\"来抓，"
             + "不是只抓当天。彬哥法第 12 条（融资余额增长）用的就是它。\n"
             + "模式：「增量」＝以日期格那天（留空＝今天）为终点回看几个交易日；"
-            + "「首次整段回补」＝从K线最早那天一路补到今天（原【一键补齐每日历史】的融资那半边），"
+            + "「首次整段回补」＝从 2010-03-31（融资融券开市首日，早于此日两融业务还不存在、"
+            + "两所一天数据都没有）一路补到今天（原【一键补齐每日历史】的融资那半边），"
             + "跳过本地已有的交易日、幂等可反复跑。",
             FetchActionParams.Date,
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
@@ -468,7 +483,8 @@ public static class FetchTaskCatalog
             TimeSpan.FromSeconds(30), "每工作日",
             "当日龙虎榜席位明细，当晚就发布、抓当天即可。\n"
             + "模式：「增量」＝抓日期格那天（留空＝今天）；"
-            + "「首次整段回补」＝从K线最早那天补到今天（原【一键补齐每日历史】的龙虎那半边），"
+            + "「首次整段回补」＝从 2002-01-01（两所公开信息制度起点；⚠ 跟两融的 2010 无关，"
+            + "龙虎榜早八年）补到今天（原【一键补齐每日历史】的龙虎那半边），"
             + "跳过本地已有的交易日、幂等可反复跑。",
             FetchActionParams.Date,
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
@@ -840,7 +856,8 @@ public static class FetchTaskCatalog
 
         new(FetchActionId.BackfillDaily, "一键补齐每日历史", "交易所", QuotaGroup.Exchange,
             TimeSpan.FromMinutes(30), "按需补洞",
-            "把融资余额、龙虎榜的历史从K线最早那天补到今天，跳过本地已有的交易日。幂等、可反复跑。\n"
+            "把融资余额、龙虎榜的历史从各自的数据起点（两融 2010-03-31、龙虎榜 2002-01-01）补到今天，"
+            + "跳过本地已有的交易日。幂等、可反复跑。\n"
             + "⚠ **已退役**（2026-09-02）：【融资余额】和【龙虎榜】各自把模式设成「首次整段回补」"
             + "就是这一项的两半，跑的是同一段代码——好处是能只补其中一样（两家源不同、失败也互不相干）。"
             + "老计划里排了它的，加载时会自动换成这两项。",
@@ -854,6 +871,10 @@ public static class FetchTaskCatalog
             + "⚠ 别跟【个股日K】那行的「新标的补 N 年历史」搞混：那个只管**本地一条K线都没有**的新标的；"
             + "已经抓过的永远从自己的水位线往后续，改大它不会让已有标的的历史往前延长。\n"
             + "⚠ 快照型数据（流通市值/板块成分/指数成分权重）天生只有\"当下\"、没有历史可取，会明确跳过并说明原因。\n"
+            + "⚠ 几类数据有各自的**数据起点**（两融 2010-03-31、龙虎榜 2002-01-01、资金净流入 2010-03-01），"
+            + "填的年份比它早时会自动上提到起点、并在日志里说一句——那不是漏抓，是那几年源上根本没有。\n"
+            + "⚠ 起点还会被钳到 A股开市首日 1990-12-19：填得比它更早会让\"本地已补齐就跳过\"的判断失效、每只标的都白发一次请求。\n"
+            + "中标公告按**自然年切片**搜索（巨潮单次搜索有翻页上限，一次跨二十几年会翻满即停、剩下的静默丢掉）。\n"
             + "补完之后，期间除过权的票会自动记进【重取前复权】的待办名单——新补的那段用的是数据源当前基准，"
             + "跟库里较新那段的基准可能对不上，接缝处会有假跳空。\n"
             + "⚠ 这一项**故意保持复合**（2026-09-02 评估）：它内部各段共享同一次"
@@ -1172,6 +1193,45 @@ public static class FetchTaskCatalog
         FetchActionId.FetchYear,
         FetchActionId.OptimizeDatabase,
     ];
+
+    /// <summary>
+    /// 板块成分股当前**真正生效**的取数通道（<c>fetcher-settings.json</c> 的
+    /// <c>BoardMemberChannel</c>，规范化成小写）。默认跟那份配置的默认值一致。
+    ///
+    /// ════ 为什么目录要知道这个 ════
+    /// 板块那两项占不占数据源，是**运行期**才定的：选 terminal 就只读东财终端落在本地的
+    /// 那份文件，一个请求都不发；选 page/browser/http 才真去打东财。目录里那两个
+    /// <c>Sources</c> 是按"走网络"写死的，于是配成 terminal 之后它们照样被记成占着
+    /// EmQuote / EmPush2，被别的东财任务挡住、或者在计划里让路，界面报"数据源被占用"
+    /// ——占的是它根本不会去打的源（2026-09-06 用户反馈）。
+    ///
+    /// ════ 为什么是这么窄的一个状态、而不是通用的"源覆盖"钩子 ════
+    /// 全项目只有板块这一处存在"配置决定走不走网络"。开一个
+    /// <c>Func&lt;FetchActionId, ...&gt;</c> 的钩子谁都能往里塞，而这个属性把判断连同理由
+    /// 留在目录里（<see cref="IsLocalOnlyNow"/> 就在下面），改的人一眼看得到。
+    ///
+    /// ⚠ 写它的人**必须写"真正生效的值"，不是配置文件里的值**：换通道要重造 fetcher，
+    /// 而重造可能因为有任务正占着 push2 而跳过（见 MainViewModel.ReloadConfig）。
+    /// 那种时候写进来的话，界面说"不占源"、实际跑的还是老的 push2 通道。
+    /// </summary>
+    public static string BoardChannel { get; set; } = "page";
+
+    /// <summary>
+    /// 这一项在**当前配置下**是不是纯本地、不占任何数据源。
+    ///
+    /// 只有板块那两项会因配置而变，判据是 <see cref="BoardChannel"/> == terminal：
+    ///   · 【板块成分股】——EastMoneyTerminalBoardFetcher 一次读盘拿全量，取不到就抛，
+    ///     没有任何网络回退，实打实的本地项。
+    ///   · 【概念和行业板块】——同一份本地文件里也有名单，优先读它（见
+    ///     FetchOrchestrator.FetchBoardListCoreAsync）；本地文件不可用时才退回菜单 JSON
+    ///     （1 个请求）、再不行退回 push2 分页（约 10 个）。
+    ///     **这种退回不登记源占用**，是有意为之：要两层同时失效才会走到那儿，而 EmQuote
+    ///     全项目只有这一项在用、冲突面为零；为这么小的概率把它常年挡在门外不值当。
+    ///     真退回去的时候日志里会明说（见那段的"未登记数据源占用"）。
+    /// </summary>
+    public static bool IsLocalOnlyNow(FetchActionId id)
+        => (id is FetchActionId.StepBoardMembers or FetchActionId.StepBoardList)
+           && string.Equals(BoardChannel, "terminal", StringComparison.OrdinalIgnoreCase);
 
     private static readonly Dictionary<FetchActionId, FetchActionInfo> ById =
         All.ToDictionary(a => a.Id);

@@ -368,4 +368,39 @@ public class EastMoneySmokeTests
         Assert.True(withLevel == ind, "有行业行没带 BOARD_LEVEL——三级分类取不到层级就没法做中性化");
         Assert.True(withReason > 0, "题材全都没有入选理由——SELECTED_BOARD_REASON 字段名可能变了");
     }
+
+    [Fact]
+    public async Task 分档资金流快照_全市场一轮能拿全且字段齐()
+    {
+        if (!Enabled) { _out.WriteLine("跳过（设 EM_SMOKE=1 才联网跑）"); return; }
+
+        // 这一路是"某天全市场"的入口（push2delay 的 clist），一轮约 60 页。
+        // 冒烟要盯的是三件会**静默出错**的事：翻页有没有少翻、停牌行有没有被当成 0、
+        // 时间戳能不能定出交易日。
+        var provider = new EastMoneyMoneyFlowSnapshotProvider(
+            new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        provider.OnStatus += s => _out.WriteLine("  " + s);
+
+        var snap = await provider.FetchAllAsync();
+
+        _out.WriteLine($"{provider.Host}：交易日 {snap.TradeDate:yyyy-MM-dd}（行情时间 {snap.QuoteTime:HH:mm}）、"
+                     + $"自报 {snap.Total} 只、拿到 {snap.Rows.Count} 只、停牌等 {snap.Suspended} 只");
+
+        Assert.True(snap.Rows.Count > 4000, $"只拿到 {snap.Rows.Count} 只——翻页多半被限流截断了");
+        Assert.NotNull(snap.TradeDate);
+        // 自报总数 = 拿到的 + 没数据的。差额就是**静默丢掉的行**。
+        Assert.Equal(snap.Total, snap.Rows.Count + snap.Suspended);
+
+        // 主力净额 = 超大单 + 大单，是东财自己的口径。拿它反查有没有把哪两档接反了——
+        // 接反了数值照样是数值，没有任何地方会报错。
+        var withAll = snap.Rows.Where(r => r.MainNet is { } && r.SuperNet is { } && r.BigNet is { }).ToList();
+        Assert.True(withAll.Count > snap.Rows.Count * 0.9, "大批行缺档位数据，字段名可能变了");
+        foreach (var r in withAll.Take(200))
+            Assert.Equal(r.SuperNet!.Value + r.BigNet!.Value, r.MainNet!.Value, 0);
+
+        // 每行都得有交易日、收盘价、涨跌幅——少了哪个都说明字段号变了
+        Assert.All(snap.Rows, r => Assert.Equal(snap.TradeDate!.Value, r.TradeDate));
+        Assert.True(snap.Rows.Count(r => r.ClosePrice is > 0) > snap.Rows.Count * 0.9);
+        Assert.True(snap.Rows.Count(r => r.ChangeRate is { }) > snap.Rows.Count * 0.9);
+    }
 }

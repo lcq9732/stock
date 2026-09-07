@@ -117,7 +117,9 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
     }
 
     public string Name => Info.Name;
-    public string DataSource => Info.DataSource;
+    /// <summary>数据源那一列。板块两项在 terminal 通道下会显示成本地文件——
+    /// 见 <see cref="FetchActionInfo.DataSourceText"/>。</summary>
+    public string DataSource => Info.DataSourceText;
     public string Note => Info.Note;
     public string FrequencyHint => Info.Frequency;
     /// <summary>
@@ -266,6 +268,9 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
     /// <summary>是不是【拉取财报预约日】那一行——参数格显示还有多少只没到披露日。</summary>
     public bool IsFetchEarnings => Model.Action == FetchActionId.FetchEarningsSchedule;
     public bool IsFetchMoneyFlow => Model.Action == FetchActionId.FetchMoneyFlowDetail;
+
+    /// <summary>是不是【板块成分股】那一行——参数格显示还剩多少个板块要抓。</summary>
+    public bool IsFetchBoardMembers => Model.Action == FetchActionId.StepBoardMembers;
     public bool NeedsKeywords => Info.Params.HasFlag(FetchActionParams.Keywords);
     public bool NeedsAnyParam => NeedsDate || NeedsYearRange || NeedsLookback || NeedsKeywords || NeedsThorough;
 
@@ -353,6 +358,8 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
 
     public void RefreshStatus()
     {
+        // 数据源那一列会随板块通道变（terminal＝本地文件），所以换过配置也要重播一次
+        Raise(nameof(DataSource));
         Raise(nameof(LastRunTip));
         Raise(nameof(LastMessage));
         Raise(nameof(Enabled));

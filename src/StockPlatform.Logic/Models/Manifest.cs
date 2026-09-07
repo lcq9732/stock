@@ -134,6 +134,37 @@ public class Manifest
     /// 改名会丢历史记录，但这只是"给人看的最近运行时间"，丢了下次跑完就重新有了。
     /// </summary>
     public Dictionary<string, TaskRunRecord> LastRunByTask { get; set; } = new();
+
+    /// <summary>
+    /// **资金净流入整天缺失**的那些交易日（2026-09-06 新增，由全库体检写入）。
+    ///
+    /// 为什么只有这一张日频表进待补名单、别的表都只报不补：新浪那个源的响应是**整只票的全部
+    /// 历史**（窗口是客户端裁的，见 SinaNetInflowFetcher 的类注释），所以"补 1 天"和"补 5 天"
+    /// 的请求数完全一样——一轮全市场就能把所有缺日一起补掉。而用现成的【补指定历史日】是
+    /// 一天一轮、每轮 1 小时 45 分，补 5 天要 9 小时，纯属浪费。
+    ///
+    /// <see cref="MissingDayRetry.Tries"/> 的收敛跟 K 线那套一致：补两轮还拿不到就移进
+    /// <see cref="ConfirmedNetInflowDays"/>，往后体检不再报，否则每次体检都报一遍、每次都白抓一轮。
+    /// </summary>
+    public List<MissingDayRetry> MissingNetInflowDays { get; set; } = new();
+
+    /// <summary>
+    /// 补满两轮仍然拿不到、判定"数据源确实没有"的资金净流入交易日（2026-09-06 新增）。
+    /// 体检时跳过这些天。「彻底体检」会连这份名单一起清空、全部重查——跟库里那张
+    /// MissingBarConfirmed 白名单是一个道理，只是量小（十年才几天），没必要单开一张表。
+    /// </summary>
+    public List<DateTime> ConfirmedNetInflowDays { get; set; } = new();
+}
+
+/// <summary>
+/// 某个整天缺失、等着重抓的交易日（见 <see cref="Manifest.MissingNetInflowDays"/>）。
+/// </summary>
+public class MissingDayRetry
+{
+    public DateTime Day { get; set; }
+
+    /// <summary>补过几轮。补两轮还拿不到就判定"数据源确实没有"。</summary>
+    public int Tries { get; set; }
 }
 
 /// <summary>

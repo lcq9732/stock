@@ -125,6 +125,22 @@ public class SqliteNetInflowDetailRepository : INetInflowDetailRepository
         return map;
     }
 
+    /// <summary>
+    /// 每只票在库里有多少行（2026-09-06）。给"哪些票的 120 天历史还没补齐"排队用。
+    ///
+    /// 一条 GROUP BY 扫 62 万行，几十毫秒——比按只查 5900 次便宜得多。
+    /// </summary>
+    public Dictionary<string, int> GetRowCountByCode()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, COUNT(*) FROM NetInflowDetail GROUP BY code";
+        var map = new Dictionary<string, int>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) map[r.GetString(0)] = r.GetInt32(1);
+        return map;
+    }
+
     public int Count()
     {
         using var conn = Open();

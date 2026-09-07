@@ -77,8 +77,9 @@ public static class NetworkInterfaceBinder
     /// </summary>
     public static string Describe(string? nameOrKeyword)
     {
-        if (string.IsNullOrWhiteSpace(nameOrKeyword))
-            return "push2 走默认路由（没配 Push2NetworkInterface）。";
+        // 没配＝走默认路由，这是常态，日志里说它等于什么都没说（还得解释一句没配哪个键）。
+        // 返回空串让调用方整行跳过；真配了网卡才有信息量，那才是执行时的事实。
+        if (string.IsNullOrWhiteSpace(nameOrKeyword)) return "";
 
         var ip = ResolveIPv4(nameOrKeyword);
         if (ip == null)

@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
@@ -31,6 +31,11 @@ public class EastMoneyNetInflowFetcher : INetInflowFetcher
         add => _rateLimiter.OnStatus += value;
         remove => _rateLimiter.OnStatus -= value;
     }
+
+    /// <summary>2010-03-01——跟 <see cref="SinaNetInflowFetcher"/> 取同一天。⚠ 那天是在新浪源上
+    /// 实测出来的；东财这个实现当前没接线（见类注释），它自己最早能给到哪天**没验过**。真要启用
+    /// 东财时先实测一次再定这个值。</summary>
+    public DateOnly EarliestAvailable => new(2010, 3, 1);
 
     public EastMoneyNetInflowFetcher(RateLimiter rateLimiter, HttpClient? httpClient = null)
     {

@@ -84,11 +84,15 @@ public class SqliteMarketEventRepository : IMarketEventRepository
         cmd.CommandText = """
             INSERT OR REPLACE INTO BlockTrade
                 (trade_date, code, daily_rank, name, deal_price, deal_volume, deal_amount,
-                 premium_ratio, close_price, change_rate, turnover_rate, buyer_name, seller_name, fetched_at)
-            VALUES ($td,$code,$rank,$name,$price,$vol,$amt,$prem,$close,$chg,$turn,$buyer,$seller,$f);
+                 premium_ratio, close_price, change_rate, turnover_rate, buyer_name, seller_name,
+                 buyer_code, seller_code, discount_ratio, free_shares_ratio, total_shares_ratio,
+                 change_rate_1d, change_rate_5d, change_rate_10d, change_rate_20d, fetched_at)
+            VALUES ($td,$code,$rank,$name,$price,$vol,$amt,$prem,$close,$chg,$turn,$buyer,$seller,
+                    $bcode,$scode,$disc,$fsr,$tsr,$c1,$c5,$c10,$c20,$f);
             """;
         var p = Params(cmd, "$td", "$code", "$rank", "$name", "$price", "$vol", "$amt",
-                       "$prem", "$close", "$chg", "$turn", "$buyer", "$seller", "$f");
+                       "$prem", "$close", "$chg", "$turn", "$buyer", "$seller",
+                       "$bcode", "$scode", "$disc", "$fsr", "$tsr", "$c1", "$c5", "$c10", "$c20", "$f");
         foreach (var x in list)
         {
             p["$td"].Value = D(x.TradeDate); p["$code"].Value = x.Code; p["$rank"].Value = x.DailyRank;
@@ -96,7 +100,13 @@ public class SqliteMarketEventRepository : IMarketEventRepository
             p["$amt"].Value = N(x.DealAmount); p["$prem"].Value = N(x.PremiumRatio);
             p["$close"].Value = N(x.ClosePrice); p["$chg"].Value = N(x.ChangeRate);
             p["$turn"].Value = N(x.TurnoverRate); p["$buyer"].Value = x.BuyerName;
-            p["$seller"].Value = x.SellerName; p["$f"].Value = T(x.FetchedAt);
+            p["$seller"].Value = x.SellerName;
+            p["$bcode"].Value = x.BuyerCode; p["$scode"].Value = x.SellerCode;
+            p["$disc"].Value = N(x.DiscountRatio);
+            p["$fsr"].Value = N(x.FreeSharesRatio); p["$tsr"].Value = N(x.TotalSharesRatio);
+            p["$c1"].Value = N(x.ChangeRate1D); p["$c5"].Value = N(x.ChangeRate5D);
+            p["$c10"].Value = N(x.ChangeRate10D); p["$c20"].Value = N(x.ChangeRate20D);
+            p["$f"].Value = T(x.FetchedAt);
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
@@ -151,16 +161,21 @@ public class SqliteMarketEventRepository : IMarketEventRepository
         cmd.CommandText = """
             INSERT OR REPLACE INTO ShareLift
                 (code, free_date, share_type, name, lift_shares, lift_market_cap,
-                 free_ratio, total_ratio, holder_count, fetched_at)
-            VALUES ($code,$fd,$type,$name,$sh,$cap,$fr,$tr,$hc,$f);
+                 free_ratio, total_ratio, holder_count,
+                 pre_free_shares, non_free_shares, before20_change, after20_change, fetched_at)
+            VALUES ($code,$fd,$type,$name,$sh,$cap,$fr,$tr,$hc,$pfs,$nfs,$b20,$a20,$f);
             """;
-        var p = Params(cmd, "$code", "$fd", "$type", "$name", "$sh", "$cap", "$fr", "$tr", "$hc", "$f");
+        var p = Params(cmd, "$code", "$fd", "$type", "$name", "$sh", "$cap", "$fr", "$tr", "$hc",
+                       "$pfs", "$nfs", "$b20", "$a20", "$f");
         foreach (var x in list)
         {
             p["$code"].Value = x.Code; p["$fd"].Value = D(x.FreeDate); p["$type"].Value = x.ShareType;
             p["$name"].Value = x.Name; p["$sh"].Value = N(x.LiftShares); p["$cap"].Value = N(x.LiftMarketCap);
             p["$fr"].Value = N(x.FreeRatio); p["$tr"].Value = N(x.TotalRatio);
-            p["$hc"].Value = N(x.HolderCount); p["$f"].Value = T(x.FetchedAt);
+            p["$hc"].Value = N(x.HolderCount);
+            p["$pfs"].Value = N(x.PreFreeShares); p["$nfs"].Value = N(x.NonFreeShares);
+            p["$b20"].Value = N(x.Before20Change); p["$a20"].Value = N(x.After20Change);
+            p["$f"].Value = T(x.FetchedAt);
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
@@ -181,11 +196,14 @@ public class SqliteMarketEventRepository : IMarketEventRepository
         cmd.CommandText = """
             INSERT OR REPLACE INTO HolderChange
                 (code, notice_date, holder_name, end_date, name, direction, change_shares,
-                 change_ratio, after_shares, after_ratio, start_date, average_price, fetched_at)
-            VALUES ($code,$nd,$holder,$ed,$name,$dir,$cs,$cr,$as,$ar,$sd,$ap,$f);
+                 change_ratio, after_shares, after_ratio, start_date, average_price,
+                 change_free_ratio, close_price, real_price, change_rate_quotes, fetched_at)
+            VALUES ($code,$nd,$holder,$ed,$name,$dir,$cs,$cr,$as,$ar,$sd,$ap,
+                    $cfr,$cp,$rp,$crq,$f);
             """;
         var p = Params(cmd, "$code", "$nd", "$holder", "$ed", "$name", "$dir", "$cs",
-                       "$cr", "$as", "$ar", "$sd", "$ap", "$f");
+                       "$cr", "$as", "$ar", "$sd", "$ap",
+                       "$cfr", "$cp", "$rp", "$crq", "$f");
         foreach (var x in list)
         {
             p["$code"].Value = x.Code; p["$nd"].Value = D(x.NoticeDate); p["$holder"].Value = x.HolderName;
@@ -194,7 +212,10 @@ public class SqliteMarketEventRepository : IMarketEventRepository
             p["$cs"].Value = N(x.ChangeShares); p["$cr"].Value = N(x.ChangeRatio);
             p["$as"].Value = N(x.AfterShares); p["$ar"].Value = N(x.AfterRatio);
             p["$sd"].Value = x.StartDate.HasValue ? D(x.StartDate.Value) : (object)DBNull.Value;
-            p["$ap"].Value = N(x.AveragePrice); p["$f"].Value = T(x.FetchedAt);
+            p["$ap"].Value = N(x.AveragePrice);
+            p["$cfr"].Value = N(x.ChangeFreeRatio); p["$cp"].Value = N(x.ClosePrice);
+            p["$rp"].Value = N(x.RealPrice); p["$crq"].Value = N(x.ChangeRateQuotes);
+            p["$f"].Value = T(x.FetchedAt);
             cmd.ExecuteNonQuery();
         }
         tx.Commit();

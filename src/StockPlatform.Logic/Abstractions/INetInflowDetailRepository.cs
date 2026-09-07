@@ -26,6 +26,16 @@ public interface INetInflowDetailRepository
     /// </summary>
     Dictionary<string, DateTime> GetLastFetchedAt();
 
+    /// <summary>
+    /// 每只票在库里有多少行（2026-09-06）。判断"这只票的 120 天历史补齐了没有"用它。
+    ///
+    /// 为什么不能再用 <see cref="GetLastFetchedAt"/> 判：全市场快照通道（push2delay）每天
+    /// 会把**所有**票的 fetched_at 刷成今天，于是"今天没抓过"这个判据恒为假，
+    /// 逐股补历史那条路会一只都不抓——而历史恰恰只有它补得了。
+    /// 行数不受快照影响：快照一天只加一行，补齐一只票要 120 行。
+    /// </summary>
+    Dictionary<string, int> GetRowCountByCode();
+
     int Count();
     int CountCodes();
 

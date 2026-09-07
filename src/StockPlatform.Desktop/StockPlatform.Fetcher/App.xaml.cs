@@ -274,21 +274,32 @@ public partial class App : Application
         var lhbSeatRepository = new SqliteLhbSeatRepository(paths.CurrentDb);
         lhbSeatRepository.EnsureSchema();
 
-        // 分档资金流（2026-09-03，东财 push2his）——跟已有的【资金净流入】(新浪)是同一件事的
-        // 不同精度：那张表每行只有主力净额合计，这里拆成超大/大/中/小单的净额+净占比。
-        // push2his 跟 push2 是不同域名、独立限流，且不需要人工验证；但全市场 5500+ 个请求。
+        // ════ 分档资金流：两条通道 ════
+        // ① 全市场当日快照（2026-09-06，push2delay）——**日常增量全靠它**：约 60 个请求、
+        //    一两分钟把当天全市场写全。排行接口 clist 本来在 push2 上，那个域名在这台机器上
+        //    被网关拦着；挨个试镜像域名发现 push2delay 通且接口完整（延时行情，收盘后取到的
+        //    就是当日终值）。跟 ② 的数据逐条比对过、零差异，见 provider 的类注释。
+        // ② 逐股补历史（2026-09-03，push2his）——一只票一个请求、给最近 120 个交易日。
+        //    快照只有当天，历史缺口只有它补得了，所以两条都留着。
         //
-        // 限流参数跟板块那边同一套依据（2026-09-04 实测，见上面 boardFetcher 的注释）：
-        // 那三串成功记录（25只/61秒、16只/31秒、33只/97秒）量的就是这个接口——**连发 16~35 个
-        // 就被切**，触发点是累计请求数不是速率。所以每 15 个主动歇 2 分钟，别撞到被切。
-        // 摊下来约 11 秒/只，全市场 5500 只要跨很多轮才抓得完；但它是"空闲时补"的定期项，
-        // 且按"这只票今天抓过没有"断点续传，慢慢攒就行——总比现在每轮 0~33 只然后被封强。
-        // ⚠ 分档资金流**暂时不接浏览器通道**（2026-09-04）：实测 push2his 在东财页面上下文里
-        //    同样能通（贵州茅台 120 条一次拿全），改法跟板块一模一样——但先等板块那条线在真实
-        //    环境里跑顺了再说，别两处一起动、出问题分不清是谁的锅。
-        var moneyFlowProvider = new EastMoneyMoneyFlowProvider(
+        // 限流参数为什么差这么多：
+        //  · 快照 60 个请求就完事，1 秒间隔、每 30 个歇 20 秒，跑完约 1 分半。实测连发 60 页
+        //    一次没被拒，这套参数是留了余量的。
+        //  · 逐股那条是 2026-09-04 量出来的：push2his **连发 16~35 个就被切**，触发点是累计
+        //    请求数不是速率，所以每 15 个主动歇 2 分钟。摊下来约 11 秒/只——补历史本来就是
+        //    "空闲时慢慢补"的活，不赶时间。
+        // 两条是不同域名、独立计数，谁被切都不影响另一条。
+        var moneyFlowChannel = FetcherSettings.ReadMoneyFlowChannel(paths.SettingsPath);
+        var moneyFlowProvider = moneyFlowChannel == "snapshot" ? null : new EastMoneyMoneyFlowProvider(
             new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(5),
                             batchSize: 15, restDuration: TimeSpan.FromMinutes(2)));
+        var moneyFlowSnapshotProvider = moneyFlowChannel == "perstock" ? null
+            : new EastMoneyMoneyFlowSnapshotProvider(
+                new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1),
+                                batchSize: 30, restDuration: TimeSpan.FromSeconds(20)),
+                host: FetcherSettings.ReadMoneyFlowSnapshotHost(paths.SettingsPath),
+                // 跟板块那边共用同一个开关：被网关按域名拦掉的时候，换块网卡出去就通了
+                bindNetworkInterface: ReadSetting(paths.SettingsPath, "Push2NetworkInterface"));
         var moneyFlowRepository = new SqliteNetInflowDetailRepository(paths.CurrentDb);
         moneyFlowRepository.EnsureSchema();
 
@@ -310,7 +321,7 @@ public partial class App : Application
         // 不给它限流器：一轮就一个请求，没有需要节流的东西。
         var sideMenuBoardList = new EastMoneySideMenuBoardListProvider();
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList);
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider);
 
         // 最后那个委托是给【重新读取配置】用的：按下时照当时的配置文件重造板块通道。
         // 传委托而不是把 App 的方法暴露出去，是为了让 MainViewModel 不用知道 browserChannel
@@ -337,6 +348,11 @@ public partial class App : Application
         //    不会自己走。2026-09-04 踩过——主窗口关了进程还赖着，发布时提示"文件被占用"。
         try { _browserChannelToDispose?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); }
         catch { /* 关不掉也别拦着退出 */ }
+
+        // 页面通道那个真浏览器同理——它是我们自己 Process.Start 起来的，
+        // 不显式关掉就会留一个 Chrome 进程和被占着的 profile 目录。
+        try { _pageScraper?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5)); }
+        catch { }
 
         Desktop.Shared.SingleInstanceGuard.Release();
         base.OnExit(e);
@@ -372,11 +388,37 @@ public partial class App : Application
     /// msedgewebview2 子进程和落盘的 Cookie，重建等于把攒下的"熟面孔"身份丢掉，
     /// 而这两个设置也压根不影响它。
     /// </summary>
+    /// <summary>
+    /// 页面通道用的浏览器（真 Chrome/Edge，CDP 驱动）——**全程只建一个**。
+    ///
+    /// 为什么要缓存：它拉着一个浏览器进程和落盘的 profile（Cookie、登录态都在里面）。
+    /// 【重新读取配置】会重造 fetcher，但重造浏览器等于把攒下的"熟面孔"身份丢掉、
+    /// 还会多出一个孤儿浏览器进程。
+    /// </summary>
+    private static ChromeCdpBoardPageScraper? _pageScraper;
+
+    private static ChromeCdpBoardPageScraper PageScraper(FetchPaths paths) =>
+        _pageScraper ??= new ChromeCdpBoardPageScraper(
+            userDataDir: System.IO.Path.Combine(AppContext.BaseDirectory, "data", "local", "chrome-cdp"));
+
     private static IBoardFetcher CreateBoardFetcher(FetchPaths paths, Services.WebView2JsonFetcher browser)
     {
         var bindNic = ReadSetting(paths.SettingsPath, "Push2NetworkInterface");
         var boardChannel = FetcherSettings.ReadBoardChannel(paths.SettingsPath);
         var memberHost = FetcherSettings.ReadBoardMemberHost(paths.SettingsPath);
+
+        // 让调度那边知道现在走的是哪条通道（2026-09-06）——terminal 时板块那两项只读盘、
+        // 一个请求都不发，占用表就不该再把它们记成占着东财（见 FetchTaskCatalog.BoardChannel）。
+        //
+        // 写在这儿而不是 ReloadConfig 里，是因为**这里是唯一真的造出通道对象的地方**：
+        // 启动装配和【重新读取配置】都走这一个方法，而"没换成"的那条路根本不会调它。
+        // 于是这个值天然只会是**真正生效**的那个，不会出现"界面说不占源、实际还在打 push2"。
+        StockPlatform.Scheduling.FetchTaskCatalog.BoardChannel = boardChannel;
+
+        // 浏览器通道不重建（重建＝丢掉攒下的 Cookie 和"熟面孔"身份），但域名可能刚被改过，
+        // 所以把新值塞进去——它拿这个决定预热探针探谁、seed 页回哪儿。
+        // 漏了这一句的话，配置退回 push2 之后探针还在探 pushguest，而且不会报错。
+        browser.MemberHost = memberHost ?? EastMoneyBoardFetcherBase.DefaultMemberHost;
 
         // ── 节奏按"人在网页上翻页"来（2026-09-05，跟着换 pushguest 一起加的）──
         // 两档而不是一档匀速：页与页之间快（RateLimiter 的间隔 ± 抖动），换板块时慢
@@ -388,6 +430,44 @@ public partial class App : Application
         // 换板块 6 秒 × 1000 ≈ 1.7 小时，加上页间间隔和批次休息，一轮 3 小时上下——
         // 比浏览器通道原来的 4 小时还快些，而且不用人守着点验证码。
         const int BoardSwitchSeconds = 6;
+
+        // ── page：操作页面取数（2026-09-05 起的默认）─────────────────────
+        // 一个 URL 都不拼，全靠点表头/点页码，截页面自己发的请求。为什么，见
+        // IBoardMemberPageScraper：同一时刻导航接口 URL 是 503、页面点页码是 200。
+        //
+        // 限流参数按"一次调用＝一个板块"来配（不是一个请求）：一个板块内部要开页面、
+        // 点表头、翻 1~3 页，节奏归 scraper 管；这里管的是板块之间的间隔和熔断退避。
+        // 每 30 个板块歇 60 秒；换板块本身还有 BoardSwitchSeconds 那一档。
+        // 不做外层重试：scraper 内部已经对每一页退避重试过 2 次（5 秒、12 秒），
+        // 外面再重试等于整个板块从开页面重来，白烧一轮配额。
+        // ── terminal：读东财终端客户端下发到本地的文件（2026-09-06）────────
+        // 一个请求都不发，一次读盘就是全量 1031 个板块 94,056 条，耗时以毫秒计，
+        // 而且完全不受出口 IP 风控影响——前三条通道慢和被限流的根子都在这儿。
+        //
+        // 代价是换来一个运行时依赖：得有人定期开一次东方财富终端，文件才会刷新。
+        // 这个依赖失效时没有任何征兆（文件还在、格式还对、只是停在几天前），所以
+        // EastMoneyTerminalBoardFile 强制查文件时间，过期就整条通道不可用。
+        //
+        // 限流参数在这条通道上几乎没意义（成分股不走网络），只有板块列表那一两个请求
+        // 会用到，给一组温和的值即可。板块之间也不歇——那一档是为了把节奏做得像真人翻页。
+        if (boardChannel == "terminal")
+            return new EastMoneyTerminalBoardFetcher(
+                new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
+                                batchSize: 50, restDuration: TimeSpan.FromSeconds(30),
+                                jitter: 0.3, retryDelays: []),
+                file: new EastMoneyTerminalBoardFile(
+                    FetcherSettings.ReadTerminalBoardFile(paths.SettingsPath),
+                    FetcherSettings.ReadTerminalMaxAge(paths.SettingsPath)),
+                bindNetworkInterface: bindNic);
+
+        if (boardChannel == "page")
+            return new EastMoneyBoardPageFetcher(
+                new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
+                                batchSize: 30, restDuration: TimeSpan.FromSeconds(60),
+                                jitter: 0.3, retryDelays: []),
+                scraper: PageScraper(paths),
+                bindNetworkInterface: bindNic,
+                boardSwitchPause: TimeSpan.FromSeconds(BoardSwitchSeconds));
 
         return boardChannel == "http"
             // 纯 HttpClient：没有页面加载那 1~3 秒，也不用等验证脚本，所以能跑得比浏览器通道快。

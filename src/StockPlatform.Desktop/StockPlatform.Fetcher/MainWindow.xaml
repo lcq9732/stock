@@ -472,6 +472,12 @@ eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填
                                                                   RelativeSource={RelativeSource AncestorType=Window}}"
                                                            ToolTip="还有多少只个股没抓过分档资金流。&#10;⚠ 这一项跟别的「还差多少」不一样：接口只给最近约120个交易日、全市场5900只按配额每天只抓百来只，跑满一圈要两个月，所以「今天待抓5800只」是常态、不代表落后。&#10;真正要盯的是「从没抓过」那个数——它归零才算历史铺满了一轮，之后只是按最久没抓的顺序轮换维护。&#10;排队顺序是最久没抓的优先，所以不用担心代码靠后的票轮不到。" />
                                                 <TextBlock VerticalAlignment="Center"
+                                                           Visibility="{Binding IsFetchBoardMembers, Converter={StaticResource BoolToVis}}"
+                                                           Foreground="{DynamicResource Theme.Foreground.Subtle}"
+                                                           Text="{Binding DataContext.PendingBoardMembersText,
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
+                                                           ToolTip="还有多少个板块的成分股要抓。&#10;判据是「7 天内抓过没有」——所以补完一轮后这个数会归零，过 7 天再重新出现，跟【分档资金流】那种天天几千的不一样。&#10;1031 个板块约 2500 个 push2 请求、限流下一轮跑不完是常态，逐板块落库，下轮自动跳过已抓好的。&#10;这个数长期停着不降，说明被限流挡住了，看日志里的失败原因。" />
+                                                <TextBlock VerticalAlignment="Center"
                                                            Visibility="{Binding IsRebuildAdj, Converter={StaticResource BoolToVis}}"
                                                            Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                            Text="{Binding DataContext.PendingAdjRebuildText,

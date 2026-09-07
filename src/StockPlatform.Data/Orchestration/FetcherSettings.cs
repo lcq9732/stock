@@ -54,14 +54,15 @@ public static class FetcherSettings
     }
 
     /// <summary>
-    /// 板块成分股走哪条通道，规范化成 <c>"http"</c>／<c>"browser"</c>，没配就是 <c>"browser"</c>。
+    /// 板块成分股走哪条通道，规范化成 <c>"page"</c>／<c>"browser"</c>／<c>"http"</c>／
+    /// <c>"terminal"</c>，没配就是 <c>"page"</c>（2026-09-05 起的默认）。
     ///
     /// 单独开一个方法是因为这个值有**两个**读它的地方：造 fetcher 的那段（App.CreateBoardFetcher）
     /// 和【重新读取配置】在日志里报告"现在生效的是哪条"。两边各写一遍 <c>?? "http"</c> 加
     /// trim/lower 的话，早晚会出现"日志说 http、实际造的是 browser"这种最难查的不一致。
     /// </summary>
     public static string ReadBoardChannel(string settingsPath) =>
-        (ReadString(settingsPath, "BoardMemberChannel") ?? "browser").Trim().ToLowerInvariant();
+        (ReadString(settingsPath, "BoardMemberChannel") ?? "page").Trim().ToLowerInvariant();
 
     /// <summary>
     /// 成分股接口走哪个域名；没配就返回 null，由
@@ -73,6 +74,58 @@ public static class FetcherSettings
     public static string? ReadBoardMemberHost(string settingsPath)
     {
         var v = ReadString(settingsPath, "BoardMemberHost")?.Trim();
+        return string.IsNullOrEmpty(v) ? null : v;
+    }
+
+    /// <summary>
+    /// 东财终端那份板块成分股文件在哪；没配返回 null，由
+    /// <c>EastMoneyTerminalBoardFile.DefaultPath</c> 兜底。只有通道选 terminal 时才用得上。
+    /// </summary>
+    public static string? ReadTerminalBoardFile(string settingsPath)
+    {
+        var v = ReadString(settingsPath, "TerminalBoardFile")?.Trim();
+        return string.IsNullOrEmpty(v) ? null : v;
+    }
+
+    /// <summary>
+    /// 终端文件多久没刷新就判定不可用（天）；没配或配了非法值返回 null，
+    /// 由 <c>EastMoneyTerminalBoardFile.DefaultMaxAge</c>（3 天）兜底。
+    ///
+    /// 留这个开关是因为"多久算旧"取决于跑批频率：天天跑的话 3 天足够宽松；
+    /// 要是只在周末跑一次，就得放到 8 天以上，否则每次都判定过期、成分股永远不更新。
+    /// </summary>
+    public static TimeSpan? ReadTerminalMaxAge(string settingsPath)
+    {
+        var v = ReadString(settingsPath, "TerminalBoardMaxAgeDays")?.Trim();
+        if (string.IsNullOrEmpty(v)) return null;
+        return double.TryParse(v, System.Globalization.NumberStyles.Float,
+                               System.Globalization.CultureInfo.InvariantCulture, out var d) && d > 0
+            ? TimeSpan.FromDays(d) : null;
+    }
+
+    /// <summary>
+    /// 分档资金流走哪条通道，规范化成 <c>"both"</c>／<c>"snapshot"</c>／<c>"perstock"</c>，
+    /// 没配就是 <c>"both"</c>。
+    ///
+    ///   both     ＝ 先拉全市场当日快照（push2delay，约 60 个请求），再用剩下的时间逐股补历史。
+    ///   snapshot ＝ 只要当天的，不补历史。历史已经补齐之后可以切到这个，一天几十秒。
+    ///   perstock ＝ 只走逐股那条老路（push2his）。快照接口哪天挂了就用它顶着。
+    ///
+    /// 两条通道的数据 2026-09-06 逐条比对过、零差异，所以怎么组合都不会写出不一致的数据。
+    /// </summary>
+    public static string ReadMoneyFlowChannel(string settingsPath) =>
+        (ReadString(settingsPath, "MoneyFlowChannel") ?? "both").Trim().ToLowerInvariant();
+
+    /// <summary>
+    /// 分档资金流快照打哪个域名；没配返回 null，由
+    /// <c>EastMoneyMoneyFlowSnapshotProvider.DefaultHost</c>（push2delay）兜底。
+    ///
+    /// 留这个开关的理由跟 <see cref="ReadBoardMemberHost"/> 一样：东财这些镜像域名说没就没，
+    /// 真出事时改一行配置就能换一个，不用等下一版程序。
+    /// </summary>
+    public static string? ReadMoneyFlowSnapshotHost(string settingsPath)
+    {
+        var v = ReadString(settingsPath, "MoneyFlowSnapshotHost")?.Trim();
         return string.IsNullOrEmpty(v) ? null : v;
     }
 
@@ -169,18 +222,27 @@ public static class FetcherSettings
         // ════════════════════════════════════════════════════════════════════
         {
           // ── 板块成分股走哪条取数通道 ────────────────────────────────────
-          //  browser ＝ WebView2 浏览器通道（Edge 内核）。慢（2500 个请求约 4 小时），
-          //            撞上图片验证码要人去点一下，但**过了验证配额就回来**，能跑得完。【默认】
-          //  http    ＝ 纯 HttpClient。不弹验证码、也不用开浏览器窗口，短时间内很快，
-          //            但被 push2 封了之后**没有恢复出口**，只能干等（实测要一小时以上）。
+          //  page    ＝ **操作页面**：打开行情中心的板块页，点表头「代码」、点「下一页」，
+          //            把页面自己发出去的请求截下来。我们一个 URL 都不拼。【默认】
+          //  browser ＝ WebView2 里注入 JSONP，URL 由我们自己拼（pz=100，请求数少 5 倍）。
+          //  http    ＝ 纯 HttpClient，最快，但最容易被切。
+          //  terminal＝ 读**东财终端客户端**下发到本地的文件，一次读盘拿全量、一个请求都不发。
+          //            1031 个板块 94,056 条，是东财自己的口径（跟已抓到的 405 个板块逐只比过，
+          //            402 个完全一致，差的 3 个是库里还没收录的新股）。
+          //            ⚠ 前提：装了东方财富终端，并且**定期开一次**让它刷新文件。
+          //            文件只在客户端启动时下发，人不开就一直是旧的——所以超过
+          //            TerminalBoardMaxAgeDays 天没刷新会直接判定通道不可用、本轮不更新。
           //
-          //  ⚠ 别被"http 更快"骗了（2026-09-05 实测教训）：push2 的限流是**累计式**的。
-          //  当天 12:00 用 HttpClient 连发 110 个请求零失败，看着完全没问题；可累计跑了
-          //  几百个之后（一轮成分股要 2500 个），12:45 再打就整片"连接被断开"——
-          //  那时连 PowerShell 裸 HTTP 都打不通，是整个 IP 被封，跟代码无关。
-          //  所以短脉冲跑得通 ≠ 一整轮跑得完，默认仍然用 browser。
-          "BoardMemberChannel": "browser",
+          //  ⚠ 为什么默认是最慢的 page（2026-09-05 实测）：同一时刻、同一个浏览器、
+          //  同一个 IP，**导航到接口 URL 是 503，打开板块页点页码是 200**。服务端认的是
+          //  请求的形状（页面 JSONP 带 cb/Referer/Sec-Fetch-Dest:script，导航是 document）。
+          //  通不了的话请求再少也没用，所以宁可用 pz=20、多花几倍请求数。
+          //
+          //  代价：一轮约 4800 个请求、跑 4~8 小时。收市后 16:00 开跑，第二天早上 8 点前收工。
+          "BoardMemberChannel": "page",
+          //"BoardMemberChannel": "browser",
           //"BoardMemberChannel": "http",
+          //"BoardMemberChannel": "terminal",
 
           // ── 板块成分股打哪个域名 ────────────────────────────────────────
           //  不配（保持注释）＝ pushguest.eastmoney.com【默认】
@@ -190,6 +252,40 @@ public static class FetcherSettings
           //  2026-09-05 逐条比对过：BK1629 三页 282 只跟前一天 push2 抓的完全一致。
           //  ⚠ 还没验证连续几百个请求会不会被限流——真被限了就把下面那行放出来退回 push2。
           //"BoardMemberHost": "push2.eastmoney.com",
+
+          // ── 东财终端本地文件（只有 BoardMemberChannel = terminal 时才用）──────
+          //  不配＝ C:\eastmoney\dfcf\data\hs_bk_crc_data_new.dat【默认】
+          //  终端装在别处就把下面这行放出来改成实际路径。
+          //"TerminalBoardFile": "C:\\eastmoney\\dfcf\\data\\hs_bk_crc_data_new.dat",
+          //
+          //  文件多久没刷新就算过期（天）。不配＝ 3【默认】
+          //  为什么是 3 不是 7：成分股本身"抓过 7 天内不重抓"，这里再放到 7 天的话，
+          //  会出现"拿 7 天前的文件更新、并标记成今天抓的"，库里最长陈到 14 天。
+          //  只在周末跑一次的话，把它放到 8 以上，否则每次都判定过期。
+          //"TerminalBoardMaxAgeDays": "3",
+
+          // ── 分档资金流走哪条通道 ────────────────────────────────────────
+          //  both     ＝ 先拉**全市场当日快照**（push2delay，约 60 个请求、一两分钟），
+          //             再用剩下的时间逐股补历史（push2his）。【默认】
+          //  snapshot ＝ 只要当天的，不补历史。等"还有 N 只历史不全"归零之后切到这个，
+          //             这一项就变成每天几十秒的事。
+          //  perstock ＝ 只走逐股那条老路。快照接口哪天挂了就用它顶着（慢：全市场 5500+ 个
+          //             请求、跑几个小时，而且当天的新数据也得一只只补）。
+          //
+          //  ⚠ 快照只有**当天**：它是"某天全市场"的入口，历史缺口只有逐股那条补得了
+          //  （接口给最近 120 个交易日）。两条的数据 2026-09-06 逐条比对过、零差异。
+          //  ⚠ 快照要在**收盘清算之后**跑：盘中拿到的是半天的资金流，程序会认出来并拒绝入库。
+          //"MoneyFlowChannel": "both",
+          //"MoneyFlowChannel": "snapshot",
+          //"MoneyFlowChannel": "perstock",
+
+          // ── 分档资金流快照打哪个域名 ────────────────────────────────────
+          //  不配（保持注释）＝ push2delay.eastmoney.com【默认】
+          //
+          //  为什么是它：排行接口 clist 本来在 push2 上，而 push2 在这台机器上被网关拦着
+          //  （连 TCP 都不通）。2026-09-06 挨个试镜像域名，push2delay 通、而且接口完整。
+          //  「delay」是延时行情，盘中滞后 15 分钟——收盘后取的是当日终值，对我们没影响。
+          //"MoneyFlowSnapshotHost": "push2.eastmoney.com",
 
           // ── K线数据源 ──────────────────────────────────────────────────
           //"BarSource": "Tencent",   // 腾讯为主，某只票拿不到时自动回退新浪重试这一只【默认】

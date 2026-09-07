@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using Microsoft.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
@@ -185,6 +185,28 @@ public class SqliteBarRepository : IBarRepository
         {
             if (reader.IsDBNull(1)) continue;
             result[reader.GetString(0)] = DateTime.ParseExact(reader.GetString(1), DateFormat, CultureInfo.InvariantCulture);
+        }
+        return result;
+    }
+
+    /// <summary>一次取回某个粒度下**全市场**出现过的所有K线日期（去重、升序）——给交易日历用。
+    /// 为什么不用单只指数的序列当日历：那只票自己缺哪一段，日历就瞎哪一段。2026-09-06 踩过——
+    /// 拿上证指数的 day 序列当日历，而它自己只有 2016-01-04 起，结果【拉取区间数据 1990~2016】
+    /// 把 2,360 只最该补历史的老股判成"缺口里没有交易日"全部静默跳过
+    /// （见 <see cref="Logic.Services.TradingCalendar"/>）。全市场并集就不会有这个盲区。
+    /// 走 ix_bar_gran_date(granularity, period_start) 索引扫描。</summary>
+    public List<DateTime> GetDistinctPeriodStarts(string granularity)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT DISTINCT period_start FROM Bar WHERE granularity = $granularity ORDER BY period_start;";
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        var result = new List<DateTime>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(0)) continue;
+            result.Add(DateTime.ParseExact(reader.GetString(0), DateFormat, CultureInfo.InvariantCulture));
         }
         return result;
     }

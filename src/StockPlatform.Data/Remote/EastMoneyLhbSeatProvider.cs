@@ -131,6 +131,9 @@ public class EastMoneyLhbSeatProvider
             TradeId = Str(el, "TRADE_ID"),
             ClosePrice = Num(el, "CLOSE_PRICE"),
             ChangeRate = Num(el, "CHANGE_RATE"),
+            BuyRatio = Num(el, "TOTAL_BUYRIO"),
+            SellRatio = Num(el, "TOTAL_SELLRIO"),
+            ChangeType = Str(el, "CHANGE_TYPE"),
             FetchedAt = DateTime.Now,
         };
     }

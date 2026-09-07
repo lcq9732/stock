@@ -459,6 +459,9 @@ public static class SqliteSchema
                 close_price REAL,
                 change_rate REAL,
                 fetched_at TEXT,
+                buy_ratio REAL,                 -- 该席位买入额占当日总成交额比例。⚠小数不是百分数：0.0103=1.03%
+                sell_ratio REAL,
+                change_type TEXT,               -- 上榜类型代码，比中文 explanation 稳定，分类统计用它
                 PRIMARY KEY (trade_date, code, is_buy, explanation, seq)
             );
 
@@ -653,6 +656,39 @@ public static class SqliteSchema
         // （见 SqliteBankRegulatoryRepository.Upsert 的 ON CONFLICT … WHERE），
         // 也才能把"这个数是 OCR 认的、还没核对"如实告诉看的人。老行为 NULL，按 'pdf' 处理。
         AddColumnIfMissing(conn, "BankRegulatoryMetric", "source", "TEXT");
+        // 龙虎榜席位的三个字段（2026-09-06）——接口 columns=ALL 本来就一起返回，当初没解析。
+        // 只对**以后抓的**生效，已有的 177 万行历史这三列是 NULL：为两个比例字段重抓 264 万行
+        // 不划算（那是所有抓取项里最慢的一个），用户明确说了历史不补。
+        AddColumnIfMissing(conn, "LhbSeat", "buy_ratio", "REAL");
+        AddColumnIfMissing(conn, "LhbSeat", "sell_ratio", "REAL");
+        AddColumnIfMissing(conn, "LhbSeat", "change_type", "TEXT");
+
+        // ── 市场事件三表的补充字段（2026-09-06）──────────────────────────────
+        // 同一个来路：datacenter 客户端一直用 columns=ALL，这些字段本来就跟着回来了，
+        // 只是当初没解析。所以补它们**不产生任何新请求**，改解析 + 加列即可。
+        //
+        // 其中"事件后 N 日涨跌幅"是**滞后字段**：东财事后才算，抓取当天窗口没走完一律返回
+        // null（实测大宗交易 2026-09-04 的股票行全空，2016-01-05 / 2020-06-10 全有值）。
+        // 光靠"水位线→今天"的增量永远填不上，所以增量起始日额外往前推 30 天重抓覆盖，
+        // 见 FetchOrchestrator 的 LaggingFieldLookbackDays。
+        AddColumnIfMissing(conn, "BlockTrade", "buyer_code", "TEXT");
+        AddColumnIfMissing(conn, "BlockTrade", "seller_code", "TEXT");
+        AddColumnIfMissing(conn, "BlockTrade", "discount_ratio", "REAL");
+        AddColumnIfMissing(conn, "BlockTrade", "free_shares_ratio", "REAL");
+        AddColumnIfMissing(conn, "BlockTrade", "total_shares_ratio", "REAL");
+        AddColumnIfMissing(conn, "BlockTrade", "change_rate_1d", "REAL");
+        AddColumnIfMissing(conn, "BlockTrade", "change_rate_5d", "REAL");
+        AddColumnIfMissing(conn, "BlockTrade", "change_rate_10d", "REAL");
+        AddColumnIfMissing(conn, "BlockTrade", "change_rate_20d", "REAL");
+        // ShareLift 每次全量重取，加完下次跑自动补齐历史，不需要回填。
+        AddColumnIfMissing(conn, "ShareLift", "pre_free_shares", "REAL");
+        AddColumnIfMissing(conn, "ShareLift", "non_free_shares", "REAL");
+        AddColumnIfMissing(conn, "ShareLift", "before20_change", "REAL");
+        AddColumnIfMissing(conn, "ShareLift", "after20_change", "REAL");
+        AddColumnIfMissing(conn, "HolderChange", "change_free_ratio", "REAL");
+        AddColumnIfMissing(conn, "HolderChange", "close_price", "REAL");
+        AddColumnIfMissing(conn, "HolderChange", "real_price", "REAL");
+        AddColumnIfMissing(conn, "HolderChange", "change_rate_quotes", "REAL");
     }
 
     /// <summary>
