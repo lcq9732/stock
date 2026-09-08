@@ -43,7 +43,7 @@ public sealed class PlanRunner(
     Action<string> log,
     Action<PlanRunnerState> onState,
     Action? onRoundFinished = null,
-    TimeSpan? hardBudgetOverride = null,
+    TimeSpan? quietBudgetOverride = null,
     SourceOccupancy? occupancy = null)
 {
     /// <summary>
@@ -52,9 +52,9 @@ public sealed class PlanRunner(
     /// </summary>
     public SourceOccupancy Occupancy { get; } = occupancy ?? new SourceOccupancy();
 
-    /// <summary>测试专用：直接指定单项硬超时，跳过 <see cref="HardBudgetFor"/> 的换算。
-    /// 生产代码一律不传——真实预算是分钟到小时级，单元测试等不起。</summary>
-    private readonly TimeSpan? _hardBudgetOverride = hardBudgetOverride;
+    /// <summary>测试专用：直接指定"静默多久算卡死"，跳过 <see cref="MaxQuietFor"/> 的按项取值。
+    /// 生产代码一律不传——真实阈值是分钟级，单元测试等不起。</summary>
+    private readonly TimeSpan? _quietBudgetOverride = quietBudgetOverride;
 
     /// <summary>没有可跑的项时的重扫间隔——也是"改了计划多久生效"的上限。</summary>
     private static readonly TimeSpan Reevaluate = TimeSpan.FromMinutes(1);
@@ -74,33 +74,20 @@ public sealed class PlanRunner(
     /// <summary>空窗短于这个数就不塞空闲项了——刚热身完就得收尾，不值当。</summary>
     private static readonly TimeSpan IdleMinWindow = TimeSpan.FromMinutes(10);
 
-    // ── 单项硬超时（2026-09-04 新增）────────────────────────────────────────────
+    // ── 卡死兜底（2026-09-04 新增，2026-09-08 换判据）──────────────────────────
     // 缘起：调度循环是串行 await、绝不并发的，所以一项**卡住不返回**（不抛异常，就是不回来）
     // 会把整个循环堵死——不光当天后面的项不跑，第二天的轮次也开不了工，必须有人手动停一次。
     // 实测踩到过：【概念和行业板块】和【板块成分股】卡住后只能人工干预，于是这两项一度
     // 变成"只敢手动触发"。有了这道兜底它们才能放回自动计划。
     //
-    // 这跟 deadline 是两回事：deadline 只给空闲项、而且是**建议性**的（靠任务自己收尾），
-    // 定时项连这个都没有。这里是**强制**上限，到点就掐。
+    // 2026-09-08：判据从「总时长」换成「多久没有进展」，原因见 QuietWatchdog 的类注释——
+    // 一句话，跑得久不等于卡死，【龙虎榜】整段回补就是被那个代理指标每天误杀一次。
+    // 现在只要还在吐进度，跑五个小时也不打断；彻底不出声超过阈值才判定卡死。
     //
-    // 预算 = 这一项自己的实测中位数 × 4，再夹在 [30分钟, 8小时] 之间：
-    //   · ×4 是给正常波动留的余量——抓取慢起来两三倍很常见，卡死是几十倍，两者分得开；
-    //   · 下限 30 分钟：Estimate 只有 1 分钟的项（如【概念和行业板块】）×4 才 4 分钟，
-    //     太紧了会把"这次网络特别慢"误杀成卡死；
-    //   · 上限 8 小时：夜里跑的长任务（财务/资金流本身就要 2~3 小时）也得在早上之前松手，
-    //     否则第二天照样开不了工——那就白做了。
-    private const int HardBudgetFactor = 4;
-    private static readonly TimeSpan MinHardBudget = TimeSpan.FromMinutes(30);
-    private static readonly TimeSpan MaxHardBudget = TimeSpan.FromHours(8);
-
-    private TimeSpan HardBudgetFor(FetchPlanItem item)
-    {
-        if (_hardBudgetOverride is { } forced) return forced;
-        var scaled = item.EffectiveEstimate * HardBudgetFactor;
-        if (scaled < MinHardBudget) return MinHardBudget;
-        if (scaled > MaxHardBudget) return MaxHardBudget;
-        return scaled;
-    }
+    // 这跟 deadline 仍是两回事：deadline 只给空闲项、而且是**建议性**的（靠任务自己收尾），
+    // 定时项连这个都没有。这里是强制的，但触发条件是"哑了"，不是"久了"。
+    private TimeSpan MaxQuietFor(FetchPlanItem item)
+        => _quietBudgetOverride ?? item.Info.MaxQuiet ?? QuietWatchdog.DefaultMaxQuiet;
 
     /// <summary>空闲项各自的下一次可跑时刻（跑完 + 冷却）。只活在内存里，重启后重新开始。</summary>
     private readonly Dictionary<FetchActionId, DateTime> _idleNextAllowed = [];
@@ -520,13 +507,15 @@ public sealed class PlanRunner(
 
         WarnIfSoftDependencyStale(item);
 
-        // 硬超时兜底：到点强制掐断这一项，让计划能自己往下走（见 HardBudgetFor 的说明）。
+        // 卡死兜底：哑掉超过阈值就掐断这一项，让计划能自己往下走（见 MaxQuietFor 的说明）。
         // ⚠ CancellationToken 是**协作式**的：任务内部得真的在检查它才掐得动。
         //    卡在网络重试循环、卡在 foreach 里等 ct 的都能掐；要是卡在一个压根不接受 ct 的
         //    同步调用上（比如死等一把 SQLite 写锁），这道兜底也无能为力——那种得从任务内部修。
-        var budget = HardBudgetFor(item);
-        using var timeoutCts = new CancellationTokenSource(budget);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        var maxQuiet = MaxQuietFor(item);
+        using var dog = new QuietWatchdog(maxQuiet, ct,
+            onLongRun: ran => log($"⏳ 计划：【{info.Name}】已经跑了 {Describe(ran)} 还在继续。"
+                                + "**没有掐断**（它一直在报进度，不是卡死）——只是跑这么久通常值得看一眼，"
+                                + "比如它是不是每轮都在重做同一批活。"));
 
         // 数据源占用的**登记**不在这里做，而在执行入口 ExecutePlanItemAsync 里
         // （那是计划和手动共用的唯一入口，登记一处就覆盖两条路，不会重复占用）。
@@ -546,8 +535,9 @@ public sealed class PlanRunner(
 
         try
         {
-            var progress = new Progress<string>(log);
-            var result = await execute(item, deadline, progress, linked.Token);
+            // 任务每说一句话就是一次心跳，看门狗靠它判断"还在往前走"。
+            var progress = dog.Wrap(log);
+            var result = await execute(item, deadline, progress, dog.Token);
             foreach (var err in result.Errors) log($"错误：{err}");
 
             // 「根本没开工」不能记成完成（2026-09-04）：界面上会显示成绿勾"09:25 完成"，
@@ -603,18 +593,20 @@ public sealed class PlanRunner(
             log($"⏹ 计划：【{info.Name}】被停止。");
             throw;
         }
-        // 到点被硬超时掐断——算"这一项失败"，计划照常往下走。
+        // 哑太久被判定卡死掐断——算"这一项失败"，计划照常往下走。
         // 放在"用户停止"那一条之后：两者抛的都是 OperationCanceledException，
-        // 靠 when 分别认自己的 token，别搞反（认错了会把手动停止当成超时、继续跑下一项）。
-        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+        // 靠 when 分别认自己的旗子，别搞反（认错了会把手动停止当成卡死、继续跑下一项）。
+        catch (OperationCanceledException) when (dog.Starved)
         {
-            var msg = $"跑了 {Describe(budget)} 还没结束，已强制掐断（预计只要 {Describe(item.EffectiveEstimate)}）";
+            // 带上它说的最后一句话——比"跑了多久"有用得多，直接指向卡在哪一步。
+            var last = dog.LastMessage is { Length: > 0 } m ? $"，最后一句是「{Trim(m)}」" : "（从头到尾一句话都没说）";
+            var msg = $"{Describe(maxQuiet)}没有任何进展，判定卡住已掐断{last}";
             Finish(item, RunOutcome.Failed, 1, msg);
             // 同下面的普通失败：空闲项要进冷却，否则每分钟回来撞同一个坑
             if (item.Pacing == RunPacing.WhenIdle)
                 _idleNextAllowed[item.Action] = DateTime.Now + IdleCooldown;
             log($"⏱ 计划：【{info.Name}】{msg}。后面的项继续跑。"
-              + "（老是超时说明它真卡住了，去日志里看最后停在哪一步）");
+              + "（不是因为跑得久被掐的——它是真的哑了这么久）");
         }
         catch (Exception ex)
         {
@@ -791,4 +783,12 @@ public sealed class PlanRunner(
         t.TotalHours >= 1 ? $"{(int)t.TotalHours}小时{t.Minutes}分"
         : t.TotalMinutes >= 1 ? $"{(int)t.TotalMinutes}分钟"
         : $"{(int)t.TotalSeconds}秒";
+
+    /// <summary>掐断原因里嵌的"最后一句话"要收进一行——有些进度是多行的（体检那种带 \n 的汇总），
+    /// 原样塞进 LastMessage 会把计划页的状态列撑开。</summary>
+    private static string Trim(string s)
+    {
+        var line = s.ReplaceLineEndings(" ").Trim();
+        return line.Length <= 80 ? line : line[..80] + "…";
+    }
 }

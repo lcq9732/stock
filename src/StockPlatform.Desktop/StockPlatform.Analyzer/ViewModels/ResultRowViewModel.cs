@@ -72,6 +72,9 @@ public class ResultRowViewModel : ISelectableRow
     /// <summary>金叉延续且K在40~60——四档里最稳的一档，标绿加粗。</summary>
     public bool IsKdjSweetSpot => KdjState.Contains("最优");
 
+    /// <summary>峰哥法的形态摘要列，见 StockScreenResult.PatternNote；其它方法为空。</summary>
+    public string PatternNote { get; init; } = "";
+
     /// <summary>近年归母净利趋势（如"23年+6.81 24年+3.40 25年+0.85｜累计+11.06亿"）。连亏或
     /// 三年累计为负时末尾带 ⚠。**只展示不过滤**——回测显示做成硬条件反而降低收益，但样本排除了
     /// ST/退市股、测不出踩雷风险，所以摆出来让用户自己判断（见 StockScreenResult.ProfitTrend）。</summary>
@@ -129,6 +132,7 @@ public class ResultRowViewModel : ISelectableRow
         DepthBucket = r.DepthBucket ?? "",
         KdjState = r.KdjState ?? "",
         ProfitTrend = r.ProfitTrend ?? "",
+        PatternNote = r.PatternNote ?? "",
         ThreeYearCumProfit = r.ThreeYearCumProfit,
     };
 }

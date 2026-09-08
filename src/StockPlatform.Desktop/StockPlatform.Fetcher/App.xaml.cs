@@ -3,11 +3,15 @@
 // System.Windows.Forms.Application，跟这里要用的System.Windows.Application同名——显式取别名
 // 消歧义，不然连这个partial class的基类都会报"ambiguous reference"。
 using Application = System.Windows.Application;
+using StockPlatform.Data.Local;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Remote;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Fetcher.ViewModels;
 using StockPlatform.Logic.Abstractions;
+using StockPlatform.Scheduling;
+using StockPlatform.Scheduling.Tasks;
+using StockPlatform.Tasks;
 
 namespace StockPlatform.Fetcher;
 
@@ -321,13 +325,65 @@ public partial class App : Application
         // 不给它限流器：一轮就一个请求，没有需要节流的东西。
         var sideMenuBoardList = new EastMoneySideMenuBoardListProvider();
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider);
+        // 板块的**父子关系**（2026-09-07）：东财终端落在本地的一份文件，不联网、不占配额。
+        // 跟上面的 boardFetcher 通道选择无关——不管成分股走哪条路，层级树只有这一个来源。
+        // 没装终端就是这一项没数据，Read() 自己会报一句，不影响板块名单本身。
+        var boardHierarchy = new EastMoneyTerminalHierarchyProvider(
+            FetcherSettings.ReadTerminalHierarchyFile(paths.SettingsPath));
+
+        // 行业景气指标（2026-09-07）：周期品的价格和库存，日/周频，是**传统行业分析**那一路的输入。
+        // 复用上面那个 emDataCenter 实例而不是新建——限流器要共享，否则两个东财任务各限各的、
+        // 合起来照样能把源打爆。
+        var indicatorProvider = new EastMoneyIndustryIndicatorProvider(emDataCenter);
+        var indicatorRepository = new SqliteIndustryIndicatorRepository(paths.CurrentDb);
+        indicatorRepository.EnsureSchema();
+
+        // 前五大客户/供应商 + 公司档案（2026-09-07/09-08）：年报里的交易金额，
+        // 供应商＝上游、客户＝下游；档案给它做对手方还原（年报写全称、本地只有简称）。
+        // 三者复用同一个 emDataCenter —— 同一个源就必须是同一个限流器，
+        // 各限各的合起来照样能把源打爆。
+        var custSuppProvider = new EastMoneyCustomerSupplierProvider(emDataCenter);
+        var custSuppRepository = new SqliteCustomerSupplierRepository(paths.CurrentDb);
+        custSuppRepository.EnsureSchema();
+        var companyProfileProvider = new EastMoneyCompanyProfileProvider(emDataCenter);
+        var companyProfileRepository = new SqliteCompanyProfileRepository(paths.CurrentDb);
+        companyProfileRepository.EnsureSchema();
+
+        // ═══ 新式任务的注册表（2026-09-08 起）═══
+        // 2026-09-08 定的规矩：**以后新加的任务都写成独立类**（继承 FetchTaskBase，放在
+        // StockPlatform.Tasks），在这里注册一行就能用——不用再往 6,200 行的 orchestrator 里加
+        // Run*Async、也不用再往 DispatchPlanActionAsync 那个 44 个 case 的 switch 里加分支
+        // （那边只加了一条"registry 里有就走新路"的总分支）。老任务维持原样，理由见
+        // doc/fetcher-task-refactor-design.md：迁移 6,200 行的风险不值得。
+        var tradingDayRepository = new SqliteTradingDayRepository(paths.CurrentDb);
+        tradingDayRepository.EnsureSchema();
+        // 深交所官网，一个月一个请求。日常两个请求、首次 264 个，间隔给 1 秒足够温和。
+        var tradingCalendarProvider = new SzseTradingCalendarProvider(
+            new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        var localTradingDays = new SqliteLocalTradingDaySource(new SqliteBarRepository(paths.CurrentDb));
+
+        // 「确认这天就是没有」名单（2026-09-08）——龙虎榜/融资余额的逐日回补靠它跟交易日历一起
+        // 把空请求砍掉。两张表都交给 orchestrator，老任务那边也能用上。
+        var dailyNoDataRepository = new SqliteDailyFetchNoDataRepository(paths.CurrentDb);
+        dailyNoDataRepository.EnsureSchema();
+
+        var taskRegistry = new FetchTaskRegistry();
+        taskRegistry.Register(FetchActionId.StepTradingCalendar,
+            () => new TradingCalendarTask(tradingDayRepository, tradingCalendarProvider, localTradingDays));
+        taskRegistry.Register(FetchActionId.StepCompanyProfile,
+            () => new CompanyProfileTask(companyProfileRepository, companyProfileProvider));
+        taskRegistry.Register(FetchActionId.StepCustomerSupplier,
+            () => new CustomerSupplierTask(custSuppRepository, companyProfileRepository, custSuppProvider));
+        taskRegistry.Register(FetchActionId.StepIndustryIndicator,
+            () => new IndustryIndicatorTask(indicatorRepository, indicatorProvider));
+
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
 
         // 最后那个委托是给【重新读取配置】用的：按下时照当时的配置文件重造板块通道。
         // 传委托而不是把 App 的方法暴露出去，是为了让 MainViewModel 不用知道 browserChannel
         // 和限流参数这些装配细节——它只管"按现在的配置再给我一个"。
         var viewModel = new MainViewModel(paths, orchestrator, sources, browserChannel,
-                                          () => CreateBoardFetcher(paths, browserChannel));
+                                          () => CreateBoardFetcher(paths, browserChannel), taskRegistry);
         var window = new MainWindow { DataContext = viewModel };
         // 显式认定主窗口：ShutdownMode=OnMainWindowClose 全靠它认对是哪一个。
         // 不设的话 WPF 会拿"第一个 Show 出来的窗口"当主窗口——现在还轮得到它，

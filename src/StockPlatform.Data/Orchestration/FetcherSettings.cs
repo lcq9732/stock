@@ -88,6 +88,20 @@ public static class FetcherSettings
     }
 
     /// <summary>
+    /// 东财终端那份**板块层级树**文件在哪（2026-09-07）；没配返回 null，由
+    /// <c>EastMoneyTerminalHierarchyProvider.DefaultPath</c> 兜底。
+    ///
+    /// 跟 <see cref="ReadTerminalBoardFile"/> 是**两份不同的文件**：那个是"板块里有哪些股票"，
+    /// 这个是"板块的父子关系"。而且这一份跟 BoardMemberChannel 无关——不管成分股走哪条通道，
+    /// 层级树都只有终端本地这一个来源。
+    /// </summary>
+    public static string? ReadTerminalHierarchyFile(string settingsPath)
+    {
+        var v = ReadString(settingsPath, "TerminalHierarchyFile")?.Trim();
+        return string.IsNullOrEmpty(v) ? null : v;
+    }
+
+    /// <summary>
     /// 终端文件多久没刷新就判定不可用（天）；没配或配了非法值返回 null，
     /// 由 <c>EastMoneyTerminalBoardFile.DefaultMaxAge</c>（3 天）兜底。
     ///
@@ -263,6 +277,15 @@ public static class FetcherSettings
           //  会出现"拿 7 天前的文件更新、并标记成今天抓的"，库里最长陈到 14 天。
           //  只在周末跑一次的话，把它放到 8 以上，否则每次都判定过期。
           //"TerminalBoardMaxAgeDays": "3",
+
+          // ── 东财终端的板块层级树文件（板块的父子关系）─────────────────────
+          //  不配＝ C:\eastmoney\dfcf\data\IndustryBlockRelation.dat【默认】
+          //  跟上面 TerminalBoardFile 是两份不同的文件：那个是"板块里有哪些股票"，
+          //  这个是"三级行业挂在哪个二级下、二级挂在哪个一级下"。
+          //  ⚠ 这一份不看文件新旧：行业分类一个季度都未必动一次，几天前的文件照样是对的；
+          //    真解析错了会被"跟 StockIndustryEm 的层级对一遍"那道校验拦下来，比看时间戳可靠。
+          //  没装东财终端就是这一项没数据，不影响板块名单本身。
+          //"TerminalHierarchyFile": "C:\\eastmoney\\dfcf\\data\\IndustryBlockRelation.dat",
 
           // ── 分档资金流走哪条通道 ────────────────────────────────────────
           //  both     ＝ 先拉**全市场当日快照**（push2delay，约 60 个请求、一两分钟），

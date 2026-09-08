@@ -32,7 +32,9 @@ public class EastMoneyMarketEventProvider
         IProgress<string>? progress = null, CancellationToken ct = default)
         => await RunSlicedAsync(
             "RPT_DATA_BLOCKTRADE", "TRADE_DATE", EastMoneyQuerySlicer.ByMonth(start, end),
-            "大宗交易", ParseBlockTrade, onBatch, progress, ct);
+            "大宗交易", ParseBlockTrade, onBatch, progress, ct,
+            // 主键是 (trade_date, code, daily_rank)，排序就得排到 daily_rank 才能定唯一序
+            tieBreaker: "DAILY_RANK");
 
     /// <summary>机构调研。约 28 万行，按年切片。</summary>
     public async Task<int> FetchOrgSurveysAsync(
@@ -145,7 +147,10 @@ public class EastMoneyMarketEventProvider
         IProgress<string>? progress = null, CancellationToken ct = default)
         => await RunSlicedAsync(
             "RPT_SHARE_HOLDER_INCREASE", "NOTICE_DATE", EastMoneyQuerySlicer.ByYear(start, end),
-            "股东增减持", ParseHolderChange, onBatch, progress, ct);
+            "股东增减持", ParseHolderChange, onBatch, progress, ct,
+            // 主键是 (code, notice_date, holder_name, end_date)：同一天同一股会有多个股东，
+            // 同一股东也可能有多个变动区间，两列都要进排序键
+            tieBreaker: "HOLDER_NAME,END_DATE");
 
     /// <summary>
     /// 大宗交易一行的解析。提成命名方法（而不是留在 lambda 里）是为了能被测试直接调用——
@@ -219,10 +224,23 @@ public class EastMoneyMarketEventProvider
     }
 
     /// <summary>分片抓取的公共骨架：切片 → 翻页 → 解析 → 整片回调落库。</summary>
+    /// <param name="tieBreaker">
+    /// 追加到排序键末尾的**定序列**，逗号分隔。
+    ///
+    /// ⚠ 必须给到能唯一定序，否则深分页会跨页重复/遗漏——**不报错但静默丢数据**。
+    /// 日期 + SECURITY_CODE 往往还不够：一只股票同一天可以有几十笔大宗交易，它们之间
+    /// 没有确定顺序，翻页时服务端返回的次序就会变。
+    ///
+    /// 2026-09-07 实测 2016-03 的大宗交易（2435 行 / 5 页）：
+    ///   排序 TRADE_DATE,SECURITY_CODE            → 5 行重复，入库只剩 2430
+    ///   排序 TRADE_DATE,SECURITY_CODE,DAILY_RANK → 0 行重复，2435 行一行不少
+    /// 全期回填累计因此丢了 773 行（0.164%）。这是这个项目在龙虎榜、板块、限售解禁上
+    /// 反复踩到的同一个坑。
+    /// </param>
     private async Task<int> RunSlicedAsync<T>(
         string report, string dateField, List<EastMoneyQuerySlicer.Slice> slices, string label,
         Func<JsonElement, T?> parse, Func<List<T>, int> onBatch,
-        IProgress<string>? progress, CancellationToken ct) where T : class
+        IProgress<string>? progress, CancellationToken ct, string? tieBreaker = null) where T : class
     {
         int total = 0;
         for (int i = 0; i < slices.Count; i++)
@@ -230,8 +248,10 @@ public class EastMoneyMarketEventProvider
             var s = slices[i];
             ct.ThrowIfCancellationRequested();
             var filter = EastMoneyQuerySlicer.DateFilter(dateField, s.Start, s.End);
+            var sortColumns = dateField + ",SECURITY_CODE"
+                            + (string.IsNullOrEmpty(tieBreaker) ? "" : "," + tieBreaker);
             var rows = new List<T>();
-            await foreach (var el in _dc.QueryAsync(report, filter, dateField + ",SECURITY_CODE", ct: ct))
+            await foreach (var el in _dc.QueryAsync(report, filter, sortColumns, ct: ct))
             {
                 var row = parse(el);
                 if (row != null) rows.Add(row);

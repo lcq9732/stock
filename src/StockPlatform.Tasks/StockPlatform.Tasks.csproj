@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    新式抓取任务的实现（2026-09-08 起）。
+
+    ════ 为什么单独一个库 ════
+    抽象（IFetchTask / FetchTaskBase / 注册表）在 StockPlatform.Scheduling 里，但**任务实现不能
+    放那儿**：那个项目的 csproj 注释把自己的边界写死了——"这里只管什么时候该跑哪一项，具体每一项
+    干什么活不归它管"。把任务实现塞进去当场自相矛盾。放 Data 也不对，Data 是数据访问不是编排。
+
+    ════ 放什么进来 ════
+    2026-09-08 定的规矩：**以后新加的任务都写成独立类放这里**，老任务维持在 FetchOrchestrator
+    里不动（迁移 6,200 行 orchestrator 的风险不值得，见 doc/fetcher-task-refactor-design.md）。
+    所以这里会慢慢长，orchestrator 不再变长。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\StockPlatform.Data\StockPlatform.Data.csproj" />
+    <ProjectReference Include="..\StockPlatform.Scheduling\StockPlatform.Scheduling.csproj" />
+  </ItemGroup>
+
+</Project>

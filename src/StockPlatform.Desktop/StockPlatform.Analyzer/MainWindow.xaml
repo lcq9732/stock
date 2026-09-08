@@ -1,4 +1,4 @@
-﻿<Window x:Class="StockPlatform.Analyzer.MainWindow"
+<Window x:Class="StockPlatform.Analyzer.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:StockPlatform.Analyzer"
@@ -968,9 +968,17 @@
 
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
                         <TextBlock Text="固定使用日线" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" />
-                        <TextBlock Text="近N个交易日内有涨停：" VerticalAlignment="Center" Margin="16,0,0,0"
-                                   ToolTip="最近多少个交易日内出现过涨停就列出来，默认7" />
-                        <TextBox Text="{Binding Lookback, UpdateSourceTrigger=PropertyChanged}" Width="50" Margin="4,0" />
+                        <TextBlock Text="回看N根K线：" VerticalAlignment="Center" Margin="16,0,0,0"
+                                   ToolTip="最近多少根K线里出现过&quot;一根穿破三线&quot;就列出来。默认1=只看最新交易日那根（今天收盘后跑、明天开盘前出名单）；调大只是为了回看最近几天核对形态" />
+                        <TextBox Text="{Binding Lookback, UpdateSourceTrigger=PropertyChanged}" Width="40" Margin="4,0" />
+                        <TextBlock Text="三线间距≤" VerticalAlignment="Center" Margin="10,0,0,0"
+                                   ToolTip="命中日 (最高均线−最低均线)÷收盘 的上限，%。默认1.5——三线必须是粘合状态；放大到没有限制时每日会命中几百只且没有超额" />
+                        <TextBox Text="{Binding MaxSpreadPct, UpdateSourceTrigger=PropertyChanged}" Width="40" Margin="4,0" />
+                        <TextBlock Text="%" VerticalAlignment="Center" />
+                        <TextBlock Text="低位≤" VerticalAlignment="Center" Margin="10,0,0,0"
+                                   ToolTip="命中日收盘价在近60日[最低,最高]区间里的位置上限，%。默认20=只要最靠底部那两成；这一条对结果质量的贡献最大" />
+                        <TextBox Text="{Binding MaxLowPositionPct, UpdateSourceTrigger=PropertyChanged}" Width="40" Margin="4,0" />
+                        <TextBlock Text="%" VerticalAlignment="Center" />
 
                         <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
                         <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
@@ -1000,7 +1008,9 @@
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
-                            <DataGridTextColumn Header="近N日涨停次数" Binding="{Binding SortScore}" Width="110" IsReadOnly="True" SortMemberPath="SortScore" />
+                            <DataGridTextColumn Header="低位分(越高越靠底)" Binding="{Binding SortScore, StringFormat=F0}" Width="110" IsReadOnly="True" SortMemberPath="SortScore" />
+                            <DataGridTextColumn Header="阴/阳" Binding="{Binding Category}" Width="55" IsReadOnly="True" SortMemberPath="Category" />
+                            <DataGridTextColumn Header="形态摘要(命中日｜60日位置｜三线间距｜振幅｜是否站上)" Binding="{Binding PatternNote}" Width="330" IsReadOnly="True" SortMemberPath="PatternNote" />
                             <DataGridTemplateColumn Header="操作" Width="186">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>

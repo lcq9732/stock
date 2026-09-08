@@ -41,9 +41,16 @@ public static class ScreeningMethods
             new[] { P("形态窗口(天)", 90, 30, 250, 5), P("摆动点窗口(±天)", 3, 2, 10), P("R²下限", 0.45, 0.1, 0.9, 0.05) },
             (d, p) => { var e = new TriangleConvergenceAnalysisEngine(d.BarRepository); return (c, n) => e.Analyze(c, n, (int)p[0], (int)p[1], p[2]); }),
 
-        new("峰哥法(近N天涨停)",
-            new[] { P("近N天涨停", 7, 1, 30) },
-            (d, p) => { var e = new FoundationAnalysisEngine(d.BarRepository); return (c, n) => e.Analyze(c, n, (int)p[0]); }),
+        // 峰哥法 2026-09-07 换规则：一根K线贯穿MA5/MA10/MA20 + 三线粘合 + 低位（三个参数的默认值
+        // 是实测定的，别随手改，依据见 FoundationAnalysisEngine 类注释）。
+        new("峰哥法(一根K线穿三线)",
+            new[]
+            {
+                P("回看N根K线", 1, 1, 20),
+                P("三线间距上限%", FoundationAnalysisEngine.DefaultMaxSpreadPct, 0.5, 5, 0.5),
+                P("低位上限%", FoundationAnalysisEngine.DefaultMaxLowPositionPct, 5, 100, 5),
+            },
+            (d, p) => { var e = new FoundationAnalysisEngine(d.BarRepository); return (c, n) => e.Analyze(c, n, (int)p[0], p[1], p[2]); }),
 
         new("耀哥法",
             new[] { P("DIF阈值", 0, 0, 1, 0.05) },

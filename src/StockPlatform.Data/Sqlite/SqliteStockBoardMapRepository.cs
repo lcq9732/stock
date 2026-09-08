@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using Microsoft.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
@@ -126,6 +126,49 @@ public class SqliteStockBoardMapRepository : IStockBoardMapRepository
         using var r = cmd.ExecuteReader();
         while (r.Read())
             map[r.GetString(0)] = (r.GetString(1), r.IsDBNull(2) ? "" : r.GetString(2));
+        return map;
+    }
+
+    public Dictionary<string, (string? Parent, int Level)> GetBoardParents()
+    {
+        var map = new Dictionary<string, (string?, int)>(StringComparer.OrdinalIgnoreCase);
+        using var conn = Open();
+
+        // ① 每个板块自己的层级。一级板块只在这一步出现——它从不作为"子"。
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT board_code, MAX(board_level) FROM StockIndustryEm
+                WHERE board_level IS NOT NULL GROUP BY board_code;
+                """;
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) map[r.GetString(0)] = (null, r.GetInt32(1));
+        }
+
+        // ② 父子链：同一只股票、层级差 1 的两行就是一条边。按 (子,父) 数票数，
+        //    取票最多的那个当父——数据干净时每个子只有一个候选（实测 0 个多父冲突），
+        //    真出现分歧时也有个确定的结果，而不是"看哪行先读到"。
+        var votes = new Dictionary<string, (string Parent, int Votes)>(StringComparer.OrdinalIgnoreCase);
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT c.board_code, p.board_code, COUNT(*)
+                FROM StockIndustryEm c
+                JOIN StockIndustryEm p ON p.code = c.code AND p.board_level = c.board_level - 1
+                GROUP BY c.board_code, p.board_code;
+                """;
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var (child, parent, n) = (r.GetString(0), r.GetString(1), r.GetInt32(2));
+                if (!votes.TryGetValue(child, out var cur) || n > cur.Votes)
+                    votes[child] = (parent, n);
+            }
+        }
+
+        foreach (var (child, v) in votes)
+            if (map.TryGetValue(child, out var e)) map[child] = (v.Parent, e.Item2);
+
         return map;
     }
 

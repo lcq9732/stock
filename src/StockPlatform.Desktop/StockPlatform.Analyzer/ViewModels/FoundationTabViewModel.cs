@@ -13,8 +13,9 @@ using StockPlatform.Logic.Services;
 namespace StockPlatform.Analyzer.ViewModels;
 
 /// <summary>"峰哥法"（代码内部沿用旧名 Foundation）tab — 见 doc/analysis-app-design.md 3.2.2。
-/// 2026-07-13 规则简化成只按"近N个交易日内出现过涨停"筛选（固定日线，N 可调、默认7），结果按涨停
-/// 次数从多到少排序。</summary>
+/// 2026-09-07 规则整体换成"一根K线从最低到最高贯穿 MA5/MA10/MA20 + 三线粘合 + 处于低位"
+/// （固定日线，三个参数都可调），结果按"低位分"从高到低排序。三个默认值的实测依据见
+/// FoundationAnalysisEngine 的类注释——纯贯穿一条每日会命中 681 只且没有超额，粘合+低位才有。</summary>
 public class FoundationTabViewModel : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -33,10 +34,19 @@ public class FoundationTabViewModel : INotifyPropertyChanged
     public ObservableCollection<string> LogLines { get; } = new();
     public ObservableCollection<ResultRowViewModel> Results { get; } = new();
 
-    /// <summary>涨停回看窗口 N（最近多少个交易日内出现过涨停），界面可调，默认7。
+    /// <summary>回看窗口 N（最近多少根K线里出现过贯穿三线），界面可调，**默认1 = 只看今天这根**
+    /// ——用户的用法是"今天收盘之后、明天开盘之前把票找出来"。调大只是为了回看最近几天核对形态。
     /// 属性名沿用 Lookback，方便自选股沿用同一个字段存取（WatchlistEntry.Lookback）。</summary>
-    private int _lookback = 7;
+    private int _lookback = 1;
     public int Lookback { get => _lookback; set => Set(ref _lookback, value); }
+
+    /// <summary>三线间距上限（%），界面可调，默认1.5。见 FoundationAnalysisEngine.DefaultMaxSpreadPct。</summary>
+    private double _maxSpreadPct = FoundationAnalysisEngine.DefaultMaxSpreadPct;
+    public double MaxSpreadPct { get => _maxSpreadPct; set => Set(ref _maxSpreadPct, value); }
+
+    /// <summary>低位上限（%），界面可调，默认20。见 FoundationAnalysisEngine.DefaultMaxLowPositionPct。</summary>
+    private double _maxLowPositionPct = FoundationAnalysisEngine.DefaultMaxLowPositionPct;
+    public double MaxLowPositionPct { get => _maxLowPositionPct; set => Set(ref _maxLowPositionPct, value); }
 
     private bool _isBusy;
     public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
@@ -90,6 +100,7 @@ public class FoundationTabViewModel : INotifyPropertyChanged
             var names = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).ToDictionary(s => s.Code, s => s.Name);
             var engine = new FoundationAnalysisEngine(_barRepository);
             int n = Lookback;
+            double spread = MaxSpreadPct, lowPos = MaxLowPositionPct;
             int errorCount = 0;
             var passed = new List<StockScreenResult>();
             await Task.Run(() =>
@@ -98,18 +109,20 @@ public class FoundationTabViewModel : INotifyPropertyChanged
                 {
                     var code = codes[i];
                     ProgressText = $"正在分析 {code} ({i + 1}/{codes.Count})";
-                    var result = engine.Analyze(code, names.GetValueOrDefault(code, code), n);
+                    var result = engine.Analyze(code, names.GetValueOrDefault(code, code), n, spread, lowPos);
                     if (result.Error != null) { errorCount++; continue; }
                     if (!result.Passed) continue;
                     passed.Add(result);
                 }
             });
 
-            // 按涨停次数（SortScore）从多到少展示。
+            // 按"低位分"（SortScore = 100 − 60日位置%）从高到低展示，越靠近60日底部越前面。
             foreach (var r in passed.OrderByDescending(r => r.SortScore ?? 0))
                 Results.Add(ResultRowViewModel.From(r));
 
-            Log($"分析完成，共扫描 {codes.Count} 只股票，{passed.Count} 只近{n}个交易日内出现过涨停（已按涨停次数从多到少排序）" +
+            Log($"分析完成，共扫描 {codes.Count} 只股票，{passed.Count} 只满足" +
+                (n <= 1 ? "最新交易日" : $"近{n}个交易日") +
+                $"贯穿三线 + 三线间距≤{spread:F1}% + 低位≤{lowPos:F0}%（已按低位分从高到低排序）" +
                 (errorCount > 0 ? $"，{errorCount} 只因历史数据不足被跳过" : ""));
         }
         catch (Exception ex)

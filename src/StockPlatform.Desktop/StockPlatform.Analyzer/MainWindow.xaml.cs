@@ -1,4 +1,4 @@
-﻿using System.Windows;
+using System.Windows;
 using System.Windows.Controls;
 using StockPlatform.Analyzer.ViewModels;
 using StockPlatform.Logic.Models;
@@ -273,7 +273,9 @@ public partial class MainWindow : Window
                 {
                     var bars = vm.BarRepository.Query(entry.Code, entry.Granularity);
                     if (bars.Count == 0) throw new InvalidOperationException("没有找到该股票的K线数据。");
-                    new DetailWindow(result, bars, entry.Lookback ?? 60) { Owner = this }.ShowDialog();
+                    // 自选股里存的 Lookback 是加入自选那天用的回看根数；老记录（规则换之前加的）没有
+                    // 这个值时按 1 处理 = 只看最新那根，跟现在的默认口径一致。
+                    new DetailWindow(result, bars, entry.Lookback ?? 1) { Owner = this }.ShowDialog();
                     break;
                 }
                 case "金叉法":

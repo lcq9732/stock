@@ -117,6 +117,22 @@ public class SinaLhbProvider : ILhbProvider
                 FetchedAt = now,
             });
         }
+
+        // ════ 骨架校验（2026-09-08）════
+        // 0 行有两种含义，必须分开：
+        //   · **这天真没有**（非交易日、或当天无人上榜）——页面还是那张正常的龙虎榜页，只是没有数据行。
+        //     实测 2026-09-06（周日）和 2003-01-05 都返回 27,365 字节的完整框架页，含"龙虎榜""tradedate"。
+        //   · **拿到的根本不是那张页**（反爬拦截页、错误页）——那时候把"0 行"当成"这天没有"记进
+        //     DailyFetchNoData 就是**永久漏掉这一天**，那张表是"一次定案"的。
+        // 所以 0 行时验一下骨架：验过了才敢说"确实没有"，验不过按失败抛（调用方只记 error、不定案）。
+        // 有数据的日子不用验——195 条数据行本身就是最好的骨架证明（实测 2026-09-04 为 264KB）。
+        if (rows.Count == 0 &&
+            !(html.Contains("tradedate", StringComparison.OrdinalIgnoreCase) && html.Contains("龙虎榜", StringComparison.Ordinal)))
+        {
+            throw new RateLimitedException(
+                $"新浪龙虎榜 {date:yyyy-MM-dd} 返回的页面不像龙虎榜页（{bytes.Length} 字节，缺少页面骨架），" +
+                "疑似反爬拦截——按失败处理，不当成\"这天没有数据\"。");
+        }
         return rows;
     }
 

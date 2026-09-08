@@ -7,6 +7,7 @@ using System.Windows.Threading;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Remote;
 using StockPlatform.Scheduling;
+using StockPlatform.Scheduling.Tasks;
 using StockPlatform.Logic.Abstractions;
 
 namespace StockPlatform.Fetcher.ViewModels;
@@ -69,6 +70,13 @@ public class MainViewModel : INotifyPropertyChanged
     /// 造法留在 App 那边——限流参数、浏览器通道这些装配细节不该漏进 ViewModel。
     /// </summary>
     private readonly Func<IBoardFetcher>? _recreateBoardFetcher;
+
+    /// <summary>
+    /// 新式任务的注册表（2026-09-08）——registry 里有的动作走
+    /// <see cref="DispatchPlanActionAsync"/> 开头那条总分支，不进下面那个 switch。
+    /// 见 <see cref="IFetchTask"/>：以后新任务只写一个类 + 在 App.xaml.cs 注册一行。
+    /// </summary>
+    private readonly FetchTaskRegistry? _taskRegistry;
     private bool _verifyingEastMoney;
     private readonly StreamWriter? _logFileWriter;
     private readonly FetchPaths _paths;
@@ -365,11 +373,17 @@ public class MainViewModel : INotifyPropertyChanged
     /// </param>
     public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources,
                          Services.WebView2JsonFetcher? browserChannel = null,
-                         Func<IBoardFetcher>? recreateBoardFetcher = null)
+                         Func<IBoardFetcher>? recreateBoardFetcher = null,
+                         FetchTaskRegistry? taskRegistry = null)
     {
         _browserChannel = browserChannel;
         _recreateBoardFetcher = recreateBoardFetcher;
+        _taskRegistry = taskRegistry;
         _orchestrator = orchestrator;
+        // 「我还活着」的旁路（2026-09-08）：黑盒步骤（建索引那种一句 SQL 跑十几分钟的）
+        // 靠它定时说一声，免得界面看着像死了。⚠ 只写日志，**不进 progress**——
+        // 那条定时话术证明不了有前进，接进 progress 会把卡死判定（QuietWatchdog）废掉。
+        _orchestrator.Liveness = Log;
         _paths = paths;
         AvailableSources = availableSources;
         // Default to Tencent, not the first entry — EastMoney gets network-limited/blocked much
@@ -2398,6 +2412,20 @@ public class MainViewModel : INotifyPropertyChanged
     private Task<FetchResult> DispatchPlanActionAsync(
         FetchPlanItem item, DateTime? deadline, IProgress<string> progress, CancellationToken ct)
     {
+        // ── 新式任务走这一条总分支（2026-09-08）──
+        // 加过这一次之后，**再新增任务就不用碰这个 switch 了**：写一个类（继承 FetchTaskBase，
+        // 放 StockPlatform.Tasks）+ 在 App.xaml.cs 的注册表里加一行即可。
+        // 任务的进度/心跳是事件广播，registry 在这里把它桥回老的 IProgress——于是日志窗、
+        // 计划引擎、静默看门狗全都零改动就能收到（见 FetchTaskRegistry.RunAsync）。
+        if (_taskRegistry?.Has(item.Action) == true)
+        {
+            var args = new TaskRunArgs(
+                Mode: item.EffectiveMode,
+                Day: ParseOptionalDate(item.DateText) is { } d ? DateOnly.FromDateTime(d) : null,
+                Deadline: deadline);
+            return _taskRegistry.RunAsync(item.Action, args, progress, ct);
+        }
+
         switch (item.Action)
         {
             case FetchActionId.FetchAll:
@@ -2564,6 +2592,10 @@ public class MainViewModel : INotifyPropertyChanged
 
             case FetchActionId.StepDayCoverage:
                 return _orchestrator.RunStepDayCoverageCheckAsync(progress, ct);
+
+            case FetchActionId.StepFillProbeFloor:
+                // 纯查库（三次 GROUP BY，本机 23GB 库上约 40 秒），推到线程池别让界面假死
+                return Task.Run(() => _orchestrator.RunStepFillProbeFloorAsync(progress, ct), ct);
 
             // ───── 另外三处复合动作拆出来的（2026-09-02）─────
 

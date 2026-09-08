@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -27,6 +27,7 @@
     <ProjectReference Include="..\..\StockPlatform.Logic\StockPlatform.Logic.csproj" />
     <ProjectReference Include="..\..\StockPlatform.Data\StockPlatform.Data.csproj" />
     <ProjectReference Include="..\..\StockPlatform.Scheduling\StockPlatform.Scheduling.csproj" />
+    <ProjectReference Include="..\..\StockPlatform.Tasks\StockPlatform.Tasks.csproj" />
   </ItemGroup>
 
   <!-- 单实例守卫跟 Analyzer 共用同一份源码（不是各自复制一份）——见该文件的类注释 -->

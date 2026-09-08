@@ -331,6 +331,72 @@ public class SqliteBoardRepository : IBoardRepository
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// 写板块层级树（2026-09-07）。数据来自东财终端本地文件，见 EastMoneyTerminalHierarchyProvider。
+    ///
+    /// 是**整棵树的快照替换**：先把所有已有的 parent_code/board_level 抹掉，再按这批边重写。
+    /// 不这么做的话，行业改版时被摘掉的父子关系会一直赖在库里。
+    ///
+    /// 三条保护：
+    /// 1. edges 为空**直接返回**，不清空——文件读不到时该保留上一次的树，跟 ReplaceAll 的空集合同理；
+    /// 2. Board 表里没有的板块代码只计数不报错（终端的板块名单跟我们抓的可能差几个）；
+    /// 3. 全程一个事务，中途出错整棵树回到原样，不会留下"清了一半"的状态。
+    /// </summary>
+    /// <returns>(写进去几个板块, 库里没有的板块代码数, 清掉几行旧关系)。</returns>
+    public (int Updated, int Unknown, int Cleared) UpdateHierarchy(IReadOnlyList<BoardHierarchyEdge> edges)
+    {
+        if (edges.Count == 0) return (0, 0, 0);
+
+        // 边只带子板块的层级，但一级板块**从不作为子出现**，它的层级藏在别人的 ParentLevel 里。
+        // 所以得把两头都收进来，否则 23 个一级行业的 board_level 会全是 NULL。
+        var levels = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var parents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var e in edges)
+        {
+            levels[e.BoardCode] = e.Level;
+            parents[e.BoardCode] = e.ParentCode;
+            if (!levels.ContainsKey(e.ParentCode)) levels[e.ParentCode] = e.ParentLevel;
+        }
+
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+
+        int cleared;
+        using (var clr = conn.CreateCommand())
+        {
+            clr.Transaction = tx;
+            clr.CommandText = """
+                UPDATE Board SET parent_code = NULL, board_level = NULL
+                WHERE parent_code IS NOT NULL OR board_level IS NOT NULL;
+                """;
+            cleared = clr.ExecuteNonQuery();
+        }
+
+        int updated = 0, unknown = 0;
+        using (var upd = conn.CreateCommand())
+        {
+            upd.Transaction = tx;
+            upd.CommandText = "UPDATE Board SET parent_code = $p, board_level = $l WHERE board_code = $c;";
+            var pp = upd.CreateParameter(); pp.ParameterName = "$p"; upd.Parameters.Add(pp);
+            var pl = upd.CreateParameter(); pl.ParameterName = "$l"; upd.Parameters.Add(pl);
+            var pc = upd.CreateParameter(); pc.ParameterName = "$c"; upd.Parameters.Add(pc);
+
+            foreach (var (code, level) in levels)
+            {
+                pc.Value = code;
+                pl.Value = level;
+                // 一级板块没有父，写 NULL 而不是空串——查询时 parent_code IS NULL 才是"树根"的判据
+                pp.Value = parents.TryGetValue(code, out var par) ? par : DBNull.Value;
+
+                if (upd.ExecuteNonQuery() > 0) updated++;
+                else unknown++;   // 终端认识、我们没抓到的板块，不算错
+            }
+        }
+
+        tx.Commit();
+        return (updated, unknown, cleared);
+    }
+
     public void UpsertBoards(IEnumerable<Board> boards)
     {
         var list = boards.ToList();

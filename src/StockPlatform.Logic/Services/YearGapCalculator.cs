@@ -17,19 +17,35 @@ public static class YearGapCalculator
     /// <item>本地最早日落在区间内 → 只补它前面那段缺口 <c>[yearStart, 最早日-1]</c>；</item>
     /// <item>本地最早日晚于区间末尾 → 整个区间都缺，全抓。</item>
     /// </list>
+    /// 以上四种都先被 <paramref name="noDataBefore"/> 抬过起点：上一轮已经探明"这天之前数据源没有"
+    /// 的那段不再重复请求，水位盖住整个缺口时直接跳过。
     /// </summary>
     /// <param name="calendar">
     /// 本地已知的交易日历，可为 null（null 时不做"缺口里有没有交易日"的优化判断，一律放行去抓）。
     /// </param>
+    /// <param name="noDataBefore">
+    /// 已探明的水位（<c>BarProbeFloor</c> 表，见 <see cref="ProbeFloorPlanner"/>）：这只票在这一天
+    /// 之前，数据源**确认**没有数据（上一轮真发过请求、成功、返回 0 行）。起点抬到它，抬过缺口末尾
+    /// 就整只跳过。这是 2026-09-07 加的——在此之前，"那些年还没上市"的票每轮都要重新试一遍，
+    /// 一次区间回补光在这上面就烧掉一万六千个请求、四个半小时，写入为零。
+    /// </param>
     public static (DateTime Start, DateTime End) For(
         string code, IReadOnlyDictionary<string, DateTime> earliestByCode,
-        DateTime yearStart, DateTime yearEnd, TradingCalendar? calendar = null)
+        DateTime yearStart, DateTime yearEnd, TradingCalendar? calendar = null,
+        IReadOnlyDictionary<string, DateTime>? noDataBefore = null)
     {
-        if (!earliestByCode.TryGetValue(code, out var earliest)) return (yearStart, yearEnd);
-        if (earliest.Date <= yearStart.Date) return (yearEnd.AddDays(1), yearEnd);   // 空区间=跳过
+        // 已探明"这天之前没有" → 起点抬上来。抬过整个区间就没什么可抓的了。
+        var start = yearStart;
+        if (noDataBefore != null && noDataBefore.TryGetValue(code, out var floor) && floor.Date > start.Date)
+            start = floor.Date;
+        if (start > yearEnd.Date) return (yearEnd.AddDays(1), yearEnd);             // 空区间=跳过
+
+        if (!earliestByCode.TryGetValue(code, out var earliest)) return (start, yearEnd);
+        if (earliest.Date <= start.Date) return (yearEnd.AddDays(1), yearEnd);      // 空区间=跳过
         if (earliest.Date <= yearEnd.Date)
         {
             var gapEnd = earliest.AddDays(-1);
+            if (start > gapEnd.Date) return (yearEnd.AddDays(1), yearEnd);          // 水位已盖住整个缺口
 
             // 缺口里一个交易日都没有 → 再请求也只会拿回空数据，直接跳过。典型情形：区间起点写的是
             // 2016-01-01（自然年首日），而 A 股 2016 年第一个交易日是 01-04，中间只有元旦假期——
@@ -40,11 +56,11 @@ public static class YearGapCalculator
             // 覆盖不到的区间它一律"查不到"，那只说明日历不知道、不代表那段真没开过市。少了这个前提，
             // 就是 2026-09-06 那个 bug：日历（上证指数 day）只有 2016 年之后，却拿它断言 1990~2015
             // 没有交易日，把 2,360 只最该补历史的老股全部静默跳过。见 <see cref="TradingCalendar"/>。
-            if (calendar != null && calendar.CoversFrom(yearStart) && !calendar.HasAnyIn(yearStart, gapEnd))
+            if (calendar != null && calendar.CoversFrom(start) && !calendar.HasAnyIn(start, gapEnd))
                 return (yearEnd.AddDays(1), yearEnd);
 
-            return (yearStart, gapEnd); // 只补前面的缺口
+            return (start, gapEnd); // 只补前面的缺口
         }
-        return (yearStart, yearEnd);
+        return (start, yearEnd);
     }
 }

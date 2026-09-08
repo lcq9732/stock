@@ -7,8 +7,8 @@ using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Analyzer;
 
-/// <summary>"峰哥法"条件详情窗口——2个面板:主图(K线+MA+涨停标记) + 成交量(量柱+5日均量+涨停/基准标记)。
-/// 2026-07-10 随峰哥法规则改成"涨停+持续放量"而重做,不再显示 BOLL/MACD。</summary>
+/// <summary>"峰哥法"条件详情窗口——2个面板:主图(K线+MA5/10/20+命中K线竖线+命中日三线上下沿两条
+/// 水平线) + 成交量(量柱+5日均量,仅参考)。2026-09-07 随规则改成"一根K线贯穿三线"而改标注。</summary>
 public partial class DetailWindow : Window
 {
     private readonly FoundationChartResult _chart;
@@ -18,7 +18,7 @@ public partial class DetailWindow : Window
         InitializeComponent();
         Loaded += (_, _) => WindowState = WindowState.Maximized;
 
-        _chart = FoundationChartBuilder.Build(bars, result.Code, result.Name, lookback);
+        _chart = FoundationChartBuilder.Build(bars, lookback);
 
         DataContext = new FoundationDetailViewModel
         {

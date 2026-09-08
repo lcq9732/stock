@@ -1,4 +1,4 @@
-﻿using OxyPlot;
+using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -8,10 +8,11 @@ using StockPlatform.Logic.Services;
 namespace StockPlatform.Analyzer;
 
 /// <summary>
-/// "峰哥法"(2026-07-10 新规则:近N天涨停 + 涨停后持续放量)条件详情图所需的一切——2个面板:
-/// 主图(K线+MA5/10/20，并在窗口内每个涨停日打红色三角、最近一次涨停日 L 单独标出) + 成交量
-/// (量柱+5日均量线，标出涨停日 L 和涨停前5日均量基准线)。图上标的东西正好对应两条规则:哪天涨停、
-/// 涨停后量能有没有持续放大。
+/// "峰哥法"(2026-09-07 新规则:一根K线贯穿MA5/MA10/MA20 + 三线粘合 + 低位)条件详情图所需的一切
+/// ——2个面板: 主图(K线+MA5/10/20，命中那根K线打竖线，并把命中日的"三线最高/最低"画成两条水平线，
+/// 一眼能看出这根K线的最低价确实在三线之下、最高价在三线之上) + 成交量(量柱+5日均量线，只作参考:
+/// 放量实测反而更差，没做成条件，见 FoundationAnalysisEngine 类注释)。
+/// 命中日的判定跟引擎同一套判据(Low &lt; min三线 且 High &gt; max三线, 取最近一根)，所以图文一致。
 /// </summary>
 public class FoundationChartResult
 {
@@ -32,7 +33,7 @@ public class FoundationChartResult
 
 public static class FoundationChartBuilder
 {
-    public static FoundationChartResult Build(List<Bar> bars, string code, string name, int lookbackDays)
+    public static FoundationChartResult Build(List<Bar> bars, int lookbackDays)
     {
         var closes = bars.Select(b => b.Close).ToList();
         var volumes = bars.Select(b => b.Volume).ToList();
@@ -43,15 +44,25 @@ public static class FoundationChartBuilder
         var ma20 = TechnicalIndicators.SMA(closes, 20);
         var volMa5 = TechnicalIndicators.SMA(volumes, 5);
 
-        // 窗口内的涨停日(跟引擎同口径:收盘涨停 + LimitUpClassifier)，及最近一次 L。
-        var limitUpDays = new List<int>();
-        int windowStart = Math.Max(1, last - lookbackDays + 1);
-        for (int t = windowStart; t <= last; t++)
+        // 命中日(跟 FoundationAnalysisEngine 同口径:最近一根 Low<三线最低 且 High>三线最高 的K线)。
+        // 引擎的窗口起点是 PositionWindow-1(60日位置窗口要凑得齐)，这里照抄，免得图上标出一根
+        // 引擎其实没算过的K线。
+        int windowStart = Math.Max(FoundationAnalysisEngine.PositionWindow - 1, last - lookbackDays + 1);
+        int l = -1;
+        double hitLoMa = double.NaN, hitHiMa = double.NaN;
+        for (int t = last; t >= windowStart; t--)
         {
-            double pct = closes[t - 1] > 0 ? (closes[t] - closes[t - 1]) / closes[t - 1] * 100 : 0;
-            if (LimitUpClassifier.IsLimitUp(code, name, pct)) limitUpDays.Add(t);
+            if (double.IsNaN(ma5[t]) || double.IsNaN(ma10[t]) || double.IsNaN(ma20[t])) continue;
+            double loMa = Math.Min(ma5[t], Math.Min(ma10[t], ma20[t]));
+            double hiMa = Math.Max(ma5[t], Math.Max(ma10[t], ma20[t]));
+            if (bars[t].Low < loMa && bars[t].High > hiMa)
+            {
+                l = t;
+                hitLoMa = loMa;
+                hitHiMa = hiMa;
+                break;
+            }
         }
-        int l = limitUpDays.Count > 0 ? limitUpDays[^1] : -1;
 
         int visibleCount = Math.Min(ChartBuilder.DefaultVisibleBars, bars.Count);
         double visibleStart = bars.Count - visibleCount;
@@ -88,14 +99,16 @@ public static class FoundationChartBuilder
         ChartBuilder.AddLine(main, mainDay.Key, ma10, "MA10", OxyColors.Orange);
         ChartBuilder.AddLine(main, mainDay.Key, ma20, "MA20", OxyColors.Purple);
 
-        // 窗口内所有涨停日：红三角标在当天最高价上方一点。
-        if (limitUpDays.Count > 0)
+        // 命中那根K线：竖线标出；再把命中日的"三线最高/最低"画成两条水平线——K线的最低价必须在
+        // 下面那条之下、最高价在上面那条之上，这就是规则1本身。
+        if (l != -1)
         {
-            var marks = new ScatterSeries { Title = "涨停日", MarkerType = MarkerType.Triangle, MarkerFill = OxyColors.Red, MarkerSize = 6, XAxisKey = mainDay.Key };
-            foreach (var t in limitUpDays) marks.Points.Add(new ScatterPoint(t, bars[t].High));
+            main.Annotations.Add(NewMarkerLine(mainDay.Key, l, "贯穿三线"));
+            var marks = new ScatterSeries { Title = "命中K线", MarkerType = MarkerType.Triangle, MarkerFill = OxyColors.Red, MarkerSize = 6, XAxisKey = mainDay.Key };
+            marks.Points.Add(new ScatterPoint(l, bars[l].High));
             main.Series.Add(marks);
-            // 最近一次涨停 L：一条竖线 + 文字，主图/量图都标。
-            main.Annotations.Add(NewMarkerLine(mainDay.Key, l, "最近涨停"));
+            main.Annotations.Add(NewLevelLine(mainDay.Key, hitHiMa, $"命中日三线最高 {hitHiMa:F2}"));
+            main.Annotations.Add(NewLevelLine(mainDay.Key, hitLoMa, $"命中日三线最低 {hitLoMa:F2}"));
         }
 
         var mainCrosshair = NewCrosshair(mainDay.Key, last);
@@ -114,9 +127,9 @@ public static class FoundationChartBuilder
         AddVolumeBars(volumeModel, volDay.Key, bars, volumes);
         ChartBuilder.AddLine(volumeModel, volDay.Key, volMa5, "5日均量", OxyColors.Orange);
 
-        // 最近一次涨停 L 在量图上也标一条竖线。（旧版的"涨停前5日均量基准线"随 C2 放量规则一起去掉了。）
+        // 命中日在量图上也标一条竖线。量能不参与判定（放量实测反而更差），只是让用户顺便看一眼。
         if (l != -1)
-            volumeModel.Annotations.Add(NewMarkerLine(volDay.Key, l, "最近涨停"));
+            volumeModel.Annotations.Add(NewMarkerLine(volDay.Key, l, "命中日"));
 
         var volumeCrosshair = NewCrosshair(volDay.Key, last);
         volumeModel.Annotations.Add(volumeCrosshair);
@@ -161,6 +174,21 @@ public static class FoundationChartBuilder
         StrokeThickness = 1,
         Text = text,
         TextColor = OxyColors.Red,
+    };
+
+    /// <summary>一条水平参考线（命中日的三线最高/最低）——横线用 YAxis，所以不设 XAxisKey 会
+    /// 落在默认Y轴上，这里显式带上 X 轴 key 是为了跟主图那套自定义日期轴对齐。</summary>
+    private static LineAnnotation NewLevelLine(string xAxisKey, double y, string text) => new()
+    {
+        Type = LineAnnotationType.Horizontal,
+        XAxisKey = xAxisKey,
+        Y = y,
+        Color = OxyColors.DarkOrange,
+        LineStyle = LineStyle.Dash,
+        StrokeThickness = 1,
+        Text = text,
+        TextColor = OxyColors.DarkOrange,
+        TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Left,
     };
 
     private static LineAnnotation NewCrosshair(string xAxisKey, int last) => new()

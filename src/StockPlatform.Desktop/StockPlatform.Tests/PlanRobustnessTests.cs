@@ -139,7 +139,7 @@ public class PlanRobustnessTests
             catch (OperationCanceledException) { }
         });
 
-        // 这些用例本该毫秒级跑完（硬超时都设成几百毫秒），10 秒是很宽的余量。
+        // 这些用例本该毫秒级跑完（静默阈值都设成几百毫秒），10 秒是很宽的余量。
         if (await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(10))) != run)
             Assert.Fail("计划跑了 10 秒还没收工——多半是一项都没被挑中，调度循环在空等。"
                       + "先看 NewHarness 里那个组的 Repeat today 该不该跑。");
@@ -461,7 +461,7 @@ public class PlanRobustnessTests
     }
 
     /// <summary>
-    /// 一项**卡住不返回**（不抛异常，就是不回来）必须被硬超时掐断，后面的项照跑。
+    /// 一项**卡住不返回**（不抛异常，就是不回来）必须被掐断，后面的项照跑。
     ///
     /// 这是 2026-09-04 补的兜底：调度循环串行 await、绝不并发，所以卡住一项就堵死整个循环——
     /// 不光当天后面的项不跑，第二天的轮次也开不了工，非得有人手动停一次。实测
@@ -469,6 +469,8 @@ public class PlanRobustnessTests
     ///
     /// 跟上面那个「抓取超时」测试的区别：那边任务**主动抛**了 TaskCanceledException，
     /// 这边任务什么都不抛、单纯不返回——只有引擎自己带表才掐得动。
+    ///
+    /// 2026-09-08：判据换成"多久没有进展"之后这个用例原样成立——它本来就是一句话都不说地卡着。
     /// </summary>
     [Fact]
     public async Task 卡住不返回的项被掐断_计划继续往下跑()
@@ -488,19 +490,93 @@ public class PlanRobustnessTests
                     return new FetchResult();
                 },
                 log: _ => { }, onState: _ => { },
-                hardBudgetOverride: TimeSpan.FromMilliseconds(300));
+                quietBudgetOverride: TimeSpan.FromMilliseconds(300));
 
             await RunUntilStopped(runner, cts.Token);
 
             Assert.Contains(h.Second.Action, 跑过的);              // ← 关键：没被卡死的那项堵住
             Assert.Equal(RunOutcome.Failed, h.First.LastOutcome);  // 掐断算"这一项失败"，不是"被停止"
             Assert.Equal(RunOutcome.Ok, h.Second.LastOutcome);
-            Assert.Contains("掐断", h.First.LastMessage ?? "");    // 失败原因要说清是超时，不是别的错
+            Assert.Contains("掐断", h.First.LastMessage ?? "");    // 失败原因要说清是被判定卡死
         }
         finally { try { Directory.Delete(h.Dir, true); } catch { } }
     }
 
-    /// <summary>手动停止不能被误认成硬超时——两者抛的都是 OperationCanceledException，
+    /// <summary>
+    /// 一直在报进度的项**绝不能**被掐——这是 2026-09-08 换判据的全部意义。
+    ///
+    /// 老的硬超时是"总时长×4、最少 30 分钟"，【龙虎榜】切到「首次整段回补」后要跑两小时，
+    /// 而它的耗时样本全是增量模式的 2 秒，于是每天被掐在 30 分钟上；掐断不记耗时样本，
+    /// 样本永远停在 2 秒，第二天照掐。这里让任务跑到远超阈值、但一直吐进度，断言它跑到自然结束。
+    /// </summary>
+    [Fact]
+    public async Task 一直在报进度的长任务不会被掐()
+    {
+        var h = NewHarness(RepeatKind.Once);
+        try
+        {
+            using var cts = new CancellationTokenSource();
+            var runner = new PlanRunner(h.Plan, h.Store, h.Paths,
+                execute: async (item, deadline, progress, ct) =>
+                {
+                    if (item.Action == h.First.Action)
+                    {
+                        // 阈值 300ms，这里跑 1.5 秒（5 倍）——只要每 50ms 说一句就不该被掐
+                        for (int i = 0; i < 30; i++)
+                        {
+                            progress.Report($"处理中 {i}/30");
+                            await Task.Delay(50, ct);
+                        }
+                        return new FetchResult();
+                    }
+                    cts.Cancel();
+                    return new FetchResult();
+                },
+                log: _ => { }, onState: _ => { },
+                quietBudgetOverride: TimeSpan.FromMilliseconds(300));
+
+            await RunUntilStopped(runner, cts.Token);
+
+            Assert.Equal(RunOutcome.Ok, h.First.LastOutcome);      // ← 跑满 5 倍阈值也不该被掐
+            Assert.Equal(RunOutcome.Ok, h.Second.LastOutcome);
+        }
+        finally { try { Directory.Delete(h.Dir, true); } catch { } }
+    }
+
+    /// <summary>
+    /// 掐断原因里要带上任务说的最后一句话。"跑了 30 分钟"对排查没用，"最后一句是 合成板块指数
+    /// 360/1031"直接指向它停在哪一步——夜里跑的任务全靠这一句定位。
+    /// </summary>
+    [Fact]
+    public async Task 掐断原因带上最后一句进度()
+    {
+        var h = NewHarness(RepeatKind.Once);
+        try
+        {
+            using var cts = new CancellationTokenSource();
+            var runner = new PlanRunner(h.Plan, h.Store, h.Paths,
+                execute: async (item, deadline, progress, ct) =>
+                {
+                    if (item.Action == h.First.Action)
+                    {
+                        progress.Report("扫到第 360 个板块");
+                        await Task.Delay(Timeout.Infinite, ct);   // 说完这句就哑了
+                    }
+                    cts.Cancel();
+                    return new FetchResult();
+                },
+                log: _ => { }, onState: _ => { },
+                quietBudgetOverride: TimeSpan.FromMilliseconds(300));
+
+            await RunUntilStopped(runner, cts.Token);
+
+            Assert.Equal(RunOutcome.Failed, h.First.LastOutcome);
+            Assert.Contains("扫到第 360 个板块", h.First.LastMessage ?? "");
+        }
+        finally { try { Directory.Delete(h.Dir, true); } catch { } }
+    }
+
+    /// <summary>手动停止不能被误认成"卡死"——两者抛的都是 OperationCanceledException，
     /// 靠各自的 token 区分。认错了会把"用户按了停止"当成超时、继续跑下一项。</summary>
     [Fact]
     public async Task 手动停止不会被误判成超时()
@@ -519,7 +595,7 @@ public class PlanRobustnessTests
                     return new FetchResult();
                 },
                 log: _ => { }, onState: _ => { },
-                hardBudgetOverride: TimeSpan.FromMinutes(10));   // 预算很宽，不该是它触发
+                quietBudgetOverride: TimeSpan.FromMinutes(10));   // 阈值很宽，不该是它触发
 
             await RunUntilStopped(runner, cts.Token);
 

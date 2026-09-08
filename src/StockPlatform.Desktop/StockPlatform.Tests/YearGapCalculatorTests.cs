@@ -99,6 +99,77 @@ public class YearGapCalculatorTests
         Assert.False(IsSkip(w));
     }
 
+    // ── 已探明水位（BarProbeFloor / ProbeFloorPlanner）─────────────────────
+
+    [Fact]
+    public void SkipsWhenProbeFloorCoversWholeRange()
+    {
+        // 2020 年上市的票，上一轮已探明"2017-01-01 之前数据源没有" → 整个 1990~2016 都不用再试。
+        // 这一条就是 2026-09-07 那次空跑要省掉的主体：5558 只里绝大多数属于这种。
+        var earliest = new Dictionary<string, DateTime> { ["300750"] = new(2020, 6, 1) };
+        var floors = new Dictionary<string, DateTime> { ["300750"] = new(2017, 1, 1) };
+
+        Assert.True(IsSkip(YearGapCalculator.For("300750", earliest, YearStart, YearEnd, FullCalendar(), floors)));
+    }
+
+    [Fact]
+    public void SkipsWhenProbeFloorCoversTheGap()
+    {
+        // 1991-01-02 上市的老票：缺口只有开市首日到年末那几天，上一轮已探明那段没有
+        var earliest = new Dictionary<string, DateTime> { ["600000"] = new(1991, 1, 2) };
+        var floors = new Dictionary<string, DateTime> { ["600000"] = new(1991, 1, 2) };
+
+        Assert.True(IsSkip(YearGapCalculator.For(
+            "600000", earliest, new DateTime(1990, 12, 19), YearEnd, FullCalendar(), floors)));
+    }
+
+    [Fact]
+    public void FetchesOnlyThePartAboveTheProbeFloor()
+    {
+        // 水位只盖住缺口的前半段 → 剩下那段仍要抓，起点抬到水位
+        var earliest = new Dictionary<string, DateTime> { ["600000"] = new(2010, 6, 1) };
+        var floors = new Dictionary<string, DateTime> { ["600000"] = new(2000, 1, 1) };
+
+        var w = YearGapCalculator.For("600000", earliest, YearStart, YearEnd, FullCalendar(), floors);
+        Assert.False(IsSkip(w));
+        Assert.Equal(new DateTime(2000, 1, 1), w.Start);
+        Assert.Equal(new DateTime(2010, 5, 31), w.End);
+    }
+
+    [Fact]
+    public void ProbeFloorEarlierThanRangeStartChangesNothing()
+    {
+        var earliest = new Dictionary<string, DateTime> { ["600000"] = new(2010, 6, 1) };
+        var floors = new Dictionary<string, DateTime> { ["600000"] = new(1985, 1, 1) };
+
+        var w = YearGapCalculator.For("600000", earliest, YearStart, YearEnd, FullCalendar(), floors);
+        Assert.Equal(YearStart, w.Start);
+        Assert.Equal(new DateTime(2010, 5, 31), w.End);
+    }
+
+    [Fact]
+    public void ProbeFloorAppliesEvenWithNoLocalBars()
+    {
+        // 本地一根都没有、但上一轮探明过水位（比如更早那次是从别的粒度补的）→ 起点照样抬
+        var floors = new Dictionary<string, DateTime> { ["300750"] = new(2010, 1, 1) };
+        var w = YearGapCalculator.For("300750", new Dictionary<string, DateTime>(),
+            YearStart, YearEnd, FullCalendar(), floors);
+
+        Assert.Equal(new DateTime(2010, 1, 1), w.Start);
+        Assert.Equal(YearEnd, w.End);
+    }
+
+    [Fact]
+    public void OtherCodesAreUnaffectedByAnotherCodesFloor()
+    {
+        var earliest = new Dictionary<string, DateTime> { ["600000"] = new(2010, 6, 1) };
+        var floors = new Dictionary<string, DateTime> { ["300750"] = new(2017, 1, 1) };
+
+        var w = YearGapCalculator.For("600000", earliest, YearStart, YearEnd, FullCalendar(), floors);
+        Assert.Equal(YearStart, w.Start);
+        Assert.Equal(new DateTime(2010, 5, 31), w.End);
+    }
+
     // ── TradingCalendar 自身 ────────────────────────────────────────────
 
     [Fact]

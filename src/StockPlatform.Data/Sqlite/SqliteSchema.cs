@@ -36,6 +36,28 @@ public static class SqliteSchema
                 PRIMARY KEY (code, granularity, period_start)
             );
 
+            -- 数据源已确认"这只标的在这一天之前没有K线"的水位（2026-09-07）。
+            --
+            -- 为什么需要它：【拉取区间数据】往前补历史时，一只 2020 年上市的票被请求 1990~2016
+            -- 必然返回空。以前"成功返回空"这个结论不落库，于是每次重跑都得重新试一遍——
+            -- 2026-09-07 用户实测：5558 只个股 × 3 个粒度 ≈ 一万六千个请求、四个半小时零写入，
+            -- 光第一个阶段就跑了 1 小时 15 分（数据库文件 mtime 全程不动，用户看着像空转）。
+            -- 记下来之后，下一轮把缺口起点抬到这一天，抬过缺口就整只跳过、连请求都不发。
+            --
+            -- 跟 MissingBarConfirmed 的分工：那张表是**逐日**白名单（一天一行），解决体检时
+            -- "停牌 vs 漏抓"分不清的问题，量小（十年才几天）；这张表记的是**一整段**的下界，
+            -- 一行顶几千个交易日——上市前那段用逐日表存要写千万行，存不下。
+            --
+            -- granularity 要记：day/day_hfq/day_raw 三条线的水位线本来就各自独立算。
+            -- probed_at 留着是为了有回头路：【全库数据体检】勾「彻底体检」会连这张表一起清空重探。
+            CREATE TABLE IF NOT EXISTS BarProbeFloor (
+                code TEXT NOT NULL,
+                granularity TEXT NOT NULL,
+                no_data_before TEXT NOT NULL,   -- 已确认：数据源在这一天之前没有该标的该粒度的K线
+                probed_at TEXT,
+                PRIMARY KEY (code, granularity)
+            );
+
             CREATE TABLE IF NOT EXISTS FundamentalMetric (
                 code TEXT NOT NULL,
                 metric_key TEXT NOT NULL,
@@ -79,14 +101,28 @@ public static class SqliteSchema
 
             CREATE TABLE IF NOT EXISTS Board (
                 board_code TEXT PRIMARY KEY,
-                board_type INTEGER NOT NULL,   -- 0=概念/题材, 1=行业
+                board_type INTEGER NOT NULL,   -- 0=概念/题材, 1=行业, 2=地区
                 name TEXT,
                 member_count INTEGER,
                 change_pct REAL,
                 amount REAL,
                 leader_code TEXT,
                 leader_name TEXT,
-                as_of TEXT
+                as_of TEXT,
+                -- 行业板块的层级树（2026-09-07）。数据来自**东财终端的本地文件**
+                -- IndustryBlockRelation.dat，不联网，见 EastMoneyTerminalHierarchyProvider。
+                --
+                -- parent_code  父板块；一级行业、概念板块、地区板块都是 NULL
+                -- board_level  这一行**自己**的层级 1/2/3；概念和地区板块为 NULL（它们本来就是平的）
+                --
+                -- 实测只覆盖行业板块：488/496 个行业在树里，概念 504 个和地区 31 个一个都没有。
+                -- 23 个一级就是申万那套（公用事业/电子/计算机/机械设备…）。
+                --
+                -- ⚠ 这两列由层级导入写，**板块列表的 upsert 绝不能碰它们**——列表每天抓一次、
+                --   层级季度才变一次，抓列表时根本不知道父级是谁，一碰就抹成 NULL。
+                --   跟 member_count 是同一个道理（那个由成分股抓取写）。
+                parent_code TEXT,
+                board_level INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS BoardMember (
@@ -379,6 +415,54 @@ public static class SqliteSchema
                 PRIMARY KEY (code, granularity, period_start)
             );
 
+            -- 交易日历（2026-09-08）——全库公共设施，凡"按交易日取数"的地方都读它。
+            --
+            -- ════ 为什么要落一张表 ════
+            -- 在此之前判交易日有两种土办法，都不好：逐日回补只跳周末（于是每个节假日每轮都白发
+            -- 一次请求，龙虎榜从 2002 年补一轮就是几百个），或者临时从 Bar 表 DISTINCT 归纳
+            -- （23GB 库走索引也要扫全部索引条目，几十秒，每个任务起手扫一遍纯浪费）。
+            --
+            -- ════ 两个来源，按年份分工（source 列记的就是这个）════
+            --   · 2005-01 起  = 'szse'：深交所官网 monthList 接口，官方权威，一个月一个请求。
+            --                   实测覆盖到 2026-12（下一年的日历交易所年底才发布）。
+            --   · 2004-12 及以前 = 'local'：深交所接口对 2004-12 及更早一律返回空（逐月二分确认过），
+            --                   所以这段从**本地全市场K线**归纳：某天只要有任何一只票有K线就是交易日。
+            --                   这段是死历史、永不再变，建一次就固定了。
+            --
+            -- ⚠ 归纳法的前提是本地K线自己不缺——2026-09-06 踩过：拿上证指数当日历，而它本地只有
+            --   2016 年起，结果 2,360 只最该补历史的老股被判成"缺口里没有交易日"静默跳过。
+            --   所以用**全市场并集**，且读的时候必须先问 TradingCalendar.CoversFrom：日历覆盖不到的
+            --   区间，"查不到交易日"的真实含义是"日历不知道"，不是"确实没有交易日"。
+            CREATE TABLE IF NOT EXISTS TradingDay (
+                day    TEXT PRIMARY KEY,   -- yyyy-MM-dd，只存交易日（非交易日不入库）
+                source TEXT                -- 'szse' 深交所官方 / 'local' 本地K线归纳
+            );
+
+            -- 「抓过、确认这个源这天就是没有」的名单（2026-09-08）。
+            --
+            -- 跟 MissingBarConfirmed 是同一个思路，只是那张按"票×粒度×日"记、这张按"数据集×日"记：
+            -- 龙虎榜/融资余额是**整天一次性返回**的，没有"某只票缺"这回事，只有"这一整天空"。
+            --
+            -- 为什么需要它：日历挡掉的是节假日，可还剩一类——是交易日、但这个源上确实没有
+            -- （新浪龙虎榜早年那几年）。不记下来的话每轮回补都要把它们重试一遍。
+            --
+            -- 什么情况才写（判据在 FetchOrchestrator 那边，这里记着免得日后误改）：
+            --   · 必须是**正常返回**的空。抛异常（网络挂了/限流/空响应）一律不记——
+            --     一次抽风换来永久漏一天，是这套机制唯一的致命失败模式。
+            --   · 必须**骨架校验通过**：返回的页面得有那张表的结构，光是"0 行"可能是空壳反爬页。
+            --   · 必须是 3 天以前的日子。近几天的空可能只是还没发布（两所融资余额 T+1、
+            --     龙虎榜当晚才出），那种不记、下轮照抓。
+            -- 满足这三条就**一次定案**，不像K线那样要两轮：同一个源抓第二次并不会带来新信息，
+            -- 真正要防的空壳页已经由骨架校验挡住了。
+            --
+            -- 回头路：【全库数据体检】勾「彻底体检」按 dataset 清空、全部重查。
+            CREATE TABLE IF NOT EXISTS DailyFetchNoData (
+                dataset      TEXT NOT NULL,   -- 'Lhb' / 'MarginDetail'，将来别的日频表直接加
+                day          TEXT NOT NULL,   -- 交易日 yyyy-MM-dd
+                confirmed_at TEXT,
+                PRIMARY KEY (dataset, day)
+            );
+
             -- 业绩预告（2026-09-03，东财 RPT_PUBLIC_OP_NEWPREDICT）。本地此前完全没有这份数据。
             --
             -- 值钱在三点：① 比正式财报早一个月以上（Q3预告10月中 vs 财报10月底；年报预告1月底 vs 年报4月）；
@@ -623,6 +707,168 @@ public static class SqliteSchema
             -- 按行业/题材反查成分（"这个三级行业里有哪些股"）不是主键最左前缀。
             CREATE INDEX IF NOT EXISTS ix_industryem_board ON StockIndustryEm(board_code);
             CREATE INDEX IF NOT EXISTS ix_themeem_board ON StockThemeEm(board_code);
+
+            -- ══ 行业景气指标（2026-09-07）══
+            -- 传统行业（周期股）分析那一路的输入，跟风口分析分开：风口看叙事能不能兑现成
+            -- 别人的报表，周期股看价格和库存本身。日/周频，比季报早一个季度。
+            -- 来源：东财 F10 的 RPTA_DATA_IF_* 三张报表，走 datacenter，不碰 push2。
+            -- 实测 116 个指标 / 658 只股票 / 1190 条映射，历史只到 2024-04。
+
+            CREATE TABLE IF NOT EXISTS IndustryIndicator (
+                indicator_id TEXT PRIMARY KEY,   -- EMI00139010
+                name         TEXT,               -- 全国猪粮比价
+                orig_name    TEXT,               -- 全国大中城市:猪粮比价（带统计范围，排查靠它）
+                unit         TEXT,               -- 元/公斤；比值类指标为空
+                frequency    TEXT,               -- 日45 / 月55 / 周14 / 旬1 / 半年1
+                granularity  TEXT,               -- 001个股 / 002行业（东财标注不全准，原样存）
+                chart_type   TEXT,               -- 折线图72 / 柱状图44 —— 决定拉历史走哪个接口
+                source       TEXT,               -- 商务部、上市公司公告…
+                fetched_at   TEXT
+            );
+
+            -- 指标序列。**故意不带股票代码**：同一指标在不同股票下的值完全一样
+            -- （实测玻璃期货 4 只股票同日同为 1431，7 个多股共享指标 569 个日期 0 冲突）。
+            -- 带上就是把 116 份序列存成 1190 份重复。东财返回的 CLOSE_PRICE 也丢掉——
+            -- 我们自己有日K，多留一份只会多一个跟本地对不上的口径。
+            CREATE TABLE IF NOT EXISTS IndustryIndicatorValue (
+                indicator_id TEXT NOT NULL,
+                trade_date   TEXT NOT NULL,      -- 值所属日期，不是写入日
+                value        REAL,
+                yoy_pct      REAL,               -- 同比%，只有柱状图那 44 个给，其余 NULL
+                PRIMARY KEY (indicator_id, trade_date)
+            );
+
+            -- 股票 ↔ 指标。反过来用才是重点：板块 → 成分股关联最多的指标。
+            CREATE TABLE IF NOT EXISTS StockIndustryIndicator (
+                code            TEXT NOT NULL,   -- 我们的 6 位码
+                indicator_id    TEXT NOT NULL,
+                indicator_order INTEGER,         -- 东财给的展示序＝相关性排序，可直接当权重
+                fetched_at      TEXT,
+                PRIMARY KEY (code, indicator_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_stockindicator_ind ON StockIndustryIndicator(indicator_id);
+
+            -- ══ 前五大客户/供应商（2026-09-07）══
+            -- 找"产业链上/中/下游"标签一路找空之后能拿到的最硬的产业链数据：不是别人的分类判断，
+            -- 是年报里的交易金额 —— 供应商＝上游，客户＝下游。
+            -- 来源：东财 F10「客户及供应商」RPT_F10_BUSINESS_CUSTSUPP，走 datacenter。
+            -- 实测 76.5 万行 / 2002 年至今 / 2025 年覆盖 5284 只（92%）；对手名 53% 是真名。
+            CREATE TABLE IF NOT EXISTS StockCustomerSupplier (
+                code         TEXT NOT NULL,      -- 6 位码
+                report_date  TEXT NOT NULL,      -- 报告期，值所属日期不是写入日；含年报/中报/一季报
+                is_supplier  INTEGER NOT NULL,   -- 0=客户(下游) 1=供应商(上游)
+                rank         INTEGER NOT NULL,   -- 1-5 前五名；**6=「其余客户/其余供应商」**
+                -- 交易对手名。53% 是真名，其余是"第一名""客户1"这类匿名披露（公司自己决定，
+                -- 大公司往往匿名）。第二期做实体消歧时就靠这一列连供应链网络。
+                partner_name TEXT,
+                amount       REAL,
+                -- 占该类合计的百分比 = amount / total_amount。
+                -- ⚠ 东财那列叫 TOI_RATIO（Total Operating Income），**名字骗人**：供应商组的
+                --   分母是采购总额而非营收（宁德时代 2025 供应商合计 5774 亿 > 它的营收）。
+                --   所以这里不叫 toi_ratio，免得以后每个人都以为是"占营收比"。
+                pct          REAL,
+                -- 该类合计：客户组≈营收口径，供应商组＝采购口径。两者不同源，别混着比。
+                total_amount REAL,
+                report_name  TEXT,               -- "2025年报" / "2026中报"
+                fetched_at   TEXT,
+                -- 对手方还原出来的上市公司代码（2026-09-08）。**没匹配上就是 NULL，不猜**。
+                -- 只做两档：精确（全称一字不差）和归一化（去空白/括号/公司后缀后相等）。
+                -- 不做"含简称"那种模糊匹配——只多 5 个百分点，却会造出看着像、其实不是的错边，
+                -- 而产业链数据有错边比没有更糟：你会照着它做判断。
+                partner_code TEXT,
+                match_type   TEXT,               -- 'exact' / 'normalized'；NULL = 没匹配上
+                PRIMARY KEY (code, report_date, is_supplier, rank)
+            );
+            -- rank=6 那行（「其余」）是**校验和**：前五 + 其余必须 = 100%，
+            -- 落库后一眼能看出有没有漏行。所以它也要存，不是冗余。
+            CREATE INDEX IF NOT EXISTS ix_custsupp_partner ON StockCustomerSupplier(partner_name);
+            -- 匹配上的对手方（2026-09-08）。没匹配上就是 NULL —— **不猜**。
+            CREATE INDEX IF NOT EXISTS ix_custsupp_pcode ON StockCustomerSupplier(partner_code);
+
+            -- ══ 客户/供应商按年抓取的完成度（2026-09-08）══
+            -- 为什么要这张表：新式任务骨架会在 Deadline / MaxItems 到点时**从批中间截断**，
+            -- 而且那算"正常完成"（走 OnCompletedAsync、返回 Completed、界面上打勾）。
+            -- 判据要是只看"这一年有没有数据"，被截断的年份下轮就会被当成抓过了跳过——
+            -- 2019 年抓了 6000/66000 行也算"有数据"，剩下 6 万行永远不来，而且**毫无征兆**。
+            --
+            -- 一般原则：任务的水位线粒度必须**细于**骨架的截断粒度。
+            -- 这里截断粒度是批（2000 行），所以水位线不能是"年（有/无）"，得是"这一年落了多少行"。
+            CREATE TABLE IF NOT EXISTS CustSuppYearState (
+                year       INTEGER PRIMARY KEY,
+                reported   INTEGER,   -- 接口自报的总行数
+                saved      INTEGER,   -- 实际落库行数；< reported 就是没抓完，下轮重来
+                updated_at TEXT
+            );
+
+            -- ══ 公司档案（2026-09-08）══
+            -- 数据源：东财 RPT_HSF9_BASIC_ORGINFO（走 datacenter），5634 家 A 股、14 页。
+            -- 每股一行的**快照**（接口无时间维度）。
+            --
+            -- 直接用途是给客户/供应商做**实体消歧**——年报里写的是"福建时代星云科技有限公司"
+            -- 这种全称，本地只有简称，对不上；有了 full_name 才能把对手方还原成股票代码。
+            -- 但它本身也是一份公司基本面档案（省份、员工数、实控人、主营业务…），
+            -- 一次请求全带回来了，不是只为匹配存的。
+            CREATE TABLE IF NOT EXISTS CompanyProfile (
+                code             TEXT PRIMARY KEY,   -- 6 位码
+                full_name        TEXT,               -- 宁德时代新能源科技股份有限公司 ← 匹配靠它
+                abbr             TEXT,               -- 宁德时代
+                name_en          TEXT,
+                org_form         TEXT,               -- 企业性质
+                found_date       TEXT,
+                listing_date     TEXT,
+                listing_state    TEXT,
+                -- ⚠ 这两列差 **1 万倍**，光看名字看不出来：
+                --   reg_capital_wan 是万元（东财 REG_CAPITAL），reg_capital 是元（REG_CAPITALY）。
+                --   宁德时代：462677.041 万元 = 4626770410 元。
+                reg_capital_wan  REAL,
+                reg_capital      REAL,
+                currency         TEXT,
+                province         TEXT,
+                city             TEXT,
+                district         TEXT,
+                reg_address      TEXT,
+                address          TEXT,
+                postcode         TEXT,
+                industry_csrc    TEXT,               -- 证监会行业
+                emp_num          INTEGER,            -- 员工数，空值率约 12%
+                legal_person     TEXT,
+                actual_holder    TEXT,               -- 实际控制人
+                final_holder     TEXT,               -- 最终控制人，空值率约 41%
+                holder_name      TEXT,               -- 控股股东
+                holder_ratio     REAL,               -- 控股股东持股比
+                chairman         TEXT,
+                president        TEXT,
+                secretary        TEXT,
+                publish_person   TEXT,               -- 信披负责人
+                secretary_tel    TEXT,
+                org_tel          TEXT,
+                org_fax          TEXT,
+                org_email        TEXT,
+                org_web          TEXT,
+                reg_num          TEXT,               -- 统一社会信用代码
+                law_firm         TEXT,
+                accountfirm      TEXT,               -- 会计师事务所
+                cpa              TEXT,               -- 签字会计师
+                ah_change        TEXT,               -- 实控人变更历史
+                main_business    TEXT,               -- 主营业务，一句话（平均 44 字）
+                org_code_em      TEXT,               -- 东财机构号，排查时对得上它那边
+                report_date      TEXT,               -- 档案数据截止日
+                fetched_at       TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_companyprofile_name ON CompanyProfile(full_name);
+
+            -- 长文本单独一张（2026-09-08）。不是洁癖：CompanyProfile 会被**匹配步骤全表读**
+            -- （5634 行），而 business_review 平均 4186 字、最长 4.6 万字，一个字段占整条记录
+            -- 体积的 69%。混在一行里，每次全表扫描要多读 3 倍数据；而这些长文本是"查某一家时
+            -- 才看"的东西。拆开后：档案约 30MB、长文本约 68MB。
+            CREATE TABLE IF NOT EXISTS CompanyNarrative (
+                code            TEXT PRIMARY KEY,
+                org_profile     TEXT,   -- 公司简介（平均 664 字）
+                org_evolution   TEXT,   -- 公司沿革/大事年表（平均 386 字）
+                business_scope  TEXT,   -- 经营范围，工商登记原文（平均 252 字）
+                business_review TEXT,   -- 经营评述（平均 4186 字，最长 46410）
+                fetched_at      TEXT
+            );
             """;
         cmd.ExecuteNonQuery();
 
@@ -689,6 +935,16 @@ public static class SqliteSchema
         AddColumnIfMissing(conn, "HolderChange", "close_price", "REAL");
         AddColumnIfMissing(conn, "HolderChange", "real_price", "REAL");
         AddColumnIfMissing(conn, "HolderChange", "change_rate_quotes", "REAL");
+
+        // 板块层级树（2026-09-07）：老库的 Board 表是 8 月建的，得显式补这两列。
+        // 数据来自东财终端本地文件，只有行业板块有值，概念/地区为 NULL。见 Board 表里的注释。
+        AddColumnIfMissing(conn, "Board", "parent_code", "TEXT");
+        AddColumnIfMissing(conn, "Board", "board_level", "INTEGER");
+
+        // 客户/供应商的对手方消歧（2026-09-08）：CREATE TABLE IF NOT EXISTS 对已存在的表
+        // 是空操作，不会补列，所以老库得显式加。
+        AddColumnIfMissing(conn, "StockCustomerSupplier", "partner_code", "TEXT");
+        AddColumnIfMissing(conn, "StockCustomerSupplier", "match_type", "TEXT");
     }
 
     /// <summary>

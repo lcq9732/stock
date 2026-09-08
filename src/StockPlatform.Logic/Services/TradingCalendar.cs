@@ -37,6 +37,25 @@ public sealed class TradingCalendar
     /// </summary>
     public bool CoversFrom(DateTime from) => _days.Count > 0 && _days[0] <= from.Date;
 
+    /// <summary>
+    /// 这一天是不是已知的交易日（2026-09-08 加，给逐日回补跳过节假日用）。
+    ///
+    /// ⚠ 返回 false 有两种含义——"确实不是交易日"和"日历不知道"，**调用方必须先问
+    /// <see cref="CoversFrom"/>**。混为一谈就会静默跳过整段该抓的日子。
+    /// </summary>
+    public bool Contains(DateTime day) => _days.BinarySearch(day.Date) >= 0;
+
+    /// <summary>最后 <paramref name="count"/> 个不晚于 <paramref name="asOf"/> 的交易日。
+    /// 给"最近几个交易日无条件重抓"用（数据源盘后陆续发布，早抓到的可能只是一半）。</summary>
+    public List<DateTime> LastTradingDays(DateTime asOf, int count)
+    {
+        int i = _days.BinarySearch(asOf.Date);
+        if (i < 0) i = ~i - 1;                      // 取最后一个 <= asOf 的
+        if (i < 0) return [];
+        int from = Math.Max(0, i - count + 1);
+        return _days.GetRange(from, i - from + 1);
+    }
+
     /// <summary>闭区间 [start, end] 内是否存在已知交易日。二分查找，O(log n)。</summary>
     public bool HasAnyIn(DateTime start, DateTime end)
     {

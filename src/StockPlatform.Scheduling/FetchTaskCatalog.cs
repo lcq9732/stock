@@ -47,6 +47,9 @@ public enum FetchActionId
     StepEtfIndexMap,
     StepBoards,
     StepBoardList,
+    StepIndustryIndicator,
+    StepCompanyProfile,
+    StepCustomerSupplier,
     StepBoardMembers,
     StepReparseBankPdf,
     StepFullAudit,
@@ -59,6 +62,12 @@ public enum FetchActionId
     FetchMoneyFlowDetail,
     FetchMarketEvents,
     FetchStockBoardMap,
+
+    // ───── 本地维护（2026-09-07）─────
+    StepFillProbeFloor,
+
+    // ───── 新式任务（2026-09-08 起，实现在 StockPlatform.Tasks，见 IFetchTask）─────
+    StepTradingCalendar,
 }
 
 /// <summary>
@@ -247,7 +256,16 @@ public sealed record FetchActionInfo(
     ///
     /// null = 没标注，按 Quota 保守推导（Mixed 视为占用全部联网源，跟谁都冲突）。
     /// </summary>
-    IReadOnlyList<DataSourceId>? Sources = null)
+    IReadOnlyList<DataSourceId>? Sources = null,
+    /// <summary>
+    /// 这一项允许"一句话都不说"多久（2026-09-08）——超过就判定卡死掐断，见 <see cref="QuietWatchdog"/>。
+    ///
+    /// null＝用默认的 5 分钟，绝大多数项都该是 null：它们逐只/逐日地干活，本来就一直在报进度。
+    ///
+    /// 要填值的只有**黑盒步骤**——整段是一次没法插进度的同步调用，从外面看跟卡死一模一样。
+    /// 这类项等于退回到"按时长判"，是明知的代价，所以必须逐个写清楚理由，别顺手放宽。
+    /// </summary>
+    TimeSpan? MaxQuiet = null)
 {
     /// <summary>
     /// 这一项的数据什么时候才齐（2026-09-02）——决定它该不该卡「不早于」。
@@ -468,26 +486,66 @@ public static class FetchTaskCatalog
             // 两份输入都要：板块成分（谁在这个板块里）+ 当天个股K线（拿什么价算）
             SoftDependsOn: [FetchActionId.StepBoardMembers, FetchActionId.StepBoardList, FetchActionId.StepStockDayBars]),
 
+        new(FetchActionId.StepTradingCalendar, "交易日历", "深交所官网", QuotaGroup.Exchange,
+            TimeSpan.FromSeconds(20), "每工作日",
+            "把交易日历落进 TradingDay 表——**全库公共设施**，凡\"按交易日取数\"的地方都读它，"
+            + "尤其是【融资余额】【龙虎榜】的逐日回补：在它之前那两项只跳周末，每个节假日每轮都要"
+            + "白发一次请求（龙虎榜从 2002 年补一轮就是几百个）。\n"
+            + "两个来源按年份分工：**2005-01 起**走深交所官网按月接口（官方权威，一月一个请求）；"
+            + "**2004-12 及以前**深交所不提供，从本地全市场日K归纳——那段是死历史、建一次就固定。\n"
+            + "模式：「增量」＝拉本月+下月（2 个请求；11 月起一路拉到次年 12 月，因为交易所年底才"
+            + "发布下一年的日历）；「首次整段回补」＝重建整份日历（264 个请求 + 一次全库日期扫描，"
+            + "23GB 库上几分钟），补过历史K线之后也该用它重跑一次。\n"
+            + "首次/重建时顺带做一次对账：官方日历里有、本地全市场却一根K线都没有的日子会报出来——"
+            + "那是**整天漏抓**的信号。",
+            FetchActionParams.None,
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
+            Sources: [DataSourceId.Exchange]),
+
         new(FetchActionId.StepMargin, "融资余额", "交易所", QuotaGroup.Exchange,
             TimeSpan.FromMinutes(1), "每工作日",
-            "两融余额。两所是 T+1 发布，所以按\"以今天为终点回看最近几个交易日、跳过本地已有的\"来抓，"
-            + "不是只抓当天。彬哥法第 12 条（融资余额增长）用的就是它。\n"
+            "两融余额。两所是 T+1 发布，所以按\"以今天为终点回看最近几个交易日\"来抓，不是只抓当天。"
+            + "彬哥法第 12 条（融资余额增长）用的就是它。\n"
+            + "本地已有的日子跳过，但**最近 5 个交易日无条件重抓**（2026-09-08）——两所分批发布，"
+            + "早抓到的可能只是一部分，\"有行就跳过\"会把残缺状态永久固化；重抓幂等、主键去重。\n"
             + "模式：「增量」＝以日期格那天（留空＝今天）为终点回看几个交易日；"
             + "「首次整段回补」＝从 2010-03-31（融资融券开市首日，早于此日两融业务还不存在、"
-            + "两所一天数据都没有）一路补到今天（原【一键补齐每日历史】的融资那半边），"
-            + "跳过本地已有的交易日、幂等可反复跑。",
+            + "两所一天数据都没有）一路补到今天（原【一键补齐每日历史】的融资那半边），幂等可反复跑。\n"
+            + "非交易日由【交易日历】挡掉、\"确认没有数据\"的日子由空日名单挡掉，都不再白发请求。",
             FetchActionParams.Date,
+            SoftDependsOn: [FetchActionId.StepTradingCalendar],
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
 
         new(FetchActionId.StepLhb, "龙虎榜", "新浪", QuotaGroup.Sina,
             TimeSpan.FromSeconds(30), "每工作日",
-            "当日龙虎榜席位明细，当晚就发布、抓当天即可。\n"
-            + "模式：「增量」＝抓日期格那天（留空＝今天）；"
+            "当日龙虎榜席位明细，当晚发布。\n"
+            + "模式：「增量」＝以今天为终点**回看 5 个交易日**（2026-09-08 改，原来只抓当天）——"
+            + "龙虎榜是盘后**陆续**公布的，15:30 抓到 20 只写进库后，老逻辑判定\"这天已经有了\"就再也"
+            + "不碰它，晚上发布的另外 40 只永久漏掉；重抓幂等，代价是每轮多 4 个请求。"
+            + "日期格**填了**就只抓那一天，并绕过\"确认没有\"名单（人点名要，就是要重查它）。\n"
             + "「首次整段回补」＝从 2002-01-01（两所公开信息制度起点；⚠ 跟两融的 2010 无关，"
-            + "龙虎榜早八年）补到今天（原【一键补齐每日历史】的龙虎那半边），"
-            + "跳过本地已有的交易日、幂等可反复跑。",
+            + "龙虎榜早八年）补到今天（原【一键补齐每日历史】的龙虎那半边），幂等可反复跑。\n"
+            + "回补跳过四类日子：周末、**交易日历里的非交易日**、**确认没有数据的日子**"
+            + "（抓过、正常返回空、过了 3 天才定案）、本地已有的日子——所以先跑一次【交易日历】，"
+            + "能省掉几百个必然为空的请求。",
             FetchActionParams.Date,
+            SoftDependsOn: [FetchActionId.StepTradingCalendar],
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
+
+        new(FetchActionId.StepFillProbeFloor, "回填\"无更早数据\"水位", "本地查库·不联网", QuotaGroup.Local,
+            TimeSpan.FromMinutes(1), "一次性",
+            "不发一个请求，直接从本地已有历史推出每只票\"数据源在这天之前没有数据\"的水位，写进 BarProbeFloor 表。\n"
+            + "**为什么值得跑一次**：【拉取区间数据】往前补历史时，一只 2020 年上市的票被请求 1990~2016 必然返回空，"
+            + "而这个结论以前不落库——2026-09-07 实测一轮区间回补 5558 只 × 3 个粒度、四个半小时、写入为零。"
+            + "跑过这一项之后，那些票连请求都不会发。\n"
+            + "**判据**：前复权/后复权/不复权三路的最早一根落在同一天。三路是三次独立抓取，都停在同一天说明"
+            + "那就是数据源的起点（本机实测 5874 只个股里 5841 只符合；退市股拿两所官网上市日交叉验证，313/319 对得上）。"
+            + "三路不一致的、以及只有前复权一路的（ETF/大盘指数/板块指数）都不填，留给真探测。\n"
+            + "⚠ **务必在K线补齐之后再跑**（尤其【重新拉取失败】之后）：它读的是本地三路的最早一根，"
+            + "要是跑在补齐之前，水位会按旧的（更晚的）最早日记下，那段真实存在的历史反而会被永久跳过。"
+            + "同理，将来若又补到了更早的历史，这里记的水位就过期了——用「彻底体检」清空重探。\n"
+            + "幂等、可反复跑。要作废这些结论，跑【全库数据体检】并勾「彻底体检」。",
+            SoftDependsOn: [FetchActionId.StepStockDayBars, FetchActionId.StepStockHfqBars, FetchActionId.StepStockRawBars]),
 
         new(FetchActionId.StepDayCoverage, "当日覆盖率体检", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(2), "每工作日",
@@ -530,38 +588,74 @@ public static class FetchTaskCatalog
 
         new(FetchActionId.StepBoards, "板块行情与成分", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(20), "每工作日～每周",
-            "⚠ **已退役**（2026-09-04）：拆成了【板块列表】+【板块成分股】两项。' + N + '"
+            "⚠ **已退役**（2026-09-04）：拆成了【板块列表】+【板块成分股】两项。\n"
             + "拆的理由是配额被挤掉了——限流器现在是「每 15 个请求主动歇 2 分钟」（东财实测连发"
             + "16~35 个就被切），而板块列表开头就要 9~10 个请求，等于每轮三分之二的配额花在列表上，"
-            + "只剩 5 个才轮到那 2500 个成分股请求。' + N + '"
+            + "只剩 5 个才轮到那 2500 个成分股请求。\n"
             + "而且列表一挂整项就退出，成分股一个都跑不成——可库里明明有上一次的板块名单，"
-            + "照样能接着抓成分。' + N + '"
+            + "照样能接着抓成分。\n"
             + "老计划里排了它的，加载时会自动换成这两项。",
             Retired: true,
             Sources: [DataSourceId.EmPush2]),
 
         new(FetchActionId.StepBoardList, "概念和行业板块", "东财 quote（菜单JSON）", QuotaGroup.Mixed,
             TimeSpan.FromSeconds(10), "每工作日",
-            "概念/题材板块 + 行业板块的**名单**，**一个请求拿全量**。' + N + '"
+            "概念/题材板块 + 行业板块的**名单**，**一个请求拿全量**。\n"
             + "✅ **2026-09-05 改走行情中心左侧菜单那份静态 JSON**（sidemenu_new.json），"
-            + "从此**不碰 push2、不用浏览器通道、不会弹图片验证码**，也不再占用成分股那边的配额。' + N + '"
+            + "从此**不碰 push2、不用浏览器通道、不会弹图片验证码**，也不再占用成分股那边的配额。\n"
             + "换之前逐条比对过：概念 504 个代码和名称跟 push2 官方名单**一个不差**，"
-            + "行业只多一个三级行业（BK1362 其他多元金融）——多出来是安全侧，不会误删。' + N + '"
+            + "行业只多一个三级行业（BK1362 其他多元金融）——多出来是安全侧，不会误删。\n"
             + "拿不到或解析不了时**自动退回 push2 分页**（那条路会慢很多、可能要人过验证）；"
             + "名单比库里少 5% 以上则**整轮放弃写库**，保留上一次的快照——"
-            + "板块是快照数据，「旧的」永远好过「半批的」。' + N + '"
+            + "板块是快照数据，「旧的」永远好过「半批的」。\n"
             + "⚠ 板块的涨跌幅/成交额不在这一步取，由【板块指数合成】用本地成分股日K算出来回填。",
             Sources: [DataSourceId.EmQuote]),
 
+        new(FetchActionId.StepIndustryIndicator, "行业景气指标", "东财 datacenter", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(4), "每日",
+            "周期品的**价格和库存**：猪粮比价、螺纹钢期货价与库存、焦煤、原油、铜铝锌铅、"
+            + "水泥价格指数、国房景气指数、全国汽车销量…共 116 个指标，日/周/月频。\n"
+            + "这是**传统行业分析**那一路的输入，跟风口分析分开看——风口看的是叙事能不能兑现成"
+            + "别人的报表，周期股看的是价格本身，而价格是**日周频的、比季报早一个季度**。\n"
+            + "覆盖 658 只票（约 12%），全是周期股；成长题材一个都没有，这是它的能力边界。\n"
+            + "⚠ 历史只到 2024-04（约 2 年），够看当下位置和同比，**不够跑长周期回测**。\n"
+            + "约 120 个请求：3 个拉目录、116 个逐指标拉序列（各自按水位线增量，每个只回几行）。\n"
+            + "**走 datacenter，不碰 push2**，无需人工过验证码。",
+            Sources: [DataSourceId.EmDataCenter]),
+
+        new(FetchActionId.StepCompanyProfile, "公司档案", "东财 datacenter", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(2), "季度",
+            "5634 家 A 股的公司档案：全称、省份、成立/上市日期、注册资本、员工数、实控人、董监高、中介机构、主营业务，以及公司简介/沿革/经营范围/经营评述四段长文本。\n"
+            + "**直接用途是给【客户与供应商】做对手方还原**——年报里写的是「福建时代星云科技有限公司」这种全称，本地只有简称「宁德时代」，对不上；有了全称才能把对手方还原成股票代码。\n"
+            + "但它本身也是一份公司基本面档案，而且这些字段是**同一个请求一起带回来的**，存下来不额外花抓取成本。\n"
+            + "14 页、约 2 分钟。长文本单独存一张表（经营评述平均 4186 字、最长 4.6 万字，一个字段占整条记录体积的 69%）。\n"
+            + "**走 datacenter，不碰 push2**。",
+            Sources: [DataSourceId.EmDataCenter]),
+
+        new(FetchActionId.StepCustomerSupplier, "客户与供应商", "东财 datacenter", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(25), "季度",
+            "公司年报里披露的**前五大客户和前五大供应商**，带交易金额和占比。\n"
+            + "供应商＝上游、客户＝下游 —— 这是找「产业链上/中/下游」标签一路找空之后能拿到的**最硬的产业链数据**：不是别人的分类判断，是年报里的金额。\n"
+            + "（标签那条路已经查死：东财网页、终端本地文件、终端「数据」/「分析」菜单、F10 全部栏目都没有；F10 前端代码里确实有 003=产业链 的分支，但线上一条数据都没有。）\n"
+            + "**当下就能用的是集中度**：前五大占多少、「其余」占多少 —— 大客户依赖风险、议价能力变化。\n"
+            + "把对手名对到上市主体、连成供应链网络是第二期的事（实测对手名 53% 是真名，71% 的股票至少有一个真名对手，其余是「第一名」这类匿名披露）。\n"
+            + "76.5 万行、2002 年至今、2025 年覆盖 5284 只（92%）。**按年切片抓**，不做深分页：全表 1531 页，单年只有约 128 页。\n"
+            + "首轮全量约 1531 个请求（20 分钟上下）；之后每轮只抓今年和去年约 260 个 —— 年报是分批披露的，抓到一次不等于抓全了。\n"
+            + "**走 datacenter，不碰 push2**。",
+            Sources: [DataSourceId.EmDataCenter],
+            // 软依赖：没有公司档案也能抓，只是对手方还原不出来、partner_code 全是 NULL；
+            // 下轮档案有了会自动补上。所以不是硬前置。
+            SoftDependsOn: [FetchActionId.StepCompanyProfile]),
+
         new(FetchActionId.StepBoardMembers, "板块成分股", "东财 push2", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(20), "每周·空闲时补",
-            "逐个板块查**官方成分名单**，1000+ 个板块约 2500 个请求——这是 push2 上最耗配额的一项。' + N + '"
+            "逐个板块查**官方成分名单**，1000+ 个板块约 2500 个请求——这是 push2 上最耗配额的一项。\n"
             + "**不能用 datacenter 的 F10 报表替代**：实测 F10 会系统性漏股（液冷服务器 170 只漏 4 只，"
             + "含美的集团、拓普集团这种链上有实际业务的大票；PCB 漏 2 只），而且漏了不报错，"
-            + "会一路带进板块营收中位数这类指标里。' + N + '"
-            + "抓到的条数跟接口自报的 total 对不上就**整块丢弃、下轮重抓**，绝不写半批进库。' + N + '"
+            + "会一路带进板块营收中位数这类指标里。\n"
+            + "抓到的条数跟接口自报的 total 对不上就**整块丢弃、下轮重抓**，绝不写半批进库。\n"
             + "**跑不完是常态、也没关系**：每个板块单独落库并记进度，下一轮自动跳过已成功的"
-            + "（7 天内抓过就算新鲜）；连续失败 10 个判定被限流、提前收尾。' + N + '"
+            + "（7 天内抓过就算新鲜）；连续失败 10 个判定被限流、提前收尾。\n"
             + "软依赖【板块列表】：列表没跑也能抓，用库里上次的名单，只是漏掉当天新增的板块。",
             SoftDependsOn: [FetchActionId.StepBoardList],
             Sources: [DataSourceId.EmPush2]),
@@ -638,8 +732,9 @@ public static class FetchTaskCatalog
             // ⚠ 必须显式声明源（2026-09-05）。不写的话 Mixed 会兜底成**全部 9 个联网源**
             //    （见 FetchTaskInfo.EffectiveSources 的"保守"分支），于是它一跑，
             //    计划里没有任何一项能通过 IsSourceBusy——实测把计划停摆了 2 小时 41 分，
-            //    期间【拉取分档资金流】【拉取财务报表】排队 30 分钟后被硬超时掐断记成"失败"，
-            //    而它们其实一个请求都没发。
+            //    期间【拉取分档资金流】【拉取财务报表】排队 30 分钟后被当时的「硬超时」掐断、
+            //    记成"失败"，而它们其实一个请求都没发。（那道硬超时 2026-09-08 已换成
+            //    静默看门狗，排队本身也早改成了"让路/抢占"，不会再这样堆着等——见 QuietWatchdog。）
             //
             //    这三个是按它真正会调的东西数出来的：
             //      · Tencent  ── K线主源（TencentThenSinaBarFetcher）
@@ -847,7 +942,10 @@ public static class FetchTaskCatalog
             + "没披露的机构不会去翻公告列表（按实际披露日判断，来自【拉取财报预约日】）——"
             + "这一段限流很紧，披露季前期挨家去查全是空转。",
             DependsOn: FetchActionId.FetchFinancials,
-            SoftDependsOn: [FetchActionId.FetchEarningsSchedule]),
+            SoftDependsOn: [FetchActionId.FetchEarningsSchedule],
+            // PDF 有几 MB，单个下载的 HttpClient 超时就设到 3 分钟（BankReportFetcher）；
+            // 再叠上解析一个大 PDF 的时间，5 分钟的默认阈值太贴脸。
+            MaxQuiet: TimeSpan.FromMinutes(10)),
 
         new(FetchActionId.ImportManual, "导入手工数据", "本地文件", QuotaGroup.Local,
             TimeSpan.FromSeconds(5), "人填完 CSV 后",
@@ -885,7 +983,12 @@ public static class FetchTaskCatalog
 
         new(FetchActionId.OptimizeDatabase, "优化数据库", "本地", QuotaGroup.Local,
             TimeSpan.FromMinutes(5), "一次性",
-            "给几张大表补建二级索引。不联网。建完就是持久对象，之后不用再跑。"),
+            "给几张大表补建二级索引。不联网。建完就是持久对象，之后不用再跑。",
+            // 唯一的真·黑盒：CREATE INDEX 和 ANALYZE 各是一次 ExecuteNonQuery，中间没有任何
+            // 可以插进度的地方，而库现在 23GB，单条索引跑十几分钟很正常。它期间会定时播报
+            // "仍在建 xxx"，但那条走 Liveness 通道、**不算心跳**（见 QuietWatchdog 类注释），
+            // 所以这一项实际是按时长兜底的——明知的代价，好在它只在手动组里。
+            MaxQuiet: TimeSpan.FromMinutes(30)),
     ];
 
     /// <summary>
@@ -981,6 +1084,10 @@ public static class FetchTaskCatalog
         FetchActionId.FetchEarningsForecast or FetchActionId.FetchLhbSeat
             or FetchActionId.FetchMarketEvents => PlanGroupKind.Daily,
 
+        // 【行业景气指标】（2026-09-07）归日更：116 个指标里 45 个是日频，每天都变。
+        // 增量很轻——每个指标只拉水位线之后的那几行。
+        FetchActionId.StepIndustryIndicator => PlanGroupKind.Daily,
+
         // ── 按周期更新、晚几天没关系的 ──
         FetchActionId.FetchIndustry
             // 【个股行业与题材】（2026-09-03）跟证监会分类同组同频：行业归属变动很慢，季度一轮够了。
@@ -997,6 +1104,13 @@ public static class FetchTaskCatalog
             // 【板块成分股】(2026-09-04 拆出来）跟分档资金流同样的处境：请求量大（约 2500 个）、
             // 没有时效压力（7 天内抓过就算新鲜），正适合"空闲时补"，别占着日更那一段。
             or FetchActionId.StepBoardMembers
+            // 【公司档案】(2026-09-08) 归定期：一个季度才动一次，14 页很轻，
+            // 排在客户与供应商前面——后者做对手方还原时要用它的全称。
+            or FetchActionId.StepCompanyProfile
+            // 【客户与供应商】(2026-09-07) 归定期：数据源是年报/中报，一个季度才动一次，
+            // 而首轮要把 2002 年至今 76.5 万行抓全（约 1531 个请求）。没有时效压力、量又大，
+            // 正是"空闲时补"这一组的典型。
+            or FetchActionId.StepCustomerSupplier
             or FetchActionId.FetchIndexCons => PlanGroupKind.Periodic,   // 最后这个已退役
 
         // ── 按需启动：想起来才做的一次性活（往回补历史、全库体检、建索引）──
@@ -1134,6 +1248,16 @@ public static class FetchTaskCatalog
         FetchActionId.RepairQfq,
         FetchActionId.RebuildAdjSeries,
 
+        // 【行业景气指标】（2026-09-07）排在补漏之后、龙虎榜席位之前。
+        //
+        // 为什么不排前面：它是**传统行业分析**的输入，不是"当天必须拿到"的核心数据——
+        // 猪粮比、螺纹钢库存这些晚几小时落库没有任何影响，而前面那些（K线、资金、公告）
+        // 晚了就影响当晚的选股。
+        //
+        // 为什么不排最末：最末那个位置是留给"首轮要跑几小时"的龙虎榜席位的。
+        // 这一项首轮也就 120 个请求、4 分钟，排它后面等于白等几小时。
+        FetchActionId.StepIndustryIndicator,
+
         // 【龙虎榜席位】排在**整组最末**（2026-09-03）。
         //
         // 它是日频数据、本该跟 StepLhb 挨着（那个抓"谁上榜了"，这个抓"是谁买的"），但**首轮
@@ -1168,6 +1292,12 @@ public static class FetchTaskCatalog
         FetchActionId.FetchShareholder,
         FetchActionId.FetchDividend,
         FetchActionId.FetchFinancials,        // 监管指标要靠它认机构类型，所以排在前面
+        // 【公司档案】+【客户与供应商】紧跟财务报表（2026-09-07/09-08）：
+        // 它们是同一份年报里的东西，一起更新才不会出现"财务是新的、客户集中度还是去年的"错配。
+        // ⚠ 两项**必须挨着且档案在前**：客户与供应商跑完会拿档案里的全称做对手方还原，
+        //   档案排在后面的话，同一轮里还原用的永远是上一轮的旧档案。
+        FetchActionId.StepCompanyProfile,
+        FetchActionId.StepCustomerSupplier,
         FetchActionId.BankRegulatory,
         FetchActionId.StepReparseBankPdf,
         FetchActionId.ImportManual,           // 填的是监管指标没解析出来的格子

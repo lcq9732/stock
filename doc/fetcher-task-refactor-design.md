@@ -1,9 +1,24 @@
 # 抓取程序重构 — 任务/数据源/存储三层设计
 
-状态：**已归档，暂不实施**（2026-09-05）。
+状态：**老任务仍不迁；新任务从 2026-09-08 起按本文的形状写**。
 
-评审结论：方向认可，但改动面过大——涉及 6,211 行 orchestrator、44 个 dispatch case、40 个 provider，
-即便按第 9 节分四阶段走，收益也不足以抵消这期间的回归风险。**代码一行未动。**
+原状态是"已归档、暂不实施"（2026-09-05）：方向认可，但改动面过大——涉及 6,211 行
+orchestrator、44 个 dispatch case、40 个 provider，收益不足以抵消回归风险，代码一行未动。
+
+2026-09-08 用户定的折中：**重构现有的不做，但以后新加的任务都写成独立类**。否则等哪天真要
+重构，新写的任务反而成了第三种形状，迁移更贵。于是落了本文的**最小子集**：
+
+| 落了 | 没落（仍是设想） |
+|---|---|
+| `IFetchTask` / `FetchTaskBase<T>` / `TaskRunArgs` / `TaskRunResult`（`StockPlatform.Scheduling/Tasks/`） | `LegacyTaskAdapter`、删 44 个 case（第 9 节阶段一） |
+| `IFetchTaskRegistry` + `FetchTaskRegistry`（含到 `FetchResult` 的桥接） | `DataSourceBase` 数据源收口（阶段二） |
+| `DispatchPlanActionAsync` 里一条"registry 里有就走新路"的总分支 | `IStagingStore` / `IPersistStore` 存储层 |
+| 新任务实现放 `StockPlatform.Tasks`（第一个：【交易日历】） | 声明式参数 UI |
+
+**加一个新任务现在＝写一个类 + 在 App.xaml.cs 注册一行。**
+
+⚠ 第 3 节的接口相对原稿改过三处（准入移出任务、没有 StopAsync、进度改事件广播），
+见 3.1 的「2026-09-08 修订」。
 
 文档保留下来的价值：① 第 1 节那五条痛点是实测数据，以后真要重构时不用重新调研；
 ② 第 9 节的迁移顺序和第 5 节 staging 的判据是踩过坑总结的，别人重做一遍容易踩回去；
@@ -74,31 +89,78 @@
 
 编排层要能把 40 种任务放进一个列表，所以顶层必须是非泛型的：
 
+**2026-09-08 修订**——原稿是下面这样（保留供对照）：任务自己实现 `CheckCanRunAsync`、
+自己声明 Sources/Dependencies/Parameters、自己有 `StopAsync`，进度靠 `TaskRunContext` 传进去。
+
 ```csharp
+// 原稿（2026-09-05），已不是现在的形状
 public interface IFetchTask
 {
-    /// <summary>任务身份。跟现有 FetchActionId 一一对应，迁移期两者并存。</summary>
     FetchTaskId Id { get; }
-
-    /// <summary>界面上的名字、数据源说明、预计耗时——现在 FetchActionInfo 那些元数据。</summary>
     FetchTaskInfo Info { get; }
-
-    /// <summary>这一项要用的数据源。占用表直接用它判断能不能并发（已实现，见 SourceOccupancy）。</summary>
     IReadOnlySet<DataSourceId> Sources { get; }
-
-    /// <summary>依赖的任务。硬依赖（跑了也白跑）和软依赖（结果会旧一点）分开。</summary>
     TaskDependencies Dependencies { get; }
-
-    /// <summary>参数集合。UI 靠它自动生成输入格，见第 6 节。</summary>
     TaskParameters Parameters { get; }
-
-    /// <summary>启动。内部自己做可执行性检查，不满足就返回 Refused 而不是抛异常。</summary>
     Task<TaskRunResult> StartAsync(TaskRunContext ctx, CancellationToken ct);
-
-    /// <summary>停止。做收尾（把攒着的数据落库、记下"下次从哪接"），返回是否已干净退出。</summary>
     Task<bool> StopAsync();
 }
 ```
+
+**现在的形状**（`StockPlatform.Scheduling/Tasks/FetchTaskContracts.cs`）：
+
+```csharp
+public interface IFetchTask
+{
+    /// <summary>直接复用现有的 FetchActionId——另造一套 id 就得维护两套映射。</summary>
+    FetchActionId Id { get; }
+
+    /// <summary>真进展：抓完一批、写了多少行。QuietWatchdog 吃的就是这个。</summary>
+    event Action<TaskProgress>? OnProgress;
+
+    /// <summary>只证明进程还活着的定时播报。⚠ 不能喂给看门狗，所以单独一路事件。</summary>
+    event Action<TaskLiveness>? OnLiveness;
+
+    /// <summary>状态变化：Running / Completed / Failed / Stopped。</summary>
+    event Action<TaskStateChanged>? OnStateChanged;
+
+    /// <summary>干活。"能不能跑"已经由调度侧判完了，这里直接开工。</summary>
+    Task<TaskRunResult> RunAsync(TaskRunArgs args, CancellationToken ct);
+}
+```
+
+三处改动的理由：
+
+**① 准入判断移到调度侧。** 原稿写作时（2026-09-05 之前）还没有准入设施；现实早就跑在前面了——
+`SourceOccupancy`（2026-09-04）管"谁占着哪个源"、`SourceAdmission`（2026-09-05）管让路与抢占，
+占用的 `Release` 也在调度侧的 finally 里。协调是调度的职责，任务只做自己的活。
+
+职责边界：
+
+| 判断 | 归谁 |
+|---|---|
+| 数据源被谁占着、能不能并发 | 调度（`SourceOccupancy`） |
+| 让路 / 抢占 / 抢占超时 | 调度（`SourceAdmission`） |
+| 前置任务、时间窗口、参数 | 调度（`PlanRunner` + `FetchTaskCatalog`） |
+| 抓什么、怎么存、停了怎么收尾 | 任务 |
+
+任务连 Sources/Dependencies 都不用自己背——`FetchTaskCatalog` 里已经有 `Sources` 和
+`SoftDependsOn`，调度器读目录就够了，所以接口里那三个元数据属性一并去掉。
+
+⚠ 界线：**只有任务自己知道的前提仍归任务**——本地还没有K线所以定不了补齐起点、没配置那个源、
+日历已经是最新的、这一天该不该发请求。这些不是"准入"，是任务开工后的第一步结论，返回
+`NothingToDo` 或 `Failed`。调度侧无从判断也不该判断。
+
+**② 没有 `StopAsync`。** 停止＝取消 token，任务在自己的 finally 里收尾后正常返回 `Stopped`。
+理由见 `SourceOccupancy` 的类注释：40 个手写的 Stop 方法漏一个就永远等不到那个 `true`。
+
+**③ 进度从"传进去"改成"发出来"。** 任务只管广播，**调度类、UI、正在执行任务表、静默看门狗
+各自订阅、各取所需**。顺带把裸字符串升级成 `TaskProgress`（带 Done/Total/Phase），UI 画进度条
+不用再从文本里抠数字。多订阅者的四个约定（写在 `FetchTaskBase` 里）：
+
+- 事件在工作线程上发射，UI 订阅者自己 marshal；
+- **逐个订阅者隔离**：一个订阅者抛异常会中断多播链，后面的收不到、异常还会冒进任务里；
+- registry 每次运行 `new` 一个任务实例、跑完丢弃，省掉配对 `+=/-=` 的泄漏；
+- 高频任务的进度要节流；占用表只覆盖"最后一条 + 时间戳"，不累积。
 
 **关于"Start 传入线程"** —— 建议改成传 `TaskRunContext` + `CancellationToken`，任务内部走 `async`，由线程池调度：
 
@@ -149,37 +211,42 @@ public abstract class FetchTaskBase<TItem> : IFetchTask
 
 ### 3.3 生命周期（骨架里写死的顺序）
 
+**2026-09-08 修订**：准入和占用登记那两步移出了任务（见 3.1 ①），所以骨架里只剩流式的
+抓—存循环和两条收尾路径。
+
 ```
-StartAsync
+调度侧（已实现，不在任务里）
+  ├─ SourceAdmission：让路 / 抢占 / 拿 lease
+  └─ SourceOccupancy：登记占用；finally 里 Release
+        │
+        ▼
+RunAsync(args, ct)
   │
-  ├─ 1. CheckCanRunAsync            ← 子类实现。不通过 → Refused，不算失败
+  ├─ 1. 发 Running 状态事件
   │
-  ├─ 2. 登记数据源占用                ← 骨架做（复用已实现的 SourceOccupancy）
-  │      拿不到 → Refused("源被占用")
+  ├─ 2. foreach batch in FetchAsync(args, ct)      ← 子类实现，流式
+  │        └─ SaveBatchAsync(batch)                 ← 抓一批存一批
+  │           · MaxItems / Deadline 到了就收尾（骨架统一处理）
+  │           · ct 被取消 → 跳到 4
   │
-  ├─ 3. foreach batch in FetchFromNetAsync
-  │        └─ SaveBatchAsync(batch)  ← 抓一批存一批
-  │           ct 被取消 → 跳到 5
+  ├─ 3. OnCompletedAsync                            ← 水位线、对账、副产物
+  │      → Completed（条数为 0 时 NothingToDo）
   │
-  ├─ 4. OnCompletedAsync             ← staging 提交、水位线更新
-  │      → Completed
-  │
-  ├─ 5. OnStoppedAsync               ← 收尾（被停止的路径）
-  │      → Stopped
-  │
-  └─ finally: 释放数据源占用           ← 骨架做，必须在 finally
+  └─ 4. OnStoppedAsync → Stopped，取消照旧往上抛
+         异常 → Failed
 ```
 
-四种结局，编排层据此决定"今天还要不要再跑"：
+三种结局（原稿的 `Refused` 去掉了——拒绝发生在调度侧，任务压根没被调用，
+那边用 `AdmissionKind.GaveWay` / `PreemptTimedOut` 表达）：
 
 | 结局 | 含义 | 计划引擎的处理 |
 |---|---|---|
 | `Completed` | 这一轮做完了 | 记 Ok；`NothingToDo` 另标 |
-| `Refused` | 压根没开工（源被占/前置没成/熔断中） | **不记状态**，下一轮重新评估 |
 | `Failed` | 开工了但出错 | 记失败，当天不再自动重试 |
 | `Stopped` | 被用户停止 | 记 Cancelled |
 
-`Refused` 和 `Failed` 必须分开——这是现在踩过的坑：数据源熔断时一行都没抓，界面上却是绿勾"完成"。
+"没开工"和"开工了但失败"仍然必须分开——这是踩过的坑：数据源熔断时一行都没抓，界面上却是
+绿勾"完成"。区别只是这个判断现在归调度侧，由 `FetchResult.SkippedReason` 承载。
 
 ### 3.4 为什么 FetchFromNet 必须是流式
 
@@ -363,12 +430,23 @@ public sealed record TaskDependencies(
 ## 8. 运行时：注册表 + 执行列表 + 停止
 
 ```csharp
+// 现在的形状（Scheduling/Tasks/FetchTaskRegistry.cs）：存**工厂**不是实例——
+// 每次运行现 new 一个、跑完丢弃，事件订阅就不会累积。
 public interface IFetchTaskRegistry
 {
-    IFetchTask Get(FetchTaskId id);
-    IReadOnlyList<IFetchTask> All { get; }
+    bool Has(FetchActionId id);
+    IFetchTask? Create(FetchActionId id);
+    IReadOnlyCollection<FetchActionId> Registered { get; }
 }
 ```
+
+`FetchTaskRegistry.RunAsync` 顺带做两件桥接，于是新任务和老世界能并存：
+
+- `OnProgress` / `OnLiveness` → 老的 `IProgress<string>`，日志窗、计划引擎、静默看门狗零改动；
+- `TaskRunResult` → `FetchResult`（`Errors` / `NothingToDo` / `Progress`）。
+
+它还留了个 `subscribe` 口子给别的订阅者（占用表挂实时进度、UI 挂进度条）——事件是多播的，
+挂多少个都互不影响。
 
 **执行列表直接复用已实现的 `SourceOccupancy`**（2026-09-04 已上线）——它已经在做用户要的第 5 点：
 
@@ -433,7 +511,18 @@ public sealed class LegacyTaskAdapter(
 
 ---
 
-## 10. 需要你定的开放问题
+## 10. 开放问题（2026-09-08 定了四个）
+
+| # | 问题 | 结论 |
+|---|---|---|
+| 1 | 线程模型 | **Task + CancellationToken**，不用裸 Thread |
+| 2 | 数据源能力接口 | 未定，留给阶段二（数据源收口时再说） |
+| 3 | 流式抓取 | **采用** `IAsyncEnumerable`，边抓边存 |
+| 4 | 迁移节奏 | **老任务不迁，只新任务用新形状** |
+| 5 | `FetchResult` 去向 | 新任务返回 `TaskRunResult`，registry 翻译成 `FetchResult`；老代码零感知 |
+
+原文（保留）：
+
 
 1. **线程模型**：接受 `Task` + `CancellationToken` 替代裸 `Thread` 吗？（第 3.1 节给了三条理由）
 2. **数据源能力**：用能力接口（类型安全、UI 靠反射自动列），还是坚持 `Fetch(枚举)` 返回 `object`？

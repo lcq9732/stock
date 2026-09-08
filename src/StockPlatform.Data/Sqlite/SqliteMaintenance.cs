@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.Data.Sqlite;
+using StockPlatform.Data.Orchestration;
 
 namespace StockPlatform.Data.Sqlite;
 
@@ -44,7 +45,13 @@ public class SqliteMaintenance
     /// 这是 SQLite 的限制，不是这里偷懒。中断后已建好的索引会保留（每条都是独立事务），
     /// 下次再点会跳过已有的继续建，所以中断是安全的。
     /// </summary>
-    public void BuildIndexes(Action<string>? log, CancellationToken ct = default)
+    /// <param name="liveness">
+    /// 「我还活着」的旁路通道（2026-09-08）：单条 CREATE INDEX 下发之后到返回之间没有任何
+    /// 可上报的东西，库现在 23GB，一条跑十几分钟很正常。这里每 30 秒播一句"仍在建 xxx"，
+    /// 免得看着像死了。⚠ 它走的是 <see cref="FetchOrchestrator.Liveness"/>，不是 progress——
+    /// 那句话证明不了这条 SQL 在前进，不能拿去骗看门狗。
+    /// </param>
+    public void BuildIndexes(Action<string>? log, CancellationToken ct = default, Action<string>? liveness = null)
     {
         using var conn = Open();
 
@@ -65,6 +72,7 @@ public class SqliteMaintenance
 
             log?.Invoke($"正在建 {name}（{table}）...");
             var sw = Stopwatch.StartNew();
+            using (var beat = Heartbeat.Start(liveness, $"建索引 {name}"))
             using (var cmd = conn.CreateCommand())
             {
                 // 大表建索引可能跑很久，默认 30 秒的命令超时不够。
@@ -78,6 +86,7 @@ public class SqliteMaintenance
         // 没有统计信息时查询计划器可能不选新索引——建完必须跑一次。
         log?.Invoke("正在更新统计信息（ANALYZE）...");
         var asw = Stopwatch.StartNew();
+        using (var beat = Heartbeat.Start(liveness, "更新统计信息（ANALYZE）"))
         using (var cmd = conn.CreateCommand())
         {
             cmd.CommandTimeout = 0;

@@ -55,6 +55,14 @@ public interface IBoardRepository
     /// <summary>丢掉暂存区里这一类的内容——开新一轮之前调。</summary>
     void ClearStaged(BoardType type);
 
+    /// <summary>
+    /// 写板块层级树（2026-09-07）：整棵树快照替换，写 Board.parent_code / Board.board_level。
+    /// 数据来自东财终端的本地文件，不联网。<b>edges 为空是空操作</b>——读不到文件时该保留
+    /// 库里上一次的树，跟 ReplaceAll 传空集合同理。
+    /// </summary>
+    /// <returns>(写进去几个板块, 库里没有的板块代码数, 清掉几行旧关系)。</returns>
+    (int Updated, int Unknown, int Cleared) UpdateHierarchy(IReadOnlyList<BoardHierarchyEdge> edges);
+
     /// <summary>替换单个板块的成分股，并记下抓取状态。逐板块落库才能断点续传。</summary>
     void ReplaceMembers(string boardCode, IReadOnlyList<string> stockCodes);
 

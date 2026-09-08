@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -22,6 +22,7 @@
     <!-- 2026-09-03：板块仓储改成"按来源替换"（东财/新浪两套并存）后加的引用。那段有 DELETE，
          写错会误删主库里另一个来源的板块，必须有测试兜着。Data 是普通类库，不涉及 NETSDK1151。 -->
     <ProjectReference Include="..\..\StockPlatform.Data\StockPlatform.Data.csproj" />
+    <ProjectReference Include="..\..\StockPlatform.Tasks\StockPlatform.Tasks.csproj" />
   </ItemGroup>
 
 </Project>

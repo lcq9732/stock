@@ -40,7 +40,7 @@ public class WatchlistEntry
     /// "day" — kept anyway so re-opening the detail chart later queries the right granularity.</summary>
     public string Granularity { get; set; } = "";
 
-    /// <summary>Only meaningful for 峰哥法 (its "前N根K线" parameter) — null for the other three
+    /// <summary>Only meaningful for 峰哥法 (its "回看N根K线" parameter, default 1) — null for the other three
     /// methods, which have no user-adjustable lookback. Used to rebuild the detail chart with the
     /// same BOLL/pattern-search window the pick was actually made under.</summary>
     public int? Lookback { get; set; }

@@ -301,6 +301,58 @@ public partial class FetchOrchestrator
     }
 
     /// <summary>
+    /// 【回填"无更早数据"水位】（2026-09-07）——不联网，把本地已有历史里能推出的水位一次性
+    /// 写进 <c>BarProbeFloor</c>，让往后的【拉取区间数据】不再对着"那些年还没上市"的票空跑。
+    ///
+    /// 判据与实测数据见 <see cref="ProbeFloorPlanner.PlanFromLocalHistory"/>（纯计算、可单测）。
+    /// 这里只负责查三路水位线、落库、把结果说清楚——尤其要说清**哪些没填、为什么**，
+    /// 否则人会以为跑完就万事大吉，而 ETF 那 1655 只其实还留给真探测。
+    ///
+    /// 幂等：水位表只抬不降（见 <see cref="SqliteBarProbeFloorRepository.Record"/>），反复跑无害。
+    /// </summary>
+    public Task<FetchResult> RunStepFillProbeFloorAsync(
+        IProgress<string>? progress, CancellationToken ct = default)
+    {
+        var (repo, errors, failed, _, sw) = BeginStep();
+        var floors = new SqliteBarProbeFloorRepository(_paths.CurrentDb);
+        floors.EnsureSchema();
+
+        progress?.Report("正在查本地三路（前复权/后复权/不复权）日K的最早一根……23GB 库上约需半分钟，不联网。");
+        var eDay = repo.GetEarliestPeriodStartByCode(Granularity.Day);
+        ct.ThrowIfCancellationRequested();
+        var eHfq = repo.GetEarliestPeriodStartByCode(Granularity.DayHfq);
+        ct.ThrowIfCancellationRequested();
+        var eRaw = repo.GetEarliestPeriodStartByCode(Granularity.DayRaw);
+        ct.ThrowIfCancellationRequested();
+
+        var plan = ProbeFloorPlanner.PlanFromLocalHistory(eDay, eHfq, eRaw,
+            Granularity.Day, Granularity.DayHfq, Granularity.DayRaw,
+            out int agreed, out int disagreed, out int dayOnly);
+
+        int before = floors.Count();
+        foreach (var (gran, rows) in plan)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (rows.Count > 0) floors.Record(rows, gran);
+        }
+        int after = floors.Count();
+
+        progress?.Report($"三路最早一根一致的标的 {agreed} 只 → 已按它写入水位（三个粒度各 {agreed} 条，"
+                       + $"表里从 {before} 条变成 {after} 条）。这些票往后的区间回补连请求都不会发。");
+        if (disagreed > 0)
+            progress?.Report($"三路最早一根不一致的 {disagreed} 只**没有填**——那说明其中某一路确实还缺前段，"
+                           + "该抓。下一次【拉取区间数据】会照旧请求它们。");
+        if (dayOnly > 0)
+            progress?.Report($"只有前复权一路的 {dayOnly} 个标的（ETF / 大盘指数 / 板块指数）**没有填**："
+                           + "它们没有另外两路可以交叉印证，不敢凭一路下结论。板块指数是本地合成的、区间回补本来就不抓；"
+                           + "ETF 留给真探测（约 20 分钟一轮，探完水位会自动记下来）。");
+        progress?.Report($"回填完毕，用时 {FormatElapsed(sw.Elapsed)}。要作废这些结论，"
+                       + "跑【全库数据体检】并勾上「彻底体检」。");
+
+        return Task.FromResult(FinishFetchRun(errors, "回填\"无更早数据\"水位", Array.Empty<string>(), failed, progress));
+    }
+
+    /// <summary>
     /// 融资余额 / 龙虎榜的**整段回补**（原【一键补齐每日历史】的两半，2026-09-02 拆开）：
     /// 从本地K线最早那天补到今天，跳过已有的交易日，幂等、可反复跑、可随时停。
     ///
@@ -309,7 +361,7 @@ public partial class FetchOrchestrator
     /// </summary>
     public async Task<FetchResult> RunStepBackfillMarginAsync(
         IProgress<string>? progress, CancellationToken ct = default) =>
-        await RunStepBackfillDailyOneAsync("融资余额", _marginProvider.EarliestAvailable,
+        await RunStepBackfillDailyOneAsync("融资余额", IDailyFetchNoDataRepository.MarginDataset, _marginProvider.EarliestAvailable,
             ct2 => _marginRepository.GetTradeDates(),
             async d =>
             {
@@ -323,7 +375,7 @@ public partial class FetchOrchestrator
     /// <summary>见 <see cref="RunStepBackfillMarginAsync"/>——龙虎榜那一半。</summary>
     public async Task<FetchResult> RunStepBackfillLhbAsync(
         IProgress<string>? progress, CancellationToken ct = default) =>
-        await RunStepBackfillDailyOneAsync("龙虎榜", _lhbProvider.EarliestAvailable,
+        await RunStepBackfillDailyOneAsync("龙虎榜", IDailyFetchNoDataRepository.LhbDataset, _lhbProvider.EarliestAvailable,
             ct2 => _lhbRepository.GetTradeDates(),
             async d =>
             {
@@ -336,6 +388,7 @@ public partial class FetchOrchestrator
 
     private async Task<FetchResult> RunStepBackfillDailyOneAsync(
         string label,
+        string dataset,
         DateOnly earliestAvailable,
         Func<CancellationToken, HashSet<DateOnly>> haveDates,
         Func<DateOnly, Task<int>> fetchOne,
@@ -352,7 +405,7 @@ public partial class FetchOrchestrator
             var earliest = repo.GetOverallEarliestPeriodStart(Granularity.Day)
                 ?? throw new InvalidOperationException(
                     "本地还没有K线数据，无法确定补齐起点——请先跑一次【个股日K·前复权】");
-            await BackfillDailyAsync(label, DateOnly.FromDateTime(earliest),
+            await BackfillDailyAsync(label, dataset, DateOnly.FromDateTime(earliest),
                 DateOnly.FromDateTime(DateTime.Today), haveDates(ct), fetchOne, errors, progress, sw,
                 earliestAvailable, ct);
         }
@@ -360,14 +413,16 @@ public partial class FetchOrchestrator
         return FinishFetchRun(errors, $"{label}·整段回补", Array.Empty<string>(), failed, progress);
     }
 
-    /// <summary>龙虎榜（新浪）——只抓指定那一天，默认今天。</summary>
+    /// <summary>龙虎榜（新浪）。日期格**填了**就只抓那一天（并绕过"确认没有"名单，人点名要就重查）；
+    /// **留空**＝日常增量，以今天为终点回看 5 个交易日——龙虎榜是盘后陆续公布的，只抓当天会把
+    /// "只抓到一半"的状态永久固化（2026-09-08 改，见 <see cref="FetchLhbOneDayAsync"/>）。</summary>
     public async Task<FetchResult> RunStepLhbDayAsync(
         DateTime? day, IProgress<string>? progress, CancellationToken ct = default)
     {
         var (_, errors, failed, _, _) = BeginStep();
         void Forward(string m) => progress?.Report(m);
         _lhbProvider.OnStatus += Forward;
-        try { await FetchLhbOneDayAsync(day ?? DateTime.Today, errors, progress, ct); }
+        try { await FetchLhbOneDayAsync(day ?? DateTime.Today, errors, progress, ct, explicitDay: day.HasValue); }
         finally { _lhbProvider.OnStatus -= Forward; }
         return FinishFetchRun(errors, "龙虎榜", Array.Empty<string>(), failed, progress);
     }
@@ -680,6 +735,31 @@ public partial class FetchOrchestrator
                 int had = audit.ConfirmedCount();
                 audit.ClearConfirmed();
                 progress?.Report($"彻底体检：已清空「确认没有」白名单（原有 {had} 条），全部重查。");
+
+                // 区间回补的"数据源没有更早数据"水位是同一类结论（只是按段记、不是按天），
+                // 同样作废：数据源当时抽风、后来补上了往年历史的话，只有这里能给它回头路。
+                var floors = new SqliteBarProbeFloorRepository(_paths.CurrentDb);
+                int hadFloors = floors.Count();
+                if (hadFloors > 0)
+                {
+                    floors.Clear();
+                    progress?.Report($"彻底体检：已清空「数据源没有更早数据」水位（原有 {hadFloors} 条）——"
+                                   + "下一次【拉取区间数据】会重新探一遍那些票的往年历史。");
+                }
+
+                // 日频表的「确认这天就是没有」名单（2026-09-08）也是同一类结论，一并作废。
+                // **按数据集分别报**：一勾就把龙虎榜和融资余额一起废掉，代价得让人看得见——
+                // 清掉多少条，下一轮回补就要多发多少个请求。
+                if (_dailyNoDataRepository != null)
+                {
+                    foreach (var ds in new[] { IDailyFetchNoDataRepository.LhbDataset, IDailyFetchNoDataRepository.MarginDataset })
+                    {
+                        int n = _dailyNoDataRepository.Clear(ds);
+                        if (n > 0)
+                            progress?.Report($"彻底体检：已清空【{ds}】的「确认没有数据」名单（{n} 天）——"
+                                           + $"下一次回补会重新试这 {n} 天，也就是多发 {n} 个请求。");
+                    }
+                }
             }
 
             var instruments = SqliteStockMetaUpsert.GetAllInstruments(_paths.CurrentDb);
@@ -1015,55 +1095,83 @@ public partial class FetchOrchestrator
         foreach (var r in pending) r.Granularity = NormalizeGran(r.Granularity);
 
         var audit = new SqliteMissingBarRepository(_paths.CurrentDb);
-        var stillMissing = new List<MissingBarRange>();
         int filledTotal = 0, confirmedTotal = 0;
         var parts = new List<string>();
 
+        // 待补名单按口径分组，**每跑完一批就把这一组的结果写回 manifest**（2026-09-07 改）。
+        //
+        // 原来是三个口径全部跑完才写一次。2026-09-07 实测的后果：前复权那 2852 段跑了
+        // 1 小时 52 分、Tries 从 0 加到 1，可这个记账只在内存里——中途停掉（或程序崩了、
+        // 断电了）全部白费，下一轮又从 Tries=0 开始，那 8103 段永远收敛不进"数据源确实没有"
+        // 白名单。用户的原话：完成多少就记录多少，应该落库。
+        //
+        // 现在的粒度是"一批 500 段"（约 17 分钟），中断最多损失这一批。做得到是因为这里的
+        // 抓取本来就是**顺序**的（见下面那句注释：并发只会更快撞配额），抓完一批立刻能复查。
+        var byGran = pending.GroupBy(r => r.Granularity, StringComparer.Ordinal)
+                            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+
+        // 把当前各口径的名单拼平写回 manifest。已处理的批换成复查结果，没轮到的批原样留着——
+        // 少了后半句就会把"还没开始跑的那两个口径"整个清掉，比不落库更糟。
+        void SaveProgress()
+        {
+            lock (_dbLock)
+            {
+                var m = _manifestStore.Load();
+                m.MissingBars = byGran.Values.SelectMany(x => x).ToList();
+                _manifestStore.Save(m);
+            }
+        }
+
         progress?.Report($"补全库体检查出的历史空洞：{pending.Count} 段、"
-                       + $"共 {pending.Sum(r => r.Days)} 个交易日（每段按区间抓一次）…");
+                       + $"共 {pending.Sum(r => r.Days)} 个交易日（每段按区间抓一次，每 {AuditBatchSize} 段落一次账）…");
 
         // 前复权先补：它是界面和大多数分析用的口径，也是另外两套的参照
-        foreach (var group in pending.GroupBy(r => r.Granularity, StringComparer.Ordinal)
-                                     .OrderBy(g => g.Key == Granularity.Day ? 0 : 1)
-                                     .ThenBy(g => g.Key, StringComparer.Ordinal))
+        foreach (var gran in byGran.Keys
+                                   .OrderBy(k => k == Granularity.Day ? 0 : 1)
+                                   .ThenBy(k => k, StringComparer.Ordinal)
+                                   .ToList())
         {
             ct.ThrowIfCancellationRequested();
-            var gran = group.Key;
-            var list = group.ToList();
+            var list = byGran[gran];
+            if (list.Count == 0) continue;
             string label = GranLabel(gran);
 
             // 后复权/不复权只有腾讯给。数据源不支持时整组原样留着、**Tries 一动不动**——
             // 让它们空跑两轮的后果是几千只票被永久打进"数据源确实没有"白名单。
             if (gran != Granularity.Day && !source.Fetcher.SupportsHfq)
             {
-                stillMissing.AddRange(list);
                 progress?.Report($"（{label} {list.Count} 段先留着：数据源 {source.Name} 不提供这个口径，"
                                + "要补请把数据源切到 Tencent 再跑一次【重新拉取失败】）");
                 parts.Add($"{label} {list.Count} 段跳过（数据源不支持）");
                 continue;
             }
 
-            progress?.Report($"补 {label} 空洞：{list.Count} 段、共 {list.Sum(r => r.Days)} 个交易日…");
+            int batchTotal = (list.Count + AuditBatchSize - 1) / AuditBatchSize;
+            progress?.Report($"补 {label} 空洞：{list.Count} 段、共 {list.Sum(r => r.Days)} 个交易日"
+                           + $"（分 {batchTotal} 批，每批跑完就落账）…");
             var stats = new FetchStats();
             int done2 = 0;
-            foreach (var range in list)
-            {
-                ct.ThrowIfCancellationRequested();
-                // 顺序抓、不并发：这批可能上千只，并发只会更快撞数据源配额（见 PlanRunner 的类注释）
-                await ProcessOneStockAsync(range.Code, source, range.From, range.To, currentRepo,
-                    errors, failedCodes, stats, progress, list.Count,
-                    () => Interlocked.Increment(ref done2), sw, ct, granularity: gran);
-            }
+            var granStill = new List<MissingBarRange>();
+            int granFilled = 0, granConfirmed = 0, batchNo = 0;
 
-            // 抓完复查这一段还缺不缺——判据仍是"交易日历里有、这只票没有"
-            var toConfirm = new List<(string Code, DateTime Day)>();
-            int stillCount = 0;
-            foreach (var chunk in list.Chunk(AuditBatchSize))
+            foreach (var batch in list.Chunk(AuditBatchSize))
             {
-                ct.ThrowIfCancellationRequested();
-                var gaps = audit.FindGaps(chunk.Select(r => r.Code).ToList(), gran,
+                batchNo++;
+                foreach (var range in batch)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    // 顺序抓、不并发：这批可能上千只，并发只会更快撞数据源配额（见 PlanRunner 的类注释）
+                    await ProcessOneStockAsync(range.Code, source, range.From, range.To, currentRepo,
+                        errors, failedCodes, stats, progress, list.Count,
+                        () => Interlocked.Increment(ref done2), sw, ct, granularity: gran);
+                }
+
+                // 抓完立刻复查这一批还缺不缺——判据仍是"交易日历里有、这只票没有"
+                var toConfirm = new List<(string Code, DateTime Day)>();
+                var batchStill = new List<MissingBarRange>();
+                var gaps = audit.FindGaps(batch.Select(r => r.Code).ToList(), gran,
                     MarketIndexCatalog.ShanghaiCompositeSymbol);
-                foreach (var r in chunk)
+                foreach (var r in batch)
                 {
                     if (!gaps.TryGetValue(r.Code, out var days)) continue;      // 补齐了
                     var left = days.Where(d => d >= r.From && d <= r.To).ToList();
@@ -1073,37 +1181,45 @@ public partial class FetchOrchestrator
                     if (tries >= AuditMaxTries)
                         toConfirm.AddRange(left.Select(d => (r.Code, d)));      // 认了：数据源就是没有
                     else
-                    {
-                        stillMissing.Add(new MissingBarRange
+                        batchStill.Add(new MissingBarRange
                         {
                             Code = r.Code, Granularity = gran,
                             From = left[0], To = left[^1], Days = left.Count, Tries = tries,
                         });
-                        stillCount++;
-                    }
                 }
+
+                // 白名单本来就是即时落库的；这里补上的是"还缺几段、Tries 加到几"那部分记账
+                if (toConfirm.Count > 0) audit.Confirm(toConfirm, gran, AuditMaxTries);
+                int confirmedInBatch = toConfirm.Select(x => x.Code).Distinct().Count();
+                int filledInBatch = Math.Max(0, batch.Length - batchStill.Count - confirmedInBatch);
+                granStill.AddRange(batchStill);
+                granConfirmed += confirmedInBatch;
+                granFilled += filledInBatch;
+
+                // 落账：这个口径**已跑过的批**换成复查结果，还没轮到的批原样留着
+                byGran[gran] = granStill.Concat(list.Skip(batchNo * AuditBatchSize)).ToList();
+                SaveProgress();
+                progress?.Report($"　{label} 第 {batchNo}/{batchTotal} 批已落账："
+                               + $"补上 {filledInBatch} 段、还缺 {batchStill.Count} 段、"
+                               + $"{confirmedInBatch} 段判定数据源确实没有"
+                               + (batchNo < batchTotal ? "（现在停也不会丢前面几批的进度）" : ""));
             }
 
-            if (toConfirm.Count > 0) audit.Confirm(toConfirm, gran, AuditMaxTries);
-            int confirmed = toConfirm.Select(x => x.Code).Distinct().Count();
-            int filled = Math.Max(0, list.Count - stillCount - confirmed);
-            filledTotal += filled;
-            confirmedTotal += confirmed;
+            byGran[gran] = granStill;
+            SaveProgress();
+            filledTotal += granFilled;
+            confirmedTotal += granConfirmed;
 
-            progress?.Report($"　{label}：{stats.Summarize()}；补上 {filled} 段、"
-                           + $"还缺 {stillCount} 段（下轮再试）、{confirmed} 段判定数据源确实没有");
-            parts.Add($"{label} 补上 {filled}/{list.Count} 段");
+            progress?.Report($"　{label}：{stats.Summarize()}；补上 {granFilled} 段、"
+                           + $"还缺 {granStill.Count} 段（下轮再试）、{granConfirmed} 段判定数据源确实没有");
+            parts.Add($"{label} 补上 {granFilled}/{list.Count} 段");
         }
 
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            manifest.MissingBars = stillMissing;
-            _manifestStore.Save(manifest);
-        }
+        SaveProgress();
 
+        int stillTotal = byGran.Values.Sum(x => x.Count);
         progress?.Report($"历史空洞补齐汇总：{string.Join("；", parts)}。\n"
-            + $"　合计补上 {filledTotal} 段；还缺 {stillMissing.Count} 段（下轮再试）；"
+            + $"　合计补上 {filledTotal} 段；还缺 {stillTotal} 段（下轮再试）；"
             + $"{confirmedTotal} 段补满 {AuditMaxTries} 轮仍拿不到，"
             + "已判定为数据源确实没有（多半是停牌），以后体检不再报。");
         done.Add($"历史空洞 {pending.Count} 段");

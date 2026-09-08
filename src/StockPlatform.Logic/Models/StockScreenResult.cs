@@ -116,6 +116,13 @@ public class StockScreenResult
     /// 它适合长期拿，反过来高股息蓝筹常年在MA20上方、永远进不了回调信号但正是底仓该买的。</summary>
     public string? Category { get; set; }
 
+    /// <summary>形态摘要（如"09-04｜位置12%｜间距0.85%｜振幅5.30%｜站上三线"）——只有峰哥法填，
+    /// 其它方法 null。跟 <see cref="KdjState"/>/<see cref="DepthBucket"/> 同类：是结果表要直接
+    /// 摆出来的一列，不点开"条件详情"就能看出这只票是哪天穿的三线、穿在什么位置、穿完站住没有。
+    /// 峰哥法**不过滤方向**（阴阳都要，用户确认），所以阴/阳放在 <see cref="Category"/> 单独一列，
+    /// 用户自己挑——实测阳线只比阴线略好（10日 +1.12% vs +0.93%），不足以做成硬条件。</summary>
+    public string? PatternNote { get; set; }
+
     /// <summary>Optional 0–100 quality/ranking score for methods where "passed" is a fuzzy match and
     /// candidates should be ranked rather than treated as equally good. Only 三角收敛
     /// (TriangleConvergenceAnalysisEngine) sets it today — its "收敛质量" (how tightly the two
