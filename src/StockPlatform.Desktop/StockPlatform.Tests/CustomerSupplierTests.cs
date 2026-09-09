@@ -138,6 +138,44 @@ public class CustomerSupplierTests : IDisposable
         Assert.Equal(0, x.Amount);
     }
 
+    [Theory]
+    // ★ 2026-09-09 补的一条，代价是 118,155 行脏数据（占 16.4%）。
+    //   原来只判 code.Length != 6，于是东财那边形如 A21653 / A04018 的 6 位代码
+    //   一路混进库里——1946 只，**一条都不在 StockMeta 里**。它们是非 A 股主体
+    //   （新三板/改制前之类），作为"上市公司之间的交易关系"一端根本不在股票池里。
+    //
+    //   同一批写的 EastMoneyCompanyProfileProvider.Parse 一直有这个检查，这边漏了。
+    //   两个 Provider 的代码校验必须一致，所以下面那条测试把两边一起钉住。
+    [InlineData("A21653")]
+    [InlineData("A04018")]
+    [InlineData("12345A")]
+    [InlineData("ABCDEF")]
+    public void 六位但含字母的代码要丢掉(string code)
+    {
+        var json = $$"""
+            {"SECURITY_CODE":"{{code}}","REPORT_DATE":"2025-12-31 00:00:00","RANK":1,
+             "TYPE_CODE":"1","ITEM_NAME":"某公司"}
+            """;
+        Assert.Null(EastMoneyCustomerSupplierProvider.Parse(J(json), Now));
+    }
+
+    [Theory]
+    [InlineData("A21653")]
+    [InlineData("12345A")]
+    public void 两个Provider的代码校验必须一致(string code)
+    {
+        // 不一致过一次就够了。这条测试的作用是：以后谁改松了任何一边，另一边立刻暴露。
+        var custSupp = $$"""
+            {"SECURITY_CODE":"{{code}}","REPORT_DATE":"2025-12-31 00:00:00","RANK":1,"TYPE_CODE":"1"}
+            """;
+        var profile = $$"""
+            {"SECUCODE":"{{code}}.SZ","SECURITY_CODE":"{{code}}","ORG_NAME":"某公司股份有限公司"}
+            """;
+
+        Assert.Null(EastMoneyCustomerSupplierProvider.Parse(J(custSupp), Now));
+        Assert.Null(EastMoneyCompanyProfileProvider.Parse(J(profile), Now));
+    }
+
     [Fact]
     public void 年份过滤器用东财自带的年份列()
         => Assert.Equal("""(REPORT_YEAR="2025")""", EastMoneyCustomerSupplierProvider.YearFilter(2025));
@@ -145,14 +183,17 @@ public class CustomerSupplierTests : IDisposable
     // ════════ 抓哪些年 ════════
     // ★ 这几条钉的是一类**无声**的错：数据永久残缺，而界面上一切正常。
 
-    /// <summary>造一个"抓齐了"的年份状态。</summary>
-    private static Dictionary<int, (int, int)> Full(params int[] years)
-        => years.ToDictionary(y => y, _ => (1000, 1000));
+    /// <summary>造一个"收全了"的年份状态：接口 1000 行，落库 1000、丢弃 0。</summary>
+    private static Dictionary<int, (int, int, int)> Full(params int[] years)
+        => years.ToDictionary(y => y, _ => (1000, 1000, 0));
+
+    /// <summary>空的年份状态。</summary>
+    private static Dictionary<int, (int, int, int)> NoState() => new();
 
     [Fact]
     public void 首轮空库_从今年一路抓到2002()
     {
-        var years = EastMoneyCustomerSupplierProvider.PlanYearsToFetch(2026, new Dictionary<int, (int, int)>());
+        var years = EastMoneyCustomerSupplierProvider.PlanYearsToFetch(2026, NoState());
 
         Assert.Equal(2026, years[0]);            // 新的在前：先拿到最有用的
         Assert.Equal(2002, years[^1]);           // 实测数据最早到 2002 年报
@@ -195,12 +236,43 @@ public class CustomerSupplierTests : IDisposable
         // 不能当判据——2019 年抓了 6000/66000 行也"有数据"，下轮一跳过，剩下 6 万行永远不来。
         // 今年去年靠"每轮都重抓"能自愈，2002-2024 不能。
         var states = Full(2026, 2025, 2024, 2023, 2022);
-        states[2019] = (66000, 6000);            // 被截断在这儿
+        states[2019] = (66000, 6000, 0);         // 被截断在这儿：接口 66000，只落了 6000、没丢弃
 
         var years = EastMoneyCustomerSupplierProvider.PlanYearsToFetch(2026, states);
 
         Assert.Contains(2019, years);            // 没抓齐 → 必须重抓
         Assert.DoesNotContain(2024, years);      // 抓齐的不动
+    }
+
+    [Fact]
+    public void 主动过滤掉的行不算没抓齐()
+    {
+        // ★★★ 2026-09-09 真的误判了：判据当时是 saved < reported，而
+        //   reported 是**接口自报**的、含非 A 股主体（形如 A21653，约 16.4%），
+        //   落库的只有 A 股。于是：
+        //       2023 年 51,677/62,791、2025 年 52,214/62,774
+        //   看着像"没抓齐"，差额比例 17.7%/16.8% 正好等于非 A 股占比。
+        //   那几年会每轮重抓，而且**永远抓不齐**——因为差额永远消不掉。
+        //
+        //   正确判据是 saved + skipped >= reported。
+        var states = Full(2026, 2025, 2024, 2022);
+        states[2023] = (62791, 51677, 11114);     // 收全了：51677 落库 + 11114 主动丢弃 = 62791
+
+        var years = EastMoneyCustomerSupplierProvider.PlanYearsToFetch(2026, states);
+
+        Assert.DoesNotContain(2023, years);       // 不该重抓
+    }
+
+    [Fact]
+    public void 真的少收了才重抓()
+    {
+        // 跟上一条对照：同样有丢弃，但三个数加起来对不上 → 确实少收了
+        var states = Full(2026, 2025, 2024, 2022);
+        states[2023] = (62791, 40000, 11114);     // 40000 + 11114 = 51114 < 62791
+
+        var years = EastMoneyCustomerSupplierProvider.PlanYearsToFetch(2026, states);
+
+        Assert.Contains(2023, years);
     }
 
     [Fact]
@@ -297,13 +369,13 @@ public class CustomerSupplierTests : IDisposable
         Assert.Equal(1, _repo.CountByYear(2025));
         Assert.Equal(0, _repo.CountByYear(2023));
 
-        // 完成度单独记：光看"有多少行"不知道该有多少行
-        _repo.SaveYearState(2024, reported: 2, saved: 2);
-        _repo.SaveYearState(2025, reported: 500, saved: 1);   // 被截断了
+        // 完成度单独记：光看"有多少行"不知道该有多少行，也不知道主动丢了多少
+        _repo.SaveYearState(2024, reported: 12, saved: 2, skipped: 10);   // 收全了：2 + 10 = 12
+        _repo.SaveYearState(2025, reported: 500, saved: 1, skipped: 0);   // 被截断了
 
         var states = _repo.GetYearStates();
-        Assert.Equal((2, 2), states[2024]);
-        Assert.Equal((500, 1), states[2025]);
+        Assert.Equal((12, 2, 10), states[2024]);
+        Assert.Equal((500, 1, 0), states[2025]);
         Assert.False(states.ContainsKey(2023));   // 没抓过的不在里面
     }
 

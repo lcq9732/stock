@@ -66,6 +66,9 @@ public enum FetchActionId
     // ───── 本地维护（2026-09-07）─────
     StepFillProbeFloor,
 
+    /// <summary>龙虎榜换源：整段用东财重抓、覆盖新浪那份历史（2026-09-09）。一次性。</summary>
+    StepLhbMigrate,
+
     // ───── 新式任务（2026-09-08 起，实现在 StockPlatform.Tasks，见 IFetchTask）─────
     StepTradingCalendar,
 }
@@ -113,7 +116,7 @@ public enum FetchActionParams
     ///
     /// 它原来是全局的，因为当时有三个复合动作都要用（拉取全部/补指定历史日/拉取区间数据）。
     /// 拆开之后真正用得上它的只剩【中标/订单公告】和【拉取区间数据】两行，
-    /// 摆在顶上反而像"所有任务都吃这个设置"。留空＝用【手动】页那个框里的值。
+    /// 摆在顶上反而像"所有任务都吃这个设置"。留空＝这一项不抓公告（日志里会说明原因）。
     /// </summary>
     Keywords = 16,
     /// <summary>
@@ -144,6 +147,17 @@ public enum FetchMode
     /// 补完就不用再跑了——日常那一根增量在 <see cref="Incremental"/> 里已经带上。
     /// </summary>
     FirstBackfill = 4,
+
+    /// <summary>
+    /// 彻底重查（2026-09-09，只有【全库数据体检】用）：忽略并清空那三张"确认没有"的结论名单
+    /// ——「确认没有」白名单、「数据源没有更早数据」水位、日频表空日名单。
+    ///
+    /// 原来这是界面上一个单独的勾（<c>PlanItemViewModel.ThoroughAudit</c>）。收成模式是因为
+    /// 项目里"模式是参数、不是任务"这个概念已经在了（见 doc/fetch-plan-atomic-tasks-design.md），
+    /// 而 catalog 的 <see cref="FetchAction.SupportedModes"/> 天然能声明"这一项支持哪几个模式"、
+    /// 界面复用现成的模式下拉——比再加一个只服务一项的勾干净。
+    /// </summary>
+    Thorough = 8,
 }
 
 /// <summary>
@@ -380,10 +394,11 @@ public static class DataSourceCatalog
 /// 行业分类 1~2 分钟。这些数字只用于**画时间轴给人看**，不参与任何调度判断——
 /// 引擎永远是"上一个真的跑完了才开下一个"，估错了不会导致抢跑。
 ///
-/// ════ 为什么"一键拉取定期数据"不在这里 ════
+/// ════ 为什么没有"一键拉取定期数据" ════
 /// 它本身就是 行业分类 → 指数成分/权重 → 股东数据 → 财务报表 → 分红 五步的固定串。
-/// 在计划里把这五项分开排更灵活（比如只在财报季开财务、平时只跑行业分类），
-/// 所以目录里只放这五项本身。那个按钮在【手动】页原样保留。
+/// 在计划里把这五项分开排更灵活（比如只在财报季开财务、平时只跑行业分类），所以目录里
+/// 只放这五项本身。那个按钮原先留在【手动】页上，2026-09-08 随那一页一起撤了——
+/// 要"一次点完"就用组头的【执行整组】，勾哪几项跑哪几项。
 /// </summary>
 public static class FetchTaskCatalog
 {
@@ -416,7 +431,7 @@ public static class FetchTaskCatalog
             "按计划页顶部填的关键词搜中标/订单类公告并取正文，回看最近 14 天（重复扫同一天是安全的，主键去重）。"
             + "关键词清空就是空跑。搜索结果没有正文就没法筛金额，所以\"检索→取正文\"是一项、不拆。\n"
             + "模式选「只抓某一天」就只搜那一天。\n"
-            + "关键词就填在这一行的参数格里（逗号分隔），留空＝用【手动】页那个框里的值；两边都空就不抓。",
+            + "关键词就填在这一行的参数格里（逗号分隔），留空＝不抓公告（日志里会说明是因为没填）。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.Date | FetchActionParams.Keywords,
             SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay,
             Sources: [DataSourceId.Cninfo]),
@@ -516,21 +531,46 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.StepTradingCalendar],
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
 
-        new(FetchActionId.StepLhb, "龙虎榜", "新浪", QuotaGroup.Sina,
+        new(FetchActionId.StepLhb, "龙虎榜", "东财", QuotaGroup.Mixed,
             TimeSpan.FromSeconds(30), "每工作日",
-            "当日龙虎榜席位明细，当晚发布。\n"
-            + "模式：「增量」＝以今天为终点**回看 5 个交易日**（2026-09-08 改，原来只抓当天）——"
-            + "龙虎榜是盘后**陆续**公布的，15:30 抓到 20 只写进库后，老逻辑判定\"这天已经有了\"就再也"
-            + "不碰它，晚上发布的另外 40 只永久漏掉；重抓幂等，代价是每轮多 4 个请求。"
+            "当日龙虎榜概要（哪只票、因为什么指标上榜、龙虎榜买卖额），当晚发布。\n"
+            + "**2026-09-09 从新浪换成东财**：两源逐条比对过（09-08 单日票集 55 vs 55 双向零差异、"
+            + "收盘价全对上、成交额换算比值精确 1.000000、数据起点同为 2004-06-25）。换的理由是口径——"
+            + "东财的上榜原因是**交易所原文**，跟【拉取龙虎榜席位】那张表同源，两张表终于能按 "
+            + "(日期,代码,原因) join；新浪那份把原因归并成 28 种粗类，且对应值跟原因错配。"
+            + "要退回新浪：改 fetcher-settings.json 的 LhbSource。\n"
+            + "模式：「增量」＝以今天为终点**回看 31 个交易日**——不只是等盘后陆续公布，更是为了"
+            + "**上榜后 N 日涨跌幅**那几列：它们是滞后字段，当天抓一律为空，d30 要等 30 个交易日才有值。"
+            + "东财按月切片，31 个交易日≈2~3 个请求，比原来逐日抓 5 天还省。"
             + "日期格**填了**就只抓那一天，并绕过\"确认没有\"名单（人点名要，就是要重查它）。\n"
-            + "「首次整段回补」＝从 2002-01-01（两所公开信息制度起点；⚠ 跟两融的 2010 无关，"
-            + "龙虎榜早八年）补到今天（原【一键补齐每日历史】的龙虎那半边），幂等可反复跑。\n"
-            + "回补跳过四类日子：周末、**交易日历里的非交易日**、**确认没有数据的日子**"
-            + "（抓过、正常返回空、过了 3 天才定案）、本地已有的日子——所以先跑一次【交易日历】，"
-            + "能省掉几百个必然为空的请求。",
+            + "「首次整段回补」＝从 2004-06-25（东财这张表的第一天）补到今天，幂等可反复跑。\n"
+            + "⚠ 东财不给\"对应值\"和\"成交量\"这两列。对应值本地补：换手率/涨跌幅直接用源给的，"
+            + "单日偏离值和振幅本地算（拿真值验过，主板命中 91~100%），**连续N日累计偏离值一律留空**"
+            + "——起算日由交易所判定，本地复现不出来，最好也只有 55%。每一行都在 deviation_source 列标明来路。\n"
+            + "**成交量一律留空**：本想从本地日K补，实测发现 Bar.volume 的单位在**科创板是股、"
+            + "其余板块是手**（09-08 全市场 688/689 的 613 只 vs 其余 4949 只），且有些行的量额本身就不全"
+            + "（603999 那天记 6914 万、实际 2.13 亿）——那是 Bar 表自己的毛病，不该在龙虎榜这儿绕过去。"
+            + "量能信息用成交额、换手率、龙虎榜买卖额那几列。",
             FetchActionParams.Date,
             SoftDependsOn: [FetchActionId.StepTradingCalendar],
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
+
+        new(FetchActionId.StepLhbMigrate, "龙虎榜·换源重抓（一次性）", "东财", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(20), "一次性",
+            "把 2004-06-25 至今的龙虎榜整段用**东财**重抓一遍，覆盖掉新浪那份历史。\n"
+            + "**为什么必须整段重抓**：两个源的上榜原因文本不一样，而它是主键的一部分。不重抓的话，"
+            + "库里会永远躺着一段\"原因是粗类、且原因跟对应值错配\"的老数据，跟新数据没法一起用——"
+            + "换源图的就是口径统一。\n"
+            + "**跑之前会自动备份**：整张 Lhb 表导出成 data/local/backup/Lhb-*.sqlite，"
+            + "**独立文件、不在主库里**（跟主库同生共死的副本不叫备份，只是把 23GB 的库撑得更大）。"
+            + "备份失败就直接中止，不往下走。要比对新旧数据，把那个文件 ATTACH 回来即可。\n"
+            + "约 267 个月片、580 个请求、十几分钟。按天替换是幂等的，中断了重跑就行。\n"
+            + "⚠ **必须先跑一次【指数日K】**：偏离值要拿深证综指 399106 / 创业板综 399102 / 北证50 当基准，"
+            + "这三条 2026-09-09 才加进指数清单，老库里一行都没有。缺了不会报错，只会让对应板块的对应值"
+            + "全为空——所以这一项开跑前会先查一遍，缺了直接中止。\n"
+            + "⚠ 跑的过程中 Lhb 表是逐天被替换的，这段时间别同时跑依赖龙虎榜的分析。",
+            FetchActionParams.None,
+            SupportedModes: FetchMode.Incremental),
 
         new(FetchActionId.StepFillProbeFloor, "回填\"无更早数据\"水位", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(1), "一次性",
@@ -688,8 +728,10 @@ public static class FetchTaskCatalog
             + "⚠ 第一次跑查出来的量通常很大（十年下来的停牌天数全在里面），补一轮可能要几小时；"
             + "沉淀进白名单之后，往后每次体检就只剩零星新增了。\n"
             + "刚过去 2 天内的日子不算缺（数据源可能还没更新完）。\n"
-            + "参数里的【彻底体检】＝清空那份白名单、全部重查一遍——数据源当时抽风、后来补上了的话用它。",
-            FetchActionParams.Thorough),
+            + "模式选「彻底重查」＝清空那份白名单、全部重查一遍——数据源当时抽风、后来补上了的话用它"
+            + "（2026-09-09 从一个单独的勾收成模式，见 FetchMode.Thorough）。",
+            FetchActionParams.None,
+            SupportedModes: FetchMode.Incremental | FetchMode.Thorough),
 
         new(FetchActionId.StepReparseBankPdf, "重解析已有PDF", "本地计算·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(5), "解析规则改了之后",
@@ -1122,8 +1164,10 @@ public static class FetchTaskCatalog
     ///
     /// 为什么要有它：这些格子原来是留空的、留空表示"用【手动】页那个框里的值"。可空着的格子
     /// 看不出会用什么值——人得知道那一行到底按几年回看、按什么关键词搜，才能判断要不要改。
-    /// 所以建计划项时直接把默认值填进去（跟【手动】页那几个框的初始值一致）。
-    /// 清空之后仍旧退回全局值，这条兜底没变。
+    /// 所以建计划项时直接把默认值填进去。
+    ///
+    /// 2026-09-08【手动】页撤掉之后，这里同时也是**运行期的兜底**：用户手工清空了某个格子
+    /// 又直接点【执行】时，回看年数和年份区间取这里的值（关键词是例外——清空就是"别抓"）。
     /// </summary>
     public static string? DefaultParamText(FetchActionId id, FetchActionParams which) => which switch
     {

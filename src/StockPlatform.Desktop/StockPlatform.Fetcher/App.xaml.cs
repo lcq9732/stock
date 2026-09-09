@@ -9,6 +9,7 @@ using StockPlatform.Data.Remote;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Fetcher.ViewModels;
 using StockPlatform.Logic.Abstractions;
+using StockPlatform.Logic.Models;
 using StockPlatform.Scheduling;
 using StockPlatform.Scheduling.Tasks;
 using StockPlatform.Tasks;
@@ -220,7 +221,14 @@ public partial class App : Application
         var indexWeightProvider = new CsindexWeightProvider(new RateLimiter(
             maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
             batchSize: 30, restDuration: TimeSpan.FromSeconds(60)));
-        var lhbProvider = new SinaLhbProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        // 龙虎榜概要的数据源（2026-09-09 默认切到东财）。两套并存、配置切换，见
+        // FetcherSettings.ReadLhbSource：东财给的上榜原因是交易所原文，跟龙虎榜席位表同源、
+        // 能 join；新浪那份把原因归并成粗类，且对应值跟原因错配。新浪留着是出事时的退路。
+        var lhbSource = FetcherSettings.ReadLhbSource(paths.SettingsPath);
+        var emLhbProvider = new EastMoneyLhbProvider(emDataCenter);
+        ILhbProvider lhbProvider = lhbSource == LhbSources.Sina
+            ? new SinaLhbProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)))
+            : emLhbProvider;
         var indexRepository = new SqliteIndexRepository(paths.CurrentDb);
         indexRepository.EnsureSchema();
         var lhbRepository = new SqliteLhbRepository(paths.CurrentDb);
@@ -376,6 +384,11 @@ public partial class App : Application
             () => new CustomerSupplierTask(custSuppRepository, companyProfileRepository, custSuppProvider));
         taskRegistry.Register(FetchActionId.StepIndustryIndicator,
             () => new IndustryIndicatorTask(indicatorRepository, indicatorProvider));
+        // 【全库数据体检】2026-09-09 从 orchestrator 迁过来（例外，判据见
+        // doc/full-audit-task-migration-design.md §0）：它要长大，而且正需要框架的流式落账 +
+        // 分批/截止——原来扫完才一次性 Save，三遍扫描半小时，中途停等于全白跑。
+        taskRegistry.Register(FetchActionId.StepFullAudit,
+            () => new FullAuditTask(paths.CurrentDb, manifestStore, dailyNoDataRepository));
 
         var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
 

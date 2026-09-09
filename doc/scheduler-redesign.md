@@ -1,4 +1,4 @@
-# 任务调度重构设计
+﻿# 任务调度重构设计
 
 > 2026-09-05 讨论定稿的架构方向。可视化版（含可勾选的待定项）：
 > https://claude.ai/code/artifact/15bb3b6f-a4da-4c8d-9d50-934f706fd8ec
@@ -168,5 +168,6 @@ classDiagram
 
 - **Debug 模式 mock 网络**（用户 09-05 提过）：等 `IFetchTask` 落地后再做，
   那时在任务层注入假实现比在传输层拦截干净得多
-- **`IsBusy` 那套**：`AcquireOrPreemptAsync` 现在遇到 `IsBusy` 仍然只能让路。
-  它代表【手动】页那几个横跨所有源的大按钮，要等它们也变成 `IFetchTask` 才能统一进 registry
+- ~~**`IsBusy` 那套**~~：**已做掉（2026-09-08）**。做法不是把那些大按钮变成 `IFetchTask`，
+  而是把【手动】页整个撤了——它的每个动作计划里都有对应的原子项，而每一行都带【执行】。
+  没有账外任务之后，`IsBusy` 和 `SourceAdmission.manualBigTaskRunning` 一并删除

@@ -29,11 +29,19 @@ public interface ICustomerSupplierRepository
     // 一般原则：任务的水位线粒度必须**细于**骨架的截断粒度。截断粒度是批（2000 行），
     // 所以水位线不能是"年（有/无）"，得是"这一年落了多少行 / 该有多少行"。
 
-    /// <summary>记下某年的完成度。<paramref name="reported"/> 是接口自报的总行数。</summary>
-    void SaveYearState(int year, int reported, int saved);
+    /// <summary>
+    /// 记下某年的完成度。
+    /// </summary>
+    /// <param name="reported">接口自报的总行数，<b>含非 A 股主体</b>。</param>
+    /// <param name="saved">实际落库行数。</param>
+    /// <param name="skipped">
+    /// 主动丢掉的行数（非 A 股代码等）。<b>必须记</b>——只比 saved 和 reported 的话，
+    /// 主动过滤会被误判成"没抓齐"，那几年每轮重抓且永远抓不齐。
+    /// </param>
+    void SaveYearState(int year, int reported, int saved, int skipped);
 
-    /// <summary>每年的 (接口自报, 实际落库)。没抓过的年份不在字典里。</summary>
-    Dictionary<int, (int Reported, int Saved)> GetYearStates();
+    /// <summary>每年的 (接口自报, 实际落库, 主动丢弃)。没抓过的年份不在字典里。</summary>
+    Dictionary<int, (int Reported, int Saved, int Skipped)> GetYearStates();
 
     // ── 实体消歧（2026-09-08）──────────────────────────────────────────
 

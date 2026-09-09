@@ -148,11 +148,15 @@ public sealed class FetchPlanItem
         Info.SupportsPartialRun
         && (Info.SupportedModes == FetchMode.Incremental || EffectiveMode != FetchMode.Incremental);
 
-    /// <summary>动作要参数时才有值；留空表示用【手动】页上的对应输入框。</summary>
+    /// <summary>
+    /// 动作要参数时才有值。**留空是有意义的**，各参数不一样，见下面每一个的说明——
+    /// 2026-09-08 之前留空一律表示"用【手动】页上那个全局框的值"，那一页撤掉后不再有这回事。
+    /// </summary>
+    /// <summary>只抓某一天时抓哪天。留空＝今天。</summary>
     public string? DateText { get; set; }
-    /// <summary>首次回看几年（只有「拉取全部」用）。留空=用【手动】页那个框。</summary>
+    /// <summary>首次回看几年（抓K线那几行用）。留空＝3 年，见 FetchTaskCatalog.DefaultParamText。</summary>
     public string? LookbackYearsText { get; set; }
-    /// <summary>中标/订单公告关键词，逗号分隔（2026-09-02 从全局参数挪进行里）。留空=用【手动】页那个框。</summary>
+    /// <summary>中标/订单公告关键词，逗号分隔（2026-09-02 从全局参数挪进行里）。留空＝这一项不抓公告。</summary>
     public string? KeywordsText { get; set; }
     public string? YearStartText { get; set; }
     public string? YearEndText { get; set; }
@@ -307,6 +311,7 @@ public sealed class FetchPlanItem
     /// </summary>
     public bool AlreadyFailedOn(DateTime day) =>
         LastOutcome == RunOutcome.Failed && StartedOnCalendarDay(day);
+
 
     /// <summary>上一轮是不是**在 <paramref name="day"/> 当天开始**的（跨午夜跑完的那轮算前一天）。</summary>
     private bool StartedOnCalendarDay(DateTime day)
@@ -767,6 +772,16 @@ public sealed class FetchPlan
     public List<string> MigrateRetired()
     {
         var notes = new List<string>();
+
+        // 【全库数据体检】的「彻底体检」勾 2026-09-09 收成了 FetchMode.Thorough（那一项迁到新任务
+        // 框架时顺手统一的，见 doc/full-audit-task-migration-design.md §4）。老计划里勾着的项
+        // 原地换成模式——不迁的话那个勾会静默失效，用户以为在彻底重查、其实是常规体检。
+        foreach (var item in AllItems.Where(i => i.ThoroughAudit))
+        {
+            item.ThoroughAudit = false;
+            item.Mode = FetchMode.Thorough;
+            notes.Add($"【{FetchTaskCatalog.Info(item.Action).Name}】的「彻底体检」勾已换成模式「彻底重查」");
+        }
 
         foreach (var group in Groups)
         {

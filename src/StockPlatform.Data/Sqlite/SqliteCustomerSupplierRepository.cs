@@ -75,31 +75,34 @@ public class SqliteCustomerSupplierRepository : ICustomerSupplierRepository
         return list.Count;
     }
 
-    public void SaveYearState(int year, int reported, int saved)
+    public void SaveYearState(int year, int reported, int saved, int skipped)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO CustSuppYearState (year, reported, saved, updated_at)
-            VALUES ($y, $r, $s, $at)
+            INSERT INTO CustSuppYearState (year, reported, saved, skipped, updated_at)
+            VALUES ($y, $r, $s, $k, $at)
             ON CONFLICT(year) DO UPDATE SET
-                reported = excluded.reported, saved = excluded.saved, updated_at = excluded.updated_at;
+                reported = excluded.reported, saved = excluded.saved,
+                skipped = excluded.skipped, updated_at = excluded.updated_at;
             """;
         cmd.Parameters.AddWithValue("$y", year);
         cmd.Parameters.AddWithValue("$r", reported);
         cmd.Parameters.AddWithValue("$s", saved);
+        cmd.Parameters.AddWithValue("$k", skipped);
         cmd.Parameters.AddWithValue("$at", DateTime.Now.ToString(TimeFormat, CultureInfo.InvariantCulture));
         cmd.ExecuteNonQuery();
     }
 
-    public Dictionary<int, (int Reported, int Saved)> GetYearStates()
+    public Dictionary<int, (int Reported, int Saved, int Skipped)> GetYearStates()
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT year, reported, saved FROM CustSuppYearState;";
-        var map = new Dictionary<int, (int, int)>();
+        // COALESCE：老库迁移上来的行 skipped 是 NULL（那时还没这一列）
+        cmd.CommandText = "SELECT year, reported, saved, COALESCE(skipped, 0) FROM CustSuppYearState;";
+        var map = new Dictionary<int, (int, int, int)>();
         using var r = cmd.ExecuteReader();
-        while (r.Read()) map[r.GetInt32(0)] = (r.GetInt32(1), r.GetInt32(2));
+        while (r.Read()) map[r.GetInt32(0)] = (r.GetInt32(1), r.GetInt32(2), r.GetInt32(3));
         return map;
     }
 

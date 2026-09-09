@@ -44,8 +44,15 @@ public sealed class PlanRunner(
     Action<PlanRunnerState> onState,
     Action? onRoundFinished = null,
     TimeSpan? quietBudgetOverride = null,
-    SourceOccupancy? occupancy = null)
+    SourceOccupancy? occupancy = null,
+    DetachedPlanRuns? detached = null)
 {
+    /// <summary>
+    /// 停止时把当前项交出去、下次开始时再认领回来的地方（2026-09-08，见 <see cref="DetachedPlanRuns"/>）。
+    /// 外面不传就自己建一个——那样脱离的任务没人认领，跑完由它自己的后台延续收尾，
+    /// 行为仍然正确，只是"重开计划把它收编回来"这件事没人做（测试里常这么用）。
+    /// </summary>
+    private readonly DetachedPlanRuns _detached = detached ?? new DetachedPlanRuns();
     /// <summary>
     /// 数据源占用表（2026-09-04）——手动执行能不能跟计划并发，就看这里。
     /// 外面不传就自己建一个：那样等于只有计划自己在记账，行为跟以前一致。
@@ -102,6 +109,10 @@ public sealed class PlanRunner(
 
         try
         {
+            // 上一轮【停止计划】时正在跑、至今还没跑完的项，先认领回来当自己的当前项
+            // （2026-09-08 用户定的：计划回来了就该把它收编，而不是绕开它另跑一份）。
+            await AdoptDetachedAsync(ct);
+
             while (!ct.IsCancellationRequested)
             {
                 var now = DateTime.Now;
@@ -301,6 +312,10 @@ public sealed class PlanRunner(
         // 失败过的今天不再自动重来——同一个错误连着撞几十次没有意义，而且会卡住后面所有项。
         // 要重试就手动触发那一项，或者靠后台自动重试（它有自己的时机和停止条件）。
         if (item.AlreadyFailedOn(now)) return false;
+        // ⚠ 被人**单独停掉**过的**不挡**（2026-09-08 用户定的）：勾着启用、又符合计划，
+        //    那它就该跑——【停止】停的是"这一次执行"，不是"今天别再跑了"。
+        //    不想让它跑，取消那一行的勾选（那才是表达"别跑"的地方）。
+        //    代价是：停掉一个跑到一半的项，计划下一轮会从头再跑它一遍。这是明确要的行为。
         // 前置今天失败了：第一次放过去让 ExecuteOneAsync 记一条"跳过"并说明原因，之后就静默
         // 掠过——否则每分钟一轮评估就会往报告里刷一行。前置后来补跑成功的话，这里自然放行。
         if (DependencyFailedToday(item) && item.AlreadySkippedOn(now)) return false;
@@ -511,8 +526,12 @@ public sealed class PlanRunner(
         // ⚠ CancellationToken 是**协作式**的：任务内部得真的在检查它才掐得动。
         //    卡在网络重试循环、卡在 foreach 里等 ct 的都能掐；要是卡在一个压根不接受 ct 的
         //    同步调用上（比如死等一把 SQLite 写锁），这道兜底也无能为力——那种得从任务内部修。
+        // ⚠ outer 传 None，**不能挂计划循环那个令牌**（2026-09-08 改）。
+        //    挂上去的话【停止计划】就等于把正在抓的东西掐掉，而它的语义只是"别再挑下一项"。
+        //    任务真正的取消源在执行入口那边（itemCts 登记进占用表），也就是界面右上角
+        //    「正在执行」里那一行的【停止】——要停某一项，那才是入口。
         var maxQuiet = MaxQuietFor(item);
-        using var dog = new QuietWatchdog(maxQuiet, ct,
+        var dog = new QuietWatchdog(maxQuiet, CancellationToken.None,
             onLongRun: ran => log($"⏳ 计划：【{info.Name}】已经跑了 {Describe(ran)} 还在继续。"
                                 + "**没有掐断**（它一直在报进度，不是卡死）——只是跑这么久通常值得看一眼，"
                                 + "比如它是不是每轮都在重做同一批活。"));
@@ -533,11 +552,81 @@ public sealed class PlanRunner(
                 ? $"——空闲补一轮，要在 {deadline:HH:mm} 前收尾（后面有定时任务）"
                 : item.Pacing == RunPacing.WhenIdle ? "——空闲补一轮" : ""));
 
+        // 任务每说一句话就是一次心跳，看门狗靠它判断"还在往前走"。
+        // ⚠ execute 的**同步段**也可能抛（参数校验、库还没建之类），那种异常不在返回的 Task 里。
+        //    不接住的话它会一路穿到 RunAsync，整份计划被一项的参数错误掀掉，而且这一项连账都没记。
+        Task<FetchResult> started;
+        try { started = execute(item, deadline, dog.Wrap(log), dog.Token); }
+        catch (Exception ex) { started = Task.FromException<FetchResult>(ex); }
+        var run = new DetachedPlanRun(item, started, dog, deadline);
+        if (!await AwaitOrDetachAsync(run, ct)) return;   // 计划被停了：它继续跑，循环退出
+        await FinishRunAsync(run);
+    }
+
+    /// <summary>
+    /// 等这一项跑完；等的过程中计划被停了就**把它交出去**（自己继续跑，见 <see cref="DetachedPlanRun"/>）。
+    /// </summary>
+    /// <returns>true＝它跑完了，调用方接着收尾；false＝已交出去，调用方立刻返回。</returns>
+    private async Task<bool> AwaitOrDetachAsync(DetachedPlanRun run, CancellationToken ct)
+    {
+        // Delay(Infinite, ct) 只是"等停止信号"的一种写法；用 linked 源是为了任务先跑完时
+        // 能把这个 Delay 收掉，不然每跑一项就漏一个永不完成的 Task。
+        using var stopWatcher = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var stopped = Task.Delay(Timeout.Infinite, stopWatcher.Token);
+        var first = await Task.WhenAny(run.Task, stopped);
+        stopWatcher.Cancel();
+        if (first == run.Task) return true;
+
+        _detached.Add(run);
+        log($"⏸ 计划已停止，但【{run.Item.Info.Name}】还在跑——**没有打断它**。"
+          + "要停它请点右上角「正在执行」里那一行的【停止】；"
+          + "再点【开始执行计划】的话，计划会把它接手回来、等它跑完再往下走。");
+        // 没人来认领的话，它自己跑完自己记账（记账权二选一，见 DetachedPlanRun.TryTakeOver）
+        _ = run.Task.ContinueWith(_ =>
+        {
+            if (!run.TryTakeOver()) return;                 // 已经被新一轮计划接手了
+            _ = FinishRunAsync(run, detachedTail: true);
+        }, TaskScheduler.Default);
+        return false;
+    }
+
+    /// <summary>
+    /// 上一轮【停止计划】留下的、还在跑的项：接手回来当自己的当前项，等它跑完并记账，
+    /// 然后计划照常往下走（2026-09-08）。已经自己收尾掉的直接跳过。
+    /// </summary>
+    private async Task AdoptDetachedAsync(CancellationToken ct)
+    {
+        foreach (var run in _detached.TakeAll())
+        {
+            if (!run.TryTakeOver()) continue;               // 它在这中间跑完了，账已经记过
+            var name = run.Item.Info.Name;
+            log($"↻ 计划：接手上一轮留下的【{name}】——它一直在跑，等它跑完再往下走。");
+            onState(new PlanRunnerState(true, run.Item, null, null, $"正在执行【{name}】"));
+            if (!await AwaitOrDetachAsync(run, ct)) return;  // 又被停了：再交出去一次
+            await FinishRunAsync(run);
+        }
+    }
+
+    /// <summary>
+    /// 一项跑完之后的全部记账：结果分类、耗时样本、冷却、日志。
+    /// **认领回来的那一项走的也是这里**，所以不会出现"脱离过一次的项记账方式不一样"。
+    /// </summary>
+    /// <param name="detachedTail">
+    /// true＝这是脱离之后自己跑完的（计划没回来接手）。只影响日志措辞：那时候计划已经显示
+    /// 未运行了，日志里得说清这一行是谁写的，否则人会以为计划又自己跑起来了。
+    /// </param>
+    private async Task FinishRunAsync(DetachedPlanRun run, bool detachedTail = false)
+    {
+        var item = run.Item;
+        var info = item.Info;
+        var dog = run.Dog;
+        var maxQuiet = dog.MaxQuiet;
+        var tail = detachedTail ? "（计划已停止，这一项是自己跑完的）" : "";
+        using var _ = dog;
+
         try
         {
-            // 任务每说一句话就是一次心跳，看门狗靠它判断"还在往前走"。
-            var progress = dog.Wrap(log);
-            var result = await execute(item, deadline, progress, dog.Token);
+            var result = await run.Task;
             foreach (var err in result.Errors) log($"错误：{err}");
 
             // 「根本没开工」不能记成完成（2026-09-04）：界面上会显示成绿勾"09:25 完成"，
@@ -546,7 +635,7 @@ public sealed class PlanRunner(
             if (result.SkippedReason is { } why)
             {
                 Finish(item, RunOutcome.Skipped, result.Errors.Count, why);
-                log($"⏸ 计划：【{info.Name}】本轮没开工——{why}。今天恢复之后还会再来。");
+                log($"⏸ 计划：【{info.Name}】本轮没开工——{why}。今天恢复之后还会再来。{tail}");
                 return;
             }
 
@@ -573,7 +662,7 @@ public sealed class PlanRunner(
                     ? (errors > 0 ? $"{prog}（{errors} 条错误）" : prog)
                 : errors > 0 ? $"完成，但有 {errors} 条错误" : "完成");
             log($"✔ 计划：【{info.Name}】完成，用时 {Describe(item.LastEnd!.Value - item.LastStart!.Value)}"
-              + (errors > 0 ? $"（{errors} 条错误，详见上面的日志）" : ""));
+              + (errors > 0 ? $"（{errors} 条错误，详见上面的日志）" : "") + tail);
 
             // "仅一次"的跑成功就自动取消勾选，免得明天又来一遍
             if (item.Repeat == RepeatKind.Once)
@@ -583,15 +672,20 @@ public sealed class PlanRunner(
                 store.Save(plan);
             }
         }
-        // ⚠ 只有**真的按了停止**才算取消。HttpClient 超时抛的也是 OperationCanceledException
-        //    （TaskCanceledException），要是不看 ct 就一律当成"用户停了"，一次网络抖动
-        //    就会把整份计划掀掉——夜里没人看着，后面十几项全不跑了。所以这里认 ct，
-        //    伪取消落到下面的 catch (Exception) 里记成"这一项失败"，计划继续往下走。
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        // 被单独停掉这一项（右上角「正在执行」里那一行的【停止】）。
+        //
+        // ⚠ 记「已取消」而不是「失败」（2026-09-08 修）：以前这一支只认计划循环的令牌，
+        //    单项停止落到最后那个兜底 catch 里，界面上显示成「✘ 失败」——人明明是自己停的。
+        // ⚠ 也**不再往外抛**：停一项不等于停计划，后面的项照常跑（那一行的 ToolTip
+        //    一直是这么写的，但代码此前并不是这样）。真要停计划请点【停止计划】。
+        // ⚠ 判据是这个**专门的异常类型**，不是"抓到 OperationCanceledException 就算"：
+        //    HttpClient 超时抛的也是 OCE，一次网络抖动不该被记成"用户停了"（见它的类注释）。
+        catch (PlanItemStoppedException)
         {
             Finish(item, RunOutcome.Cancelled, 0, "被手动停止");
-            log($"⏹ 计划：【{info.Name}】被停止。");
-            throw;
+            log($"⏹ 计划：【{info.Name}】被单独停止（后面的项继续）。{tail}"
+              + "⚠ 它还勾着启用、也仍符合计划，所以**下一轮可能又被排上、从头再跑一遍**——"
+              + "今天不想让它跑，把那一行的勾选去掉。");
         }
         // 哑太久被判定卡死掐断——算"这一项失败"，计划照常往下走。
         // 放在"用户停止"那一条之后：两者抛的都是 OperationCanceledException，
@@ -606,7 +700,7 @@ public sealed class PlanRunner(
             if (item.Pacing == RunPacing.WhenIdle)
                 _idleNextAllowed[item.Action] = DateTime.Now + IdleCooldown;
             log($"⏱ 计划：【{info.Name}】{msg}。后面的项继续跑。"
-              + "（不是因为跑得久被掐的——它是真的哑了这么久）");
+              + "（不是因为跑得久被掐的——它是真的哑了这么久）" + tail);
         }
         catch (Exception ex)
         {
@@ -616,7 +710,7 @@ public sealed class PlanRunner(
             //    不挡一下就会每分钟重试一次，一直撞同一个错。
             if (item.Pacing == RunPacing.WhenIdle)
                 _idleNextAllowed[item.Action] = DateTime.Now + IdleCooldown;
-            log($"✘ 计划：【{info.Name}】失败：{ex.Message}（不影响后面的项，继续）");
+            log($"✘ 计划：【{info.Name}】失败：{ex.Message}（不影响后面的项，继续）{tail}");
         }
     }
 

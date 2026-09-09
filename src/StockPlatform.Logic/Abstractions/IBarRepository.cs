@@ -6,7 +6,7 @@ namespace StockPlatform.Logic.Abstractions;
 public interface IBarRepository
 {
     void EnsureSchema();
-    void InsertOrIgnore(IEnumerable<Bar> bars);
+    void InsertOrRefreshUnconfirmed(IEnumerable<Bar> bars);
     DateTime? GetLatestPeriodStart(string code, string granularity);
     /// <summary>Latest period_start across ALL codes for a granularity — used by the Analyzer to
     /// show "本地数据最新到 X" without needing a separate sync-state file (see

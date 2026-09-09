@@ -211,20 +211,15 @@ public partial class FetchOrchestrator
     private static bool IsDrifted(double stored, double fresh) =>
         Math.Abs(stored - fresh) > Math.Max(0.005, Math.Abs(fresh) * 0.002);
 
-    // 15:00只是常规连续竞价的收盘时间，15:00~15:30还有盘后定价交易（大宗/固定价格成交），这段
-    // 时间抓到的数据不算真正确定——用16:00才能确保盘后定价交易也结束了，判断"某一天的数据是不是
-    // 已经收盘后抓到、以后不会再变了"更安全（2026-07-09新增，2026-07-09从15点改成16点，见
-    // IsConfirmedFinal）。故意不处理早收盘的极少数节假日前半天交易——用这个固定较晚的时间点判断
-    // 只会让那些日子多等一会儿才被认定为"最终"，不会出现"提前认定成最终、结果数据其实还会变"的
-    // 反向错误，属于保守但安全的简化。
-    private const int MarketCloseHour = 16;
-
-    /// <summary>某一天(<paramref name="tradingDay"/>)的数据，如果实际抓到的时间
-    /// (<paramref name="fetchedAt"/>) 已经在那天16点之后（或者压根是更晚的日子才抓到的），就
-    /// 认为是收盘后确认的最终数据，以后不用再为这一天重新发请求——不管是当天多次重复运行，还是
-    /// 隔了几天才想起来要补，只要抓取时间点晚于当天16点就成立，不需要额外判断具体是哪一天。</summary>
+    /// <summary>判据本体在 <see cref="IncrementalWindowCalculator"/>（Logic 层纯函数，有单测覆盖）——
+    /// 这里只是转发，别在这儿再写一份。2026-09-09 抽走的理由见那个类的注释。</summary>
     private static bool IsConfirmedFinal(DateTime fetchedAt, DateTime tradingDay) =>
-        fetchedAt >= tradingDay.Date.AddHours(MarketCloseHour);
+        IncrementalWindowCalculator.IsConfirmedFinal(fetchedAt, tradingDay);
+
+    /// <summary>同上，转发给 <see cref="IncrementalWindowCalculator.IncrementalStart"/>。</summary>
+    private static DateTime IncrementalStart(
+        (DateTime PeriodStart, DateTime FetchedAt)? latest, DateTime end, int lookbackYears) =>
+        IncrementalWindowCalculator.IncrementalStart(latest, end, lookbackYears);
 
     /// <summary>"mm\:ss"格式的TimeSpan在超过1小时后会把小时部分直接丢掉（比如1小时5分12秒会被
     /// 打印成"05:12"，看起来像是时间变短了/重置了，而不是继续在涨）——全市场扫描现在经常跑到
@@ -316,27 +311,14 @@ public partial class FetchOrchestrator
         _industryProvider = industryProvider;
     }
 
-    /// <summary>
-    /// 抓取板块数据（概念/题材 + 行业）及各板块成分股，整体覆盖写入本地库（见 IBoardRepository）。
-    /// 独立于 K线/市值/资金流的抓取——是一个单独的按钮触发（"拉取板块"），因为板块热点是"当下快照"、
-    /// 跟历史K线的增量抓取不是一回事，也不想让它拖慢主抓取。
-    /// </summary>
-    public async Task<FetchResult> RunFetchBoardsAsync(IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var errors = new ConcurrentBag<string>();
-        var skipped = await FetchBoardsCoreAsync(errors, progress, ct);
-        if (skipped != null)
-            return new FetchResult { Errors = errors.ToList(), SkippedReason = skipped };
-
-        // 拉完板块紧接着合成板块指数（不联网，用本地已有个股K线按新成分重算）——2026-07-16 合并为
-        // 一步。2026-09-02 拆分之后合成也有了自己的计划项（StepBoardIndex / RunStepSynthesizeBoardIndexAsync），
-        // 这里仍旧带着跑，让老按钮的行为保持不变；排了独立项的人多跑一次也只是几分钟本地计算。
-        var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
-        currentRepo.EnsureSchema();
-        SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
-
-        return new FetchResult { Errors = errors.ToList() };
-    }
+    // ── 2026-09-08：【手动】页撤掉时一并删掉的四个"整包"方法 ─────────────────────────
+    //   RunFetchAsync（拉取全部）／RunFetchDayAsync（补指定历史日）／RunFetchBoardsAsync（拉取板块）
+    //   ／RunBackfillDailyHistoryAsync（一键补齐每日历史）／RunFetchPeriodicAsync（一键拉取定期数据）。
+    //   它们 2026-09-02 就被拆成了计划里的原子项（见 FetchOrchestrator.Steps.cs 和
+    //   FetchTaskCatalog.RetiredInto），此后只剩【手动】页那几个按钮还在调；那一页撤掉之后
+    //   全无调用方。同一件事留两条实现路径，改了一边忘另一边是迟早的事，所以直接删。
+    //   它们串起来的每一步（FetchMarketCapAsync / FetchStockDayBarsAsync / FetchBoardsCoreAsync …）
+    //   都还在，被各自的 RunStepXxxAsync 单项入口调用。
 
     /// <summary>
     /// 只抓板块行情与成分股、写库，**不合成板块指数**（2026-09-02 从 RunFetchBoardsAsync 抽出）。
@@ -951,13 +933,7 @@ public partial class FetchOrchestrator
             DateTime start;
             lock (_dbLock)
             {
-                var info = currentRepo.GetLatestBarInfo(etf.Code, Granularity.Day);
-                if (info == null)
-                    start = end.AddYears(-lookbackYears);
-                else if (info.Value.PeriodStart.Date < end.Date)
-                    start = info.Value.PeriodStart.AddDays(1);
-                else
-                    start = IsConfirmedFinal(info.Value.FetchedAt, end) ? end.AddDays(1) : end;
+                start = IncrementalStart(currentRepo.GetLatestBarInfo(etf.Code, Granularity.Day), end, lookbackYears);
             }
             return ProcessOneStockAsync(etf.Code, source, start, end, currentRepo, errors, failedCodes, stats, progress, etfs.Count, () => Interlocked.Increment(ref completed), sw, ct);
         });
@@ -999,7 +975,7 @@ public partial class FetchOrchestrator
                 lock (_dbLock)
                 {
                     currentRepo.DeleteByCode(board.BoardCode, Granularity.Day);
-                    if (bars.Count > 0) currentRepo.InsertOrIgnore(bars);
+                    if (bars.Count > 0) currentRepo.InsertOrRefreshUnconfirmed(bars);
                 }
                 if (bars.Count > 0)
                 {
@@ -1023,208 +999,6 @@ public partial class FetchOrchestrator
         if (synthesizedMeta.Count > 0)
             SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, synthesizedMeta, SqliteStockMetaUpsert.TypeBoard);
         progress?.Report($"板块指数合成完成：{boards.Count} 个板块，其中 {withBars} 个成分股数据足够、已写入 {totalBars} 根日K（code=板块代码，不进个股选股）。");
-    }
-
-    /// <summary>
-    /// Fetches every A-share stock automatically — the user does not type in codes, they
-    /// just pick a source and click "拉取全部"; the program looks up the full market list itself.
-    /// </summary>
-    /// <param name="lookbackYears">How far back to backfill a stock that has NO local history yet
-    /// (never fetched before, or newly IPO'd since the last run) — does not affect stocks already
-    /// tracked locally, their resume point is always their own last local date + 1 regardless of
-    /// this value (see remarks). User-adjustable, default 3.</param>
-    public async Task<FetchResult> RunFetchAsync(
-        NamedBarSource source, int lookbackYears, IReadOnlyList<string> announcementKeywords,
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        // Forward the rate limiter's out-of-band status (e.g. "intentionally pausing, not
-        // hung" — see RateLimiter/IBarDataFetcher.OnStatus) into this run's progress log. The
-        // fetcher/its RateLimiter live for the whole app session, so this must be unsubscribed
-        // when the run ends — otherwise a later run would get duplicate deliveries.
-        void ForwardStatus(string msg) => progress?.Report(msg);
-        source.Fetcher.OnStatus += ForwardStatus;
-        _marketCapFetcher.OnStatus += ForwardStatus;
-        _netInflowFetcher.OnStatus += ForwardStatus;
-        _lhbProvider.OnStatus += ForwardStatus;      // 龙虎榜每日数据已并入主流程
-        _marginProvider.OnStatus += ForwardStatus;   // 融资余额每日数据已并入主流程
-        try
-        {
-            return await RunFetchAllInternalAsync(source, lookbackYears, announcementKeywords, progress, ct);
-        }
-        finally
-        {
-            source.Fetcher.OnStatus -= ForwardStatus;
-            _marketCapFetcher.OnStatus -= ForwardStatus;
-            _netInflowFetcher.OnStatus -= ForwardStatus;
-            _lhbProvider.OnStatus -= ForwardStatus;
-            _marginProvider.OnStatus -= ForwardStatus;
-        }
-    }
-
-    /// <summary>See the class remarks — "拉取当天", independent of each stock's watermark.</summary>
-    public async Task<FetchResult> RunFetchDayAsync(
-        NamedBarSource source, DateOnly date, IReadOnlyList<string> announcementKeywords,
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        void ForwardStatus(string msg) => progress?.Report(msg);
-        source.Fetcher.OnStatus += ForwardStatus;
-        _marketCapFetcher.OnStatus += ForwardStatus;
-        _netInflowFetcher.OnStatus += ForwardStatus;
-        _lhbProvider.OnStatus += ForwardStatus;
-        _marginProvider.OnStatus += ForwardStatus;
-        try
-        {
-            return await RunFetchDayInternalAsync(source, date, announcementKeywords, progress, ct);
-        }
-        finally
-        {
-            source.Fetcher.OnStatus -= ForwardStatus;
-            _marketCapFetcher.OnStatus -= ForwardStatus;
-            _netInflowFetcher.OnStatus -= ForwardStatus;
-            _lhbProvider.OnStatus -= ForwardStatus;
-            _marginProvider.OnStatus -= ForwardStatus;
-        }
-    }
-
-    private async Task<FetchResult> RunFetchAllInternalAsync(
-        NamedBarSource source, int lookbackYears, IReadOnlyList<string> announcementKeywords,
-        IProgress<string>? progress, CancellationToken ct)
-    {
-        var today = DateTime.Today;
-        var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
-        currentRepo.EnsureSchema();
-
-        var sw = Stopwatch.StartNew();
-        progress?.Report("正在获取全市场股票列表...");
-        var stocks = await source.StockListProvider.GetAllStocksAsync(progress, ct);
-        progress?.Report($"共 {stocks.Count} 只股票，数据源：{source.Name}，开始抓取（已用时 {FormatElapsed(sw.Elapsed)}）");
-        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, stocks.Select(s => (s.Code, s.Name)));
-
-        await FetchMarketCapAsync(source, stocks.Select(s => s.Code).ToList(), progress, ct);
-        await FetchNetInflowAsync(stocks.Select(s => s.Code).ToList(), today, exactDayOnly: false, progress, ct);
-        await FetchAnnouncementsAsync(
-            announcementKeywords, DateOnly.FromDateTime(today.AddDays(-AnnouncementLookbackDaysForFetchAll)),
-            DateOnly.FromDateTime(today), progress, ct);
-
-        var errors = new ConcurrentBag<string>();
-        var failedCodes = new ConcurrentBag<string>();
-        var stats = new FetchStats();
-        await FetchIndexBarsAsync(source, today, lookbackYears, currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        await FetchStockDayBarsAsync(source, stocks.Select(s => s.Code).ToList(), today, lookbackYears,
-            currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        // 后复权日K（回测专用，见 FetchHfqBarsAsync）——只对个股，指数/ETF不需要。
-        await FetchHfqBarsAsync(source, stocks.Select(s => s.Code).ToList(),
-            code => HfqWatermarkWindow(currentRepo, code, today, lookbackYears),
-            currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        // 不复权日K（原始成交价）——跟后复权并列，日常增量在这里顺带抓一根，
-        // 这样【补不复权历史】就只剩"首次回补十年"这一件事，跑完一次就基本不用再管了。
-        await FetchHfqBarsAsync(source, stocks.Select(s => s.Code).ToList(),
-            code => HfqWatermarkWindow(currentRepo, code, today, lookbackYears, Granularity.DayRaw),
-            currentRepo, errors, failedCodes, stats, progress, sw, ct, gran: Granularity.DayRaw);
-
-        // 个股抓完后，末尾顺带跑 ETF 和板块指数合成（合成放最后，要读当天个股K线）。
-        var etfCodes = await FetchEtfBarsAsync(source, today, lookbackYears, currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        // 退市股收尾：只补"本地已跟踪过、但最后一根K线还早于终止日"的那几只（见方法注释）。
-        var delistedCodes = await CatchUpDelistedTailsAsync(source, currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
-
-        // 每日数据（融资余额/龙虎榜）并入主流程——非致命，失败只记 error 不影响 K线；更早的历史用
-        // "一键补齐每日历史"补。融资余额要回看最近几个交易日、不能只抓当天（两所T+1发布，
-        // 见 MarginLookbackTradingDays 的说明）；龙虎榜当晚就发布，抓当天即可。
-        await FetchMarginRecentAsync(today, errors, progress, ct);
-        await FetchLhbOneDayAsync(today, errors, progress, ct);
-
-        progress?.Report($"本轮汇总：{stats.Summarize()}");
-        var attempted = stocks.Select(s => s.Code)
-            .Concat(MarketIndexCatalog.All.Select(i => i.Symbol))
-            .Concat(etfCodes)
-            .Concat(delistedCodes).ToList();
-        return FinishFetchRun(errors, "拉取全部", attempted, failedCodes, progress, checkDayCoverage: true);
-    }
-
-    private async Task<FetchResult> RunFetchDayInternalAsync(
-        NamedBarSource source, DateOnly date, IReadOnlyList<string> announcementKeywords,
-        IProgress<string>? progress, CancellationToken ct)
-    {
-        if (!File.Exists(_paths.CurrentDb))
-            throw new InvalidOperationException("本地还没有任何数据，无法按天抓取，请先执行一次\"拉取全部\"");
-
-        var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
-        currentRepo.EnsureSchema();
-        var stocks = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb);
-        if (stocks.Count == 0)
-            throw new InvalidOperationException("本地股票列表为空，无法按天抓取，请先执行一次\"拉取全部\"");
-
-        var day = date.ToDateTime(TimeOnly.MinValue);
-        var sw = Stopwatch.StartNew();
-        progress?.Report($"按天抓取 {date:yyyy-MM-dd}，共 {stocks.Count} 只股票（K线用本地已有列表、不为K线重新扫全市场；流通市值步骤仍会扫一遍全市场、顺带发现新股），数据源：{source.Name}");
-
-        // 流通市值本来就要扫一遍全市场列表，顺带发现的新股（本地列表里还没有的代码）在这里并入
-        // 本轮的 stocks——这样"拉取当天"也能当天就把新股纳入K线/资金净流入抓取，不用非得先专门跑
-        // 一次"拉取全部"才会发现它（2026-07-10新增，见 FetchMarketCapAsync 的类注释）。
-        var (newCodes, _) = await FetchMarketCapAsync(source, stocks.Select(s => s.Code).ToList(), progress, ct);
-        if (newCodes.Count > 0)
-            stocks = stocks.Concat(newCodes).ToList();
-
-        await FetchNetInflowAsync(stocks.Select(s => s.Code).ToList(), day, exactDayOnly: true, progress, ct);
-        await FetchAnnouncementsAsync(announcementKeywords, date, date, progress, ct);
-
-        var errors = new ConcurrentBag<string>();
-        var failedCodes = new ConcurrentBag<string>();
-        var stats = new FetchStats();
-        var driftedCodes = new ConcurrentBag<string>();
-
-        // 指数走的是水位线增量（不是"只抓这一天"）——指数总共就几个，增量补齐的代价可以忽略，
-        // 而且这样第一次升级到带指数的版本时，跑一次"拉取当天"就能自动把指数近几年的历史一次
-        // 补齐（跟扫市值时顺带发现的新股用长回看窗口是同一个道理）。
-        await FetchIndexBarsAsync(source, day, DefaultLookbackYears, currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        await FetchStockDayBarsForDayAsync(source, stocks.Select(s => s.Code).ToList(), day,
-            currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        // 后复权日K（回测专用）——跟 ETF/指数一样走自己的水位线增量而不是"只抓这一天"，所以升级后
-        // 第一次跑"拉取当天"会自动把最近 DefaultLookbackYears 年的后复权补上；要一次补齐十年历史
-        // 仍需跑一次"拉取区间数据"（见 FetchHfqBarsAsync 注释）。
-        await FetchHfqBarsAsync(source, stocks.Select(s => s.Code).ToList(),
-            code => HfqWatermarkWindow(currentRepo, code, day, DefaultLookbackYears),
-            currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        // 不复权日K：同上，日常增量并在这里，见"拉取全部"里的同一段注释。
-        await FetchHfqBarsAsync(source, stocks.Select(s => s.Code).ToList(),
-            code => HfqWatermarkWindow(currentRepo, code, day, DefaultLookbackYears, Granularity.DayRaw),
-            currentRepo, errors, failedCodes, stats, progress, sw, ct, gran: Granularity.DayRaw);
-
-        // 个股抓完后，末尾顺带跑 ETF 和板块指数合成（合成放最后，要读当天个股K线）。ETF 跟大盘指数一样
-        // 走水位线增量而不是"只抓这一天"，所以升级后第一次跑"拉取当天"就会自动把 ETF 历史一次补齐。
-        var etfCodes = await FetchEtfBarsAsync(source, day, DefaultLookbackYears, currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        // 退市股收尾两种模式末尾都跑（这里 + RunFetchAllInternalAsync）：原因是2026-07-29时用户的日常
-        // 入口是"拉取当天"（当时确认"拉取全部"只有第一次会点），只挂在"拉取全部"上等于永远不执行。
-        // 2026-07-31 复核后用户改为日常点"拉取全部"（两者耗时相同、只有它补断档，见类注释），该按钮也
-        // 已改名为"补指定历史日"——但这一步仍保留在两处：两个入口都跑才与"哪个都不漏"的初衷一致。
-        // 放末尾也保证本轮的抓取清单（开头已取好）不受影响，见方法注释。
-        var delistedCodes = await CatchUpDelistedTailsAsync(source, currentRepo, errors, failedCodes, stats, progress, sw, ct);
-
-        SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
-
-        // 每日数据（融资余额/龙虎榜）并入"补指定历史日"。融资余额同样按"以该日为终点回看几天、
-        // 跳过本地已有"处理（见 MarginLookbackTradingDays）——补历史某天时，它前面几天多半也缺，
-        // 顺手一起补掉；已有的日子不会重复请求。龙虎榜仍只抓指定那一天。
-        await FetchMarginRecentAsync(day, errors, progress, ct);
-        // 龙虎榜只抓指定那一天，且绕过"确认没有"名单——人点名要这一天，就是要重查它
-        await FetchLhbOneDayAsync(day, errors, progress, ct, explicitDay: true);
-
-        progress?.Report($"本轮汇总：{stats.Summarize()}");
-        var attempted = stocks.Select(s => s.Code)
-            .Concat(MarketIndexCatalog.All.Select(i => i.Symbol))
-            .Concat(etfCodes)
-            .Concat(delistedCodes).ToList();
-        return FinishFetchRun(errors, "补指定历史日", attempted, failedCodes, progress, checkDayCoverage: true);
     }
 
     /// <summary>
@@ -2425,59 +2199,10 @@ public partial class FetchOrchestrator
         return result;
     }
 
-    /// <summary>
-    /// 除权事件源（<c>Dividend</c> / <c>RightsIssue</c>）比 <c>day_adj</c> 新的那些票——它们的复权因子
-    /// 是拿**旧的**除权记录算的，得重算。
-    ///
-    /// ⚠ 这条判据不能少（2026-09-02 补）：原来只比 day_raw 和 day_adj 的**日期范围**，
-    /// 于是"价格没变、但除权记录变了"这种情况完全检测不到——
-    /// 补录了一条漏掉的除权、配股方案入库、分红从"预案"变成"实施"填上了 ex_date，
-    /// 全都会改变复权因子，而界面上的待办量还是 0。又是个不报错的静默错误：
-    /// day_adj 静静地保持旧值，回测拿着错的收益率跑，没有任何地方会提示。
-    ///
-    /// **代价**：【拉取分红】是按 code 删旧写新的，跑完一轮全市场的 fetched_at 都会变新，
-    /// 于是每月触发一次全量重算（5781 只，十几二十分钟）。这个代价是认的——
-    /// 它纯本地、不占数据源配额、挂在「空闲时」跑，用一个月一次的机器时间换"因子永远跟事件一致"。
-    /// 要更精准就得存"上次算用了哪些事件"的签名（多一张状态表），眼下不值得。
-    /// </summary>
-    private HashSet<string> CodesWithStaleAdjEvents()
-    {
-        var stale = new HashSet<string>(StringComparer.Ordinal);
-        try
-        {
-            using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_paths.CurrentDb}");
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            // ⚠ 这里比的是「事件抓取时刻 vs day_adj 的重算时刻」。后者从 2026-09-04 起才是真的
-            // "重算时刻"——在那之前 day_adj 的 fetched_at 是从 day_raw 原样抄来的（源K线抓取
-            // 时刻），跟重算没关系，于是判据只在"事件抓得比K线还晚"时碰巧成立：实测配股 09-02
-            // 抓入、K线 09-03 抓取，642 只有配股的票一只都没被检出。见 AdjustFactorCalculator
-            // 的 computedAt 参数。
-            // 老数据的时间戳仍是旧的（偏早），只会让判据更倾向于"要重算"——偏保守，不会漏。
-            //
-            // RightsIssue 是后加的表，老库可能没有——用 sqlite_master 兜一下，缺表不该让整个判据失效
-            bool hasRights;
-            using (var probe = conn.CreateCommand())
-            {
-                probe.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='RightsIssue';";
-                hasRights = Convert.ToInt32(probe.ExecuteScalar() ?? 0) > 0;
-            }
-            string events = hasRights
-                ? "SELECT code, MAX(fetched_at) f FROM Dividend GROUP BY code " +
-                  "UNION ALL SELECT code, MAX(fetched_at) f FROM RightsIssue GROUP BY code"
-                : "SELECT code, MAX(fetched_at) f FROM Dividend GROUP BY code";
-            cmd.CommandText = $"""
-                WITH adj AS (SELECT code, MAX(fetched_at) f FROM Bar WHERE granularity='day_adj' GROUP BY code),
-                     ev  AS ({events})
-                SELECT DISTINCT ev.code FROM ev JOIN adj ON adj.code = ev.code
-                WHERE ev.f IS NOT NULL AND adj.f IS NOT NULL AND ev.f > adj.f;
-                """;
-            using var r = cmd.ExecuteReader();
-            while (r.Read()) stale.Add(r.GetString(0));
-        }
-        catch { /* 判据取不到就当没有：宁可少算一轮，也不该让界面上的计数抛异常 */ }
-        return stale;
-    }
+    /// <summary>判据本体在 <see cref="Sqlite.SqliteAdjSeriesAuditor"/>（2026-09-09 抽走，原来这里和
+    /// <see cref="RunRebuildAdjSeriesAsync"/> 各写了一份同样的判据）——这里只是转发。</summary>
+    private HashSet<string> CodesWithStaleAdjEvents() =>
+        new Sqlite.SqliteAdjSeriesAuditor(_paths.CurrentDb).CodesWithStaleEvents();
 
     /// <summary>
     /// 分档资金流的历史还差多少只（2026-09-04 加；2026-09-06 换了判据）——
@@ -2505,27 +2230,10 @@ public partial class FetchOrchestrator
         catch { return null; }
     }
 
-    /// <summary>本地有多少只个股的回测序列需要重算（不复权比它新，或者压根还没算过）。</summary>
-    public int GetPendingAdjRebuildCount()
-    {
-        try
-        {
-            var repo = new SqliteBarRepository(_paths.CurrentDb);
-            var rawLatest = repo.GetLatestPeriodStartByCode(Granularity.DayRaw);
-            var adjLatest = repo.GetLatestPeriodStartByCode(Granularity.DayAdj);
-            var rawEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayRaw);
-            var adjEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayAdj);
-            // 两头都要比：不复权在**前面**补长了（补历史），回测序列也得整段重算——
-            // 复权因子是从最早那天累乘上来的，起点一变整条线都变。
-            // 再加一条：除权事件本身变了也要重算，见 CodesWithStaleAdjEvents。
-            var staleEvents = CodesWithStaleAdjEvents();
-            return rawLatest.Count(kv => !adjLatest.TryGetValue(kv.Key, out var a) || a.Date < kv.Value.Date
-                || !adjEarliest.TryGetValue(kv.Key, out var ae)
-                || (rawEarliest.TryGetValue(kv.Key, out var re) && ae.Date > re.Date)
-                || staleEvents.Contains(kv.Key));
-        }
-        catch { return 0; }
-    }
+    /// <summary>本地有多少只个股的回测序列需要重算。判据在
+    /// <see cref="Sqlite.SqliteAdjSeriesAuditor"/>，跟【重算回测序列】用的是同一份。</summary>
+    public int GetPendingAdjRebuildCount() =>
+        new Sqlite.SqliteAdjSeriesAuditor(_paths.CurrentDb).PendingCount();
 
     /// <summary>
     /// 重算回测序列（day_adj）＝ 不复权 × 本地算的乘法式复权因子。**纯本地计算，不联网。**
@@ -2545,22 +2253,12 @@ public partial class FetchOrchestrator
         var divRepo = new SqliteDividendRepository(_paths.CurrentDb);
 
         progress?.Report("正在统计哪些股票的回测序列要重算（要扫一遍全库的日线索引，通常几十秒，请稍等）…");
-        var rawLatest = repo.GetLatestPeriodStartByCode(Granularity.DayRaw);
-        var adjLatest = repo.GetLatestPeriodStartByCode(Granularity.DayAdj);
-        var rawEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayRaw);
-        var adjEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayAdj);
-        // 两头都要比 + 除权事件变没变，理由见 GetPendingAdjRebuildCount
-        var staleEvents = CodesWithStaleAdjEvents();
-        var todo = rawLatest
-            .Where(kv => !adjLatest.TryGetValue(kv.Key, out var a) || a.Date < kv.Value.Date
-                      || !adjEarliest.TryGetValue(kv.Key, out var ae)
-                      || (rawEarliest.TryGetValue(kv.Key, out var re) && ae.Date > re.Date)
-                      || staleEvents.Contains(kv.Key))
-            .Select(kv => kv.Key)
-            .OrderBy(c => c, StringComparer.Ordinal)
-            .ToList();
-        if (staleEvents.Count > 0)
-            progress?.Report($"其中 {staleEvents.Count} 只是因为分红/配股记录有更新——"
+        // 判据（四条，见 SqliteAdjSeriesAuditor.BuildPlan）跟界面上那个"待重算 N 只"是同一份——
+        // 2026-09-09 之前这里和 GetPendingAdjRebuildCount 各写了一遍，改一处漏一处就是静默不一致。
+        var plan = new Sqlite.SqliteAdjSeriesAuditor(_paths.CurrentDb).BuildPlan();
+        var todo = plan.Codes.ToList();
+        if (plan.StaleEventCount > 0)
+            progress?.Report($"其中 {plan.StaleEventCount} 只是因为分红/配股记录有更新——"
                            + "复权因子是拿这些事件算的，事件一变整条序列都得重算。");
 
         if (todo.Count == 0)
@@ -2631,18 +2329,18 @@ public partial class FetchOrchestrator
                 // ── 能只补增量就别整段重算 ────────────────────────────────────────
                 // 复权因子只在除权日变。没除权的日子，新增那几根乘上现有因子追加就行——
                 // 每个交易日都全量重算的话，5781 只 × 2400 根 = 1400 万行每天读写一遍，纯浪费。
-                DateTime? adjLast = adjLatest.TryGetValue(code, out var al) ? al.Date : null;
+                DateTime? adjLast = plan.AdjLatest.TryGetValue(code, out var al) ? al.Date : null;
                 var newDays = adjLast is { } last ? raw.Where(b => b.PeriodStart.Date > last).ToList() : raw;
                 bool exInNewDays = adjLast is { } lastEx
                     && events.Any(e => e.ExDate.Date > lastEx && e.ExDate.Date <= raw[^1].PeriodStart.Date);
 
                 // 开头也对得上才敢走增量：raw 要是在**前面**补长了（补历史），因子基准就变了，
                 // 只追加尾巴会让新旧两段落在不同基准上，接缝处凭空多出一个假跳空。
-                bool headMatches = adjEarliest.TryGetValue(code, out var ae0)
+                bool headMatches = plan.AdjEarliest.TryGetValue(code, out var ae0)
                                 && ae0.Date <= raw[0].PeriodStart.Date;
                 // 除权事件变过的，一律整段重算：因子是从最早那天累乘上来的，
                 // 中间插进一条新的除权记录，它之后的每一根都得跟着变，只追加尾巴是错的。
-                if (adjLast is not null && headMatches && !exInNewDays && !staleEvents.Contains(code)
+                if (adjLast is not null && headMatches && !exInNewDays && !plan.StaleEvents.Contains(code)
                     && newDays.Count > 0 && newDays.Count < raw.Count)
                 {
                     // 增量：从"最后一根已算好的"反推当前因子，直接乘上去
@@ -2663,7 +2361,7 @@ public partial class FetchOrchestrator
                             // CodesWithStaleAdjEvents 会把它们误判成"事件比序列新"、反复重算。
                             FetchedAt = rebuildStamp,
                         }).ToList();
-                        lock (_dbLock) repo.InsertOrIgnore(appended);
+                        lock (_dbLock) repo.InsertOrRefreshUnconfirmed(appended);
                         incremental++;
                         done++;
                         tick.Report(() => $"  处理中 {done}/{batch.Count}（增量 {incremental} 只、整段重算 {rebuilt} 只），"
@@ -2683,7 +2381,7 @@ public partial class FetchOrchestrator
                 lock (_dbLock)
                 {
                     repo.DeleteByCode(code, Granularity.DayAdj);   // 因子一变全历史都变，整段重写
-                    repo.InsertOrIgnore(adj);
+                    repo.InsertOrRefreshUnconfirmed(adj);
                 }
             }
             catch (OperationCanceledException) { throw; }
@@ -2906,10 +2604,7 @@ public partial class FetchOrchestrator
     {
         lock (_dbLock)
         {
-            var info = currentRepo.GetLatestBarInfo(code, gran);
-            if (info == null) return (end.AddYears(-lookbackYears), end);
-            if (info.Value.PeriodStart.Date < end.Date) return (info.Value.PeriodStart.AddDays(1), end);
-            return (IsConfirmedFinal(info.Value.FetchedAt, end) ? end.AddDays(1) : end, end);
+            return (IncrementalStart(currentRepo.GetLatestBarInfo(code, gran), end, lookbackYears), end);
         }
     }
 
@@ -3581,13 +3276,7 @@ public partial class FetchOrchestrator
             DateTime start;
             lock (_dbLock)
             {
-                var info = currentRepo.GetLatestBarInfo(code, Granularity.Day);
-                if (info == null)
-                    start = today.AddYears(-3);
-                else if (info.Value.PeriodStart.Date < today.Date)
-                    start = info.Value.PeriodStart.AddDays(1);
-                else
-                    start = IsConfirmedFinal(info.Value.FetchedAt, today) ? today.AddDays(1) : today;
+                start = IncrementalStart(currentRepo.GetLatestBarInfo(code, Granularity.Day), today, 3);
             }
             return ProcessOneStockAsync(code, source, start, today, currentRepo, errors, failedCodes, stats, progress, failedCodesList.Count, () => Interlocked.Increment(ref completed), sw, ct);
         });
@@ -3746,14 +3435,7 @@ public partial class FetchOrchestrator
         {
             foreach (var code in codes)
             {
-                var info = currentRepo.GetLatestBarInfo(code, Granularity.Day);
-                DateTime start;
-                if (info == null)
-                    start = end.AddYears(-lookbackYears);
-                else if (info.Value.PeriodStart.Date < end.Date)
-                    start = info.Value.PeriodStart.AddDays(1);
-                else
-                    start = IsConfirmedFinal(info.Value.FetchedAt, end) ? end.AddDays(1) : end;
+                var start = IncrementalStart(currentRepo.GetLatestBarInfo(code, Granularity.Day), end, lookbackYears);
                 windows.Add((code, start));
             }
         }
@@ -3844,13 +3526,7 @@ public partial class FetchOrchestrator
             DateTime start;
             lock (_dbLock)
             {
-                var info = currentRepo.GetLatestBarInfo(symbol, Granularity.Day);
-                if (info == null)
-                    start = end.AddYears(-lookbackYears);
-                else if (info.Value.PeriodStart.Date < end.Date)
-                    start = info.Value.PeriodStart.AddDays(1);
-                else
-                    start = IsConfirmedFinal(info.Value.FetchedAt, end) ? end.AddDays(1) : end;
+                start = IncrementalStart(currentRepo.GetLatestBarInfo(symbol, Granularity.Day), end, lookbackYears);
             }
             await ProcessOneStockAsync(symbol, source, start, end, currentRepo, errors, failedCodes, stats, progress, MarketIndexCatalog.All.Count, () => Interlocked.Increment(ref completed), sw, ct);
         }
@@ -3956,7 +3632,7 @@ public partial class FetchOrchestrator
                         if (!existing.TryGetValue(b.PeriodStart.Date, out var storedClose)) toInsert.Add(b);
                         else if (driftedCodes != null && IsDrifted(storedClose, b.Close)) toOverwrite.Add(b);
                     }
-                    if (toInsert.Count > 0) currentRepo.InsertOrIgnore(toInsert);
+                    if (toInsert.Count > 0) currentRepo.InsertOrRefreshUnconfirmed(toInsert);
                     if (toOverwrite.Count > 0)
                     {
                         SqliteBarUpsert.Upsert(_paths.CurrentDb, toOverwrite);
@@ -5016,15 +4692,30 @@ public partial class FetchOrchestrator
                 : _dailyNoDataRepository.GetConfirmed(IDailyFetchNoDataRepository.LhbDataset);
             var confirmCutoff = DateOnly.FromDateTime(DateTime.Today).AddDays(-3);
 
-            // 指定日：就那一天。日常：回看 5 个交易日（日历没建时退化成最近 7 个自然日里的工作日）
+            // 回看多少个交易日：东财源要顺带把**滞后字段**（上榜后 N 日涨跌幅）补上，
+            // 而 d30 要等 30 个交易日才有值，所以窗口按 D30 的长度取；新浪源没有这些字段，
+            // 5 天只是为了覆盖"盘后陆续公布"。东财走月片，窗口拉长几乎不增加请求数
+            // （31 个交易日 ≈ 2 个月片 ≈ 2~3 个请求，逐日抓则要 31 个）。
+            int lookback = _lhbProvider is ILhbRangeProvider
+                ? LhbLaggingLookbackTradingDays
+                : LhbLookbackTradingDays;
+
+            // 指定日：就那一天。日常：回看若干交易日（日历没建时退化成最近 N 个自然日里的工作日）
             List<DateOnly> targets;
             if (explicitDay) targets = [end];
             else if (calendar != null)
-                targets = calendar.LastTradingDays(day, LhbLookbackTradingDays).Select(DateOnly.FromDateTime).ToList();
+                targets = calendar.LastTradingDays(day, lookback).Select(DateOnly.FromDateTime).ToList();
             else
-                targets = Enumerable.Range(0, 7).Select(i => end.AddDays(-i))
+                targets = Enumerable.Range(0, lookback * 7 / 5 + 2).Select(i => end.AddDays(-i))
                     .Where(x => x.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday))
                     .OrderBy(x => x).ToList();
+
+            // ── 东财：整段一次抓完（2~3 个请求），再按天落库 ──────────────────
+            if (!explicitDay && _lhbProvider is ILhbRangeProvider ranged && targets.Count > 0)
+            {
+                await FetchLhbRangeAsync(ranged, targets, confirmed, confirmCutoff, progress, ct);
+                return;
+            }
 
             int wrote = 0, skipNoData = 0;
             foreach (var d in targets)
@@ -5060,6 +4751,160 @@ public partial class FetchOrchestrator
     /// <summary>龙虎榜日常增量回看几个交易日。见 <see cref="FetchLhbOneDayAsync"/>：盘后陆续公布，
     /// 只抓当天会把"只抓到一半"的状态永久固化。5 个交易日足够覆盖发布延迟，重抓幂等。</summary>
     private const int LhbLookbackTradingDays = 5;
+
+    /// <summary>
+    /// 东财源的回看窗口（交易日）。31 是照 <c>d30_chg</c> 定的——上榜后 30 日涨跌幅要等
+    /// 30 个交易日才有值，窗口短一天，那一列就永远空着一部分。
+    ///
+    /// 为什么敢开这么大：东财按月切片抓，31 个交易日跨 2 个自然月＝2~3 个请求，跟原来 5 天
+    /// 逐日抓的 5 个请求是一个量级。新浪源没这个便利（一天一个页面），所以它仍用
+    /// <see cref="LhbLookbackTradingDays"/>。
+    /// </summary>
+    private const int LhbLaggingLookbackTradingDays = 31;
+
+    /// <summary>
+    /// 东财源的日常增量：整段抓一次，按天整天替换落库。
+    ///
+    /// 为什么是"整天替换"而不是 upsert：这段窗口里可能还躺着新浪时代的行，而两个源的上榜原因
+    /// 文本不一样、reason 又是主键的一部分——upsert 只会让同一天并排存着两套原因，
+    /// 26 万行的历史会翻倍且分不清谁是谁。见 <c>ILhbRepository.ReplaceDays</c>。
+    /// </summary>
+    private async Task FetchLhbRangeAsync(
+        ILhbRangeProvider ranged, List<DateOnly> targets,
+        HashSet<DateOnly> confirmed, DateOnly confirmCutoff,
+        IProgress<string>? progress, CancellationToken ct)
+    {
+        var start = targets.Min();
+        var end = targets.Max();
+        var seen = new HashSet<DateOnly>();
+        int wrote = 0;
+
+        wrote = await ranged.FetchRangeAsync(
+            start.ToDateTime(TimeOnly.MinValue), end.ToDateTime(TimeOnly.MinValue),
+            batch =>
+            {
+                foreach (var r in batch) seen.Add(DateOnly.FromDateTime(r.TradeDate));
+                return WriteLhbBatch(batch, progress);
+            },
+            progress, ct);
+
+        // 目标日里一行都没回来的＝这天确实没人上榜。跟逐日路径同一套判据：太近的不定案
+        // （盘后可能还没发布完），够旧的记进"确认没有"，往后不再为它发请求。
+        int noData = 0;
+        foreach (var d in targets)
+        {
+            if (seen.Contains(d) || confirmed.Contains(d)) continue;
+            noData++;
+            if (_dailyNoDataRepository != null && d <= confirmCutoff)
+                _dailyNoDataRepository.Confirm(IDailyFetchNoDataRepository.LhbDataset, d);
+        }
+        progress?.Report($"龙虎榜：回看 {targets.Count} 个交易日、写入 {wrote} 条" +
+                         (noData > 0 ? $"，其中 {noData} 天无数据" : ""));
+    }
+
+    /// <summary>
+    /// 龙虎榜换源：把 2004-06-25 至今整段用**东财**重抓一遍，覆盖掉新浪那份历史（2026-09-09）。
+    ///
+    /// 为什么必须整段重抓、不能只切增量：两个源的上榜原因文本不一样（新浪把交易所原文归并成了
+    /// 28 种粗类），而 reason 是主键的一部分。不重抓的话，库里会永远躺着一段"原因是粗类、
+    /// 且原因跟对应值错配"的历史，跟新数据混在一起没法一起用——换源图的就是口径统一。
+    ///
+    /// 跑之前先把整张表导出成**库外的独立文件**（见 <see cref="FetchPaths.BackupDbPath"/>）。
+    /// 这一步失败就直接中止，不往下走：这是个删了 26 万行再写回去的操作，没有备份不该开始。
+    ///
+    /// 约 267 个月片、580 个请求、十几分钟。中断了重跑即可——按天替换是幂等的。
+    /// </summary>
+    public async Task<FetchResult> RunStepLhbMigrateAsync(
+        IProgress<string>? progress, CancellationToken ct = default)
+    {
+        var (_, errors, failed, _, sw) = BeginStep();
+        void Forward(string s) => progress?.Report(s);
+        _lhbProvider.OnStatus += Forward;
+        try
+        {
+            if (_lhbProvider is not ILhbRangeProvider ranged)
+                throw new InvalidOperationException(
+                    "当前龙虎榜数据源不支持整段抓取（多半是配置切回了新浪）——" +
+                    "把 fetcher-settings.json 的 LhbSource 设成 em 再跑。");
+
+            _lhbRepository.EnsureSchema();
+
+            // ⓪ 先确认算偏离值要用的基准指数都在本地——**这一步必须挡在最前面**。
+            //
+            // 偏离值 ＝ 个股涨跌幅 − 对应指数涨跌幅，指数按板块选（深主板要深证综指 399106，
+            // 创业板要创业板综 399102，北交所要北证50）。这三条是 2026-09-09 才加进
+            // MarketIndexCatalog 的，老库里一行都没有。
+            //
+            // 缺了不会报错，只会让对应板块的 deviation 静静地全为 null——而这一步是
+            // 580 个请求、十几分钟、整表覆盖，发现时已经晚了，还得从头再来一遍。
+            var barRepoForCheck = new SqliteBarRepository(_paths.CurrentDb);
+            var missingIndexes = MarketIndexCatalog.All
+                .Select(i => i.Symbol)
+                .Where(s => barRepoForCheck.GetLatestPeriodStart(s, Granularity.Day) == null)
+                .ToList();
+            if (missingIndexes.Count > 0)
+                throw new InvalidOperationException(
+                    $"本地还没有这些指数的日K：{string.Join("、", missingIndexes)}。" +
+                    "它们是算龙虎榜偏离值的基准（深市主板用深证综指 399106、创业板用创业板综 399102、" +
+                    "北交所用北证50），缺了对应板块的对应值会全为空。" +
+                    "**先跑一次【指数日K】**再来跑这一项。");
+
+            var backup = _paths.BackupDbPath("Lhb", DateTime.Now);
+            progress?.Report($"① 备份现有龙虎榜到库外文件：{backup}");
+            int backedUp = _lhbRepository.ExportTo(backup);
+            progress?.Report($"   已备份 {backedUp} 行（这是独立 sqlite 文件，不在主库里；" +
+                             "要比对新旧数据把它 ATTACH 回来即可）");
+
+            var start = _lhbProvider.EarliestAvailable;
+            var end = DateOnly.FromDateTime(DateTime.Today);
+            progress?.Report($"② 用东财重抓 {start:yyyy-MM-dd} ~ {end:yyyy-MM-dd}（按月切片，约 {(end.Year - start.Year) * 12 + end.Month - start.Month + 1} 片）...");
+
+            int wrote = await ranged.FetchRangeAsync(
+                start.ToDateTime(TimeOnly.MinValue), end.ToDateTime(TimeOnly.MinValue),
+                batch => WriteLhbBatch(batch, progress), progress, ct);
+
+            int emRows = _lhbRepository.CountRows(start, end, LhbSources.EastMoney);
+            int leftover = _lhbRepository.CountRows(start, end) - emRows;
+            progress?.Report($"③ 完成：写入 {wrote} 行，库里东财源共 {emRows} 行，用时 {FormatElapsed(sw.Elapsed)}");
+            if (leftover > 0)
+                progress?.Report($"⚠ 还剩 {leftover} 行不是东财源——多半是那些天东财一行都没给" +
+                                 "（老库里新浪抓到过、东财没有），留着不动比删掉安全，需要的话按日期查出来看。");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { errors.Add($"龙虎榜换源：{ex.Message}"); }
+        finally { _lhbProvider.OnStatus -= Forward; }
+        return FinishFetchRun(errors, "龙虎榜·换源重抓", Array.Empty<string>(), failed, progress);
+    }
+
+    /// <summary>
+    /// 一批东财龙虎榜行的落库：先补派生列，再整天替换。返回写入行数。
+    ///
+    /// 派生器每批新建一个：它内部按 (代码,粒度) 缓存日K，而这里给 loadBars 传的是**限定在
+    /// 这批日期附近**的区间（26 万行全量迁移时，一只票取全历史日K是几百倍的浪费）。
+    /// 缓存跟着批走，语义才不会串。
+    /// </summary>
+    private int WriteLhbBatch(List<LhbRow> rows, IProgress<string>? progress)
+    {
+        if (rows.Count == 0) return 0;
+
+        // 派生只需要上榜日和它前一天的K线，前后各放 10 天足够跨过长假
+        var from = rows.Min(r => r.TradeDate).AddDays(-10);
+        var to = rows.Max(r => r.TradeDate).AddDays(1);
+        var barRepo = new SqliteBarRepository(_paths.CurrentDb);
+        var deriver = new LhbDeviationDeriver((code, gran) => barRepo.Query(code, gran, from, to));
+        deriver.Apply(rows);
+
+        lock (_dbLock)
+        {
+            var (deleted, inserted) = _lhbRepository.ReplaceDays(rows);
+            // 删得比写的多，说明这一天原来有更多行——多半是新浪历史（原因粗类）被换成了东财
+            // 原文，行数本就不同；真要是东财这一片没抓全，也只有这一行日志能看出来。
+            if (deleted > inserted)
+                progress?.Report($"龙虎榜 {rows.Min(r => r.TradeDate):yyyy-MM-dd}~" +
+                                 $"{rows.Max(r => r.TradeDate):yyyy-MM-dd}：替换掉旧的 {deleted} 行、写入 {inserted} 行");
+            return inserted;
+        }
+    }
 
     /// <summary>"回补融资余额"（2026-07-16新增）——按交易日区间回补历史（首次或补漏）。日常当天数据已并入
     /// "拉取全部/当天"，这个按钮用于第一次把历史补齐或补某段缺的日子。from/to 都为 null=今天；失败不进
@@ -5102,62 +4947,6 @@ public partial class FetchOrchestrator
         finally
         {
             _marginProvider.OnStatus -= Forward;
-        }
-    }
-
-    /// <summary>
-    /// "一键补齐每日历史"（2026-07-16新增）——把**每日数据**（融资余额、龙虎榜）的历史一次性补齐：范围从
-    /// 本地 K线(Bar)最早那天到今天，逐交易日抓，**本地已有的交易日跳过、不重复请求**。一次性用途：开发中
-    /// 新加了每日数据、之前没抓的，点一次补上历史；之后每天靠"拉取全部/当天"增量。以后再加每日数据也并进来。
-    /// </summary>
-    public async Task<FetchResult> RunBackfillDailyHistoryAsync(IProgress<string>? progress, CancellationToken ct = default)
-    {
-        void Forward(string s) => progress?.Report(s);
-        _marginProvider.OnStatus += Forward;
-        _lhbProvider.OnStatus += Forward;
-        try
-        {
-            if (!File.Exists(_paths.CurrentDb))
-                throw new InvalidOperationException("本地还没有任何数据，请先执行一次\"拉取全部\"（要用K线的最早日期作为补齐起点）");
-            var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
-            currentRepo.EnsureSchema();
-            _marginRepository.EnsureSchema();
-            _lhbRepository.EnsureSchema();
-
-            var earliest = currentRepo.GetOverallEarliestPeriodStart(Granularity.Day);
-            if (earliest == null)
-                throw new InvalidOperationException("本地还没有K线数据，无法确定补齐起点，请先执行一次\"拉取全部\"");
-            var start = DateOnly.FromDateTime(earliest.Value);
-            var end = DateOnly.FromDateTime(DateTime.Today);
-
-            var errors = new ConcurrentBag<string>();
-            var sw = Stopwatch.StartNew();
-
-            var marginHave = _marginRepository.GetTradeDates();
-            await BackfillDailyAsync("融资余额", IDailyFetchNoDataRepository.MarginDataset, start, end, marginHave, async d =>
-            {
-                var rows = await _marginProvider.GetDetailAsync(d, ct);
-                if (rows.Count > 0) { lock (_dbLock) { _marginRepository.InsertOrIgnore(rows); } }
-                return rows.Count;
-            }, errors, progress, sw, _marginProvider.EarliestAvailable, ct);
-
-            var lhbHave = _lhbRepository.GetTradeDates();
-            await BackfillDailyAsync("龙虎榜", IDailyFetchNoDataRepository.LhbDataset, start, end, lhbHave, async d =>
-            {
-                var rows = await _lhbProvider.GetDailyAsync(d, ct);
-                if (rows.Count > 0) { lock (_dbLock) { _lhbRepository.InsertOrIgnore(rows); } }
-                return rows.Count;
-            }, errors, progress, sw, _lhbProvider.EarliestAvailable, ct);
-
-            progress?.Report("融资余额、龙虎榜历史补齐完毕。");
-            var result = new FetchResult();
-            result.Errors.AddRange(errors);
-            return result;
-        }
-        finally
-        {
-            _marginProvider.OnStatus -= Forward;
-            _lhbProvider.OnStatus -= Forward;
         }
     }
 
@@ -5295,59 +5084,19 @@ public partial class FetchOrchestrator
     private TradingCalendar? _tradingCalendarCache;
 
     /// <summary>
-    /// "一键拉取定期数据"（2026-07-16新增）——把**不是每天更新**的数据一次点完：依次跑 指数成分/权重 →
-    /// 股东数据（各自全量刷新）→ 财务报表（2026-07-31并入，按报告期增量跳过、二次运行几乎零成本）。
-    /// 前一个整体失败不阻断后一个（分别 try/catch）；单项内部的逐指数/逐股失败
-    /// 仍进各自失败名单、可用"重新拉取失败股票"重试。⚠️ 较慢，可能数小时，季度点一次即可。板块不在这里
-    /// （它更新频率高、独立"拉取板块"按钮）。
+    /// 【交易日历】那一行在参数格里显示的存量：日历覆盖到哪天、共多少天（2026-09-09）。
+    ///
+    /// 为什么要它：这一项跟别的"还差多少只"不一样，它没有待办清单，人想知道的是**覆盖到哪天**——
+    /// 交易所年底才发布下一年的日历，日历只到今天附近就说明该再拉一次了，光看"✔ 完成"看不出来。
+    ///
+    /// null = 没配仓储（老配置）。三条 MIN/MAX/COUNT 都走 day 主键，几毫秒，可以跟着计数一起刷。
+    /// **不走 <see cref="_tradingCalendarCache"/>**：那份缓存一次运行内不失效，而这里要的是刚抓完的现状。
     /// </summary>
-    public async Task<FetchResult> RunFetchPeriodicAsync(IProgress<string>? progress, CancellationToken ct = default)
+    public (DateTime? Min, DateTime? Max, int Days)? GetTradingCalendarRange()
     {
-        var errors = new List<string>();
-        progress?.Report("依次执行：行业分类 → 指数成分/权重 → 股东数据 → 财务报表 → 分红送配（较慢，可能数小时）");
-
-        // 行业分类放最前：只要一两分钟，且后面几步都不依赖它，先跑完早出结果
-        if (_industryProvider != null)
-        {
-            try { errors.AddRange((await RunFetchIndustryAsync(progress, ct)).Errors); }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { errors.Add($"行业分类整体失败：{ex.Message}"); }
-        }
-
-        try { errors.AddRange((await RunFetchIndexConsAsync(progress, ct)).Errors); }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { errors.Add($"指数成分/权重整体失败：{ex.Message}"); }
-
-        try { errors.AddRange((await RunFetchShareholderAsync(progress, ct)).Errors); }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { errors.Add($"股东数据整体失败：{ex.Message}"); }
-
-        try { errors.AddRange((await RunFetchFinancialsAsync(progress, ct)).Errors); }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { errors.Add($"财务报表整体失败：{ex.Message}"); }
-
-        if (_dividendProvider != null && _dividendRepository != null)
-        {
-            try { errors.AddRange((await RunFetchDividendAsync(progress, ct)).Errors); }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { errors.Add($"分红送配整体失败：{ex.Message}"); }
-        }
-
-        // 财务那一段可能是几小时前跑的，它自己那句剩余提示早被后面的日志刷走了，这里在最终
-        // 汇总里再说一遍——否则用户看到"全部处理完毕"会以为财务也补齐了，实际可能只补了一轮。
-        string financialTail = "";
-        try
-        {
-            int stillPending = GetFinancialFetchPlan().AllPending.Count;
-            if (stillPending > 0)
-                financialTail = $" ⚠ 注意：财务报表还有 {stillPending} 只未补" +
-                                $"（该接口配额严、每轮上限 {MaxFinancialFetchPerRun} 只，见运行日志里财务那一段）——" +
-                                "建议勾选界面上的【空闲时自动补财务】，程序空着时会自己补完。";
-        }
-        catch (Exception) { /* 只是提示 */ }
-
-        progress?.Report("行业分类、指数成分/权重、股东数据、财务报表、分红送配全部处理完毕。" + financialTail);
-        return new FetchResult { Errors = errors };
+        if (_tradingDayRepository == null) return null;
+        var (min, max) = _tradingDayRepository.GetRange();
+        return (min, max, min == null ? 0 : _tradingDayRepository.Count());
     }
 
     /// <summary>

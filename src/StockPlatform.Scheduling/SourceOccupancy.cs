@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 
 namespace StockPlatform.Scheduling;
 
@@ -27,7 +27,8 @@ public sealed record RunningTask(
 /// 这张表把"忙"从**一个布尔**换成**按源记账**：只要源不重叠就可以同时跑。
 ///
 /// ════ 顺带解决了停止 ════
-/// 表项里带着各自的 CTS，所以【停止全部】就是遍历表逐个 Cancel；而任务是在自己的
+/// 表项里带着各自的 CTS，所以停一项就是拿它的 CTS 一 Cancel（界面上「正在执行」那一行的
+/// 【停止】走的就是这条路，2026-09-08 起那也是停掉一项任务的唯一入口）；而任务是在自己的
 /// <c>finally</c> 里释放登记的，**收尾做完才会从表里消失**——于是"表空了"天然等于
 /// "全部真的停干净了"，不需要每个任务再手写一个返回 bool 的 Stop 方法（40 个手写方法漏一个
 /// 就永远等不到那个 true）。
@@ -128,7 +129,7 @@ public sealed class SourceOccupancy
     /// 返回 false = 表里已经没有它了（刚好在点之前跑完），这时候不用再提示什么。
     ///
     /// 注意它**不动计划循环**：计划正在跑的那一项被单独停掉后，计划会当作这一项被取消、
-    /// 接着跑后面的项。要连计划一起停用【停止全部】。
+    /// 接着跑后面的项。要让计划别再往下排，用【停止计划】（反过来那个也不会碰这里的任务）。
     /// </summary>
     public bool CancelOne(Guid id)
     {

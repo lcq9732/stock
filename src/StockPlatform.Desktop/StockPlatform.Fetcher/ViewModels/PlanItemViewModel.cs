@@ -44,6 +44,7 @@ public sealed record ModeOption(FetchMode Value, string Text)
         new(FetchMode.Incremental, "增量"),
         new(FetchMode.SpecificDay, "只抓某一天"),
         new(FetchMode.FirstBackfill, "首次整段回补"),
+        new(FetchMode.Thorough, "彻底重查"),
     ];
 
     /// <summary>某个动作支持的那几项。</summary>
@@ -229,18 +230,6 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
                              && Model.EffectiveMode == FetchMode.SpecificDay;
     public bool NeedsYearRange => Info.Params.HasFlag(FetchActionParams.YearRange);
 
-    /// <summary>要不要显示「彻底体检」那个勾（只有【全库数据体检】有）。</summary>
-    public bool NeedsThorough => Info.Params.HasFlag(FetchActionParams.Thorough);
-
-    /// <summary>
-    /// 彻底体检：清空"确认数据源没有"的白名单、全部重查。
-    /// 默认不勾——那份白名单正是让体检能收敛的东西。
-    /// </summary>
-    public bool ThoroughAudit
-    {
-        get => Model.ThoroughAudit;
-        set { if (Model.ThoroughAudit == value) return; Model.ThoroughAudit = value; Raise(); onChanged(); }
-    }
     public bool NeedsLookback => Info.Params.HasFlag(FetchActionParams.LookbackYears);
 
     /// <summary>
@@ -271,8 +260,14 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
 
     /// <summary>是不是【板块成分股】那一行——参数格显示还剩多少个板块要抓。</summary>
     public bool IsFetchBoardMembers => Model.Action == FetchActionId.StepBoardMembers;
+
+    /// <summary>
+    /// 是不是【交易日历】那一行——参数格显示**日历覆盖到哪天**（2026-09-09）。
+    /// 它没有"还差多少只"这种待办量，人判断"还要不要再取"看的就是这个日期。
+    /// </summary>
+    public bool IsTradingCalendar => Model.Action == FetchActionId.StepTradingCalendar;
     public bool NeedsKeywords => Info.Params.HasFlag(FetchActionParams.Keywords);
-    public bool NeedsAnyParam => NeedsDate || NeedsYearRange || NeedsLookback || NeedsKeywords || NeedsThorough;
+    public bool NeedsAnyParam => NeedsDate || NeedsYearRange || NeedsLookback || NeedsKeywords;
 
     /// <summary>
     /// 这一行的数据要不要等收盘（2026-09-02）。计划自检拿它判断"这一组的时刻会不会太早"，
@@ -280,14 +275,14 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
     /// </summary>
     public bool NeedsAfterClose => Info.Readiness == DataReadiness.AfterClose;
 
-    /// <summary>中标/订单公告关键词，逗号分隔。留空=用【手动】页那个框的值。</summary>
+    /// <summary>中标/订单公告关键词，逗号分隔。留空＝这一项不抓公告。</summary>
     public string KeywordsText
     {
         get => Model.KeywordsText ?? "";
         set { Model.KeywordsText = Blank(value); Raise(); onChanged(); }
     }
 
-    /// <summary>首次回看几年——只有「拉取全部」这一行会显示。留空=用【手动】页那个框的值。</summary>
+    /// <summary>首次回看几年——只有抓K线那几行会显示。留空＝3 年（目录里的默认值）。</summary>
     public string LookbackYearsText
     {
         get => Model.LookbackYearsText ?? "";

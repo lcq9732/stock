@@ -48,9 +48,14 @@ public class EastMoneyCustomerSupplierProvider
     /// 会在批边界收尾，批越细，"停在哪都不丢"的粒度就越细。
     /// </summary>
     /// <param name="onReported">接口自报的总行数（第一页时回调一次），给年度完成度对账用。</param>
+    /// <param name="onSkipped">
+    /// 这一年**主动丢掉**多少行（收尾时回调一次）。必须记下来：接口自报的 reported 含非 A 股
+    /// 主体（形如 A21653，约 16.4%），而落库的只有 A 股，只比 saved 和 reported 会把主动过滤
+    /// 误判成"没抓齐"，那几年每轮重抓且永远抓不齐。
+    /// </param>
     public async IAsyncEnumerable<IReadOnlyList<CustomerSupplier>> StreamYearAsync(
         int year, Action<int> onReported, int batchSize = 2000,
-        Action<string>? onSkipped = null,
+        Action<int>? onSkipped = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         var buf = new List<CustomerSupplier>(batchSize);
@@ -77,7 +82,7 @@ public class EastMoneyCustomerSupplierProvider
             else skipped++;
         }
         if (buf.Count > 0) yield return buf;
-        if (skipped > 0) onSkipped?.Invoke($"{year} 年有 {skipped} 行字段不全，已跳过");
+        onSkipped?.Invoke(skipped);
     }
 
     /// <summary>某一年的 filter。<c>REPORT_YEAR</c> 是东财自带的年份列，不用拿日期区间去凑。</summary>
@@ -97,19 +102,27 @@ public class EastMoneyCustomerSupplierProvider
     ///     剩下 6 万行永远不来，**毫无征兆**。今年去年靠"每轮重抓"能自愈，2002-2024 不能。
     /// </summary>
     /// <param name="thisYear">当前年份。</param>
-    /// <param name="states">每年的 (接口自报, 实际落库)，来自 CustSuppYearState。没抓过的不在里面。</param>
+    /// <param name="states">每年的 (接口自报, 实际落库, 主动丢弃)，来自 CustSuppYearState。</param>
     /// <param name="rebuild">首次整段回补：无视完成度，所有年份重来。</param>
     public static List<int> PlanYearsToFetch(
-        int thisYear, IReadOnlyDictionary<int, (int Reported, int Saved)> states, bool rebuild = false)
+        int thisYear, IReadOnlyDictionary<int, (int Reported, int Saved, int Skipped)> states,
+        bool rebuild = false)
     {
         var years = new List<int>();
         for (int y = thisYear; y >= FirstYear; y--)
         {
             if (rebuild || y >= thisYear - 1) { years.Add(y); continue; }
-            // 没记录过 → 抓；记录了但没抓齐 → 重抓。
-            // ⚠ 判据是"落库数 < 接口自报数"而不是"这一年有没有数据"：骨架会在 Deadline /
-            //   MaxItems 到点时从批中间截断，只看有无的话，抓了 6000/66000 行的年份下轮就被跳过。
-            if (!states.TryGetValue(y, out var st) || st.Saved < st.Reported) years.Add(y);
+            // 没记录过 → 抓；记录了但没收全 → 重抓。
+            //
+            // ⚠ 判据是 **saved + skipped < reported**，三个数缺一不可：
+            //   · 不能只看"这一年有没有数据"——骨架会在 Deadline / MaxItems 到点时从批中间
+            //     截断，抓了 6000/66000 行的年份会被当成抓过了跳过；
+            //   · 也不能只比 saved 和 reported——reported 是接口自报的、**含非 A 股主体**
+            //     （约 16.4%），而落库的只有 A 股。2026-09-09 就是这么误报的：
+            //     2023 年 51,677/62,791、2025 年 52,214/62,774，差额比例正好是非 A 股占比，
+            //     那几年每轮重抓、而且**永远抓不齐**。
+            if (!states.TryGetValue(y, out var st) || st.Saved + st.Skipped < st.Reported)
+                years.Add(y);
         }
         return years;
     }
@@ -125,7 +138,12 @@ public class EastMoneyCustomerSupplierProvider
         var typeCode = Str(el, "TYPE_CODE");
         var rank = Num(el, "RANK");
 
-        if (code.Length != 6 || date == null || rank == null) return null;
+        // ⚠ 必须**同时**判长度和"全是数字"（2026-09-09 补）。只判长度的话，东财那边形如
+        //   A21653 / A04018 的 6 位代码会一路混进来——实测落库 1946 只、118,155 行（16.4%），
+        //   而它们**一条都不在 StockMeta 里**：那是非 A 股主体（新三板/改制前之类），
+        //   作为"上市公司之间的交易关系"一端根本不在股票池里，连不成任何有用的边。
+        //   同一批写的 EastMoneyCompanyProfileProvider.Parse 一直有这个检查，这边漏了，两处不一致。
+        if (code.Length != 6 || !code.All(char.IsDigit) || date == null || rank == null) return null;
         // TYPE_CODE：1=客户、2=供应商。别的值不认——宁可少几行，也不能把上游下游搞反。
         if (typeCode != "1" && typeCode != "2") return null;
 

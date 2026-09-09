@@ -24,6 +24,21 @@ public static class SqliteSchema
         // 旧表(PK不含 as_of_date)先删掉、由下面 CREATE 重建——权重数据可随时重拉，改造前基本为空。
         DropTableIfPkMismatch(conn, "IndexWeight", "as_of_date");
 
+        // ══ 补列跑两次，两次都必要（2026-09-08 修）══════════════════════════════
+        //
+        // ① 这一次是给**老库**补：下面那段 DDL 里可能有 CREATE INDEX 建在后加的列上，
+        //    而 CREATE TABLE IF NOT EXISTS 对已存在的表是空操作、不会补列——顺序反了的话
+        //    老库一开程序就崩在 no such column（实际撞上的是
+        //    ix_custsupp_pcode ON StockCustomerSupplier(partner_code)，窗口都开不出来）。
+        // ② DDL 之后还要再跑一次，是给**新库**补：有些后加的列（StockMeta.type、
+        //    BlockTrade.buyer_code…）当初只写进了这份补列名单、没有补进 CREATE TABLE，
+        //    新建的表里并没有它们。
+        //
+        // 两次之间不会互相打架：每一条都先查列在不在、表在不在，幂等且很便宜（pragma 查询）。
+        // 真正的理想状态是新列同时写进 CREATE TABLE，那样第二次就是纯空转——但那要人记得，
+        // 而这个坑正是"人没记得"造成的，所以宁可多跑一遍。
+        MigrateColumns(conn);
+
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS Bar (
@@ -208,9 +223,24 @@ public static class SqliteSchema
                 trade_date TEXT NOT NULL,
                 stock_code TEXT NOT NULL,
                 stock_name TEXT,
-                close_price REAL, deviation REAL, volume REAL, amount REAL,
-                reason TEXT NOT NULL,       -- 上榜指标（同股同日可多条）
+                close_price REAL,
+                deviation REAL,             -- 对应值；东财源不给，本地派生（见 deviation_source）
+                volume REAL,                -- 成交量；东财源不给，取本地日K
+                amount REAL,                -- 成交额（万元）
+                reason TEXT NOT NULL,       -- 上榜指标（同股同日可多条）；东财源下是交易所原文
                 fetched_at TEXT,
+                -- ↓ 东财源独有（2026-09-09），新浪历史行为 NULL
+                change_rate REAL, turnover_rate REAL, free_market_cap REAL,
+                billboard_buy_amt REAL, billboard_sell_amt REAL,
+                billboard_net_amt REAL, billboard_deal_amt REAL,
+                deal_amount_ratio REAL, deal_net_ratio REAL,
+                explain_text TEXT,          -- 东财"解读"；⚠ 不能叫 explain，那是 SQLite 关键字
+                trade_id TEXT,              -- 榜单流水号，与 LhbSeat.trade_id 同源
+                change_type TEXT, trade_market TEXT,
+                d1_chg REAL, d2_chg REAL, d5_chg REAL,      -- 上榜后 N 日涨跌幅（滞后字段）
+                d10_chg REAL, d20_chg REAL, d30_chg REAL,
+                source TEXT,                -- 'em' / 'sina'
+                deviation_source TEXT,      -- '源' / '派生' / '派生-未核验' / 空
                 PRIMARY KEY (trade_date, stock_code, reason)
             );
 
@@ -795,8 +825,16 @@ public static class SqliteSchema
             -- 这里截断粒度是批（2000 行），所以水位线不能是"年（有/无）"，得是"这一年落了多少行"。
             CREATE TABLE IF NOT EXISTS CustSuppYearState (
                 year       INTEGER PRIMARY KEY,
-                reported   INTEGER,   -- 接口自报的总行数
-                saved      INTEGER,   -- 实际落库行数；< reported 就是没抓完，下轮重来
+                reported   INTEGER,   -- 接口自报的总行数（**含非 A 股主体**）
+                saved      INTEGER,   -- 实际落库行数
+                -- 主动丢掉的行数（2026-09-09 补）。东财这张报表里有形如 A21653 的非 A 股代码，
+                -- 解析时按"必须 6 位全数字"过滤掉——实测约占 16.4%。
+                --
+                -- ⚠ 没有这一列的话，判据 saved < reported 会把**主动过滤**误判成"没抓齐"：
+                --   2023 年 51,677/62,791、2025 年 52,214/62,774 都是这么来的，差额比例
+                --   17.7%/16.8% 正好等于非 A 股占比。那几年会每轮重抓、而且**永远抓不齐**。
+                -- 正确判据是 saved + skipped < reported。
+                skipped    INTEGER DEFAULT 0,
                 updated_at TEXT
             );
 
@@ -872,6 +910,16 @@ public static class SqliteSchema
             """;
         cmd.ExecuteNonQuery();
 
+        // ② 见上面「补列跑两次」：这一次是给刚由 DDL 建出来的新表补那些没写进 CREATE TABLE 的列。
+        MigrateColumns(conn);
+    }
+
+    /// <summary>
+    /// 老库补列。<see cref="EnsureSchema"/> 在建表 DDL 的**前后各调一次**，理由见那里的注释。
+    /// 每一条都先判表在不在、列在不在，所以幂等、可重复调、表还没建时安全跳过。
+    /// </summary>
+    private static void MigrateColumns(SqliteConnection conn)
+    {
         // 老数据库文件（2026-07-09之前建的）已经有Bar/NetInflow表，上面CREATE TABLE IF NOT
         // EXISTS对已存在的表是空操作，不会补上新列——用ALTER TABLE显式迁移。加列前先检查是否已经
         // 存在（EnsureSchema要保持幂等可重复调用，且ALTER TABLE ADD COLUMN对已有同名列会直接报错）。
@@ -945,6 +993,42 @@ public static class SqliteSchema
         // 是空操作，不会补列，所以老库得显式加。
         AddColumnIfMissing(conn, "StockCustomerSupplier", "partner_code", "TEXT");
         AddColumnIfMissing(conn, "StockCustomerSupplier", "match_type", "TEXT");
+        // 主动过滤掉的行数（2026-09-09）：不记的话"没抓齐"会误报，见建表处的注释。
+        AddColumnIfMissing(conn, "CustSuppYearState", "skipped", "INTEGER DEFAULT 0");
+
+        // ── 龙虎榜概要改走东财（2026-09-09）────────────────────────────────
+        // Lhb 原来只有新浪那 4 个数值列。换到东财 RPT_DAILYBILLBOARD_DETAILSNEW 之后，
+        // 同一个请求里本来就带回这一整组字段（columns=ALL），解析出来存下即可，不多发请求。
+        //
+        // 为什么值得换：东财的上榜原因是**交易所原文**，跟 LhbSeat.explanation 同源，两张表
+        // 终于能按 (日期,代码,原因) join——"这张榜是谁在买"和"这张榜为什么上"以前对不起来。
+        //
+        // d1..d30_chg 是**滞后字段**，跟 BlockTrade 那组同一个毛病：抓取当天一律 null
+        // （实测 2026-09-08 全空、2026-07-15 有值），只靠"水位线→今天"永远填不上，
+        // 所以龙虎榜的增量起始日要往前推一个月重抓覆盖。
+        AddColumnIfMissing(conn, "Lhb", "change_rate", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "turnover_rate", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "free_market_cap", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "billboard_buy_amt", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "billboard_sell_amt", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "billboard_net_amt", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "billboard_deal_amt", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "deal_amount_ratio", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "deal_net_ratio", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "explain_text", "TEXT");   // ⚠ 不能叫 explain，那是 SQLite 关键字
+        AddColumnIfMissing(conn, "Lhb", "trade_id", "TEXT");
+        AddColumnIfMissing(conn, "Lhb", "change_type", "TEXT");
+        AddColumnIfMissing(conn, "Lhb", "trade_market", "TEXT");
+        AddColumnIfMissing(conn, "Lhb", "d1_chg", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "d2_chg", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "d5_chg", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "d10_chg", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "d20_chg", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "d30_chg", "REAL");
+        AddColumnIfMissing(conn, "Lhb", "source", "TEXT");
+        // deviation 到底是源给的还是本地算的，必须能分清——新浪那份历史就是因为分不清
+        // （reason 被归并成粗类、deviation 还跟着原规则走）才没法用。
+        AddColumnIfMissing(conn, "Lhb", "deviation_source", "TEXT");
     }
 
     /// <summary>
@@ -1006,6 +1090,8 @@ public static class SqliteSchema
 
     private static void DropColumnIfExists(SqliteConnection conn, string table, string column)
     {
+        if (!TableExists(conn, table)) return;   // 同 AddColumnIfMissing：新库这会儿还没建表
+
         using var checkCmd = conn.CreateCommand();
         checkCmd.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = $column;";
         checkCmd.Parameters.AddWithValue("$column", column);
@@ -1016,8 +1102,25 @@ public static class SqliteSchema
         alterCmd.ExecuteNonQuery();
     }
 
+    /// <summary>表在不在。用 sqlite_master 判：pragma_table_info 对不存在的表也返回 0 行，
+    /// 跟"存在但没有列"分不开——判据模糊的代码迟早被误读。</summary>
+    private static bool TableExists(SqliteConnection conn, string table)
+    {
+        using var q = conn.CreateCommand();
+        q.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$t;";
+        q.Parameters.AddWithValue("$t", table);
+        return Convert.ToInt64(q.ExecuteScalar()) > 0;
+    }
+
+    /// <summary>
+    /// 给老库补一列。**表还不存在就什么都不做**——这一段跑在建表 DDL 之前（理由见 EnsureSchema
+    /// 里那段说明），新库走到这儿时表都还没有，不判这一下 ALTER TABLE 会报 no such table。
+    /// 已有同名列也直接返回：EnsureSchema 要能反复调。
+    /// </summary>
     private static void AddColumnIfMissing(SqliteConnection conn, string table, string column, string columnType)
     {
+        if (!TableExists(conn, table)) return;
+
         using var checkCmd = conn.CreateCommand();
         checkCmd.CommandText = $"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = $column;";
         checkCmd.Parameters.AddWithValue("$column", column);

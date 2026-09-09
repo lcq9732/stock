@@ -1,4 +1,4 @@
-# Solution 类图 — 抓取与分析双线
+﻿# Solution 类图 — 抓取与分析双线
 
 > 2026-09-08 整理。可视化版（同样内容，图渲染好的）：
 > https://claude.ai/code/artifact/6a66deb4-c954-40a4-910c-b1809799f409
@@ -69,9 +69,11 @@ flowchart TD
 
 ### 图 F1 · 主干：界面 → 调度 → 编排
 
-两条并行的启动路径：【手动】页按钮直接调 `FetchOrchestrator.RunXxxAsync`；【计划】页交给
-`PlanRunner` 按时间表串行跑。两条路都要先过 `SourceAdmission` 这道准入，否则会出现两个任务
-同时打同一家服务器、同时写同一张表。
+启动路径只有一条（2026-09-08 起）：界面上的每个动作都是**计划里的一行**，计划引擎
+`PlanRunner` 按时间表串行跑，人也可以按行【执行】或按组【执行整组】插一次。
+两种触发都要先过 `SourceAdmission` 这道准入，否则会出现两个任务同时打同一家服务器、
+同时写同一张表。（原来还有一条【手动】页按钮直调 `FetchOrchestrator.RunXxxAsync` 的路，
+连同那一页一起撤了——同一件事两套实现，改一边忘另一边是迟早的事。）
 
 ```mermaid
 classDiagram
@@ -91,8 +93,8 @@ class MainWindow {
 }
 class MainViewModel {
   <<Fetcher>>
-  手动页二十多个命令
   计划页与正在执行任务表
+  按行/按组执行、自动重试
   日志汇聚与落盘
 }
 class TrayNotifier {
@@ -148,9 +150,9 @@ App --> MainViewModel : 注入依赖
 App --> MainWindow : 设为 DataContext
 App --> FetcherSettings : 读取并写模板
 MainWindow --> MainViewModel
-MainViewModel --> FetchOrchestrator : 手动页直接调
+MainViewModel --> FetchOrchestrator : 把计划项翻译成编排调用
 MainViewModel --> PlanRunner : 启动与停止计划
-MainViewModel --> SourceAdmission : 手动任务准入
+MainViewModel --> SourceAdmission : 任务准入
 MainViewModel --> FetchTaskRegistry : 跑新式任务
 MainViewModel --> TrayNotifier
 MainViewModel --> WebView2JsonFetcher
@@ -372,7 +374,7 @@ EastMoneyTerminalBoardFetcher --> EastMoneyDataCenterClient
 |---|---|---|
 | `App` | Fetcher | 组合根。造出全部 provider / repository / 限流器，按 `fetcher-settings.json` 决定板块走哪个通道、绑哪张网卡，注册新式任务，最后把 `FetchOrchestrator` 和数据源列表交给 VM。另外拦 UI 未处理异常（抓了几小时不能因为点错一下就没了）。 |
 | `MainWindow` | Fetcher | 窗口壳。托盘图标、最小化行为、几个直接事件处理；业务全转给 VM。 |
-| `MainViewModel`（2733 行） | Fetcher | 界面状态机。【手动】页二十多个 RelayCommand、【计划】页分组与项、正在执行任务表、日志缓冲与落盘、自动重试、数据源切换。**唯一同时认识调度层和编排层的类。** |
+| `MainViewModel`（约 2400 行） | Fetcher | 界面状态机。【计划】页分组与项、按行/按组执行、正在执行任务表、日志缓冲与落盘、自动重试、数据源切换。**唯一同时认识调度层和编排层的类。** |
 | `PlanItemViewModel` / `PlanGroupViewModel` / `RunningTaskViewModel` | Fetcher | 行视图模型：一条计划项 / 一个分组 / 一个正在跑的任务（已用时、占着哪些源、能不能停）。 |
 | `WebView2JsonFetcher` | Fetcher | 浏览器通道：用 WebView2 带真实浏览器上下文取 JSON，对付纯 HTTP 会被拦的接口。放 Fetcher 是因为依赖 WPF 宿主。 |
 | `TrayNotifier` · `LogText` · `RelayCommand` · 两个 Converter | Fetcher | 托盘气泡、日志文本行为、命令与值转换器。 |
@@ -385,16 +387,16 @@ EastMoneyTerminalBoardFetcher --> EastMoneyDataCenterClient
 | `FetchTaskCatalog` · `FetchActionInfo` · `DataSourceCatalog` | Scheduling | 动作元数据的**唯一权威处**：数据源、配额组、参数、全量/增量、数据就绪度、界面分组。加动作只改这一处。 |
 | `IFetchTask` · `FetchTaskBase<TItem>` · `FetchTaskRegistry` | Scheduling | 新式任务契约（2026-09-08）：任务自己会跑、广播三路事件（真进展 / 存活播报 / 状态变化），停止＝取消 token 后 finally 收尾。**准入归调度侧**，任务只判断自己才知道的前提并返回 `NothingToDo`。 |
 | `TradingCalendarTask` | Tasks | 目前唯一的新形状任务：抓深交所官方交易日历写 `TradingDay` 表，逐日回补靠它跳过节假日。 |
-| `FetchOrchestrator`（partial，6400+1400 行） | Data | 抓取程序真正的核心，与 UI 无关。四种整体模式（拉取全部 / 补指定历史日 / 重拉失败 / 拉取年份区间）+ 五十多个 `RunStepXxxAsync`，共用同一套"逐标的抓取→写库→聚合→更新水位线"躯干。全部直接写 `current.sqlite`。 |
+| `FetchOrchestrator`（partial，5800+1400 行） | Data | 抓取程序真正的核心，与 UI 无关。五十多个 `RunStepXxxAsync` 单项入口 + 两个仍保留复合的模式（重拉失败 / 拉取年份区间），共用同一套"逐标的抓取→写库→聚合→更新水位线"躯干。全部直接写 `current.sqlite`。（拉取全部 / 补指定历史日 / 拉取板块 / 一键补齐每日历史 / 一键拉取定期数据那五个整包方法 2026-09-08 已删——它们 09-02 就被拆成原子项，此后只剩【手动】页在调。） |
 | `AnnouncementFetchOrchestrator` · `BoardListFetchLoop` | Data | 两条自成一体的子流程：公告（巨潮搜索→东财正文→解析入库）、板块名单分页循环。 |
 | `FetchPaths` · `FetcherSettings` · `JsonManifestStore` · `Heartbeat` · `ProgressThrottle` · `FetchResult` · `FailedRetrySummary` · `ManualFillWorklist` | Data | 编排层配套件：路径、JSONC 设置、水位线清单、心跳、进度节流、运行结果、失败重试汇总、手工补录清单。 |
-| `Data.Remote`（约 60 个类） | Data | 数据源实现，按"一个数据源/通道一个类"拆：新浪系（K线/财务/分红/股东/龙虎/指数成分/市值/ETF）、东财系（datacenter 客户端 + 预测/席位/资金流/事件/板块映射/行业指标/客户供应商，板块另有 HTTP、页面、终端文件三通道并存）、腾讯 K线、交易所直连（融资/退市名单/深交所日历）、中证权重、巨潮公告与预约。公共件：`RateLimiter`、`NetworkInterfaceBinder`、`EastMoneyJson`、`EastMoneyClistPage`、PDF 文本与 OCR。 |
+| `Data.Remote`（约 60 个类） | Data | 数据源实现，按"一个数据源/通道一个类"拆：新浪系（K线/财务/分红/股东/指数成分/市值/ETF，龙虎榜留作后备）、东财系（datacenter 客户端 + 预测/龙虎榜概要/龙虎榜席位/资金流/事件/板块映射/行业指标/客户供应商，板块另有 HTTP、页面、终端文件三通道并存）、腾讯 K线、交易所直连（融资/退市名单/深交所日历）、中证权重、巨潮公告与预约。公共件：`RateLimiter`、`NetworkInterfaceBinder`、`EastMoneyJson`、`EastMoneyClistPage`、PDF 文本与 OCR。 |
 | `Data.Sqlite`（约 40 个类） | Data | 仓储实现，一张（组）表一个类。`SqliteSchema` 是 schema 权威处；`SqliteMaintenance` 管索引与优化；`SqliteMissingBarRepository`/`SqliteDailyTableAuditor` 做缺口与覆盖体检；`SqliteStockDossierReader` 是给分析程序按表直读的旁路。 |
 | `Logic.Services`（抓取侧） | Logic | `BarAggregator`、`AdjustFactorCalculator`、`TradingCalendar`、`MarketClassifier`、`BoardIndexSynthesizer`、`ProbeFloorPlanner`、`DailyBackfillGate`、`YearGapCalculator`/`CalendarYearSlicer`、`CoverageShapeAuditor`、`IndexCatalog`/`MarketIndexCatalog`、`OrderWinExtractor`、`PartnerNameMatcher`、`LimitUpClassifier`。全部纯计算，抽出来就是为了能被单测钉住。 |
 
-> ⚠ **一处要小心的耦合**：`MainViewModel` 同时握着调度层和编排层——【手动】页那几个横跨所有
-> 数据源的大按钮**不进占用表**，`SourceAdmission` 只能靠 `manualBigTaskRunning` 这个布尔量给
-> 它们让路。要统一进占用表，得先把这些大按钮也变成 `IFetchTask`。
+> ✅ **原来那处耦合已解除（2026-09-08）**：【手动】页那几个横跨所有数据源的大按钮不进占用表，
+> `SourceAdmission` 只能靠 `manualBigTaskRunning` 这个布尔量给它们让路。那一页撤掉之后
+> **占用表就是唯一的账本**，没有账外任务，那个参数和 `MainViewModel.IsBusy` 一起删了。
 
 ---
 

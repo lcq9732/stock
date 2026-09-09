@@ -31,7 +31,46 @@ public static class MarketIndexCatalog
         ("sh000300", "沪深300"),
         ("sh000905", "中证500"),
         ("sh000688", "科创50"),
+        // ↓ 2026-09-09 追加，专为龙虎榜"涨跌幅偏离值"的派生（见 DeviationBenchmarkFor）。
+        // 它们不是给人看的大盘指数，是**算偏离值的分母**——交易所算偏离值用的就是这几条，
+        // 少抓一条，对应板块的偏离值就永远算不出来。
+        ("sz399106", "深证综指"),
+        ("sz399102", "创业板综"),
+        ("bj899050", "北证50"),
     };
+
+    /// <summary>
+    /// 算"涨跌幅偏离值"时，一只票该拿哪条指数当基准——偏离值 ＝ 个股涨跌幅 − 该指数涨跌幅。
+    ///
+    /// ⚠ 跟 <see cref="IndexOverlayMatcher.PickFor"/> **不是一回事，别合并**：那个是界面上
+    /// "个股K线叠加大盘"用的，用户明确要求按**交易所**配（深市的票一律叠深证成指）；这里是
+    /// 交易所计算规则里写死的基准，深市主板用的是**深证综指 399106**，不是深证成指。
+    /// 两者拿同一批数据实测过：深主板配 399106 命中率 70.6%，配 399001 只有 2.3%。
+    ///
+    /// 验证情况（2026-09-09，用 2026-06 以来的主板历史反推，|派生−真值| &lt; 0.02 算命中）：
+    ///   · 沪主板 × 上证综指   n=670  中位 0.0032  命中 88.2%  ✅
+    ///   · 深主板 × 深证综指   n=653  中位 0.0082  命中 70.6%  ✅
+    ///   · 创业板 / 科创板 / 北交所——**没验过**，照交易所规则配的。不是算不出来，是没有可信
+    ///     真值：唯一的历史对照是新浪那份，而它对这三个板块的对应值本身就是错配的。
+    ///     所以这三类算出来的值一律标 <c>派生-未核验</c>。
+    ///
+    /// 返回 null＝识别不出板块，偏离值就留空，不硬凑一条别的指数。
+    /// </summary>
+    public static string? DeviationBenchmarkFor(string code) => MarketClassifier.Classify(code) switch
+    {
+        MarketBoard.ShanghaiMain or MarketBoard.ShanghaiB => ShanghaiCompositeSymbol,
+        MarketBoard.ShanghaiStar => "sh000688",
+        MarketBoard.ShenzhenMain or MarketBoard.ShenzhenB => "sz399106",
+        MarketBoard.ShenzhenChiNext => "sz399102",
+        MarketBoard.Beijing => "bj899050",
+        _ => null,
+    };
+
+    /// <summary>这只票的偏离值派生规则**有没有拿真值验证过**——只有沪深主板验过，
+    /// 见 <see cref="DeviationBenchmarkFor"/> 里的实测数据。决定写库时标"派生"还是"派生-未核验"。</summary>
+    public static bool IsDeviationRuleVerified(string code) => MarketClassifier.Classify(code)
+        is MarketBoard.ShanghaiMain or MarketBoard.ShanghaiB
+        or MarketBoard.ShenzhenMain or MarketBoard.ShenzhenB;
 
     /// <summary>是否是带厂商前缀的完整符号（"sh000001"这种）——各K线抓取器用它区分
     /// "已经是指数符号，原样使用"和"6位个股代码，需要按板块推前缀"两种输入。</summary>

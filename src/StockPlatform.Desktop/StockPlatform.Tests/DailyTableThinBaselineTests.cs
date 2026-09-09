@@ -50,7 +50,7 @@ public class DailyTableThinBaselineTests : IDisposable
         var bars = new SqliteBarRepository(_dbPath);
         bars.EnsureSchema();
         // 成交额给个恒定值：这一套测的是"行数基准"，别让清淡日豁免插进来搅局
-        bars.InsertOrIgnore(Cal.Select(day => new Bar
+        bars.InsertOrRefreshUnconfirmed(Cal.Select(day => new Bar
         {
             Code = Anchor, Granularity = Granularity.Day, PeriodStart = day,
             Open = 1, Close = 1, High = 1, Low = 1, Volume = 1, Amount = 1000,

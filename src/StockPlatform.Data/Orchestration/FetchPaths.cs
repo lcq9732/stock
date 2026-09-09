@@ -38,6 +38,15 @@ public class FetchPaths
     public string PlanReportPath(DateTime day) =>
         Path.Combine(LogArchiveDir, $"plan-{day:yyyy-MM-dd}.txt");
 
+    /// <summary>
+    /// 换数据源之前的整表备份（2026-09-09 新增）——**独立的 sqlite 文件，不在主库里**。
+    ///
+    /// 为什么不做成库内的 Xxx_backup 表：备份的意义是"主库出事时它还在"，跟主库同生共死的
+    /// 副本只是把 23GB 的库撑得更大。落成单独文件，要比对时 ATTACH 回来即可，不用了直接删。
+    /// </summary>
+    public string BackupDbPath(string table, DateTime day) =>
+        Path.Combine(BaseDir, "local", "backup", $"{table}-{day:yyyyMMdd-HHmmss}.sqlite");
+
     public FetchPaths(string? baseDir = null)
     {
         BaseDir = baseDir ?? Path.Combine(AppContext.BaseDirectory, "data");

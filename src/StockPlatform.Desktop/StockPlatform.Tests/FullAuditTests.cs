@@ -47,7 +47,7 @@ public class FullAuditTests : IDisposable
     }
 
     private void Insert(string code, string gran, params DateTime[] days) =>
-        _bars.InsertOrIgnore(days.Select(d => new Bar
+        _bars.InsertOrRefreshUnconfirmed(days.Select(d => new Bar
         {
             Code = code, Granularity = gran, PeriodStart = d,
             Open = 1, Close = 1, High = 1, Low = 1, Volume = 1, Amount = 1,

@@ -27,7 +27,7 @@ public class FoundationAnalysisEngineTests
         public List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null) => _bars;
         public List<string> GetAllCodes() => new() { Code };
         public void EnsureSchema() => throw new NotSupportedException();
-        public void InsertOrIgnore(IEnumerable<Bar> bars) => throw new NotSupportedException();
+        public void InsertOrRefreshUnconfirmed(IEnumerable<Bar> bars) => throw new NotSupportedException();
         public DateTime? GetLatestPeriodStart(string code, string granularity) => throw new NotSupportedException();
         public DateTime? GetOverallLatestPeriodStart(string granularity) => throw new NotSupportedException();
         public DateTime? GetOverallEarliestPeriodStart(string granularity) => throw new NotSupportedException();

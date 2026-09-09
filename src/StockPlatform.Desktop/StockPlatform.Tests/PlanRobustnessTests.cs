@@ -249,6 +249,11 @@ public class PlanRobustnessTests
     /// <summary>
     /// 反过来也要成立：**真**按了停止，就得立刻收手，不能再挑下一项。
     /// 这一条守着上一条别修过头——把真取消也当成"这一项失败"就永远停不下来了。
+    ///
+    /// ⚠ 2026-09-08 语义变了：【停止计划】只停"还挑不挑下一项"，**不打断正在跑的那一项**
+    /// （计划是排期，跟此刻有没有任务在做是两回事）。所以这里断言的是"第二项没被碰过"
+    /// 加上"第一项照常跑完、记 Ok"——原来那句 Assert Cancelled 是旧语义，撤了。
+    /// 脱离/认领那一套单独在 PlanStopDetachTests 里钉。
     /// </summary>
     [Fact]
     public async Task 真的按了停止就不再挑下一项()
@@ -263,7 +268,6 @@ public class PlanRobustnessTests
                 {
                     跑过的.Add(item.Action);
                     cts.Cancel();               // 用户在第一项跑着的时候点了停止
-                    ct.ThrowIfCancellationRequested();
                     return Task.FromResult(new FetchResult());
                 },
                 log: _ => { }, onState: _ => { });
@@ -271,7 +275,7 @@ public class PlanRobustnessTests
             await RunUntilStopped(runner, cts.Token);
 
             Assert.Single(跑过的);                                   // 第二项没被碰过
-            Assert.Equal(RunOutcome.Cancelled, h.First.LastOutcome);
+            Assert.Equal(RunOutcome.Ok, h.First.LastOutcome);        // 它没被打断，照常跑完
         }
         finally { try { Directory.Delete(h.Dir, true); } catch { } }
     }
@@ -582,6 +586,7 @@ public class PlanRobustnessTests
     public async Task 手动停止不会被误判成超时()
     {
         var h = NewHarness(RepeatKind.Once);
+        var 放行 = new TaskCompletionSource();
         try
         {
             using var cts = new CancellationTokenSource();
@@ -590,8 +595,8 @@ public class PlanRobustnessTests
                 execute: async (item, deadline, progress, ct) =>
                 {
                     跑过的.Add(item.Action);
-                    cts.Cancel();                       // 模拟用户在这一项跑着时按了停止
-                    await Task.Delay(Timeout.Infinite, ct);
+                    cts.Cancel();                       // 模拟用户在这一项跑着时点了【停止计划】
+                    await 放行.Task;                     // 它没被取消，还挂在这儿
                     return new FetchResult();
                 },
                 log: _ => { }, onState: _ => { },
@@ -600,9 +605,17 @@ public class PlanRobustnessTests
             await RunUntilStopped(runner, cts.Token);
 
             Assert.Single(跑过的);                                  // 停了就不再挑下一项
-            Assert.Equal(RunOutcome.Cancelled, h.First.LastOutcome);
+            // 2026-09-08 语义：那一项脱离计划继续跑，这会儿**还没有结果**——
+            // 既不该被记成"取消"（没人停它），更不该被看门狗误判成卡死记"失败"。
+            Assert.Equal(RunOutcome.None, h.First.LastOutcome);
+
+            放行.SetResult();                                       // 让它跑完，账自己记上
+            var deadline = DateTime.Now.AddSeconds(5);
+            while (h.First.LastOutcome == RunOutcome.None && DateTime.Now < deadline)
+                await Task.Delay(20);
+            Assert.Equal(RunOutcome.Ok, h.First.LastOutcome);
         }
-        finally { try { Directory.Delete(h.Dir, true); } catch { } }
+        finally { 放行.TrySetResult(); try { Directory.Delete(h.Dir, true); } catch { } }
     }
 
     // ── 「每工作日」的收盘到点（2026-09-04）────────────────────────────────────────

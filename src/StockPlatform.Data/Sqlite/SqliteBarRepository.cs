@@ -28,17 +28,37 @@ public class SqliteBarRepository : IBarRepository
         SqliteSchema.EnsureSchema(conn);
     }
 
-    public void InsertOrIgnore(IEnumerable<Bar> bars)
+    /// <summary>
+    /// 写入K线：库里没有的插入；**已经"收盘后确认"过的行永不覆盖**（历史行的OHLC是当年抓取时的
+    /// 复权基准，重抓同一天可能因其间除权而整体平移，覆盖会造成同一序列里新旧基准混杂）。
+    ///
+    /// 唯一的例外是**盘中抓的行**（<c>fetched_at</c> 早于它自己那天 16:00，见
+    /// <c>FetchOrchestrator.IsConfirmedFinal</c>）：那种行的 OHLC 是当时的瞬时价、量额换手是半天
+    /// 累计值，本来就不是最终数据，后来抓到的更晚数据一律覆盖它。
+    ///
+    /// ⚠ 2026-09-09 加这个例外之前的后果：2026-09-01 早上 09:25~10:10 跑【不复权首次整段回补】，
+    /// 4020 只票的当天K线被写成"开盘半小时"的快照（002650 四价合一 6.04、成交量 23 手），
+    /// day_adj 原样继承 1555 行；而水位线只在"最新那根就是今天"时才判确认，跨过午夜就再也不回头，
+    /// 于是那批错值永久固化。同一个坑在 2026-07-16 11:25 也吃过一次（1330 个指数/ETF，含上证指数）。
+    /// </summary>
+    public void InsertOrRefreshUnconfirmed(IEnumerable<Bar> bars)
     {
         using var conn = Open();
         using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT OR IGNORE INTO Bar
+            INSERT INTO Bar
                 (code, granularity, period_start, open, close, high, low, volume, amount, turnover, fetched_at)
             VALUES
-                ($code, $granularity, $period_start, $open, $close, $high, $low, $volume, $amount, $turnover, $fetched_at);
+                ($code, $granularity, $period_start, $open, $close, $high, $low, $volume, $amount, $turnover, $fetched_at)
+            ON CONFLICT(code, granularity, period_start) DO UPDATE SET
+                open = excluded.open, close = excluded.close, high = excluded.high, low = excluded.low,
+                volume = excluded.volume, amount = excluded.amount, turnover = excluded.turnover,
+                fetched_at = excluded.fetched_at
+            WHERE Bar.fetched_at IS NOT NULL
+              AND Bar.fetched_at < datetime(Bar.period_start, '+16 hours')
+              AND excluded.fetched_at > Bar.fetched_at;
             """;
         var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
         var pGran = cmd.CreateParameter(); pGran.ParameterName = "$granularity"; cmd.Parameters.Add(pGran);
@@ -241,9 +261,14 @@ public class SqliteBarRepository : IBarRepository
                 Close = reader.GetDouble(4),
                 High = reader.GetDouble(5),
                 Low = reader.GetDouble(6),
-                Volume = reader.GetDouble(7),
-                Amount = reader.GetDouble(8),
-                Turnover = reader.GetDouble(9),
+                // 量/额/换手三列都做 NULL 兜底（2026-09-09 加）：写入路径向来写 0 而不是 NULL，
+                // 但**批量导入**能绕过它们——东财终端日线不含换手率，那次导入让 day_raw 2015 年
+                // 及以前 702 万行的 turnover 整列为 NULL，这里原来是 GetDouble(9) 硬读，于是
+                // 【重算回测序列】对 2886 只票每只都抛 "data is NULL at ordinal 9"，界面上
+                // "待重算 2886 只"永不下降、潜伏了三天没人发现。数据已就地修好，兜底留着防下一次。
+                Volume = reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
+                Amount = reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
+                Turnover = reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
                 // 老数据（这个字段2026-07-09之前没有）读出来是DBNull——用MinValue兜底，永远判定为
                 // "未确认最终"，直到这一天被重新抓到一次为止（只影响"今天"这一天的判断，更早的
                 // 历史天数不会因为FetchedAt是MinValue而被误判成需要重新抓——见FetchOrchestrator

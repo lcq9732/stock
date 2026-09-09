@@ -115,6 +115,12 @@ public class SinaLhbProvider : ILhbProvider
                 Amount = ParseD(tds[6]),
                 Reason = reason,
                 FetchedAt = now,
+                Source = LhbSources.Sina,
+                // 新浪的对应值是**源给的**（交易所公布的原值），标 FromSource 没错。
+                // ⚠ 但它跟 Reason 是错配的：新浪把上榜原因归并成了粗类，对应值却还跟着各自的
+                // 原规则走，同一个 reason 下混着当日涨跌幅/两日累计/多日累计。这一点写在
+                // LhbRow 的类注释里，别拿这份历史当真值去验证任何派生规则。
+                DeviationSource = LhbDeviationSources.FromSource,
             });
         }
 

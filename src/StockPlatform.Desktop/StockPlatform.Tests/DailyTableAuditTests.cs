@@ -37,7 +37,7 @@ public class DailyTableAuditTests : IDisposable
         _dbPath = Path.Combine(Path.GetTempPath(), $"daily_{Guid.NewGuid():N}.sqlite");
         var bars = new SqliteBarRepository(_dbPath);
         bars.EnsureSchema();
-        bars.InsertOrIgnore(Cal.Select(d => new Bar
+        bars.InsertOrRefreshUnconfirmed(Cal.Select(d => new Bar
         {
             Code = Anchor, Granularity = Granularity.Day, PeriodStart = d,
             Open = 1, Close = 1, High = 1, Low = 1, Volume = 1, Amount = 1,

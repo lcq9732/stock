@@ -38,5 +38,5 @@ public class CutoffBarRepository : IBarRepository
     public DateTime? GetOverallEarliestPeriodStart(string granularity) => _inner.GetOverallEarliestPeriodStart(granularity);
     public List<string> GetAllCodes() => _inner.GetAllCodes();
     public void EnsureSchema() => _inner.EnsureSchema();
-    public void InsertOrIgnore(IEnumerable<Bar> bars) => _inner.InsertOrIgnore(bars);
+    public void InsertOrRefreshUnconfirmed(IEnumerable<Bar> bars) => _inner.InsertOrRefreshUnconfirmed(bars);
 }

@@ -93,10 +93,6 @@ public sealed class SourceAdmission
     /// <param name="sources">它要用哪些数据源。</param>
     /// <param name="isTimedItem">是不是**定时项**（到点必须跑）。空闲项传 false。</param>
     /// <param name="fromPlan">是不是**计划**在跑。手动点【执行】传 false。</param>
-    /// <param name="manualBigTaskRunning">
-    /// 【手动】页那几个大按钮是不是正在跑（它们横跨所有数据源、不进占用表）。
-    /// 是的话只能让路——抢占它们要动的是另一套机制。
-    /// </param>
     /// <param name="itemCts">这一项自己的取消源，登记进占用表用（别人要停它就靠它）。</param>
     /// <param name="progress">过程说明，给日志/界面。</param>
     /// <param name="onPreemptStart">
@@ -106,7 +102,7 @@ public sealed class SourceAdmission
     /// </param>
     public async Task<AdmissionResult> AcquireAsync(
         string taskName, IReadOnlySet<DataSourceId> sources,
-        bool isTimedItem, bool fromPlan, bool manualBigTaskRunning,
+        bool isTimedItem, bool fromPlan,
         CancellationTokenSource itemCts, IProgress<string>? progress = null,
         CancellationToken ct = default, Action<string>? onPreemptStart = null)
     {
@@ -114,14 +110,9 @@ public sealed class SourceAdmission
             _occupancy.TryAcquire(taskName, sources, manual: !fromPlan, itemCts,
                                   out blockedBy, out blockedSource);
 
-        // ① 【手动】页的大任务横跨所有数据源，跟谁都不能并发，而且它们不进占用表
-        if (manualBigTaskRunning)
-        {
-            progress?.Report("　【手动】页有大任务正在跑（它横跨所有数据源），这一轮先让路，下次重扫再来。");
-            return new AdmissionResult(AdmissionKind.GaveWay, null,
-                "【手动】页有大任务在跑，本轮让路", null, null);
-        }
-
+        // 原来这里打头还有一道 manualBigTaskRunning：【手动】页那几个大按钮横跨所有数据源、
+        // 又不进占用表，只能靠一个外部标志让路。2026-09-08 那一页整个撤掉之后，
+        // **每个任务都按源登记在占用表里**，判据只剩下面这一套，不再有账外的任务。
         var lease = TryNow(out var blocker, out var source);
         if (lease != null)
             return new AdmissionResult(AdmissionKind.Acquired, lease, "", null, null);

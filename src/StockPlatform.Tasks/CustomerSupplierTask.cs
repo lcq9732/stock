@@ -45,8 +45,13 @@ public sealed class CustomerSupplierTask(
 {
     public override FetchActionId Id => FetchActionId.StepCustomerSupplier;
 
-    /// <summary>本轮每年的 (接口自报, 已落库)，边抓边记，收尾时写进 CustSuppYearState。</summary>
-    private readonly Dictionary<int, (int Reported, int Saved)> _thisRun = [];
+    /// <summary>
+    /// 本轮每年的 (接口自报, 已落库, 主动丢弃)，边抓边记，收尾时写进 CustSuppYearState。
+    ///
+    /// 三个数都要：reported 含非 A 股主体（约 16.4%），落库的只有 A 股——
+    /// 不记 skipped 的话，主动过滤会被当成"没抓齐"，那几年每轮重抓且永远抓不齐。
+    /// </summary>
+    private readonly Dictionary<int, (int Reported, int Saved, int Skipped)> _thisRun = [];
 
     /// <summary>当前正在抓哪一年——<c>SaveBatchAsync</c> 要靠它把落库数记到对的年份上。</summary>
     private int _currentYear;
@@ -82,23 +87,25 @@ public sealed class CustomerSupplierTask(
             {
                 ct.ThrowIfCancellationRequested();
                 _currentYear = year;
-                _thisRun[year] = (0, 0);
+                _thisRun[year] = (0, 0, 0);
 
                 await foreach (var batch in provider.StreamYearAsync(
                                    year,
-                                   onReported: n => _thisRun[year] = (n, _thisRun[year].Saved),
-                                   onSkipped: m => Report($"（{m}）", phase: "抓取"),
+                                   onReported: n => _thisRun[year] = (n, _thisRun[year].Saved, _thisRun[year].Skipped),
+                                   onSkipped: k => _thisRun[year] = (_thisRun[year].Reported, _thisRun[year].Saved, k),
                                    ct: ct))
                 {
                     yield return batch;
                 }
 
                 doneYears++;
-                var (rep, saved) = _thisRun[year];
+                var (rep, saved, skipped) = _thisRun[year];
                 // 每年抓完立刻落一次完成度：被 Deadline 截断时，**已经抓完的年份要留下记录**，
                 // 否则下轮又从头来一遍。
-                repository.SaveYearState(year, rep, repository.CountByYear(year));
-                Report($"{year} 年：{saved} 行（接口自报 {rep}）", doneYears, years.Count, "抓取");
+                repository.SaveYearState(year, rep, repository.CountByYear(year), skipped);
+                Report($"{year} 年：{saved} 行"
+                     + (skipped > 0 ? $"（接口自报 {rep}，丢弃 {skipped} 行非 A 股主体）" : $"（接口自报 {rep}）"),
+                       doneYears, years.Count, "抓取");
             }
         }
         finally { provider.OnStatus -= Forward; }
@@ -108,7 +115,7 @@ public sealed class CustomerSupplierTask(
     {
         repository.Upsert(batch);
         if (_thisRun.TryGetValue(_currentYear, out var st))
-            _thisRun[_currentYear] = (st.Reported, st.Saved + batch.Count);
+            _thisRun[_currentYear] = (st.Reported, st.Saved + batch.Count, st.Skipped);
         return Task.CompletedTask;
     }
 
@@ -119,7 +126,8 @@ public sealed class CustomerSupplierTask(
     protected override Task OnStoppedAsync(TaskRunStats stats)
     {
         if (_currentYear > 0 && _thisRun.TryGetValue(_currentYear, out var st))
-            repository.SaveYearState(_currentYear, st.Reported, repository.CountByYear(_currentYear));
+            repository.SaveYearState(_currentYear, st.Reported,
+                                     repository.CountByYear(_currentYear), st.Skipped);
         return Task.CompletedTask;
     }
 
@@ -129,17 +137,20 @@ public sealed class CustomerSupplierTask(
         // 被 Deadline/MaxItems 截断时，正在抓的那一年也要落完成度——
         // 骨架是 break 出来的，上面 foreach 里那句 SaveYearState 没轮到执行。
         if (_currentYear > 0 && _thisRun.TryGetValue(_currentYear, out var cur))
-            repository.SaveYearState(_currentYear, cur.Reported, repository.CountByYear(_currentYear));
+            repository.SaveYearState(_currentYear, cur.Reported,
+                                     repository.CountByYear(_currentYear), cur.Skipped);
 
         var errors = new List<string>();
 
         // ── 对账：哪几年还没抓齐 ──
         var states = repository.GetYearStates();
-        var short_ = states.Where(kv => kv.Value.Saved < kv.Value.Reported)
+        // 判据跟 PlanYearsToFetch 一致：saved + skipped 才是"这一年我们收到的全部"
+        var short_ = states.Where(kv => kv.Value.Saved + kv.Value.Skipped < kv.Value.Reported)
                            .OrderByDescending(kv => kv.Key).ToList();
         if (short_.Count > 0)
         {
-            var sample = string.Join("、", short_.Take(5).Select(kv => $"{kv.Key}年 {kv.Value.Saved}/{kv.Value.Reported}"));
+            var sample = string.Join("、", short_.Take(5).Select(
+                kv => $"{kv.Key}年 {kv.Value.Saved}+{kv.Value.Skipped}/{kv.Value.Reported}"));
             Report($"⚠ {short_.Count} 个年份还没抓齐（{sample}），下轮会重抓这几年。", phase: "对账");
         }
 

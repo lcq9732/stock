@@ -53,7 +53,7 @@ public class SourceAdmissionTests
         var occ = new SourceOccupancy();
         var r = await NewAdmission(occ).AcquireAsync(
             "板块成分股", Src(DataSourceId.EmPush2),
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource());
 
         Assert.Equal(AdmissionKind.Acquired, r.Kind);
@@ -68,7 +68,7 @@ public class SourceAdmissionTests
 
         var r = await NewAdmission(occ).AcquireAsync(
             "板块成分股", Src(DataSourceId.EmPush2),                // 要的是 push2
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource());
 
         Assert.Equal(AdmissionKind.Acquired, r.Kind);
@@ -85,7 +85,7 @@ public class SourceAdmissionTests
         var r = await NewAdmission(occ).AcquireAsync(
             "重新拉取失败", Src(DataSourceId.EmPush2),
             isTimedItem: true, fromPlan: false,           // ← 手动点的
-            manualBigTaskRunning: false, new CancellationTokenSource());
+            new CancellationTokenSource());
 
         Assert.Equal(AdmissionKind.GaveWay, r.Kind);
         Assert.Null(r.Lease);
@@ -103,25 +103,11 @@ public class SourceAdmissionTests
         var r = await NewAdmission(occ).AcquireAsync(
             "拉取财务报表", Src(DataSourceId.Sina),
             isTimedItem: false, fromPlan: true,           // ← 空闲项
-            manualBigTaskRunning: false, new CancellationTokenSource());
+            new CancellationTokenSource());
 
         Assert.Equal(AdmissionKind.GaveWay, r.Kind);
         Assert.False(blocker.Cts.IsCancellationRequested, "空闲项不该掐掉用户主动点的任务");
         Assert.Contains("空闲项不抢占", r.Reason);
-    }
-
-    [Fact]
-    public async Task 手动页大任务在跑_只让路()
-    {
-        var occ = new SourceOccupancy();
-        var r = await NewAdmission(occ).AcquireAsync(
-            "板块成分股", Src(DataSourceId.EmPush2),
-            isTimedItem: true, fromPlan: true,
-            manualBigTaskRunning: true,                   // ← 拉取全部那类横跨所有源的大按钮
-            new CancellationTokenSource());
-
-        Assert.Equal(AdmissionKind.GaveWay, r.Kind);
-        Assert.Contains("【手动】页有大任务", r.Reason);
     }
 
     [Fact]
@@ -132,7 +118,7 @@ public class SourceAdmissionTests
 
         var r = await NewAdmission(occ).AcquireAsync(
             "拉取财务报表", Src(DataSourceId.Sina),
-            isTimedItem: false, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: false, fromPlan: true,
             new CancellationTokenSource());
 
         Assert.Contains("重新拉取失败", r.Reason);      // 在等谁
@@ -160,7 +146,7 @@ public class SourceAdmissionTests
         var started = new List<string>();
         var r = await NewAdmission(occ, log).AcquireAsync(
             "板块成分股", Src(DataSourceId.Sina),
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource(), onPreemptStart: started.Add);
 
         Assert.Equal(AdmissionKind.AcquiredAfterPreempt, r.Kind);
@@ -181,7 +167,7 @@ public class SourceAdmissionTests
         var log = new List<string>();
         await NewAdmission(occ, log).AcquireAsync(
             "板块成分股", Src(DataSourceId.Sina),
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource());
 
         // 出问题时要能复盘：抢了谁、因为哪个源、对方跑了多久
@@ -203,7 +189,7 @@ public class SourceAdmissionTests
         var log = new List<string>();
         var r = await NewAdmission(occ, log, waitLimit: TimeSpan.FromMilliseconds(150))
             .AcquireAsync("板块成分股", Src(DataSourceId.Sina),
-                isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+                isTimedItem: true, fromPlan: true,
                 new CancellationTokenSource());
 
         Assert.Equal(AdmissionKind.PreemptTimedOut, r.Kind);
@@ -227,13 +213,13 @@ public class SourceAdmissionTests
                                      cooldown: TimeSpan.FromMinutes(5));
 
         var first = await admission.AcquireAsync("板块成分股", Src(DataSourceId.Sina),
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource());
         Assert.Equal(AdmissionKind.PreemptTimedOut, first.Kind);
 
         // 第二次：冷却期内，直接让路，不该再抢一遍（否则每分钟撞一次、日志刷屏）
         var second = await admission.AcquireAsync("板块成分股", Src(DataSourceId.Sina),
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource());
 
         Assert.Equal(AdmissionKind.GaveWay, second.Kind);
@@ -250,7 +236,7 @@ public class SourceAdmissionTests
                                      cooldown: TimeSpan.FromMilliseconds(50));
 
         var first = await admission.AcquireAsync("板块成分股", Src(DataSourceId.Sina),
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource());
         Assert.Equal(AdmissionKind.PreemptTimedOut, first.Kind);
 
@@ -259,7 +245,7 @@ public class SourceAdmissionTests
         finish();                    // 这次它收尾了
 
         var second = await admission.AcquireAsync("板块成分股", Src(DataSourceId.Sina),
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource());
 
         Assert.Equal(AdmissionKind.Acquired, second.Kind);
@@ -283,7 +269,7 @@ public class SourceAdmissionTests
 
         var r = await NewAdmission(occ, waitLimit: TimeSpan.FromMilliseconds(400))
             .AcquireAsync("板块成分股", Src(DataSourceId.Sina),
-                isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+                isTimedItem: true, fromPlan: true,
                 new CancellationTokenSource());
 
         // 不该把第三方也一起掐了——让路，下一轮重来
@@ -300,7 +286,7 @@ public class SourceAdmissionTests
 
         var r = await NewAdmission(occ).AcquireAsync(
             "板块指数合成", Src(),                       // 本地计算，不占任何源
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource());
 
         Assert.Equal(AdmissionKind.Acquired, r.Kind);
@@ -317,7 +303,7 @@ public class SourceAdmissionTests
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var task = admission.AcquireAsync("板块成分股", Src(DataSourceId.Sina),
-            isTimedItem: true, fromPlan: true, manualBigTaskRunning: false,
+            isTimedItem: true, fromPlan: true,
             new CancellationTokenSource(), ct: userStop.Token);
 
         await Task.Delay(50);

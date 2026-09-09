@@ -16,8 +16,8 @@ public partial class MainWindow : Window
     /// <summary>
     /// 让右边日志的顶边跟左边【任务表】齐平。
     ///
-    /// 为什么要用代码算：左边"任务表以上"的那截高度是 页签头 + 工具条 两段拼出来的，
-    /// 它们在 TabControl 内部、跟右边这一列不在同一个 Grid 里，XAML 没法直接对齐
+    /// 为什么要用代码算：左边"任务表以上"的那截高度是 状态条 + 工具条 两段拼出来的，
+    /// 它们跟右边这一列不在同一个 Grid 里，XAML 没法直接对齐
     /// （SharedSizeGroup 只能共享同一个 Grid 作用域里的行）。所以量一次实际位置最直接。
     ///
     /// 顺带解决的问题：这样右上角空出一块，计划的运行状态就搬到那儿了——
@@ -26,7 +26,7 @@ public partial class MainWindow : Window
     private void SyncLogTop()
     {
         if (PlanTableBox == null || RootGrid == null || StatusPane == null) return;
-        if (!PlanTableBox.IsVisible) return;        // 切到【手动】页时任务表不可见，保持上一次的高度
+        if (!PlanTableBox.IsVisible) return;        // 还没布局出来时别算，保持上一次的高度
         try
         {
             double y = PlanTableBox.TranslatePoint(new System.Windows.Point(0, 0), RootGrid).Y;
@@ -72,10 +72,13 @@ public partial class MainWindow : Window
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         var vm = DataContext as MainViewModel;
-        if (vm?.IsBusy == true)
+        // 有任务正在抓就拦下来（2026-09-08 从 IsBusy 改成占用表——【手动】页撤掉之后，
+        // 所有任务都按数据源登记在占用表里，那才是"现在到底有没有在抓"的唯一账本）。
+        if (vm?.Occupancy.AnyRunning == true)
         {
             MessageBox.Show(
-                "正在拉取数据，请先点击\"停止\"，再关闭程序。",
+                "正在拉取数据。请先在右上角「正在执行」里逐项点【停止】，再关闭程序。\n"
+              + "（【停止计划】只停排期、不会打断正在跑的任务。）",
                 "无法关闭", MessageBoxButton.OK, MessageBoxImage.Warning);
             e.Cancel = true;
             return;

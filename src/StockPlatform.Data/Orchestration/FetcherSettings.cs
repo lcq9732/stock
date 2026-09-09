@@ -143,6 +143,18 @@ public static class FetcherSettings
         return string.IsNullOrEmpty(v) ? null : v;
     }
 
+    /// <summary>
+    /// 龙虎榜概要走哪个源，规范化成 <c>"em"</c>／<c>"sina"</c>，没配就是 <c>"em"</c>
+    /// （2026-09-09 起的默认）。取值用 <c>LhbSources</c> 里的常量，跟写进
+    /// <c>Lhb.source</c> 列的是同一套字符串——配置里写的和库里存的对得上，查起来不用猜。
+    ///
+    /// 换到东财的理由是**口径**不是数量：它的上榜原因是交易所原文，跟 LhbSeat.explanation
+    /// 同源，两张表才能按 (日期,代码,原因) join。留着新浪是因为 datacenter 哪天不通了得有退路
+    /// ——但真退回去要知道代价：新浪的原因是归并过的粗类，对应值跟原因错配。
+    /// </summary>
+    public static string ReadLhbSource(string settingsPath) =>
+        (ReadString(settingsPath, "LhbSource") ?? "em").Trim().ToLowerInvariant();
+
     /// <summary>读一个 true/false 设置；读不到就当 false。</summary>
     public static bool ReadBool(string settingsPath, string key)
     {
@@ -309,6 +321,22 @@ public static class FetcherSettings
           //  （连 TCP 都不通）。2026-09-06 挨个试镜像域名，push2delay 通、而且接口完整。
           //  「delay」是延时行情，盘中滞后 15 分钟——收盘后取的是当日终值，对我们没影响。
           //"MoneyFlowSnapshotHost": "push2.eastmoney.com",
+
+          // ── 龙虎榜概要走哪个源 ──────────────────────────────────────────
+          //  em   ＝ 东财 datacenter（RPT_DAILYBILLBOARD_DETAILSNEW）。【默认】
+          //  sina ＝ 新浪龙虎榜每日页。出事时的退路。
+          //
+          //  2026-09-09 换到东财。两源逐条比对过（09-08 单日）：票集 55 vs 55 双向零差异、
+          //  收盘价全对上、成交额换算比值精确 1.000000、数据起点同为 2004-06-25。
+          //  换的理由是**口径**：东财的上榜原因是交易所原文，跟【拉取龙虎榜席位】那张表
+          //  同源，两张表终于能按 (日期,代码,原因) join——"为什么上榜"和"谁在买"以前对不起来。
+          //
+          //  ⚠ 退回 sina 的代价：它把上榜原因归并成粗类（28 种 vs 交易所原文的几十种），
+          //  而"对应值"仍跟着各自的原规则走，同一个 reason 下混着当日涨跌幅/两日累计/多日
+          //  累计（2026-08-04 创业板那批就是）。真退回去，新写进来的行会跟已有的东财行
+          //  在同一天里并存两套原因文本。
+          //"LhbSource": "em",
+          //"LhbSource": "sina",
 
           // ── K线数据源 ──────────────────────────────────────────────────
           //"BarSource": "Tencent",   // 腾讯为主，某只票拿不到时自动回退新浪重试这一只【默认】
