@@ -12,7 +12,9 @@ namespace StockPlatform.Tests;
 /// 这里钉住的是三条规则各自的边界，尤其两条**容易被后来人"顺手放宽"**的：
 ///   · 贯穿必须是**严格**穿透且用最高/最低价（含影线）——用户的原话是"从最低到最高，从头到尾
 ///     穿破三根均线"，改成实体口径会把大部分命中筛掉；
-///   · **不限阴阳**——阴线也必须能入选（用户明确要求，实测阳线只比阴线略好，不足以做硬条件）。
+///   · **方向要跟着 direction 参数走**——2026-09-10 用户看过实跑名单后改口要"一阳破三线"，
+///     默认档变成 <see cref="FoundationDirection.BullishCloseAbove"/>（阳线且收盘站上三线）；
+///     "不限阴阳"仍然保留成一档，所以两种口径都得钉住，别再被谁按自己的理解写死。
 /// 另外钉住"回看N根"的语义：N=1 只看最新那根（今天收盘后跑、明天开盘前用），前一天命中不算。
 /// </summary>
 public class FoundationAnalysisEngineTests
@@ -66,7 +68,7 @@ public class FoundationAnalysisEngineTests
     public void PassesWhenSingleBarSpansAllThreeMovingAveragesAtLowPosition()
     {
         var bars = LowFlatHistory();
-        bars.Add(B(60, 10.00, 10.10, 10.50, 9.50));   // 影线上下都穿出三线
+        bars.Add(B(60, 10.00, 10.10, 10.50, 9.50));   // 阳线，影线上下都穿出三线，收盘站上三线
 
         var r = new FoundationAnalysisEngine(new FakeBarRepository(bars)).Analyze(Code, "测试", lookbackDays: 1);
 
@@ -78,17 +80,68 @@ public class FoundationAnalysisEngineTests
     }
 
     [Fact]
-    public void PassesForBearishBarToo_DirectionIsNotFiltered()
+    public void PassesForBearishBarOnlyUnderTheAnyDirectionSetting()
     {
-        // 阴线（收盘<开盘）且收盘没站上三线，照样入选——不限方向是用户明确要求的口径。
+        // 同一根阴线（收盘<开盘、没站上三线）：选"不限阴阳"那档才入选。
+        var bars = LowFlatHistory();
+        bars.Add(B(60, 10.20, 9.90, 10.50, 9.50));
+        var engine = new FoundationAnalysisEngine(new FakeBarRepository(bars));
+
+        var any = engine.Analyze(Code, "测试", lookbackDays: 1, direction: FoundationDirection.Any);
+        Assert.True(any.Passed);
+        Assert.Equal("阴线", any.Category);
+        Assert.Contains("未站上", any.PatternNote);
+    }
+
+    [Fact]
+    public void RejectsBearishBarUnderTheDefaultDirection()
+    {
+        // 默认档（一阳破三线且收盘站上）下同一根阴线必须落选——这正是用户看名单时挑出来的问题：
+        // "它选出来的有往下的，也就是空头的一阴破三线"。
         var bars = LowFlatHistory();
         bars.Add(B(60, 10.20, 9.90, 10.50, 9.50));
 
         var r = new FoundationAnalysisEngine(new FakeBarRepository(bars)).Analyze(Code, "测试", lookbackDays: 1);
 
-        Assert.True(r.Passed);
-        Assert.Equal("阴线", r.Category);
-        Assert.Contains("未站上", r.PatternNote);
+        Assert.False(r.Passed);
+        Assert.False(r.Criteria[0].Satisfied);
+        // 诊断文案要能分清"根本没穿"和"穿了但方向不对"。
+        Assert.Contains("穿透了三线", r.Criteria[0].Basis);
+    }
+
+    [Fact]
+    public void RejectsBullishBarThatDoesNotCloseAboveTheTopMovingAverage()
+    {
+        // 阳线、也贯穿了三线，但收盘还夹在三线中间 —— 默认档要求收盘站上三线（弱市里这一步
+        // 决定了是不是假突破：只要阳线20日 -0.10%，阳线且站上 +0.65%）。选中间那档则入选。
+        var bars = LowFlatHistory();
+        bars.Add(B(60, 9.90, 9.97, 10.50, 9.50));   // 收盘 9.97 低于三线上沿(约10.0)
+        var engine = new FoundationAnalysisEngine(new FakeBarRepository(bars));
+
+        var strict = engine.Analyze(Code, "测试", lookbackDays: 1);
+        Assert.False(strict.Passed);
+        Assert.Contains("穿透了三线", strict.Criteria[0].Basis);
+
+        var loose = engine.Analyze(Code, "测试", lookbackDays: 1, direction: FoundationDirection.Bullish);
+        Assert.True(loose.Passed);
+        Assert.Equal("阳线", loose.Category);
+        Assert.Contains("未站上", loose.PatternNote);
+    }
+
+    [Fact]
+    public void SkipsWrongDirectionBarsAndKeepsLookingBackWithinTheWindow()
+    {
+        // 昨天"一阴破三线"、前天"一阳破三线"：N=3 时应该报前天那根，不该被昨天那根挡住。
+        var bars = LowFlatHistory();
+        bars.Add(B(60, 10.00, 10.10, 10.50, 9.50));   // 前天：阳线且站上
+        bars.Add(B(61, 10.30, 9.95, 10.60, 9.60));    // 昨天：阴线，方向不合
+        bars.Add(B(62, 9.96, 9.98, 10.02, 9.94));     // 今天：没穿
+
+        var r = new FoundationAnalysisEngine(new FakeBarRepository(bars)).Analyze(Code, "测试", lookbackDays: 3);
+
+        Assert.True(r.Passed, string.Join(" | ", r.Criteria.Select(c => $"{c.Name}={c.Satisfied}:{c.Basis}")));
+        Assert.Equal("阳线", r.Category);
+        Assert.Contains("03-02", r.PatternNote);      // 第60根那天，不是昨天那根阴线
     }
 
     [Fact]
@@ -117,7 +170,9 @@ public class FoundationAnalysisEngineTests
             double p = 13.0 - i * 0.05;
             bars.Add(B(i, p, p, p + 0.05, p - 0.05));
         }
-        bars.Add(B(60, 10.05, 10.10, 11.20, 9.00));
+        // 收盘要高过三线上沿(下跌段里 MA20 最高，约10.5)，否则会先被默认的方向条件挡掉，
+        // 就测不到"间距"这一条了。
+        bars.Add(B(60, 10.20, 10.90, 11.50, 9.00));
 
         var r = new FoundationAnalysisEngine(new FakeBarRepository(bars)).Analyze(Code, "测试", lookbackDays: 1);
 

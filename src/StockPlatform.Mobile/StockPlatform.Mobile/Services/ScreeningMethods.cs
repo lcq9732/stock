@@ -43,14 +43,17 @@ public static class ScreeningMethods
 
         // 峰哥法 2026-09-07 换规则：一根K线贯穿MA5/MA10/MA20 + 三线粘合 + 低位（三个参数的默认值
         // 是实测定的，别随手改，依据见 FoundationAnalysisEngine 类注释）。
-        new("峰哥法(一根K线穿三线)",
+        new("峰哥法(一阳破三线)",
             new[]
             {
                 P("回看N根K线", 1, 1, 20),
                 P("三线间距上限%", FoundationAnalysisEngine.DefaultMaxSpreadPct, 0.5, 5, 0.5),
                 P("低位上限%", FoundationAnalysisEngine.DefaultMaxLowPositionPct, 5, 100, 5),
+                // 方向：0=不限阴阳 1=一阳破三线 2=一阳破三线且收盘站上（默认，跟桌面版下拉框同序）。
+                // 移动端的参数只能是数字，所以这里是枚举的整数值，取值含义见 FoundationDirection。
+                P("方向0不限/1阳/2阳且站上", (int)FoundationAnalysisEngine.DefaultDirection, 0, 2, 1),
             },
-            (d, p) => { var e = new FoundationAnalysisEngine(d.BarRepository); return (c, n) => e.Analyze(c, n, (int)p[0], p[1], p[2]); }),
+            (d, p) => { var e = new FoundationAnalysisEngine(d.BarRepository); return (c, n) => e.Analyze(c, n, (int)p[0], p[1], p[2], (FoundationDirection)(int)p[3]); }),
 
         new("耀哥法",
             new[] { P("DIF阈值", 0, 0, 1, 0.05) },

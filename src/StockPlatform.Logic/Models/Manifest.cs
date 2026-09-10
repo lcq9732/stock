@@ -194,6 +194,26 @@ public class MissingBarRange
     public int Days { get; set; }
     /// <summary>补过几轮。补两轮还拿不到就判定"数据源确实没有"，移进白名单表。</summary>
     public int Tries { get; set; }
+
+    /// <summary>
+    /// 这一段**为什么**要重抓（2026-09-09 新增，取值见 <see cref="AuditFindingKind"/>）。
+    /// 原来只有一种情形——缺行；现在"行在但值错"也走同一条管道，于是必须记下原因。
+    ///
+    /// ⚠ **复查时一定要按它分派回对应判据**：值错的行**一直都在**，拿"行在不在"（<c>FindGaps</c>）
+    /// 去复查会一律判成"已补齐"划掉，哪怕值根本没被覆盖（比如又在盘中跑了一次）。
+    /// 见 doc/bar-value-audit-design.md §5。
+    ///
+    /// 老 manifest 没有这个字段，反序列化出来是 null/空串，一律按 <see cref="AuditFindingKind.Gap"/>
+    /// 处理——那些记录本来就都是缺行。
+    /// </summary>
+    public string Reason { get; set; } = AuditFindingKind.Gap;
+
+    /// <summary>空/null 一律当"缺行"（老记录兼容）。</summary>
+    public string EffectiveReason =>
+        string.IsNullOrEmpty(Reason) ? AuditFindingKind.Gap : Reason;
+
+    /// <summary>是不是"行在但值错"那一类（跟缺行相对）——复查方式和白名单策略都不同。</summary>
+    public bool IsValueIssue => EffectiveReason != AuditFindingKind.Gap;
 }
 
 /// <summary>某个任务最后一次跑完的记录（见 <see cref="Manifest.LastRunByTask"/>）。</summary>

@@ -7,11 +7,17 @@
 /// 一批 = 一个面的全部发现，落账时只替换这个面的旧记录、别的面原样保留（理由见
 /// doc/full-audit-task-migration-design.md §1）。<c>Kind=note</c> 的行不需要它。
 /// </param>
+/// <param name="Granularity">
+/// 这一条属于哪个口径。**不能一律从 <paramref name="Scope"/> 推**：空洞体检的一批只涉及一个口径
+/// （面＝类型×口径），但值体检的一批**横跨四个日线口径**（那几条判据是全表一次扫出来的，
+/// 按口径分四次扫是四倍的钱）。
+/// </param>
 /// <param name="Note">Kind=note 时的那行人读文本（板块指数/day_adj/覆盖形状/日频表这些只报数的面）。</param>
 public sealed record AuditFinding(
     string Kind,
     string? Scope = null,
     string? Code = null,
+    string? Granularity = null,
     DateTime From = default,
     DateTime To = default,
     int Days = 0,
@@ -38,6 +44,13 @@ public static class AuditFindingKind
 
     /// <summary>OHLC 不自洽（high &lt; max(open,close) 之类）。</summary>
     public const string Ohlc = "ohlc";
+
+    /// <summary>
+    /// <c>amount / (volume × close)</c> 不在 ≈100（手）或 ≈1（科创板按股）附近——量或额本身不对。
+    /// **只报数、不进待补名单**：603999 那种是数据源自己给错的，重抓大概率拿回同样的值，
+    /// 要修得先查清成因（见 memory project_bar_volume_unit_bug）。
+    /// </summary>
+    public const string Ratio = "ratio";
 
     /// <summary>只报数、不进待补名单的那些（本地合成/本地重算的面、覆盖形状、日频表）。</summary>
     public const string Note = "note";

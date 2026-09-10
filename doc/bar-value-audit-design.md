@@ -153,8 +153,17 @@ public string Reason { get; set; } = MissingBarReason.Gap;
 | 2 | V3 | 跨口径 self-join |
 | 3 | V5 | day_adj × day_raw join |
 
-实测参考：单条 V1 判据（带 `datetime()` 计算）全库扫一遍 878 秒。体检是手动触发的重活，可接受；
-若要提速，可给这几条加 `period_start >= ?` 的下界参数（默认全history，界面可选"只查近一年"）。
+实测参考（2026-09-09 生产库 22.2 GB / 7000 万行）：
+
+| | 耗时 |
+|---|---|
+| **现有的空洞体检**（走索引 join）：五个面 + 板块指数 + day_adj + 覆盖形状 + 七张日频表，整轮 | **3 分 08 秒** |
+| **单条值判据** V1（`fetched_at < datetime(period_start,'+16 hours')`，逐行算日期函数、用不上索引），全库一遍 | **878 秒** |
+
+也就是说**瓶颈全在新加的这几条值判据**，是现有体检的十几倍。三遍下来约 40 分钟。
+
+真嫌慢就给值判据加 `period_start >= ?` 下界——历史段一旦体检干净就不会再变，默认只查近一年即可
+（用 Mode 表达，别再加 UI 元素，理由同 doc/full-audit-task-migration-design.md §4）。
 
 ## 8. 类与接入点
 
@@ -194,16 +203,85 @@ turnover/amount/volume NULL 各 0 —— 干净，且因 `fetched_at`（2026-09-
 - 复查分派：值错段补完后**值没变**时不能被划掉（这是 §5 那个坑的回归测试）；
 - 白名单：值错段 Tries 到上限不进 `MissingBarConfirmed`。
 
-## 11. 实施顺序
+## 11. 实施状态（2026-09-09）
 
-1. `SqliteBarValueAuditor` + 单测（纯新增，无风险）
-2. `MissingBarReason` + `MissingBarRange.Reason`（纯新增字段，老 manifest 兼容）
-3. `RunStepFullAuditAsync` 接入
-4. `FillAuditedGapsAsync` 复查分派 + `UpdateDayAmountTurnover` 扩展
-5. 全套测试 + Debug 实例实机跑一次【全库数据体检】，核对报出来的数字跟 §9 一致
+| # | 内容 | 状态 |
+|---|---|---|
+| 1 | `SqliteBarValueAuditor`（六条判据的纯查询）+ `BarValueAuditTests` 24 个 | ✅ 完成 |
+| 2 | `AuditFindingKind` + `MissingBarRange.Reason`/`EffectiveReason`/`IsValueIssue`（老 manifest 兼容） | ✅ 完成 |
+| 3 | `FullAuditTask` 接入：V1~V4 进待补名单（`CommitValueFindings` 值类整体替换）、V5/V6 只报数 | ✅ 完成 |
+| 4 | 【重新拉取失败】**不再清掉值类记录**（`SaveProgress` 带上它们） | ✅ 完成 |
+| 5 | 值类记录的**补法**：`FillValueIssuesAsync` 按 Reason 分派——多口径不一致走 `UpdateVolumeAmountTurnover`（只覆盖三列、绝不动 OHLC），其余整段重抓靠 UPSERT 覆盖未确认行 | ✅ 完成 |
+| 6 | **复查按 Reason 分派**：`SqliteBarValueAuditor` 加了"只查这批 code"的重载（全库扫描不能拿来复查一批 500 段），判定抽成 `ValueIssueRecheck`（Logic 层纯函数 + 单测） | ✅ 完成 |
+
+### 闭环后的流程
+
+```
+【全库数据体检】六条判据 → V1~V4 进 MissingBars（带 Reason）、V5/V6 只报数
+        ↓
+【重新拉取失败】按 Reason 分两条路：
+   · Reason=gap          → 整段重抓，复查用 FindGaps（原有逻辑，一行没动）
+   · Reason=inconsistent → 抓回来只覆盖 volume/amount/turnover 三列
+   · 其余值类            → 整段重抓，靠 InsertOrRefreshUnconfirmed 覆盖未确认行
+        ↓
+复查：用**对应判据**只查这批 code（不是 FindGaps，值错的行一直都在）
+   · 判据不再命中 → 从名单划掉
+   · 还命中       → 段收窄到仍命中的那几天、Tries+1，**不进白名单**（那是给停牌用的，
+                    值错进去等于发永久豁免；收敛靠真修好，不靠计数到顶）
+```
+
+跳过的两种：数据源不支持该口径（后复权/不复权只有腾讯给）、`day_adj`（本地重算的，抓不来，
+等【重算回测序列】）——两种都 **Tries 一动不动**，免得空跑两轮被误判。
+
+### 实施中被测试抓出来的两个真 bug（都很安静）
+
+1. **面级落账连带删值类记录**：`CommitScope` 的 `kept` 过滤原来只看 `code + gran`，于是扫完
+   "个股·不复权"这个面就把同一只票同一口径的**值类**记录删了。加 `!m.IsValueIssue` 修掉，
+   回归测试是 `值类记录的Tries按Reason分别继承`。
+2. **值判据零发现时落账不被调用**：批里只剩 `Scope=null` 的汇总行，`SaveBatchAsync` 找不到
+   scope 就不落账 ⇒ "这些值问题已经修好了"永远写不回名单。让值体检的汇总行也带
+   `ValueScope` 修掉，回归测试是 `值问题修好后_旧的值类记录被清掉_缺行记录不受影响`。
+   （跟 §1 里"每个面必须至少产出一条汇总行"是同一个坑的第二次出现。）
 
 ## 12. 相关
 
 - `IncrementalWindowCalculator`（16:00 确认判据的本体）、`IntradayBarConfirmationTests`
 - `doc/fetch-plan-atomic-tasks-design.md`（体检与重拉失败在任务矩阵里的位置）
 - memory：`project_intraday_bar_confirmation`、`project_bar_volume_unit_bug`、`project_eastmoney_terminal`
+
+## 13. 生产实测暴露的四个缺陷（2026-09-09，全是判据"适用范围"没想清楚）
+
+第一轮生产体检（22.2 GB 库）报出 22514 段，其中大部分是误报或修不了的。**四个缺陷有一个共同
+形状：判据本身的算法没错，错在没界定"它对哪些列、哪些口径、哪些标的成立"。**
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| ① | V4 报 5 万行（打满上限），244 只票全是 `day` | `low <= 0` 撞上**前复权减法式的负价**（万科 1997 年前复权价 −8.17，是已知失真不是脏数据） | "价格 ≤ 0" 只对 `day_raw` 判 |
+| ② | V6 报 2621 万行，一只票 8420 行＝全部历史 | 比值 `amount/(volume×close)` 里**只有 close 随复权变**，而 amount 永远是真实成交额——拿复权价去除必然对不上 | V6 只对「个股 × 不复权」判（第一次只排除了指数/板块，不够） |
+| ③ | 69 段 `inconsistent` 重抓也修不掉 | `turnover` 是数据源**算出来的派生值**（量÷流通股本），各口径不同时刻抓，期间股本一变就重算成另一个数（000153 的 08-27：量额完全一致、turnover 7.39 vs 7.36，相隔 5 天抓） | 三列分开：量额保持 1e-6，turnover 放宽到 2% 或绝对 0.05 |
+| ④ | 5621 段 `day_adj` 永远被跳过、每轮重报 | `day_adj` 是本地重算产物、**抓不来** | 它的值问题只报数、不进待补名单（跟 V5 同处置） |
+
+### 还有一个不属于判据、但更严重的功能缺陷
+
+**`intraday` 那 5282 段一段都没修上**：我原本让它走 `ProcessOneStockAsync`（"整段重抓，靠
+`InsertOrRefreshUnconfirmed` 覆盖未确认行"），但那个方法在 `overwrite=false` 时**只把"库里
+没有的行"放进 `toInsert`**——值错的行是"**存在**但值错"，压根到不了 UPSERT 那一步，覆盖条件
+没机会生效。002650 跑完一轮后 OHLC 还是四价合一 6.04。
+
+改成抓回来**直接交给 `InsertOrRefreshUnconfirmed`**，让它的 WHERE 去裁决。
+
+> ⚠ 这条值得单独记住：**`ProcessOneStockAsync` 是"补缺"的工具，不是"改错"的工具**。
+> 任何"行在但值错"的修复都不能指望它。
+
+### 附带的效率问题
+
+同一 (票, 口径) 常有多条不同 Reason 的记录（2026-09-01 那批盘中行既是 `intraday`、量额也
+`inconsistent`），逐段抓的话 9398 段里 4020 段是白发的请求。改成按 (票, 口径) 分组、取日期
+并集抓一次；混着多种 Reason 时走整段重抓（那条路顺带也修好量额），全是 `inconsistent` 才走
+"只覆盖三列"。
+
+### 判据"上限"是个反面教材
+
+最初给每类判据加了 5 万条返回上限（防内存）。后果是 V4/V6 都打满，日志显示"50000 行"——
+**把截断伪装成了精确数字**，真实规模从此不可知。正确做法是流式聚合成段（内存里只留段、
+行数只累加计数），上限根本不需要。用户一句"为什么要 50000 上限"点出了这个问题。

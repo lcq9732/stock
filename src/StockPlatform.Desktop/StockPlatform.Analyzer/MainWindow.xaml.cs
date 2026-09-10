@@ -85,7 +85,7 @@ public partial class MainWindow : Window
     }
 
     // SelectionChanged bubbles up from ANY Selector inside a tab's content too (e.g. the 峰哥法
-    // 粒度 ComboBox), not just the TabControl itself — the TabItem type check below is what
+    // 方向 ComboBox), not just the TabControl itself — the TabItem type check below is what
     // filters those out, not the sender.
     private void TabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {

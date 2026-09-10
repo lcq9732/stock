@@ -968,6 +968,10 @@
 
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
                         <TextBlock Text="固定使用日线" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                        <TextBlock Text="方向：" VerticalAlignment="Center" Margin="16,0,0,0"
+                                   ToolTip="命中那根K线的方向要求。默认&quot;一阳破三线且收盘站上&quot;——最早做的是不限阴阳，实跑名单在下跌日大半是一阴破线，那不是要找的形态。三档实测：不限84只/10日+1.28%，只要阳线34只/+1.46%，阳线且站上19只/+1.59%" />
+                        <ComboBox ItemsSource="{Binding DirectionOptions}" SelectedIndex="{Binding DirectionIndex}"
+                                  Width="160" Margin="4,0" VerticalAlignment="Center" />
                         <TextBlock Text="回看N根K线：" VerticalAlignment="Center" Margin="16,0,0,0"
                                    ToolTip="最近多少根K线里出现过&quot;一根穿破三线&quot;就列出来。默认1=只看最新交易日那根（今天收盘后跑、明天开盘前出名单）；调大只是为了回看最近几天核对形态" />
                         <TextBox Text="{Binding Lookback, UpdateSourceTrigger=PropertyChanged}" Width="40" Margin="4,0" />

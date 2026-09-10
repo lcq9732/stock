@@ -237,4 +237,94 @@ public class FullAuditTaskTests : IDisposable
         // 白名单挡住了那一天，所以这一轮不该再报它
         Assert.DoesNotContain(_manifest.Load().MissingBars, r => r.Code == "600000");
     }
+
+    // ─────────────────── ⑤ 值体检接入（2026-09-09）───────────────────
+
+    [Fact]
+    public async Task 盘中固化的行_进待补名单且带上Reason()
+    {
+        Meta("600000", SqliteStockMetaUpsert.TypeStock);
+        // 三天都齐（没有缺行），但 9-2 那根是盘中 09:33 抓的
+        Insert("600000", Granularity.Day, Days[0], Days[2]);
+        _bars.InsertOrRefreshUnconfirmed([new Bar
+        {
+            Code = "600000", Granularity = Granularity.Day, PeriodStart = Days[1],
+            Open = 1, Close = 1, High = 1, Low = 1, Volume = 1, Amount = 100, Turnover = 1,
+            FetchedAt = Days[1].AddHours(9).AddMinutes(33),
+        }]);
+
+        await NewTask().RunAsync(Args(), CancellationToken.None);
+
+        var hit = _manifest.Load().MissingBars
+            .Where(r => r.EffectiveReason == AuditFindingKind.Intraday).ToList();
+        Assert.Single(hit);
+        Assert.Equal("600000", hit[0].Code);
+        Assert.Equal(Days[1], hit[0].From);
+        Assert.True(hit[0].IsValueIssue);
+    }
+
+    [Fact]
+    public async Task 值问题修好后_旧的值类记录被清掉_缺行记录不受影响()
+    {
+        Meta("600000", SqliteStockMetaUpsert.TypeStock);
+        Insert("600000", Granularity.Day, Days);          // 这轮完全干净
+
+        var m = _manifest.Load();
+        m.MissingBars =
+        [
+            // 上一轮报的盘中固化（现在已经修好了，本轮该消失）
+            new MissingBarRange
+            {
+                Code = "600000", Granularity = Granularity.Day, Reason = AuditFindingKind.Intraday,
+                From = Days[1], To = Days[1], Days = 1, Tries = 1,
+            },
+            // 别的面的缺行记录（值体检一行都不该碰）
+            new MissingBarRange
+            {
+                Code = "sh510300", Granularity = Granularity.Day, Reason = AuditFindingKind.Gap,
+                From = Days[0], To = Days[0], Days = 1, Tries = 2,
+            },
+        ];
+        _manifest.Save(m);
+
+        await NewTask().RunAsync(Args(), CancellationToken.None);
+
+        var after = _manifest.Load().MissingBars;
+        // 值类记录清掉了——这一条靠"汇总行也带 ValueScope"才成立（否则零发现时压根不落账）
+        Assert.DoesNotContain(after, r => r.IsValueIssue);
+        // 缺行记录原样保留，Tries 也没被动
+        var gap = after.Single(r => r.Code == "sh510300");
+        Assert.Equal(2, gap.Tries);
+        Assert.Equal(AuditFindingKind.Gap, gap.EffectiveReason);
+    }
+
+    [Fact]
+    public async Task 值类记录的Tries按Reason分别继承()
+    {
+        Meta("600000", SqliteStockMetaUpsert.TypeStock);
+        Insert("600000", Granularity.Day, Days[0], Days[2]);      // 缺 9-2 → gap
+        _bars.InsertOrRefreshUnconfirmed([new Bar                  // 9-1 是盘中抓的 → intraday
+        {
+            Code = "600000", Granularity = Granularity.DayRaw, PeriodStart = Days[0],
+            Open = 1, Close = 1, High = 1, Low = 1, Volume = 1, Amount = 100, Turnover = 1,
+            FetchedAt = Days[0].AddHours(10),
+        }]);
+
+        var m = _manifest.Load();
+        m.MissingBars =
+        [
+            new MissingBarRange
+            {
+                Code = "600000", Granularity = Granularity.DayRaw, Reason = AuditFindingKind.Intraday,
+                From = Days[0], To = Days[0], Days = 1, Tries = 1,
+            },
+        ];
+        _manifest.Save(m);
+
+        await NewTask().RunAsync(Args(), CancellationToken.None);
+
+        var intraday = _manifest.Load().MissingBars
+            .Single(r => r.EffectiveReason == AuditFindingKind.Intraday);
+        Assert.Equal(1, intraday.Tries);      // 继承，没清零
+    }
 }

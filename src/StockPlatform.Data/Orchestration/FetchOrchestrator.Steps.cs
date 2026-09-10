@@ -145,16 +145,27 @@ public partial class FetchOrchestrator
 
     // ───────────────────────────── 4. 指数日K ─────────────────────────────
 
-    /// <summary>大盘指数日K（水位线增量）。它同时是"最近一个已收盘交易日"的锚，很多快照类判断靠它。</summary>
+    /// <summary>
+    /// 大盘指数日K。它同时是"最近一个已收盘交易日"的锚，很多快照类判断靠它。
+    ///
+    /// 两个模式：
+    ///   · <b>增量</b>：每条指数从自己的水位线续到今天，日常就用它。
+    ///   · <b>首次整段回补</b>（<paramref name="fullBackfill"/>，2026-09-10 加）：不看水位线，
+    ///     从 A股开市首日抓起。**往指数清单里加了新指数之后必须跑一次**——水位线只往后走，
+    ///     新指数第一次被增量抓到的只有回看窗口那几年，之后水位线就钉在最新一根上，
+    ///     再也不会回头补前面的历史（2026-09-09 加深证综指等三条时踩到：只抓到 3 年，
+    ///     而龙虎榜偏离值要拿它当基准回溯到 2004）。
+    /// </summary>
     public async Task<FetchResult> RunStepIndexBarsAsync(
-        NamedBarSource source, int lookbackYears, IProgress<string>? progress, CancellationToken ct = default)
+        NamedBarSource source, int lookbackYears, IProgress<string>? progress,
+        CancellationToken ct = default, bool fullBackfill = false)
     {
         var (repo, errors, failed, stats, sw) = BeginStep();
         void Forward(string m) => progress?.Report(m);
         source.Fetcher.OnStatus += Forward;
         try
         {
-            await FetchIndexBarsAsync(source, DateTime.Today, lookbackYears, repo, errors, failed, stats, progress, sw, ct);
+            await FetchIndexBarsAsync(source, DateTime.Today, lookbackYears, repo, errors, failed, stats, progress, sw, ct, fullBackfill);
         }
         finally { source.Fetcher.OnStatus -= Forward; }
         progress?.Report($"本项汇总：{stats.Summarize()}");
@@ -667,400 +678,18 @@ public partial class FetchOrchestrator
     }
 
 
-    // ─────────────── 全库数据体检（本地查库） ───────────────
+    // ─────────────── 体检查出的空洞：补回来（【重新拉取失败】的一部分）───────────────
+    //
+    // 体检本身 2026-09-09 迁到了 StockPlatform.Tasks/FullAuditTask（判据见
+    // doc/full-audit-task-migration-design.md），这里只剩"拿着名单去补"这一半，
+    // 以及它跟体检共用的几个常量/小工具。
 
-    /// <summary>一次查多少只票的空洞。太大一次 join 上千万行、内存和时间都难看；太小则来回开连接。</summary>
+    /// <summary>一次补多少段。太大一次 join 上千万行、内存和时间都难看；太小则来回开连接。</summary>
     private const int AuditBatchSize = 500;
-
-    /// <summary>
-    /// 一个交易日过去多久，才算"数据源确实该有了"。T+1 发布 + 盘后逐步更新，留 2 天很宽松。
-    /// 比这更近的缺口不算数——那多半只是数据源还没更新完。
-    /// </summary>
-    private const int AuditSettleDays = 2;
-
-    /// <summary>
-    /// 体检要扫的"标的类型 × 口径"矩阵里**能联网补**的那几个面（2026-09-04 扩，原来只有个股×前复权）。
-    /// 这些面查出来的空洞进 <see cref="Manifest.MissingBars"/>，由【重新拉取失败】按口径逐段补回来。
-    ///
-    /// ════ 为什么必须扫这么多面 ════
-    /// 2026-09-02 把【拉取全部】拆成 13 个独立任务之后，后复权、不复权、ETF、指数各自成了一项——
-    /// 独立就意味着**可以被漏排、可以单独失败**，而只体检前复权的话，这些面缺了没有任何人会发现。
-    /// 回测吃的是 day_adj，它由 day_raw 推出来：不复权缺一天，回测序列就跟着错一天。
-    ///
-    /// ════ 哪些面不在这里 ════
-    /// · 板块指数：本地合成的，缺了要重新合成、不是去抓（见 <see cref="AuditLocalOnlyScopes"/>）；
-    /// · day_adj：本地重算的，同上；
-    /// · 退市股：数据源不再更新它们，报出来也补不到，只会补满两轮之后堆进白名单变成噪声——
-    ///   它们缺的最后那几天由【退市股收尾】负责。
-    /// </summary>
-    private static readonly (string Type, string Gran, string Label)[] AuditFetchableScopes =
-    [
-        (SqliteStockMetaUpsert.TypeStock, Granularity.Day,    "个股·前复权"),
-        (SqliteStockMetaUpsert.TypeStock, Granularity.DayHfq, "个股·后复权"),
-        (SqliteStockMetaUpsert.TypeStock, Granularity.DayRaw, "个股·不复权"),
-        (SqliteStockMetaUpsert.TypeEtf,   Granularity.Day,    "ETF"),
-        (SqliteStockMetaUpsert.TypeIndex, Granularity.Day,    "指数"),
-    ];
-
-    /// <summary>
-    /// **全库数据体检**（2026-09-02 新增，2026-09-04 从"只查个股前复权"扩成全口径、全标的）：
-    /// 逐只对照交易日历找日线空洞，能联网补的写进 <see cref="Manifest.MissingBars"/> 交给
-    /// 【重新拉取失败】去补；补不靠网络的（板块指数、回测序列）只报数、并说清楚该跑哪一项。
-    ///
-    /// ════ 为什么要有它 ════
-    /// 日更末尾的【当日覆盖率体检】只查**最新一个交易日的个股前复权**，挡的是"跑早了、数据源还没
-    /// 更新完"那个坑。可要是程序停了几天、某天那轮跑挂了、或者某个口径的任务压根没排进计划，
-    /// 中间那些天的缺口就没人发现——而"哪天缺了"恰恰是最不该让用户自己去判断的事。
-    ///
-    /// ════ 为什么是手动触发、不是每天跑 ════
-    /// 全库扫描是重活（千万行级 join × 好几个面）。日更本身已经有检查，正常不会有缺口；真出问题多半
-    /// 是别的原因（停机、断电、库损坏、某一项被漏排），那种情况隔一阵子手动体检一次就够。
-    ///
-    /// ════ 停牌怎么办 ════
-    /// 停牌那几天在数据上跟漏抓一模一样——交易日历里有、这只票没有，查是分不开的。所以：
-    /// 体检只负责**报**，补不到的由【重新拉取失败】在补过两轮之后写进 MissingBarConfirmed 白名单，
-    /// 往后体检跳过（白名单按口径分开存，互不影响）。想推翻这些结论就用「彻底体检」
-    /// （<paramref name="thorough"/>），它会先清空白名单。
-    /// </summary>
-    /// <param name="thorough">true＝忽略并清空"确认没有"白名单，全部重查一遍。</param>
-    public async Task<FetchResult> RunStepFullAuditAsync(
-        IProgress<string>? progress, CancellationToken ct = default, bool thorough = false)
-    {
-        var (repo, errors, failed, _, sw) = BeginStep();
-        var result = await Task.Run(() =>
-        {
-            var audit = new SqliteMissingBarRepository(_paths.CurrentDb);
-            if (thorough)
-            {
-                int had = audit.ConfirmedCount();
-                audit.ClearConfirmed();
-                progress?.Report($"彻底体检：已清空「确认没有」白名单（原有 {had} 条），全部重查。");
-
-                // 区间回补的"数据源没有更早数据"水位是同一类结论（只是按段记、不是按天），
-                // 同样作废：数据源当时抽风、后来补上了往年历史的话，只有这里能给它回头路。
-                var floors = new SqliteBarProbeFloorRepository(_paths.CurrentDb);
-                int hadFloors = floors.Count();
-                if (hadFloors > 0)
-                {
-                    floors.Clear();
-                    progress?.Report($"彻底体检：已清空「数据源没有更早数据」水位（原有 {hadFloors} 条）——"
-                                   + "下一次【拉取区间数据】会重新探一遍那些票的往年历史。");
-                }
-
-                // 日频表的「确认这天就是没有」名单（2026-09-08）也是同一类结论，一并作废。
-                // **按数据集分别报**：一勾就把龙虎榜和融资余额一起废掉，代价得让人看得见——
-                // 清掉多少条，下一轮回补就要多发多少个请求。
-                if (_dailyNoDataRepository != null)
-                {
-                    foreach (var ds in new[] { IDailyFetchNoDataRepository.LhbDataset, IDailyFetchNoDataRepository.MarginDataset })
-                    {
-                        int n = _dailyNoDataRepository.Clear(ds);
-                        if (n > 0)
-                            progress?.Report($"彻底体检：已清空【{ds}】的「确认没有数据」名单（{n} 天）——"
-                                           + $"下一次回补会重新试这 {n} 天，也就是多发 {n} 个请求。");
-                    }
-                }
-            }
-
-            var instruments = SqliteStockMetaUpsert.GetAllInstruments(_paths.CurrentDb);
-            if (instruments.Count == 0)
-            {
-                progress?.Report("本地还没有标的名册，没什么可体检的。");
-                return new FetchResult { NothingToDo = true };
-            }
-
-            var byType = instruments
-                .GroupBy(i => i.Type, StringComparer.Ordinal)
-                .ToDictionary(g => g.Key, g => g.Select(i => i.Code).ToList(), StringComparer.Ordinal);
-            List<string> CodesOf(string type) => byType.TryGetValue(type, out var l) ? l : [];
-
-            // 太新的日子不算缺（数据源可能还没更新完），这条线由 AuditSettleDays 定
-            var cutoff = DateTime.Today.AddDays(-AuditSettleDays);
-            var ranges = new List<MissingBarRange>();
-            var summary = new List<string>();
-
-            progress?.Report($"开始全库体检：{AuditFetchableScopes.Length} 个可联网补的面（"
-                           + string.Join("、", AuditFetchableScopes.Select(x => x.Label))
-                           + $"），逐只对照交易日历找日线空洞（{cutoff:yyyy-MM-dd} 之后的日子不算，"
-                           + "数据源可能还没更新完）…");
-
-            foreach (var (type, gran, label) in AuditFetchableScopes)
-            {
-                ct.ThrowIfCancellationRequested();
-                var codes = CodesOf(type);
-                if (codes.Count == 0)
-                {
-                    summary.Add($"　{label}：本地一只都没有，跳过");
-                    continue;
-                }
-
-                // 「整只票一根都没有这个口径」FindGaps 是查不出来的——它只看每只票自己
-                // [最早, 最晚] 区间内的洞，一根都没有的票根本进不了那张区间表。这类问题跟"缺几天"
-                // 完全是两回事（多半是那一项从来没排进计划、或者一直在失败），所以单独数出来提醒，
-                // **不进待补名单**：整段回补该走【拉取区间数据】，几千只×十年塞进逐段重试里跑不完。
-                var have = repo.GetLatestPeriodStartByCode(gran);
-                int none = codes.Count(c => !have.ContainsKey(c));
-
-                var (withGaps, days) = AuditScanScope(audit, codes, gran, cutoff, thorough, label,
-                                                      ranges, progress, sw, ct);
-                summary.Add($"　{label}：{codes.Count} 只，{withGaps} 只有空洞、共 {days} 个交易日"
-                          + (none > 0 ? $"；另有 {none} 只**一根都没有**（该口径从没抓过，要整段回补）" : ""));
-            }
-
-            // 已经在名单里的保留原有的 Tries（别把补过两轮的计数清零，否则永远确认不了）。
-            // key 是"代码+口径"：同一只票的三个口径各自计数，前复权补上了不该把不复权的进度抹掉。
-            lock (_dbLock)
-            {
-                var manifest = _manifestStore.Load();
-                var triesByKey = new Dictionary<(string Code, string Gran), int>();
-                foreach (var m in manifest.MissingBars)
-                    triesByKey[(m.Code, NormalizeGran(m.Granularity))] = m.Tries;
-                foreach (var r in ranges)
-                    if (triesByKey.TryGetValue((r.Code, r.Granularity), out var t)) r.Tries = t;
-                manifest.MissingBars = ranges
-                    .OrderBy(r => r.Code, StringComparer.Ordinal)
-                    .ThenBy(r => r.Granularity, StringComparer.Ordinal)
-                    .ToList();
-                _manifestStore.Save(manifest);
-            }
-
-            // ── 补不靠网络的那两个面：只报数，说清楚该跑哪一项 ──
-            var localHints = AuditLocalOnlyScopes(audit, CodesOf, cutoff, thorough, progress, ct);
-
-            // ── 覆盖形状（起点晚了 / 尾巴停了）：FindGaps 天生看不见的两种形状 ──
-            localHints.AddRange(AuditCoverageShape(repo, CodesOf, cutoff, progress, ct));
-
-            // ── K线之外的日频表（资金流/融资余额/龙虎榜/东财三张）──
-            localHints.AddRange(AuditDailyTables(cutoff, thorough, progress, ct));
-
-            int delisted = CodesOf(SqliteStockMetaUpsert.TypeDelisted).Count;
-            if (delisted > 0)
-                summary.Add($"　退市股 {delisted} 只：不体检（数据源不再更新，报了也补不到；"
-                          + "缺的最后几天由【退市股收尾】负责）");
-            summary.AddRange(localHints);
-
-            int totalDays = ranges.Sum(r => r.Days);
-            progress?.Report($"全库体检完成（用时 {FormatElapsed(sw.Elapsed)}）：\n"
-                + string.Join("\n", summary) + "\n"
-                + (ranges.Count == 0
-                    ? "　可联网补的面没有发现空洞。"
-                    : $"　合计 {ranges.Count} 段、{totalDays} 个交易日的日线缺失，已记入待补名单。\n"
-                      + "　下一步：跑一次【重新拉取失败】去补。补得到的自动划掉；"
-                      + "连补两轮拿不到的会被判定为\"数据源确实没有\"（多半是停牌），写进白名单、以后体检不再报。\n"
-                      + "　⚠ 第一次体检查出的量通常很大（十年下来的停牌天数都在里面），补一轮可能要几小时。"));
-
-            return new FetchResult { NothingToDo = ranges.Count == 0 };
-        }, ct);
-
-        result.Errors.AddRange(errors);
-        FinishFetchRun(errors, "全库数据体检", Array.Empty<string>(), failed, progress);
-        return result;
-    }
 
     /// <summary>老 manifest 里的记录没有口径字段（2026-09-04 之前只体检前复权），一律按前复权算。</summary>
     private static string NormalizeGran(string? gran) =>
         string.IsNullOrEmpty(gran) ? Granularity.Day : gran;
-
-    /// <summary>
-    /// 扫一个面（一批标的 × 一个口径），把空洞按**包络区间**追加进 <paramref name="ranges"/>。
-    /// 返回 (有空洞的标的数, 缺失交易日总数)，只用来写汇总行。
-    /// </summary>
-    private (int WithGaps, int Days) AuditScanScope(
-        SqliteMissingBarRepository audit, List<string> codes, string gran, DateTime cutoff,
-        bool thorough, string label, List<MissingBarRange> ranges,
-        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
-    {
-        int scanned = 0, withGaps = 0, days = 0;
-        foreach (var batch in codes.Chunk(AuditBatchSize))
-        {
-            ct.ThrowIfCancellationRequested();
-            var gaps = audit.FindGaps(batch, gran,
-                MarketIndexCatalog.ShanghaiCompositeSymbol, ignoreConfirmed: thorough);
-
-            foreach (var (code, gapDays) in gaps)
-            {
-                var settled = gapDays.Where(d => d.Date <= cutoff).ToList();
-                if (settled.Count == 0) continue;
-                // 空洞不连续时取包络：一次请求覆盖整段，比逐日请求划算得多
-                ranges.Add(new MissingBarRange
-                {
-                    Code = code, Granularity = gran,
-                    From = settled[0], To = settled[^1], Days = settled.Count, Tries = 0,
-                });
-                withGaps++;
-                days += settled.Count;
-            }
-
-            scanned += batch.Length;
-            progress?.Report($"体检 {label}：{scanned}/{codes.Count}，已发现 {withGaps} 只有空洞"
-                           + $"（已用时 {FormatElapsed(sw.Elapsed)}）");
-        }
-        return (withGaps, days);
-    }
-
-    /// <summary>
-    /// 体检那两个**补不靠网络**的面（2026-09-04）：板块指数是本地合成的、day_adj 是本地重算的。
-    /// 它们缺了不该去发请求——把这种空洞塞进待补名单，只会让【重新拉取失败】对着本地合成出来的
-    /// 代码空抓两轮，然后错误地判定"数据源确实没有"、写进白名单。所以这里只查、只报，
-    /// 并直接告诉用户该跑哪一项。
-    /// </summary>
-    private List<string> AuditLocalOnlyScopes(
-        SqliteMissingBarRepository audit, Func<string, List<string>> codesOf,
-        DateTime cutoff, bool thorough, IProgress<string>? progress, CancellationToken ct)
-    {
-        var lines = new List<string>();
-
-        // ① 板块指数（本地等权合成，code 是 gn_xxx/new_xxx）
-        var boards = codesOf(SqliteStockMetaUpsert.TypeBoard);
-        if (boards.Count > 0)
-        {
-            progress?.Report($"体检 板块指数：{boards.Count} 个（本地合成，只报不补）…");
-            int withGaps = 0, days = 0;
-            foreach (var batch in boards.Chunk(AuditBatchSize))
-            {
-                ct.ThrowIfCancellationRequested();
-                foreach (var (_, gapDays) in audit.FindGaps(batch, Granularity.Day,
-                             MarketIndexCatalog.ShanghaiCompositeSymbol, ignoreConfirmed: thorough))
-                {
-                    int n = gapDays.Count(d => d.Date <= cutoff);
-                    if (n == 0) continue;
-                    withGaps++; days += n;
-                }
-            }
-            lines.Add(withGaps == 0
-                ? $"　板块指数：{boards.Count} 个，没有空洞"
-                : $"　板块指数：{boards.Count} 个里 {withGaps} 个有空洞、共 {days} 个交易日"
-                  + "——**不进待补名单**（本地合成的，抓不来）：先把个股日K补齐，再跑一次【板块指数合成】");
-        }
-
-        // ② 回测序列 day_adj（＝不复权 × 本地算的复权因子）
-        ct.ThrowIfCancellationRequested();
-        progress?.Report("体检 回测序列(day_adj)：对比不复权的进度…");
-        int pending = GetPendingAdjRebuildCount();
-        var stocks = codesOf(SqliteStockMetaUpsert.TypeStock);
-        int adjWithGaps = 0, adjDays = 0;
-        foreach (var batch in stocks.Chunk(AuditBatchSize))
-        {
-            ct.ThrowIfCancellationRequested();
-            foreach (var (_, gapDays) in audit.FindGaps(batch, Granularity.DayAdj,
-                         MarketIndexCatalog.ShanghaiCompositeSymbol, ignoreConfirmed: thorough))
-            {
-                int n = gapDays.Count(d => d.Date <= cutoff);
-                if (n == 0) continue;
-                adjWithGaps++; adjDays += n;
-            }
-        }
-        lines.Add(pending == 0 && adjWithGaps == 0
-            ? "　回测序列(day_adj)：跟不复权一样新，没有空洞"
-            : $"　回测序列(day_adj)：{pending} 只落后于不复权、{adjWithGaps} 只区间内有空洞（{adjDays} 个交易日）"
-              + "——**不进待补名单**（本地算的，抓不来）：先把个股·不复权补齐，再跑一次【重算回测序列】");
-
-        return lines;
-    }
-
-    /// <summary>尾巴落后超过这么多个交易日的标的不算"漏抓"：长期停牌的在市股票（*ST 那些）
-    /// 一停就是几个月甚至几年，全报出来只会把真正的"最近几天没跑成"淹掉。</summary>
-    private const int AuditTailSuspectLimit = 10;
-
-    /// <summary>
-    /// **覆盖形状体检**（2026-09-06 新增）——查 <see cref="SqliteMissingBarRepository.FindGaps"/>
-    /// 天生看不见的两种形状：起点比该有的晚一大截、尾巴停在几天前。判据是纯函数，
-    /// 放在 <see cref="CoverageShapeAuditor"/> 里单独测。
-    ///
-    /// ════ 为什么尾巴要分"全局"和"个别票"两档 ════
-    /// **全局**：某个口径所有票里最新的那一根都落后了 → 这一项最近根本没跑成（漏排、连续失败），
-    /// 这是几乎零误报的信号，也是最该立刻处理的。
-    /// **个别票**：只有几只落后 → 多半是那几只当天没抓到；但长期停牌的在市股票也长这样，
-    /// 所以只数落后在 <see cref="AuditTailSuspectLimit"/> 个交易日以内的，再久的当停牌处理。
-    /// </summary>
-    private List<string> AuditCoverageShape(
-        SqliteBarRepository repo, Func<string, List<string>> codesOf, DateTime cutoff,
-        IProgress<string>? progress, CancellationToken ct)
-    {
-        var lines = new List<string>();
-        progress?.Report("体检 覆盖形状：起点/尾巴跟交易日历对照…");
-
-        var calendar = repo.Query(MarketIndexCatalog.ShanghaiCompositeSymbol, Granularity.Day)
-            .Select(b => b.PeriodStart.Date)
-            .Where(d => d <= cutoff.Date)
-            .OrderBy(d => d)
-            .ToList();
-        if (calendar.Count == 0)
-        {
-            lines.Add("　覆盖形状：本地上证指数日线为空，没有交易日历可比，跳过");
-            return lines;
-        }
-
-        var stocks = codesOf(SqliteStockMetaUpsert.TypeStock).ToHashSet(StringComparer.Ordinal);
-
-        // 每个口径的最早/最晚日各查一次就够——一次 GROUP BY 要扫一千多万行，
-        // 下面 day 这一套会被个股/ETF/指数三个面用到，不缓存就是白扫三遍。
-        var earliestCache = new Dictionary<string, Dictionary<string, DateTime>>(StringComparer.Ordinal);
-        var latestCache = new Dictionary<string, Dictionary<string, DateTime>>(StringComparer.Ordinal);
-        Dictionary<string, DateTime> Earliest(string gran) =>
-            earliestCache.TryGetValue(gran, out var v) ? v
-                : earliestCache[gran] = repo.GetEarliestPeriodStartByCode(gran);
-        Dictionary<string, DateTime> Latest(string gran) =>
-            latestCache.TryGetValue(gran, out var v) ? v
-                : latestCache[gran] = repo.GetLatestPeriodStartByCode(gran);
-
-        // ① 起点：以前复权为基准，后复权/不复权比它晚太多就是"整段没补上"
-        var baseEarliest = Only(Earliest(Granularity.Day), stocks);
-        foreach (var (gran, label) in
-                 new[] { (Granularity.DayHfq, "个股·后复权"), (Granularity.DayRaw, "个股·不复权") })
-        {
-            ct.ThrowIfCancellationRequested();
-            var late = CoverageShapeAuditor.FindLateStarts(
-                calendar, baseEarliest, Only(Earliest(gran), stocks));
-            if (late.Count == 0) continue;
-
-            var worst = late.OrderByDescending(g => g.TradingDays).Take(3)
-                .Select(g => $"{g.Code} 晚 {g.TradingDays} 天");
-            lines.Add($"　{label}：{late.Count} 只的历史起点比前复权晚 "
-                    + $"{CoverageShapeAuditor.DefaultLateStartThreshold} 个交易日以上（{string.Join("、", worst)}…）"
-                    + "——**不进待补名单**（整段回补该走【拉取区间数据】，逐段重试跑不完）");
-        }
-
-        // ② 尾巴：先看全局（这一项是不是最近没跑成），再看个别票
-        foreach (var (type, gran, label) in AuditFetchableScopes)
-        {
-            ct.ThrowIfCancellationRequested();
-            var codes = codesOf(type).ToHashSet(StringComparer.Ordinal);
-            if (codes.Count == 0) continue;
-
-            var latest = Only(Latest(gran), codes);
-            if (latest.Count == 0) continue;
-
-            var globalLatest = latest.Values.Max().Date;
-            int behind = calendar.Count - 1 - calendar.FindLastIndex(d => d <= globalLatest);
-            if (behind > 0)
-            {
-                lines.Add($"　{label}：**整个口径最新只到 {globalLatest:yyyy-MM-dd}、落后 {behind} 个交易日**"
-                        + "——这一项最近没跑成（漏排或连续失败），先去看它的运行记录");
-                continue;   // 全局都落后时，逐票再数一遍没有意义
-            }
-
-            var tails = CoverageShapeAuditor.FindLateTails(
-                calendar, latest, Only(Earliest(gran), codes))
-                .Where(g => g.TradingDays <= AuditTailSuspectLimit)
-                .ToList();
-            if (tails.Count == 0) continue;
-
-            var worst = tails.OrderByDescending(g => g.TradingDays).Take(3)
-                .Select(g => $"{g.Code} 停在 {g.Actual:MM-dd}");
-            lines.Add($"　{label}：{tails.Count} 只的最新一根停在 {AuditTailSuspectLimit} 个交易日以内的过去"
-                    + $"（{string.Join("、", worst)}…）——多半是临时停牌，长于这个的不计（那是长期停牌）");
-        }
-
-        return lines;
-    }
-
-    /// <summary>只留这一批代码的那些项——GetEarliestPeriodStartByCode 是按口径查全库的，
-    /// 里面混着 ETF、指数和板块指数的代码。</summary>
-    private static Dictionary<string, DateTime> Only(
-        Dictionary<string, DateTime> byCode, HashSet<string> codes) =>
-        byCode.Where(kv => codes.Contains(kv.Key))
-              .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
 
     /// <summary>补两轮还拿不到，就判定"数据源确实没有"（多半是停牌），写进白名单、以后体检跳过。</summary>
     private const int AuditMaxTries = 2;
@@ -1107,7 +736,14 @@ public partial class FetchOrchestrator
         //
         // 现在的粒度是"一批 500 段"（约 17 分钟），中断最多损失这一批。做得到是因为这里的
         // 抓取本来就是**顺序**的（见下面那句注释：并发只会更快撞配额），抓完一批立刻能复查。
-        var byGran = pending.GroupBy(r => r.Granularity, StringComparer.Ordinal)
+        // 值类记录（行在但值错，2026-09-09 起也走这条管道）**这一轮先原样留着**：
+        // 它们的补法和复查方式跟缺行不一样（缺行看"行在不在"，值错要重查对应判据；
+        // 多口径不一致还只能覆盖量额换手三列、不能动 OHLC），见 doc/bar-value-audit-design.md §5。
+        // ⚠ 但必须在 SaveProgress 里带着它们一起写回——不然跑一轮【重新拉取失败】就把
+        //   体检刚报出来的值问题全清了，而且清得很安静。
+        var valuePending = pending.Where(r => r.IsValueIssue).ToList();
+        var byGran = pending.Where(r => !r.IsValueIssue)
+                            .GroupBy(r => r.Granularity, StringComparer.Ordinal)
                             .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
 
         // 把当前各口径的名单拼平写回 manifest。已处理的批换成复查结果，没轮到的批原样留着——
@@ -1117,7 +753,7 @@ public partial class FetchOrchestrator
             lock (_dbLock)
             {
                 var m = _manifestStore.Load();
-                m.MissingBars = byGran.Values.SelectMany(x => x).ToList();
+                m.MissingBars = byGran.Values.SelectMany(x => x).Concat(valuePending).ToList();
                 _manifestStore.Save(m);
             }
         }
@@ -1217,7 +853,15 @@ public partial class FetchOrchestrator
 
         SaveProgress();
 
-        int stillTotal = byGran.Values.Sum(x => x.Count);
+        // ── 值问题（行在但值错）：补法和复查都跟缺行不一样，见 FillValueIssuesAsync ──
+        if (valuePending.Count > 0)
+            valuePending = await FillValueIssuesAsync(
+                source, currentRepo, valuePending, errors, failedCodes, parts, progress, sw, ct,
+                updated => { valuePending = updated; SaveProgress(); });
+
+        SaveProgress();
+
+        int stillTotal = byGran.Values.Sum(x => x.Count) + valuePending.Count;
         progress?.Report($"历史空洞补齐汇总：{string.Join("；", parts)}。\n"
             + $"　合计补上 {filledTotal} 段；还缺 {stillTotal} 段（下轮再试）；"
             + $"{confirmedTotal} 段补满 {AuditMaxTries} 轮仍拿不到，"
@@ -1225,109 +869,188 @@ public partial class FetchOrchestrator
         done.Add($"历史空洞 {pending.Count} 段");
     }
 
-    /// <summary>日期列举最多列这么多个，再多就只报个数——日志是给人看的，糊满 200 个日期没人读。</summary>
-    private const int AuditMaxListedDays = 8;
 
     /// <summary>
-    /// 体检 K线之外的**日频表**（2026-09-04）：资金净流入、融资余额、龙虎榜，以及 2026-09-03
-    /// 接进来的东财三张（资金流明细、龙虎榜席位、大宗交易）。
-    ///
-    /// 这些表拆成原子项之后同样是"可以被漏排、可以单独失败"，而且失败得比K线更静默——K线至少
-    /// 还有当日覆盖率体检兜着，这几张一天都没抓到的话，本地是一点动静都没有的。
-    /// 判据和补法见 <see cref="SqliteDailyTableAuditor"/>：只认"某个交易日一行都没有"和
-    /// "行数不到中位数两成"，**只报不补**（各表补法不同，塞进统一重试里既补不对也说不清）。
+    /// 体检报出的**值问题**（行在但值错）跟缺行用同一份 <see cref="Manifest.MissingBars"/>，
+    /// 但补法和复查方式必须分开，见 <see cref="FetchTaskCatalog"/> 之外的
+    /// doc/bar-value-audit-design.md §5。这个常量是复查用的截止线，跟体检那边的
+    /// <c>FullAuditTask.SettleDays</c> 是同一个 2 天——两处改了一处就会各说各话。
     /// </summary>
-    private List<string> AuditDailyTables(
-        DateTime cutoff, bool thorough, IProgress<string>? progress, CancellationToken ct)
+    private const int ValueRecheckSettleDays = 2;
+
+    /// <summary>
+    /// 修体检报出的值问题（2026-09-09）。跟缺行那条路有**三处**关键不同：
+    ///
+    /// ① **抓法按 Reason 分**。"多口径量额对不上"只覆盖 volume/amount/turnover 三列、绝不动 OHLC
+    ///    （那三列不受复权影响，任何时候抓都是同一个值；而历史行的价格是当年的复权基准，
+    ///    覆盖会造成同一序列里新旧基准混杂）。其余三类整段重抓，靠
+    ///    <see cref="SqliteBarRepository.InsertOrRefreshUnconfirmed"/> 覆盖掉未确认的行。
+    ///
+    /// ② **复查用对应判据，不是 FindGaps**。值错的行**一直都在**，拿"行在不在"去复查会一律判成
+    ///    "已补齐"划掉——哪怕值根本没被覆盖（比如又在盘中跑了一次）。复查只查这一批的 code，
+    ///    不是全库扫描（那等于把体检重跑一遍）。
+    ///
+    /// ③ **不进「确认没有」白名单**。那份名单是给停牌用的（补两轮拿不到就认了），让错值进去
+    ///    等于发永久豁免。<c>Tries</c> 到顶就一直留在名单里报警。
+    /// </summary>
+    /// <param name="commit">每批跑完调一次，传入"当前完整的值类名单"，由调用方写回 manifest。</param>
+    private async Task<List<MissingBarRange>> FillValueIssuesAsync(
+        NamedBarSource source, SqliteBarRepository currentRepo, List<MissingBarRange> pending,
+        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, List<string> parts,
+        IProgress<string>? progress, Stopwatch sw, CancellationToken ct,
+        Action<List<MissingBarRange>> commit)
     {
-        var lines = new List<string>();
-        var auditor = new SqliteDailyTableAuditor(_paths.CurrentDb);
+        var still = new List<MissingBarRange>();
+        var auditor = new SqliteBarValueAuditor(_paths.CurrentDb);
+        var cutoff = DateTime.Today.AddDays(-ValueRecheckSettleDays);
+        var stats = new FetchStats();
+        int done = 0, fixedTotal = 0, skippedTotal = 0, batchNo = 0;
+        int batchTotal = (pending.Count + AuditBatchSize - 1) / AuditBatchSize;
 
-        foreach (var spec in SqliteDailyTableAuditor.DailyTables)
+        progress?.Report($"修体检报出的值问题：{pending.Count} 段"
+                       + $"（{string.Join("、", pending.GroupBy(r => r.EffectiveReason).Select(g => $"{ReasonLabel(g.Key)} {g.Count()}"))}）"
+                       + $"，分 {batchTotal} 批，每批跑完就落账…");
+
+        foreach (var batch in pending.Chunk(AuditBatchSize))
         {
-            ct.ThrowIfCancellationRequested();
-            progress?.Report($"体检 {spec.Label}：按交易日核对覆盖…");
+            batchNo++;
+            var skipped = new HashSet<MissingBarRange>();
 
-            SqliteDailyTableAuditor.Result? r;
-            try { r = auditor.Check(spec, MarketIndexCatalog.ShanghaiCompositeSymbol, cutoff); }
+            // ── 阶段一：先把抓不了的挑出来（Tries 一动不动，免得空跑两轮被误判）──
+            foreach (var r in batch)
+            {
+                // 后复权/不复权只有腾讯给。数据源不支持这个口径就原样留着。
+                if (r.Granularity != Granularity.Day && r.Granularity != Granularity.DayAdj
+                    && !source.Fetcher.SupportsHfq)
+                    skipped.Add(r);
+                // day_adj 是本地重算的产物，抓不来——留着，等【重算回测序列】跑。
+                else if (r.Granularity == Granularity.DayAdj)
+                    skipped.Add(r);
+            }
+
+            // ── 阶段二：按 (票, 口径) 分组，一组只抓一次 ──
+            //
+            // 同一 (票, 口径) 常有几条不同 Reason 的记录：2026-09-01 那批盘中行既是半天快照
+            // （intraday）、量额自然也跟 day 对不上（inconsistent），两条判据都命中。
+            // 逐段抓的话 9398 段里有 4020 段是白发的请求（2026-09-09 实测），多花二十分钟。
+            // 抓一次、取各条日期的并集，复查再按各自判据分别判。
+            var groups = batch
+                .Where(r => !skipped.Contains(r))
+                .GroupBy(r => (r.Code, r.Granularity))
+                .Select(g => new
+                {
+                    g.Key.Code,
+                    g.Key.Granularity,
+                    From = g.Min(x => x.From),
+                    To = g.Max(x => x.To),
+                    // "只覆盖量额换手三列"那条路，只在这一组**全是** inconsistent 时才够用；
+                    // 混着别的 Reason（盘中固化的 OHLC 也错了）就得整段重抓——那条路顺带也会
+                    // 把量额修好，所以不会漏。
+                    OnlyInconsistent = g.All(x => x.EffectiveReason == AuditFindingKind.Inconsistent),
+                })
+                .ToList();
+
+            foreach (var g in groups)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    var (_, fresh) = await source.Fetcher.FetchAsync(
+                        g.Code, g.Granularity, g.From, g.To, ct);
+
+                    if (g.OnlyInconsistent)
+                    {
+                        // 只覆盖 volume/amount/turnover 三列、**绝不动 OHLC**：历史行的价格是
+                        // 当年抓取时的复权基准，覆盖会造成同一序列里新旧基准混杂。
+                        int n;
+                        lock (_dbLock) n = currentRepo.UpdateVolumeAmountTurnover(fresh, g.Granularity);
+                        if (n > 0) stats.FetchedWithNewData(); else stats.FetchedButEmpty();
+                    }
+                    else if (fresh.Count > 0)
+                    {
+                        // 盘中固化 / NULL / OHLC：抓回来**直接交给 InsertOrRefreshUnconfirmed**，
+                        // 让它的 UPSERT 条件裁决（只覆盖未确认的行，已确认的一行不动）。
+                        //
+                        // ⚠ 这里**不能走 ProcessOneStockAsync**（2026-09-09 生产实测踩的）：
+                        // 它在 overwrite=false 时只把"库里没有的行"放进 toInsert，而值错的行是
+                        // "**存在**但值错"，压根到不了 UPSERT 那一步——覆盖条件没机会生效。
+                        // 那一轮 5282 段盘中固化全部判"还在"，002650 的 OHLC 一直是四价合一 6.04。
+                        lock (_dbLock) currentRepo.InsertOrRefreshUnconfirmed(fresh);
+                        stats.FetchedWithNewData();
+                    }
+                    else stats.FetchedButEmpty();
+
+                    Interlocked.Increment(ref done);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    errors.Add($"{g.Code} {GranLabel(g.Granularity)} 值修复失败：{ex.Message}");
+                    failedCodes.Add(g.Code);
+                }
+            }
+
+            // ── 复查：按 Reason 用对应判据重查这一批（只查这批 code）──
+            var codes = batch.Select(r => r.Code).Distinct().ToList();
+            var live = new Dictionary<(string, string, string), List<DateTime>>();
+            try
+            {
+                foreach (var i in auditor.RowIssues(cutoff, codes: codes)
+                                         .Concat(auditor.CrossGranularityMismatch(cutoff, codes: codes)))
+                {
+                    var key = (i.Code, i.Granularity, i.Kind);
+                    if (!live.TryGetValue(key, out var days)) live[key] = days = [];
+                    days.Add(i.Day);
+                }
+            }
             catch (Exception ex)
             {
-                lines.Add($"　{spec.Label}：体检没跑成（{ex.Message}）");
+                // 复查查不动就保守处理：这一批原样留着（宁可下轮重来，也不能当成"修好了"划掉）
+                errors.Add($"值问题复查失败（本批原样留着）：{ex.Message}");
+                still.AddRange(batch);
+                commit(still.Concat(pending.Skip(batchNo * AuditBatchSize)).ToList());
                 continue;
             }
 
-            if (r == null)
+            int fixedInBatch = 0, stillInBatch = 0;
+            foreach (var r in batch)
             {
-                lines.Add($"　{spec.Label}：本地还没有这类数据，跳过");
-                continue;
+                if (skipped.Contains(r)) { still.Add(r); skippedTotal++; continue; }
+
+                // 判定本体在 ValueIssueRecheck（Logic 层纯函数，有单测）——判据不再命中就是修好了
+                live.TryGetValue((r.Code, r.Granularity, r.EffectiveReason), out var days);
+                var survived = ValueIssueRecheck.Survives(r, days);
+                if (survived == null) { fixedInBatch++; continue; }
+
+                stillInBatch++;
+                still.Add(survived);
             }
+            fixedTotal += fixedInBatch;
 
-            // 资金净流入的空日进待补名单，交给【重新拉取失败】一轮补掉（见 Manifest.MissingNetInflowDays）
-            var queued = spec.Table == "NetInflow"
-                ? QueueMissingNetInflowDays(r.EmptyDays, thorough)
-                : 0;
-
-            string span = $"{r.From:yyyy-MM-dd}~{r.To:yyyy-MM-dd} 共 {r.TradingDays} 个交易日"
-                        + $"（每日约 {r.MedianRows} 行）";
-            if (r.EmptyDays.Count == 0 && r.ThinDays.Count == 0 && r.TailMissingDays.Count == 0)
-            {
-                lines.Add($"　{spec.Label}：{span}，齐");
-                continue;
-            }
-
-            var parts = new List<string>();
-            // 尾部滞后放最前面：它是"这一项最近根本没跑成"，比十年前少几行紧急得多
-            if (r.TailMissingDays.Count > 0)
-                parts.Add($"**最新只到 {r.To:yyyy-MM-dd}、落后 {r.TailMissingDays.Count} 个交易日**"
-                        + $"（{FormatDays(r.TailMissingDays)}）");
-            if (r.EmptyDays.Count > 0)
-                parts.Add($"{r.EmptyDays.Count} 天一行都没有（{FormatDays(r.EmptyDays)}）"
-                        + (queued > 0 ? $"，其中 {queued} 天已记入待补名单" : ""));
-            if (r.ThinDays.Count > 0)
-                parts.Add($"{r.ThinDays.Count} 天行数明显偏少、疑似只抓了一半"
-                        + $"（{FormatDays(r.ThinDays.Select(t => t.Day).ToList())}）");
-            lines.Add($"　{spec.Label}：{span}——{string.Join("；", parts)}。补法：{spec.HowToFill}");
+            commit(still.Concat(pending.Skip(batchNo * AuditBatchSize)).ToList());
+            progress?.Report($"　值问题 第 {batchNo}/{batchTotal} 批已落账：修好 {fixedInBatch} 段、"
+                           + $"还在 {stillInBatch} 段"
+                           + (batchNo < batchTotal ? "（现在停也不会丢前面几批的进度）" : ""));
         }
 
-        return lines;
+        commit(still);
+        parts.Add($"值问题 修好 {fixedTotal}/{pending.Count} 段");
+        progress?.Report($"　值问题：{stats.Summarize()}；修好 {fixedTotal} 段、还在 {still.Count - skippedTotal} 段"
+                       + (skippedTotal > 0 ? $"、{skippedTotal} 段跳过（数据源不支持该口径 / 本地重算的口径）" : "")
+                       + "。⚠ 还在的**不会**进「数据源确实没有」白名单——那是给停牌用的，"
+                       + "值错进去等于发永久豁免，所以它会一直报到真修好为止。");
+        return still;
     }
 
-    /// <summary>
-    /// 把资金净流入的空日写进待补名单（2026-09-06）。已经在名单里的保留原有 Tries——
-    /// 跟 K 线空洞一个道理，别把补过一轮的计数清零，否则永远收敛不到"数据源确实没有"。
-    /// </summary>
-    /// <param name="thorough">「彻底体检」：连之前判定"数据源确实没有"的那些天也一起重查。</param>
-    /// <returns>这一轮实际记进名单的天数。</returns>
-    private int QueueMissingNetInflowDays(List<DateTime> emptyDays, bool thorough)
+    /// <summary>值问题的中文名，只用在日志里。</summary>
+    private static string ReasonLabel(string reason) => reason switch
     {
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            if (thorough) manifest.ConfirmedNetInflowDays = [];
-
-            var confirmed = manifest.ConfirmedNetInflowDays.Select(d => d.Date).ToHashSet();
-            var triesByDay = manifest.MissingNetInflowDays
-                .GroupBy(m => m.Day.Date)
-                .ToDictionary(g => g.Key, g => g.Max(m => m.Tries));
-
-            manifest.MissingNetInflowDays = emptyDays
-                .Select(d => d.Date)
-                .Where(d => !confirmed.Contains(d))
-                .Distinct()
-                .OrderBy(d => d)
-                .Select(d => new MissingDayRetry { Day = d, Tries = triesByDay.GetValueOrDefault(d) })
-                .ToList();
-            _manifestStore.Save(manifest);
-            return manifest.MissingNetInflowDays.Count;
-        }
-    }
-
-    /// <summary>日期列表转成人读的一行，超过 <see cref="AuditMaxListedDays"/> 个就截断。</summary>
-    private static string FormatDays(List<DateTime> days) =>
-        days.Count <= AuditMaxListedDays
-            ? string.Join("、", days.Select(d => d.ToString("MM-dd")))
-            : string.Join("、", days.Take(AuditMaxListedDays).Select(d => d.ToString("MM-dd")))
-              + $"… 等 {days.Count} 天";
+        AuditFindingKind.Intraday => "盘中固化",
+        AuditFindingKind.NullValue => "关键列NULL",
+        AuditFindingKind.Ohlc => "OHLC不自洽",
+        AuditFindingKind.Inconsistent => "多口径量额对不上",
+        _ => reason,
+    };
 
     /// <summary>口径的中文名，只用在日志里。</summary>
     private static string GranLabel(string gran) => gran switch

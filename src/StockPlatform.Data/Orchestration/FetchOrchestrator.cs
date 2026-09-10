@@ -3513,22 +3513,53 @@ public partial class FetchOrchestrator
     private async Task FetchIndexBarsAsync(
         NamedBarSource source, DateTime end, int lookbackYears, SqliteBarRepository currentRepo,
         ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, FetchStats stats,
-        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
+        IProgress<string>? progress, Stopwatch sw, CancellationToken ct, bool fullBackfill = false)
     {
-        progress?.Report($"正在抓取大盘指数K线（{MarketIndexCatalog.All.Count} 个：{string.Join("、", MarketIndexCatalog.All.Select(i => i.Name))}）...");
+        progress?.Report(fullBackfill
+            ? $"正在**整段回补**大盘指数K线（{MarketIndexCatalog.All.Count} 个，从 {AShareMarketOpen:yyyy-MM-dd} 起，不看水位线）..."
+            : $"正在抓取大盘指数K线（{MarketIndexCatalog.All.Count} 个：{string.Join("、", MarketIndexCatalog.All.Select(i => i.Name))}）...");
         // 指数名称写进 StockMeta（type=index）——让"查询"页能按名称/代码搜到指数（不影响个股选股，选股扫的是6位纯数字）。
         SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, MarketIndexCatalog.All.Select(i => (i.Symbol, i.Name)), SqliteStockMetaUpsert.TypeIndex);
         int completed = 0;
         foreach (var (symbol, _) in MarketIndexCatalog.All)
         {
-            // 跟"拉取全部"的个股水位线同一套规则：没抓过的从回看窗口起点开始（数据源只会返回
-            // 指数实际存在的日期），抓过的从上次的下一天继续，"今天"要看是否已收盘后确认。
             DateTime start;
-            lock (_dbLock)
+            if (fullBackfill)
             {
-                start = IncrementalStart(currentRepo.GetLatestBarInfo(symbol, Granularity.Day), end, lookbackYears);
+                // 整段回补：忽略水位线、也忽略回看年数，直接从开市首日要起。
+                //
+                // 为什么忽略回看年数：这个模式存在的意义就是"把这条指数的历史一次补到底"，
+                // 还要人先去把那个格子改成 25、跑完再改回 3，正是它要消灭的麻烦。
+                // 数据源只会返回该指数实际存在的日期，早于发布日的部分自然是空
+                // （创业板综 2010 才有、北证50 2021 才有），不会写进任何垃圾。
+                //
+                // 重复抓的代价可以忽略：入库走 InsertOrRefreshUnconfirmed，已确认的行原样跳过，
+                // 所以**不会覆盖已有历史、也不会动复权基准**；多花的只是翻页请求
+                // （每条指数按 640 行/页算十几页，九条合计一两分钟）。
+                start = AShareMarketOpen;
+            }
+            else
+            {
+                // 跟"拉取全部"的个股水位线同一套规则：没抓过的从回看窗口起点开始（数据源只会返回
+                // 指数实际存在的日期），抓过的从上次的下一天继续，"今天"要看是否已收盘后确认。
+                lock (_dbLock)
+                {
+                    start = IncrementalStart(currentRepo.GetLatestBarInfo(symbol, Granularity.Day), end, lookbackYears);
+                }
             }
             await ProcessOneStockAsync(symbol, source, start, end, currentRepo, errors, failedCodes, stats, progress, MarketIndexCatalog.All.Count, () => Interlocked.Increment(ref completed), sw, ct);
+        }
+
+        if (fullBackfill)
+        {
+            // 回补完把每条的实际覆盖报出来——这个模式多半是"加了新指数"之后跑的，
+            // 人要的就是"它到底补到哪年了"这个答案，翻日志数行数太费劲。
+            foreach (var (symbol, name) in MarketIndexCatalog.All)
+            {
+                DateTime? earliest;
+                lock (_dbLock) earliest = currentRepo.GetEarliestPeriodStart(symbol, Granularity.Day);
+                progress?.Report($"　{name}（{symbol}）：本地最早 {earliest:yyyy-MM-dd}");
+            }
         }
     }
 
@@ -4753,14 +4784,19 @@ public partial class FetchOrchestrator
     private const int LhbLookbackTradingDays = 5;
 
     /// <summary>
-    /// 东财源的回看窗口（交易日）。31 是照 <c>d30_chg</c> 定的——上榜后 30 日涨跌幅要等
-    /// 30 个交易日才有值，窗口短一天，那一列就永远空着一部分。
+    /// 东财源的回看窗口（交易日）。照 <c>d30_chg</c> 定的——上榜后 30 日涨跌幅要等 30 个交易日
+    /// 才有值，窗口短了那一列就永远空着。
     ///
-    /// 为什么敢开这么大：东财按月切片抓，31 个交易日跨 2 个自然月＝2~3 个请求，跟原来 5 天
+    /// ⚠ **35 而不是 31**（2026-09-10 改）：原来按"d30 要 30 个交易日"直接取 31，正好卡在
+    /// 边界上——窗口最早那天是 T−30，它的 d30 得等到 T 当天东财算完才有，于是每轮都差那么一步，
+    /// 实测跑完 2242 行 <c>d30_chg</c> **一个非空都没有**（而 d20 是满的，证明机制本身没问题）。
+    /// 多留 4 个交易日的余量，让最早那几天的 d30 早就落定。
+    ///
+    /// 为什么敢开这么大：东财按月切片抓，35 个交易日跨 2~3 个自然月＝2~3 个请求，跟原来 5 天
     /// 逐日抓的 5 个请求是一个量级。新浪源没这个便利（一天一个页面），所以它仍用
     /// <see cref="LhbLookbackTradingDays"/>。
     /// </summary>
-    private const int LhbLaggingLookbackTradingDays = 31;
+    private const int LhbLaggingLookbackTradingDays = 35;
 
     /// <summary>
     /// 东财源的日常增量：整段抓一次，按天整天替换落库。
@@ -4829,25 +4865,44 @@ public partial class FetchOrchestrator
 
             _lhbRepository.EnsureSchema();
 
-            // ⓪ 先确认算偏离值要用的基准指数都在本地——**这一步必须挡在最前面**。
+            var start = _lhbProvider.EarliestAvailable;
+            var end = DateOnly.FromDateTime(DateTime.Today);
+
+            // ⓪ 先确认算偏离值要用的基准指数**覆盖得够早**——这一步必须挡在最前面。
             //
-            // 偏离值 ＝ 个股涨跌幅 − 对应指数涨跌幅，指数按板块选（深主板要深证综指 399106，
-            // 创业板要创业板综 399102，北交所要北证50）。这三条是 2026-09-09 才加进
-            // MarketIndexCatalog 的，老库里一行都没有。
+            // 偏离值 ＝ 个股涨跌幅 − 对应指数涨跌幅。缺了不会报错，只会让对应板块的 deviation
+            // 静静地全为 null——而这一步是 580 个请求、十几分钟、整表覆盖，发现时已经晚了。
             //
-            // 缺了不会报错，只会让对应板块的 deviation 静静地全为 null——而这一步是
-            // 580 个请求、十几分钟、整表覆盖，发现时已经晚了，还得从头再来一遍。
+            // ⚠ 判据是"最早一根够不够早"，**不是"有没有数据"**（2026-09-10 修）。
+            // 原来只判非空，结果 09-09 那晚增量给三条新指数各抓了 3 年（回看年数默认 3），
+            // 检查照样放行——真跑下去，2023-09 之前的深市主板偏离值会全是空的，而那是历史大头。
+            //
+            // 只硬卡上证综指和深证综指：两市主板占了龙虎榜历史的绝大多数，而且这两条客观上
+            // 就有全历史（深证综指腾讯能给到 2002-05 之前）。创业板综 2010 才有、北证50 2021
+            // 才有、科创50 2020 才有——它们晚是客观事实，不该拿来挡路，只在日志里报一句。
             var barRepoForCheck = new SqliteBarRepository(_paths.CurrentDb);
-            var missingIndexes = MarketIndexCatalog.All
-                .Select(i => i.Symbol)
-                .Where(s => barRepoForCheck.GetLatestPeriodStart(s, Granularity.Day) == null)
+            var startTime = start.ToDateTime(TimeOnly.MinValue);
+            var required = new[] { (MarketIndexCatalog.ShanghaiCompositeSymbol, "上证综指"), ("sz399106", "深证综指") };
+            var tooShallow = required
+                .Select(x => (x.Item1, x.Item2, Earliest: barRepoForCheck.GetEarliestPeriodStart(x.Item1, Granularity.Day)))
+                .Where(x => x.Earliest == null || x.Earliest > startTime)
                 .ToList();
-            if (missingIndexes.Count > 0)
+            if (tooShallow.Count > 0)
                 throw new InvalidOperationException(
-                    $"本地还没有这些指数的日K：{string.Join("、", missingIndexes)}。" +
-                    "它们是算龙虎榜偏离值的基准（深市主板用深证综指 399106、创业板用创业板综 399102、" +
-                    "北交所用北证50），缺了对应板块的对应值会全为空。" +
-                    "**先跑一次【指数日K】**再来跑这一项。");
+                    "这几条基准指数的本地历史不够早，跑下去对应板块的偏离值会大面积为空：" +
+                    string.Join("；", tooShallow.Select(x =>
+                        $"{x.Item2}({x.Item1}) 本地最早 {(x.Earliest == null ? "无数据" : x.Earliest.Value.ToString("yyyy-MM-dd"))}，" +
+                        $"需要覆盖到 {start:yyyy-MM-dd}")) +
+                    "。**先把【指数日K】的模式选成「首次整段回补」跑一次**（不看水位线，从开市首日抓起，" +
+                    "一两分钟），再来跑这一项。");
+
+            foreach (var (symbol, name) in new[] { ("sz399102", "创业板综"), ("sh000688", "科创50"), ("bj899050", "北证50") })
+            {
+                var e = barRepoForCheck.GetEarliestPeriodStart(symbol, Granularity.Day);
+                if (e == null || e > startTime)
+                    progress?.Report($"　提示：{name}({symbol}) 本地最早 {(e == null ? "无数据" : e.Value.ToString("yyyy-MM-dd"))}，" +
+                                     $"早于这一天的对应板块偏离值会留空（这几个板块本身也是后来才有的，多数属正常）。");
+            }
 
             var backup = _paths.BackupDbPath("Lhb", DateTime.Now);
             progress?.Report($"① 备份现有龙虎榜到库外文件：{backup}");
@@ -4855,8 +4910,6 @@ public partial class FetchOrchestrator
             progress?.Report($"   已备份 {backedUp} 行（这是独立 sqlite 文件，不在主库里；" +
                              "要比对新旧数据把它 ATTACH 回来即可）");
 
-            var start = _lhbProvider.EarliestAvailable;
-            var end = DateOnly.FromDateTime(DateTime.Today);
             progress?.Report($"② 用东财重抓 {start:yyyy-MM-dd} ~ {end:yyyy-MM-dd}（按月切片，约 {(end.Year - start.Year) * 12 + end.Month - start.Month + 1} 片）...");
 
             int wrote = await ranged.FetchRangeAsync(

@@ -2246,8 +2246,11 @@ public class MainViewModel : INotifyPropertyChanged
                     ParseAnnouncementKeywords(item), progress, ct, specificDay: SpecificDayOf(item));
 
             case FetchActionId.StepIndexBars:
+                // 「首次整段回补」＝不看水位线、从开市首日抓起。加了新指数之后必须跑一次，
+                // 否则它永远停在第一次被增量抓到的那几年（见 FetchIndexBarsAsync 里的注释）。
                 return _orchestrator.RunStepIndexBarsAsync(
-                    SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
+                    SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct,
+                    fullBackfill: item.EffectiveMode == FetchMode.FirstBackfill);
 
             case FetchActionId.StepStockDayBars:
                 // 「只抓某一天」＝原【补指定历史日】那一路（不看水位线、不补断档）

@@ -168,6 +168,28 @@ public class SqliteBarRepository : IBarRepository
         return DateTime.ParseExact((string)result, DateFormat, CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// **单个**代码本地最早的 period_start（2026-09-10 新增）。
+    ///
+    /// 跟下面那个"一次返回全部代码"的批量版分工明确：批量版是 GROUP BY 全表，2540 万行的库上
+    /// 要几十秒，只在"拉取区间数据"那种要遍历全市场的场合值得；这里查的是几条指数，走主键前缀
+    /// (code, granularity, period_start) 是毫秒级，拿批量版来查九条纯属浪费。
+    ///
+    /// 用途：【指数日K·首次整段回补】跑完之后报告"每条指数补到哪年了"。
+    /// 同样只加在具体实现上、不进 <see cref="Logic.Abstractions.IBarRepository"/> 接口。
+    /// </summary>
+    public DateTime? GetEarliestPeriodStart(string code, string granularity)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT MIN(period_start) FROM Bar WHERE code = $code AND granularity = $granularity;";
+        cmd.Parameters.AddWithValue("$code", code);
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        var result = cmd.ExecuteScalar();
+        if (result == null || result is DBNull) return null;
+        return DateTime.ParseExact((string)result, DateFormat, CultureInfo.InvariantCulture);
+    }
+
     /// <summary>每个代码本地最早的 period_start（一次查询返回全部代码，2026-07-29新增）——给"拉取指定
     /// 年份"（<see cref="Orchestration.FetchOrchestrator.RunFetchYearAsync"/>）决定每只标的在那一年里要
     /// 补哪一段：最早日已经在目标年之前=那年本地已有（增量抓取保证历史是连续的），直接跳过不发请求；
@@ -380,25 +402,49 @@ public class SqliteBarRepository : IBarRepository
     /// 股票序列里新旧复权基准混杂；而成交额/换手率是不受复权影响的原始事实，单独更新是安全的。
     /// 只更新 amount=0 的行（回填语义——已经有值的行不碰），抓回来仍是0的行直接跳过不发UPDATE。
     /// 返回实际更新的行数。</summary>
-    public int UpdateDayAmountTurnover(IEnumerable<Bar> bars)
+    public int UpdateDayAmountTurnover(IEnumerable<Bar> bars) =>
+        UpdateVolumeAmountTurnover(bars, Granularity.Day, onlyWhenAmountZero: true);
+
+    /// <summary>
+    /// 只更新 <c>volume</c>/<c>amount</c>/<c>turnover</c> 三列，**其余列一律不动**——这是
+    /// <see cref="UpdateDayAmountTurnover"/> 的通用版（2026-09-09 扩：任意口径 + 可选择是否只填空）。
+    ///
+    /// 为什么单独更新这三列是安全的、而价格不行：这三列**不受复权影响**（实测腾讯 qfq 与不复权
+    /// 640 天 0 差异），任何时候重抓都是同一个值；而历史行的 OHLC 是当年抓取时的复权基准，
+    /// 重抓可能因其间除权而整体平移，覆盖会造成同一序列里新旧基准混杂。
+    ///
+    /// 两个用法：
+    /// · <paramref name="onlyWhenAmountZero"/>=true —— 回填老行（2026-07-10 换接口前入库的日线
+    ///   amount/turnover 全是 0）。已经有值的行不碰；抓回来仍是 0 的（新浪不给成交额）直接跳过。
+    /// · false —— 修【全库数据体检】V3 报出的"多口径量额对不上"：以数据源当前值为准覆盖，
+    ///   连 volume 一起（2026-09-01 那批盘中行差的就是 volume，23 手 vs 20953 手）。
+    /// </summary>
+    /// <returns>实际更新的行数。</returns>
+    public int UpdateVolumeAmountTurnover(
+        IEnumerable<Bar> bars, string granularity, bool onlyWhenAmountZero = false)
     {
         using var conn = Open();
         using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = """
-            UPDATE Bar SET amount = $amount, turnover = $turnover
-            WHERE code = $code AND granularity = 'day' AND period_start = $period_start AND amount = 0;
+        cmd.CommandText = $"""
+            UPDATE Bar SET volume = $volume, amount = $amount, turnover = $turnover
+            WHERE code = $code AND granularity = $granularity AND period_start = $period_start
+            {(onlyWhenAmountZero ? "AND amount = 0" : "")};
             """;
+        var pVolume = cmd.CreateParameter(); pVolume.ParameterName = "$volume"; cmd.Parameters.Add(pVolume);
         var pAmount = cmd.CreateParameter(); pAmount.ParameterName = "$amount"; cmd.Parameters.Add(pAmount);
         var pTurnover = cmd.CreateParameter(); pTurnover.ParameterName = "$turnover"; cmd.Parameters.Add(pTurnover);
         var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
+        var pGran = cmd.CreateParameter(); pGran.ParameterName = "$granularity"; cmd.Parameters.Add(pGran);
         var pStart = cmd.CreateParameter(); pStart.ParameterName = "$period_start"; cmd.Parameters.Add(pStart);
+        pGran.Value = granularity;
 
         int updated = 0;
         foreach (var bar in bars)
         {
-            if (bar.Amount == 0) continue; // 数据源没给成交额（比如新浪），写0没意义，留给下次回填
+            if (onlyWhenAmountZero && bar.Amount == 0) continue;
+            pVolume.Value = bar.Volume;
             pAmount.Value = bar.Amount;
             pTurnover.Value = bar.Turnover;
             pCode.Value = bar.Code;

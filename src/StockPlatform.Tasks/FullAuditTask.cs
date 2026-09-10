@@ -48,6 +48,12 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
     private const string ScopeSep = "|";
 
     /// <summary>
+    /// 值体检那一批的 scope。它不是"类型×口径"的面——那几条判据是**全表一次扫出来的**
+    /// （按口径分四次扫是四倍的钱），所以一批横跨四个日线口径，落账时按"值类记录整体替换"。
+    /// </summary>
+    private const string ValueScope = "value" + ScopeSep + "all";
+
+    /// <summary>
     /// 体检要扫的"标的类型 × 口径"矩阵里**能联网补**的那几个面。
     ///
     /// 为什么必须扫这么多面：2026-09-02 把【拉取全部】拆成独立任务之后，后复权、不复权、ETF、
@@ -138,6 +144,11 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
         yield return await Task.Run(() => Notes(CoverageShape(CodesOf, cutoff, ct)), ct);
         yield return await Task.Run(() => Notes(DailyTables(cutoff, thorough, ct)), ct);
 
+        // ── 值体检：六条"行在但值错"的判据（doc/bar-value-audit-design.md §3）──
+        // 放在最后：它是全表扫描（单条判据实测 878 秒），前面那些走索引 join 的先跑完，
+        // 这样中途停止至少留下了空洞那部分的结论。
+        yield return await Task.Run(() => ValueAudit(cutoff, ct), ct);
+
         int delisted = CodesOf(SqliteStockMetaUpsert.TypeDelisted).Count;
         if (delisted > 0)
             _summary.Add($"　退市股 {delisted} 只：不体检（数据源不再更新，报了也补不到；"
@@ -150,7 +161,9 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             _summary.Add(f.Note!);
 
         var scope = batch.FirstOrDefault(f => f.Scope != null)?.Scope;
-        if (scope != null)
+        if (scope == ValueScope)
+            CommitValueFindings(batch.Where(f => f.Kind != AuditFindingKind.Note).ToList());
+        else if (scope != null)
             CommitScope(scope, batch.Where(f => f.Kind != AuditFindingKind.Note).ToList());
 
         return Task.CompletedTask;
@@ -192,12 +205,18 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             : new HashSet<string>(StringComparer.Ordinal);
 
         var manifest = _manifestStore.Load();
-        var triesByKey = new Dictionary<(string, string), int>();
+        var triesByKey = new Dictionary<(string, string, string), int>();
         foreach (var m in manifest.MissingBars)
-            triesByKey[(m.Code, NormalizeGran(m.Granularity))] = m.Tries;
+            triesByKey[(m.Code, NormalizeGran(m.Granularity), m.EffectiveReason)] = m.Tries;
 
+        // ⚠ 只替换本面的**缺行**记录（Reason=gap）。值类记录（盘中固化/NULL/OHLC/不一致）归
+        //   CommitValueFindings 管——不加 `!m.IsValueIssue` 这一条，扫完"个股·不复权"这个面
+        //   就会把同一只票同一口径的值类记录连带删掉，而且删得很安静（2026-09-09 被
+        //   "值类记录的Tries按Reason分别继承"那个测试抓出来）。
         var kept = manifest.MissingBars
-            .Where(m => !(codes.Contains(m.Code) && NormalizeGran(m.Granularity) == gran))
+            .Where(m => !(codes.Contains(m.Code)
+                          && NormalizeGran(m.Granularity) == gran
+                          && !m.IsValueIssue))
             .ToList();
 
         var fresh = gaps
@@ -206,7 +225,8 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             {
                 Code = f.Code!, Granularity = gran,
                 From = f.From, To = f.To, Days = f.Days,
-                Tries = triesByKey.GetValueOrDefault((f.Code!, gran)),
+                Reason = AuditFindingKind.Gap,
+                Tries = triesByKey.GetValueOrDefault((f.Code!, gran, AuditFindingKind.Gap)),
             })
             .ToList();
 
@@ -250,7 +270,7 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
                 var settled = gapDays.Where(d => d.Date <= cutoff).ToList();
                 if (settled.Count == 0) continue;
                 // 空洞不连续时取包络：一次请求覆盖整段，比逐日请求划算得多
-                found.Add(new AuditFinding(AuditFindingKind.Gap, scope, code,
+                found.Add(new AuditFinding(AuditFindingKind.Gap, scope, code, gran,
                     settled[0], settled[^1], settled.Count));
                 withGaps++;
                 days += settled.Count;
@@ -524,6 +544,151 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             .ToList();
         _manifestStore.Save(manifest);
         return manifest.MissingNetInflowDays.Count;
+    }
+
+
+    // ─────────────────── 值体检（六条判据）───────────────────
+
+    /// <summary>
+    /// 值体检：抓"**行在但值错**"——V1 盘中固化 / V2 关键列 NULL / V3 多口径量额不一致 /
+    /// V4 OHLC 不自洽 / V5 day_adj 与 day_raw 脱节 / V6 量额比率异常。
+    /// 判据本体在 <see cref="SqliteBarValueAuditor"/>（纯查询、有 24 个单测）。
+    ///
+    /// V1/V2/V3/V4 进待补名单交给【重新拉取失败】纠正；V5/V6 **只报数**：
+    /// V5 是本地重算的事（跑【重算回测序列】），V6 那种数据源自己给错的重抓也拿回同样的值。
+    /// </summary>
+    private List<AuditFinding> ValueAudit(DateTime cutoff, CancellationToken ct)
+    {
+        var found = new List<AuditFinding>();
+        var v = new SqliteBarValueAuditor(_dbPath);
+
+        Report("值体检 单行判据：盘中固化 / 关键列 NULL / OHLC 自洽 / 量额比率"
+             + "（全表扫描，几十分钟——它比前面那些走索引的慢十几倍）…");
+        var segs = v.RowIssueSegments(cutoff);
+        ct.ThrowIfCancellationRequested();
+
+        Report("值体检 多口径一致性：同一天的量额换手在几套口径之间比对…");
+        var cross = v.CrossGranularitySegments(cutoff);
+        ct.ThrowIfCancellationRequested();
+
+        Report("值体检 回测序列：day_adj 跟它的输入 day_raw 是否对齐…");
+        var drift = v.AdjVsRawDrift(cutoff);
+
+        var all = segs.Concat(cross).ToList();
+
+        // ── 进待补名单：四类值问题，但**排除 day_adj** ──
+        // day_adj 是本地重算的产物、抓不来。放进名单的后果是它永远被跳过、Tries 一动不动，
+        // 每轮体检重报一次（2026-09-09 生产实测：1555 段盘中固化 + 4301 段量额不一致全是它）。
+        // 它的处置跟 V5 一样：只报数，去跑【重算回测序列】。
+        foreach (var g in all.Where(x => x.Kind != AuditFindingKind.Ratio
+                                      && x.Granularity != Granularity.DayAdj))
+            found.Add(new AuditFinding(g.Kind, ValueScope, g.Code, g.Granularity, g.From, g.To, g.Days));
+
+        // ── 汇总行 ──
+        void Line(string kind, string label, string howToFix)
+        {
+            var hit = all.Where(x => x.Kind == kind).ToList();
+            if (hit.Count == 0) { found.Add(Note($"　值体检 {label}：没有")); return; }
+
+            var byGran = hit.GroupBy(x => x.Granularity)
+                .OrderBy(g => g.Key, StringComparer.Ordinal)
+                .Select(g => $"{g.Key} {g.Sum(x => x.Days)} 行/{g.Count()} 段");
+            var sample = hit.OrderByDescending(x => x.Days).Take(3)
+                .Select(x => $"{x.Code} {x.From:MM-dd}起{x.Days}行");
+            var adj = hit.Where(x => x.Granularity == Granularity.DayAdj).ToList();
+
+            found.Add(Note($"　值体检 {label}：{hit.Sum(x => x.Days)} 行 / {hit.Count} 段"
+                         + $"（{string.Join("、", byGran)}；最多的 {string.Join("、", sample)}）——{howToFix}"
+                         + (adj.Count > 0
+                             ? $"\n　　其中 day_adj 的 {adj.Count} 段**不进名单**（本地重算的，抓不来）：跑【重算回测序列】"
+                             : "")));
+        }
+
+        Line(AuditFindingKind.Intraday, "盘中固化",
+            "抓取时刻早于当天 16:00，OHLC 是瞬时价、量额是半天累计值。已进待补名单，"
+            + "跑【重新拉取失败】重抓覆盖（未确认的行会被新数据覆盖）");
+        Line(AuditFindingKind.NullValue, "关键列 NULL",
+            "多半是批量导入绕过了写入路径（写入路径向来写 0 不写 NULL）。已进待补名单");
+        Line(AuditFindingKind.Ohlc, "OHLC 不自洽",
+            "high 装不下 open/close，或 low 比它们还高（\"价格≤0\"只对不复权判，"
+            + "前复权减法式的负价是已知失真、不报）。已进待补名单");
+        Line(AuditFindingKind.Inconsistent, "多口径量额对不上",
+            "同源盘后本该逐值相同（实测 112,473 天 0 差异）。已进待补名单，"
+            + "重抓时**只覆盖量额换手三列**、不动 OHLC");
+
+        var ratio = all.Where(x => x.Kind == AuditFindingKind.Ratio).ToList();
+        found.Add(Note(ratio.Count == 0
+            ? "　值体检 量额比率：没有"
+            : $"　值体检 量额比率：{ratio.Sum(x => x.Days)} 行 / {ratio.Count} 段的 amount/(volume×close)"
+              + "不在 ≈100（手）或 ≈1（科创板按股）附近"
+              + $"（最多的 {string.Join("、", ratio.OrderByDescending(x => x.Days).Take(3).Select(x => $"{x.Code} {x.Days}行"))}）"
+              + "——**不进待补名单**：数据源自己给错的重抓也拿回同样的值（603999 那种），"
+              + "要修得先查成因。只对个股判（指数/板块的 close 是点位、没这个倍数关系）"));
+
+        found.Add(Note(drift.RawOnlyRows == 0 && drift.AdjOnlyRows == 0 && drift.ValueMismatchRows == 0
+            ? "　值体检 回测序列：day_adj 跟 day_raw 逐行对齐"
+            : $"　值体检 回测序列：不复权有而 day_adj 没有 {drift.RawOnlyRows} 行、"
+              + $"反向 {drift.AdjOnlyRows} 行、两边都有但量额对不上 {drift.ValueMismatchRows} 行"
+              + "——**不进待补名单**（本地算的）：跑一次【重算回测序列】"));
+
+        return found;
+    }
+
+    /// <summary>
+    /// 值体检的汇总行。**必须带上 <see cref="ValueScope"/>**：批里一条带 scope 的都没有的话
+    /// <see cref="SaveBatchAsync"/> 就不会去落账，于是"这些值问题已经修好了"永远写不回名单
+    /// （值判据全部零发现时，批里恰好只剩这些汇总行）。跟 <see cref="ScanScope"/> 末尾那条汇总行
+    /// 是同一个道理。
+    /// </summary>
+    private static AuditFinding Note(string text) =>
+        new(AuditFindingKind.Note, ValueScope, Note: text);
+
+    /// <summary>
+    /// 值体检的落账：**值类记录整体替换**。
+    ///
+    /// 为什么能整体替换（不像空洞那样按面）：值体检一批就覆盖了全部四个日线口径和全部判据，
+    /// 所以"本轮没报出来"＝"这条已经不成立了"，可以放心删。缺行那些记录（<c>Reason=gap</c>）
+    /// 一行都不碰——它们是另一套判据的结论。
+    ///
+    /// <c>Tries</c> 的 key 带上 Reason：同一只票同一口径可能同时有"缺行"和"盘中固化"两条，
+    /// 各自计数。
+    /// </summary>
+    private void CommitValueFindings(List<AuditFinding> findings)
+    {
+        var manifest = _manifestStore.Load();
+
+        var tries = new Dictionary<(string, string, string), int>();
+        foreach (var m in manifest.MissingBars)
+            tries[(m.Code, NormalizeGran(m.Granularity), m.EffectiveReason)] = m.Tries;
+
+        var kept = manifest.MissingBars.Where(m => !m.IsValueIssue).ToList();
+
+        var fresh = findings
+            .Where(f => f.Code != null)
+            .GroupBy(f => (f.Code!, f.Granularity ?? Granularity.Day, f.Kind))
+            .Select(g => new MissingBarRange
+            {
+                Code = g.Key.Item1,
+                Granularity = g.Key.Item2,
+                From = g.Min(x => x.From),
+                To = g.Max(x => x.To),
+                // finding 现在已经是**段级**（ValueAudit 用 RowIssueSegments 聚合过），
+                // Days 是那一段里命中判据的行数——别再用 g.Count()，那会把几千行记成 1
+                Days = g.Sum(x => x.Days),
+                Reason = g.Key.Item3,
+                Tries = tries.GetValueOrDefault(g.Key),
+            })
+            .ToList();
+
+        manifest.MissingBars = kept.Concat(fresh)
+            .OrderBy(r => r.Code, StringComparer.Ordinal)
+            .ThenBy(r => r.Granularity, StringComparer.Ordinal)
+            .ThenBy(r => r.EffectiveReason, StringComparer.Ordinal)
+            .ToList();
+        _manifestStore.Save(manifest);
+
+        _totalRanges += fresh.Count;
+        _totalDays += fresh.Sum(r => r.Days);
     }
 
     /// <summary>只报数那些面的输出。空列表也要给一条，保证批非空——见 <see cref="ScanScope"/> 的注释。</summary>
