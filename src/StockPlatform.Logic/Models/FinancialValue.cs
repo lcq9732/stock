@@ -1,4 +1,4 @@
-namespace StockPlatform.Logic.Models;
+﻿namespace StockPlatform.Logic.Models;
 
 /// <summary>
 /// FinancialReport 表里 <c>metric_key</c> 的规范键。
@@ -41,8 +41,12 @@ public static class FinancialKeys
     ///       的特征科目，用来把"金融机构"细分成银行/券商/保险三类。
     ///       ⚠ 金融机构需要按此版本重抓一次才认得出类型；【券商保险监管指标】按钮会自动补抓
     ///         这一百来只，不必等全市场。
+    ///   5 = 2026-09-10 **换源到东财**（科目集没变，仍是 60 个）——版本号在这里的作用不是
+    ///       "科目变多了"，而是**逼全库重抓一遍**：新旧两源的口径和精度不同，
+    ///       同一张表里前后期混着两个源的值，同比/环比会出现无从分辨的断层。
+    ///       见 doc/financial-source-eastmoney-design.md。
     /// </summary>
-    public const int Version = 4;
+    public const int Version = 5;
 
     // ══════════ 利润表 ══════════
 

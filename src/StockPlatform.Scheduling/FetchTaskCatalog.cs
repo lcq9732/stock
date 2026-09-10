@@ -1003,7 +1003,7 @@ public static class FetchTaskCatalog
             "逐只抓股东户数 + 十大股东 + 十大流通股东的全部历史。"
             + "十大流通股东里的「香港中央结算」就是北向资金的名义持有人。"),
 
-        new(FetchActionId.FetchFinancials, "拉取财务报表", "新浪(报表接口·配额最严)", QuotaGroup.Sina,
+        new(FetchActionId.FetchFinancials, "拉取财务报表", "东财 F10（保险走新浪）", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(90), "季度·跨天分轮",
             "三张表 52 个科目的全部报告期。⚠ 这个接口配额很严，已单独降速到约 10 请求/分钟、"
             + "每轮上限 300 只（约 90 分钟），全市场要跨几天补完。"
@@ -1011,11 +1011,13 @@ public static class FetchTaskCatalog
             + "跨几天慢慢啃完。设成「每月某天」只会跑一轮 300 只，全市场根本补不完。\n"
             + "「要不要抓」按每只票的**实际披露日**判断（来自【拉取财报预约日】），不是法定截止日——"
             + "所以那一项要是好几天没跑成，这边会以为没人披露而少取。\n"
-            + "2026-09-10 起可切东财（配置 FinancialSource: \"eastmoney\"，默认仍是新浪）：固定英文列名、"
-            + "按 ORG_TYPE 选 G/B/S 表，datacenter 的配额比新浪宽得多。⚠ **切过去之后要把下面的 QuotaGroup 从 Sina "
-            + "改成 Mixed、Sources 改成 [Sina, EmDataCenter]**——保险那 5 家仍走新浪，所以两个源都占；"
-            + "不改的话调度侧会按错的源算准入，白占新浪配额、又挡不住跟东财任务并行。",
+            + "**2026-09-10 换成东财 F10**（固定英文列名、按 ORG_TYPE 选 G/B/S 三套表），"
+            + "datacenter 的配额比新浪宽得多，所以上面那句「10 请求/分钟」只在退回新浪时成立。\n"
+            + "⚠ **保险那 5 家仍走新浪**（东财整组不填赔付支出/退保金/保单红利/分保费用），"
+            + "所以两个源都占——见 FinancialSourceRouter。要退回新浪：改 fetcher-settings.json 的 FinancialSource，"
+            + "但要知道新浪那条路有两个老毛病：幽灵 0（银行的应付账款/存货被写成 0）、营业支出漏掉信用减值。",
             SupportsPartialRun: true,
+            Sources: [DataSourceId.Sina, DataSourceId.EmDataCenter],
             SoftDependsOn: [FetchActionId.FetchEarningsSchedule]),
 
         new(FetchActionId.FetchDividend, "拉取分红送配", "新浪", QuotaGroup.Sina,

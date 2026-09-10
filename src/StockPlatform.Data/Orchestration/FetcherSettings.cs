@@ -171,18 +171,25 @@ public static class FetcherSettings
         (ReadString(settingsPath, "IndustrySource") ?? "eastmoney").Trim().ToLowerInvariant();
 
     /// <summary>
-    /// 财务报表走哪个源，规范化成 <c>"sina"</c>／<c>"eastmoney"</c>，没配就是 <c>"sina"</c>。
+    /// 财务报表走哪个源，规范化成 <c>"sina"</c>／<c>"eastmoney"</c>，没配就是 <c>"eastmoney"</c>
+    /// （2026-09-10 起的默认）。
     ///
-    /// ⚠ **默认还是新浪**：东财那条路的字段映射已逐值验过（000001/000338 逐格零差异），
-    /// 但**全量比对（200 只 × 全部报告期 × 60 个科目）还没做**，做完才改默认，见
-    /// doc/financial-source-eastmoney-design.md §5.2。想先试就在设置文件里打开那一行。
+    /// 换过去的依据是 193 只票 508,681 格的逐格比对，以及一条更根本的判断：
+    /// **东财有持牌券商和行情终端，客户拿它的 F10 下单，错了有人投诉**；新浪财经是资讯门户，
+    /// 没有交易业务，F10 错十年也没人报。这解释了实测到的形态——东财近强远弱
+    /// （2020 年后缺失 0.2%、2005 年前 4~6%），正是"有人用的部分才有投入"。
+    /// 而今天查清的每一个个案，错的都是新浪：117,860 格幽灵 0（银行的应付账款/存货写成 0）、
+    /// 数字截到万位、银行营业支出漏掉信用减值损失（462 亿 vs 东财 1166 亿）。
+    ///
+    /// 代价是老年代数据变浅（2005 年前东财缺 4~6%），已接受：那时上市公司才几百家、
+    /// 会计准则也完全不同，对回测价值有限。
     ///
     /// 换过去之后：保险公司**仍走新浪**（东财整组不填赔付支出/退保金/保单红利/分保费用），
     /// 由 <c>FinancialSourceRouter</c> 按 ORG_TYPE 分流；银行/券商的净额科目从 B/S 专表取，
     /// 因为同一个 G 表列对银行是毛额、对券商是净额。
     /// </summary>
     public static string ReadFinancialSource(string settingsPath) =>
-        (ReadString(settingsPath, "FinancialSource") ?? "sina").Trim().ToLowerInvariant();
+        (ReadString(settingsPath, "FinancialSource") ?? "eastmoney").Trim().ToLowerInvariant();
 
     /// <summary>读一个 true/false 设置；读不到就当 false。</summary>
     public static bool ReadBool(string settingsPath, string key)
@@ -385,8 +392,9 @@ public static class FetcherSettings
           //  sina      ＝ 新浪 vDOWN_ 报表下载（中文行名匹配）。【默认】
           //  eastmoney ＝ 东财 F10（RPT_F10_FINANCE_*，固定英文列名，按 ORG_TYPE 选 G/B/S 表）。
           //
-          //  东财那条路的字段映射是**数值证明**的（拿库里 8 只样本的科目值，去东财所有数值列里
-          //  找相等的那一列），000001/000338 逐格零差异；但**全量比对还没做**，所以默认仍是新浪。
+          //  2026-09-10 切成东财。依据：193 只票 508,681 格逐格比对（2020 年后缺失仅 0.2%），
+          //  加上"东财有持牌券商和终端客户、错了有人投诉，新浪是资讯门户没人较真"这条判断。
+          //  查清的个案错的都是新浪：11.8 万格幽灵 0、数字截到万位、银行营业支出漏掉信用减值。
           //  ⚠ 无论切到哪边，保险那 5 家（平安/太保/国寿/新华/人保）都走新浪——东财**整组不填**
           //    保险的支出科目（赔付支出/退保金/保单红利/分保费用三处全 null），而赔付率指标要用它。
           //  ⚠ 切过去之后要把 FinancialKeys.Version +1 才会全量重抓，否则老数据不会被替换。
