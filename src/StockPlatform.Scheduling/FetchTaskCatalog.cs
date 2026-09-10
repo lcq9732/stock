@@ -66,11 +66,21 @@ public enum FetchActionId
     // ───── 本地维护（2026-09-07）─────
     StepFillProbeFloor,
 
-    /// <summary>龙虎榜换源：整段用东财重抓、覆盖新浪那份历史（2026-09-09）。一次性。</summary>
+    /// <summary>
+    /// 龙虎榜换源：整段用东财重抓、覆盖新浪那份历史。**已退役**（2026-09-10 跑过一次就完成了使命）。
+    ///
+    /// ⚠ 枚举值本身**不能删**：用户的 fetch-plan.json 里存的是动作名字符串，
+    /// <c>JsonStringEnumConverter</c> 读到认不出的名字会抛异常，而 <c>FetchPlanStore.Load</c>
+    /// 的 catch 会把**整份计划重建成默认**——用户排过的顺序和时刻全没了。
+    /// 留着这个值，那一行才能被 <see cref="RetiredInto"/> 干净地清掉。
+    /// </summary>
     StepLhbMigrate,
 
     // ───── 新式任务（2026-09-08 起，实现在 StockPlatform.Tasks，见 IFetchTask）─────
     StepTradingCalendar,
+
+    /// <summary>把 Bar.volume 里按"股"存的历史行改成"手"（2026-09-10）。纯本地、幂等。</summary>
+    StepFixVolumeUnit,
 }
 
 /// <summary>
@@ -436,7 +446,7 @@ public static class FetchTaskCatalog
             SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay,
             Sources: [DataSourceId.Cninfo]),
 
-        new(FetchActionId.StepIndexBars, "指数日K", "腾讯（回退新浪）", QuotaGroup.Mixed,
+        new(FetchActionId.StepIndexBars, "指数日K", "腾讯", QuotaGroup.Mixed,
             TimeSpan.FromSeconds(30), "每工作日",
             "大盘指数日K（十几个标的）。\n"
             + "⚠ 它还是全库的**交易日锚**：\"最近一个已收盘交易日是哪天\"就是看上证指数最新一根日线"
@@ -455,7 +465,7 @@ public static class FetchTaskCatalog
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
-        new(FetchActionId.StepStockDayBars, "个股日K·前复权", "腾讯（回退新浪）", QuotaGroup.Mixed,
+        new(FetchActionId.StepStockDayBars, "个股日K·前复权", "腾讯", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(30), "每工作日",
             "日常选股看盘用的主力价格序列，每只从自己上次抓到那天续抓（所以能自动补断档）。\n"
             + "两件顺带做的事也在这一项里：① 写完日线立刻重算该股**周线/月线**（本地计算，分析程序的"
@@ -469,7 +479,7 @@ public static class FetchTaskCatalog
             SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay,
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
-        new(FetchActionId.StepStockHfqBars, "个股日K·后复权", "腾讯（回退新浪）", QuotaGroup.Mixed,
+        new(FetchActionId.StepStockHfqBars, "个股日K·后复权", "腾讯", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(30), "每工作日",
             "数据源口径的后复权日K，水位线独立于前复权。\n"
             + "⚠ 它是\"送转乘、分红加\"的混合式、会压低收益率（实测工商银行 ×0.625），**回测已经改用本地算的"
@@ -478,7 +488,7 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.StepRoster],
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
-        new(FetchActionId.StepStockRawBars, "个股日K·不复权", "腾讯（回退新浪）", QuotaGroup.Mixed,
+        new(FetchActionId.StepStockRawBars, "个股日K·不复权", "腾讯", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(30), "每工作日",
             "原始成交价——全库唯一**不随分红变化**的序列，也是【重算回测序列】的输入。\n"
             + "模式：「增量」＝日常那一根；「首次整段回补」＝把每只补到跟前复权一样长"
@@ -566,24 +576,41 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.StepTradingCalendar],
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
 
-        new(FetchActionId.StepLhbMigrate, "龙虎榜·换源重抓（一次性）", "东财", QuotaGroup.Mixed,
-            TimeSpan.FromMinutes(20), "一次性",
-            "把 2004-06-25 至今的龙虎榜整段用**东财**重抓一遍，覆盖掉新浪那份历史。\n"
-            + "**为什么必须整段重抓**：两个源的上榜原因文本不一样，而它是主键的一部分。不重抓的话，"
-            + "库里会永远躺着一段\"原因是粗类、且原因跟对应值错配\"的老数据，跟新数据没法一起用——"
-            + "换源图的就是口径统一。\n"
-            + "**跑之前会自动备份**：整张 Lhb 表导出成 data/local/backup/Lhb-*.sqlite，"
-            + "**独立文件、不在主库里**（跟主库同生共死的副本不叫备份，只是把 23GB 的库撑得更大）。"
-            + "备份失败就直接中止，不往下走。要比对新旧数据，把那个文件 ATTACH 回来即可。\n"
-            + "约 267 个月片、580 个请求、十几分钟。按天替换是幂等的，中断了重跑就行。\n"
-            + "⚠ **必须先把【指数日K】的模式选成「首次整段回补」跑一次**：偏离值要拿深证综指 399106 / "
-            + "创业板综 399102 / 北证50 当基准，这三条 2026-09-09 才加进指数清单，而水位线增量只往后走"
-            + "——它们第一次被日更抓到的只有 3 年（2023-09 起），2023 年之前的深市主板偏离值会全为空。"
-            + "缺了不会报错，所以这一项开跑前会查一遍**基准指数最早一根够不够早**（不是查有没有），"
-            + "不够早直接中止。\n"
-            + "⚠ 跑的过程中 Lhb 表是逐天被替换的，这段时间别同时跑依赖龙虎榜的分析。",
+        new(FetchActionId.StepLhbMigrate, "龙虎榜·换源重抓", "东财", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(20), "已退役",
+            "⚠ **已退役（2026-09-10）**——一次性迁移工具，跑过一次就完成了使命，实现已删除。\n"
+            + "它当时做的事：把 2004-06-25 至今的龙虎榜整段用东财重抓、覆盖掉新浪那份历史。"
+            + "实跑 23 分钟、268 个月片、267,986 行，跑完 source 100% 是 em、"
+            + "跟【拉取龙虎榜席位】的全量 join 覆盖率 100.00%（179,944/179,945）。"
+            + "换源前的新浪历史备份在 data/local/backup/Lhb-20260910-091818.sqlite（库外独立文件）。\n"
+            + "**为什么不留着**：它是\"重抓 580 个请求 + 顺带重算 2 列派生\"。真需要重算 deviation 时"
+            + "（比如累计偏离值的规则哪天搞明白了），输入全在库里，该写本地重算、1 分钟跑完，"
+            + "而不是把那 580 个请求重发一遍拿回一份一模一样的数据。可复用的零件都留着："
+            + "EastMoneyLhbProvider.FetchRangeAsync（按月切片）、ILhbRepository.ReplaceDays（整天替换）、"
+            + "LhbDeviationDeriver（派生）、ExportTo（库外备份）——真要重来，六十行编排随时能再写。\n"
+            + "换源的完整始末见 doc/data-dictionary.md 的 Lhb 小节。",
             FetchActionParams.None,
+            Retired: true,
             SupportedModes: FetchMode.Incremental),
+
+        new(FetchActionId.StepFixVolumeUnit, "统一成交量单位", "本地查库·不联网", QuotaGroup.Local,
+            TimeSpan.FromMinutes(5), "一次性",
+            "把 Bar.volume 里按\"股\"存进去的历史行改成\"手\"。**一个请求都不发**，纯 UPDATE。\n"
+            + "**修的是什么**：三个数据源口径不一样——腾讯主板给手、**科创板给股**；新浪一律给股；"
+            + "东财都给手。而两个 fetcher 原来把源给的数字原样入库，于是这一列里并存两种单位："
+            + "2026-09-08 那天全市场日线，主板 3203 只、创业板 1404 只、北交所 342 只是手，"
+            + "**科创板 688/689 的 613 只是股**，差 100 倍。解析层已经归一化（BarVolumeUnit），"
+            + "这一项负责已经躺在库里的历史（约 300 万行）。\n"
+            + "**为什么一直没被发现**：单票内部的分析用的都是比值（放量比、量能排序、K线图），"
+            + "单位约掉了怎么看都正常。只有跨股票累加才露馅——板块指数把成分股成交量加总，"
+            + "含科创板的板块常年虚高 100 倍，而这不会报任何错。\n"
+            + "**判据是逐行的量额比**（amount/(volume×close) 落在 0.8~1.25 才算\"股\"），不是按代码前缀"
+            + "一刀切——要修的不止科创板：新浪回退（已于 2026-09-10 拆除）每触发一次就往那只票历史里"
+            + "掺一段股口径的行，哪只票哪一段全凭当时的网络抖动。\n"
+            + "**幂等**：改完的行比值变成 ≈100，再跑不会被选中。中断了直接重跑，不用记断点。\n"
+            + "指数、板块合成、ETF **不动**：它们的\"成交量\"是汇总值或按份计，量额比没有物理意义。\n"
+            + "⚠ 跑完**要再跑一次【板块指数合成】**——它存的成交量是按旧单位加总出来的。",
+            FetchActionParams.None),
 
         new(FetchActionId.StepFillProbeFloor, "回填\"无更早数据\"水位", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(1), "一次性",
@@ -792,7 +819,7 @@ public static class FetchTaskCatalog
             //    静默看门狗，排队本身也早改成了"让路/抢占"，不会再这样堆着等——见 QuietWatchdog。）
             //
             //    这三个是按它真正会调的东西数出来的：
-            //      · Tencent  ── K线主源（TencentThenSinaBarFetcher）
+            //      · Tencent  ── K线主源（纯腾讯；新浪回退 2026-09-10 拆除，见 App.xaml.cs）
             //      · Sina     ── K线回退、流通市值、资金净流入、指数成分、股东、分红，全在新浪
             //      · CsIndex  ── 指数权重（中证 OSS）
             //    收窄之后，用 push2 / push2his / datacenter / quote 的那些项就能跟它并行跑。
@@ -803,7 +830,7 @@ public static class FetchTaskCatalog
             //    默认也不是它；真要长期用东财当K线源，这里得把 EmPush2His 加回来。
             Sources: [DataSourceId.Tencent, DataSourceId.Sina, DataSourceId.CsIndex]),
 
-        new(FetchActionId.RepairQfq, "重取前复权", "腾讯（回退新浪）", QuotaGroup.Mixed,
+        new(FetchActionId.RepairQfq, "重取前复权", "腾讯", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(30), "空闲时",
             "把**除权后基准变了**的股票，前复权历史整段按新基准重取。\n"
             + "数据源的前复权是「原价 − 之后累计分红送配」，某只票一分红，它全部历史的前复权值就都变了；"
@@ -897,7 +924,7 @@ public static class FetchTaskCatalog
             SupportsPartialRun: true,
             Sources: [DataSourceId.EmPush2His]),
 
-        new(FetchActionId.FetchRawBars, "补不复权历史", "腾讯（回退新浪）", QuotaGroup.Mixed,
+        new(FetchActionId.FetchRawBars, "补不复权历史", "腾讯", QuotaGroup.Mixed,
             TimeSpan.FromHours(2), "一次性（补完就不用再跑了）",
             "抓**不复权**日线（原始成交价）。\n"
             + "它是全库唯一**不随分红变化**的价格序列——抓一次永远有效，不会像前复权那样一除权就得整段重取。\n"
@@ -922,7 +949,11 @@ public static class FetchTaskCatalog
             + "不分配给原股东、不产生除权，而数据源会把它当普通转增列出来）。\n"
             + "⚠ 前置：不复权历史。纯本地计算，不发任何网络请求。",
             // 前置指向拆开后的那一项（老的【补不复权历史】已退役）
-            DependsOn: FetchActionId.StepStockRawBars, SupportsPartialRun: true),
+            DependsOn: FetchActionId.StepStockRawBars, SupportsPartialRun: true,
+            // 「首次整段回补」在这一项里的意思是**全量重算**：忽略五条判据，有不复权日线的票
+            // 全部整段重来（2026-09-10 加）。改过复权算法之后需要它——原来只能靠手工删掉
+            // day_adj 逼判据重新认出来，而那一步没有任何地方记着该怎么做。
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
 
         new(FetchActionId.FetchBoards, "拉取板块", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(5), "每工作日～每周",
@@ -933,10 +964,14 @@ public static class FetchTaskCatalog
             Retired: true,
             Sources: [DataSourceId.EmPush2]),
 
-        new(FetchActionId.FetchIndustry, "拉取行业分类", "交易所 + 新浪", QuotaGroup.Mixed,
+        new(FetchActionId.FetchIndustry, "拉取行业分类", "东财 + 交易所", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(2), "季度",
-            "证监会两级行业分类。行业极少变动，跟财报同频跑一次即可，整体覆盖写入、反复跑无副作用。",
-            Sources: [DataSourceId.Exchange, DataSourceId.Sina]),
+            "证监会两级行业分类。行业极少变动，跟财报同频跑一次即可，**整表重写**、反复跑无副作用。\n"
+            + "2026-09-10 换成东财（门类名+大类都由它给，门类字母仍来自两所）：有大类的票 3886 → 6006 只、"
+            + "门类叫法从 32 种收敛到 19 个标准名（原来沪深两所各说各话），实测「库里有、东财无」为 0 只。\n"
+            + "⚠ 整表重写不是「顺手」：两个源的大类名分属证监会分类的不同修订版，新旧名并存会把同一个行业"
+            + "裂成两个中性化分组。要退回新浪：改 fetcher-settings.json 的 IndustrySource。",
+            Sources: [DataSourceId.Exchange, DataSourceId.EmDataCenter]),
 
         new(FetchActionId.FetchStockBoardMap, "拉取个股行业与题材", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(8), "季度",
@@ -975,7 +1010,11 @@ public static class FetchTaskCatalog
             + "**建议把重复规则设成「空闲时」**：程序空着就自己补一批，到点前自动收尾给定时任务让路，"
             + "跨几天慢慢啃完。设成「每月某天」只会跑一轮 300 只，全市场根本补不完。\n"
             + "「要不要抓」按每只票的**实际披露日**判断（来自【拉取财报预约日】），不是法定截止日——"
-            + "所以那一项要是好几天没跑成，这边会以为没人披露而少取。",
+            + "所以那一项要是好几天没跑成，这边会以为没人披露而少取。\n"
+            + "2026-09-10 起可切东财（配置 FinancialSource: \"eastmoney\"，默认仍是新浪）：固定英文列名、"
+            + "按 ORG_TYPE 选 G/B/S 表，datacenter 的配额比新浪宽得多。⚠ **切过去之后要把下面的 QuotaGroup 从 Sina "
+            + "改成 Mixed、Sources 改成 [Sina, EmDataCenter]**——保险那 5 家仍走新浪，所以两个源都占；"
+            + "不改的话调度侧会按错的源算准入，白占新浪配额、又挡不住跟东财任务并行。",
             SupportsPartialRun: true,
             SoftDependsOn: [FetchActionId.FetchEarningsSchedule]),
 
@@ -1227,6 +1266,11 @@ public static class FetchTaskCatalog
 
             [FetchActionId.FetchRawBars] =
                 [new(FetchActionId.StepStockRawBars, FetchMode.FirstBackfill)],
+
+            // 【龙虎榜·换源重抓】退役（2026-09-10），**没有等价项**——空列表就是"原地删掉"。
+            // 它是一次性迁移工具：09-10 跑过一次把 2004 年至今 26.8 万行从新浪换成东财，
+            // 之后没有再用的场合（重算派生列该走本地重算、不该重发 580 个请求）。
+            [FetchActionId.StepLhbMigrate] = [],
 
             [FetchActionId.BackfillDaily] =
             [

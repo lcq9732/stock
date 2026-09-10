@@ -85,16 +85,22 @@ public partial class App : Application
         // 同一个厂商自己的K线+列表，不用再跨厂商拼（见 SinaBarFetcher 类注释里未验证是否前复权的
         // 说明）。资金净流入/流通市值已经默认走新浪/腾讯。
         //
-        // "Tencent" 这一项（同一天晚些时候）改成了 TencentThenSinaBarFetcher——用户反馈实际使用
-        // 中新浪的抓取稳定性不如腾讯，所以腾讯仍是主力，只有某只股票腾讯拿不到时才回退到新浪重试
-        // 这一只，不是两个平级选项。独立的"Sina"选项不受影响，仍然是纯新浪、无回退。
+        // "Tencent" 曾经是 TencentThenSinaBarFetcher（腾讯拿不到就回退新浪重试这一只），
+        // **2026-09-10 拆掉了回退**，改回纯腾讯。三个理由：
+        //   ① 回退根本不是为"腾讯没有这只票"准备的——判据是 `catch (Exception)`，即请求失败。
+        //      翻遍保留的日志，回退实际只触发过 1 次，原因是 "No such host is known"（DNS 抖动）。
+        //   ② 而 RateLimiter 本来就已经重试 3 次（间隔 2 秒、10 秒）。三次都栽了还立刻换一家，
+        //      多半也是本机网络的问题，换谁都一样。
+        //   ③ 代价却很实在：新浪的成交量是**股**、腾讯主板是**手**，回退每触发一次就往那只票的
+        //      历史里掺一段异口径的行，哪只票哪一段全凭当时的网络抖动（见 BarVolumeUnit）。
+        // 现在三次都失败就让异常抛出去，ProcessOneStockAsync 记进失败名单，
+        // 交给【重新拉取失败】重试——有名单、可追溯，比静默换源干净。
+        //
+        // 独立的 "Sina" 选项不受影响，仍是纯新浪（它的成交量换算在 SinaBarFetcher 里做）。
         var sources = new List<NamedBarSource>
         {
             new("EastMoney", new EastMoneyBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))), new EastMoneyStockListProvider()),
-            new("Tencent", new TencentThenSinaBarFetcher(
-                new TencentBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))),
-                new SinaBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)))),
-                new SinaStockListProvider()),
+            new("Tencent", new TencentBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))), new SinaStockListProvider()),
             new("Sina", new SinaBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))), new SinaStockListProvider()),
         };
 
@@ -257,11 +263,26 @@ public partial class App : Application
         // 3并发/1秒 用在 K线/板块/股东/龙虎榜上天天全市场 5000+ 只都没事。
         // 单并发 + 4 秒间隔 + 每 30 个请求歇 60 秒 ≈ 10 请求/分钟，配合下面的每轮上限和
         // FinancialKeys.Version 的断点续传，分多天补齐。
-        var financialProvider = new SinaFinancialProvider(new RateLimiter(
+        var sinaFinancialProvider = new SinaFinancialProvider(new RateLimiter(
             maxConcurrency: 1,
             delayBetweenRequests: TimeSpan.FromSeconds(4),
             batchSize: 30,
             restDuration: TimeSpan.FromSeconds(60)));
+
+        // 2026-09-10：财务报表可切东财（RPT_F10_FINANCE_*，固定英文列名，摆脱中文行名匹配）。
+        // **默认仍是新浪**——字段映射逐值验过了，但 200 只的全量比对还没做，见
+        // doc/financial-source-eastmoney-design.md §5.2。配 FinancialSource: "eastmoney" 可先试。
+        //
+        // 切到东财时走的是 FinancialSourceRouter：**保险那 5 家仍留在新浪**，因为东财整组不填
+        // 保险的支出科目（赔付支出/退保金/保单红利/分保费用，三处全 null），而赔付率指标要用它。
+        // datacenter 比新浪宽松得多（1 秒间隔连拉几百页无事），所以东财这条限流参数放宽。
+        IFinancialProvider financialProvider =
+            FetcherSettings.ReadFinancialSource(paths.SettingsPath) == "eastmoney"
+                ? new FinancialSourceRouter(
+                    new EastMoneyFinancialProvider(new RateLimiter(
+                        maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                    sinaFinancialProvider)
+                : sinaFinancialProvider;
 
         // 分红送配(新浪分红派息页 vISSUE_ShareBonus)——库里原本没有分红明细,做股息率因子/核对除权除息日的数据
         // 基础。逐只抓全历史,并入"一键拉取定期数据",也有独立按钮。写 Dividend 表。
@@ -269,8 +290,16 @@ public partial class App : Application
         var dividendRepository = new SqliteDividendRepository(paths.CurrentDb);
         dividendRepository.EnsureSchema();
 
-        // 证监会行业分类(两所门类+新浪大类)——因子法显示"板块"、FactorLab 行业中性化都用它。
-        var industryProvider = new ExchangeSinaIndustryProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        // 证监会行业分类——因子法显示"板块"、FactorLab 行业中性化都用它。
+        // 2026-09-10 默认改成东财（门类名+大类都由它给，门类字母仍来自两所）：大类覆盖
+        // 3886 → 6006 只、门类叫法 32 种 → 19 个标准名，实测"库里有、东财无"为 0 只。
+        // 配 IndustrySource: "sina" 可切回老路（两所门类 + 新浪大类），见 FetcherSettings。
+        var industrySource = FetcherSettings.ReadIndustrySource(paths.SettingsPath);
+        IIndustryProvider industryProvider = industrySource == IndustrySources.Sina
+            ? new ExchangeSinaIndustryProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)))
+            : new ExchangeEastMoneyIndustryProvider(new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        var industryRepository = new SqliteIndustryRepository(paths.CurrentDb);
+        industryRepository.EnsureSchema();
 
         // 业绩预告/快报（2026-09-03，东财）——本地此前完全没有这两份数据，且没有回退源：
         // 新浪/腾讯/交易所都不提供结构化预告，巨潮只有公告原文。复用上面那个 datacenter 客户端
@@ -384,13 +413,29 @@ public partial class App : Application
             () => new CustomerSupplierTask(custSuppRepository, companyProfileRepository, custSuppProvider));
         taskRegistry.Register(FetchActionId.StepIndustryIndicator,
             () => new IndustryIndicatorTask(indicatorRepository, indicatorProvider));
+        taskRegistry.Register(FetchActionId.StepFixVolumeUnit,
+            () => new BarVolumeUnitFixTask(new SqliteBarVolumeUnitFixer(paths.CurrentDb)));
+        // 【拉取行业分类】2026-09-10 从 orchestrator 迁过来（判据见
+        // doc/full-audit-task-migration-design.md §0：迁移成本 + 维护成本，老方式耦合）。
+        // 它只有一批（整表快照），MaxItems/Deadline 对它没意义，理由见 IndustryTask 类注释。
+        taskRegistry.Register(FetchActionId.FetchIndustry,
+            () => new IndustryTask(industryRepository, industryProvider));
+        // 【拉取财务报表】2026-09-10 从 orchestrator 迁过来。一批＝一只票（抓 3 张报表后整只落库），
+        // 所以框架的 MaxItems/Deadline 直接就是"本轮抓几只/到点收尾"，老那套自写的每轮 300 只上限删了。
+        // ⚠ provider 跟 orchestrator 里那条【银行监管指标】前置补数路径**是同一个实例**，别各造一个。
+        taskRegistry.Register(FetchActionId.FetchFinancials,
+            () => new FinancialTask(paths, financialProvider));
         // 【全库数据体检】2026-09-09 从 orchestrator 迁过来（例外，判据见
         // doc/full-audit-task-migration-design.md §0）：它要长大，而且正需要框架的流式落账 +
         // 分批/截止——原来扫完才一次性 Save，三遍扫描半小时，中途停等于全白跑。
         taskRegistry.Register(FetchActionId.StepFullAudit,
             () => new FullAuditTask(paths.CurrentDb, manifestStore, dailyNoDataRepository));
+        // 【重算回测序列】2026-09-10 从 orchestrator 迁过来：依赖只有一个 db 路径，
+        // 不碰 manifest、不占数据源、调用点只有一个——老任务里最容易迁的一类。
+        taskRegistry.Register(FetchActionId.RebuildAdjSeries,
+            () => new AdjSeriesRebuildTask(paths.CurrentDb));
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, industryProvider, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
 
         // 最后那个委托是给【重新读取配置】用的：按下时照当时的配置文件重造板块通道。
         // 传委托而不是把 App 的方法暴露出去，是为了让 MainViewModel 不用知道 browserChannel

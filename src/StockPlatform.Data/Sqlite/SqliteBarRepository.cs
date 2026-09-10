@@ -2,6 +2,7 @@
 using Microsoft.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Sqlite;
 
@@ -253,7 +254,40 @@ public class SqliteBarRepository : IBarRepository
         return result;
     }
 
+    /// <summary>
+    /// 取K线。<b>周线/月线不落库了（2026-09-10），这里从日线现场聚合。</b>
+    ///
+    /// ════ 为什么不存 ════
+    /// 它们 100% 是本地从日线算出来的（<see cref="BarAggregator"/>），一个字节都不是抓来的，
+    /// 却占了 Bar 表 20%（week 414 万行 + month 100 万行）。代价不只是空间：
+    ///   · 同一个数据错误要在**六个口径**上分别修——2026-09-10 的成交量单位事故就是这么放大的；
+    ///   · 日线更新到周月线重算之间永远有个不一致窗口；
+    ///   · 每只票抓完日线都要"读全历史 + 聚合 + 两次 upsert"，全市场 5500 只是笔不小的开销。
+    /// 而现算的成本几乎为零：一次遍历 8000 行日线，纯 CPU、零额外 IO。
+    ///
+    /// ⚠ <b>先聚合、再按 start/end 过滤，顺序不能反</b>：先截断日线再聚合的话，
+    /// 区间边界那一周/月只会用到落在区间内的那几天，算出来的开盘价、最高最低、成交量全是错的
+    /// ——而且错得很像真的，图上看不出来。
+    /// </summary>
     public List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null)
+    {
+        if (granularity is Granularity.Week or Granularity.Month)
+        {
+            var days = QueryStored(code, Granularity.Day, null, null);
+            if (days.Count == 0) return [];
+            var aggregated = granularity == Granularity.Week
+                ? BarAggregator.ToWeekly(days)
+                : BarAggregator.ToMonthly(days);
+            if (start == null && end == null) return aggregated;
+            return aggregated
+                .Where(b => (start == null || b.PeriodStart >= start) && (end == null || b.PeriodStart <= end))
+                .ToList();
+        }
+        return QueryStored(code, granularity, start, end);
+    }
+
+    /// <summary>真正读表的那一半（<see cref="Query"/> 对周/月线会绕开它）。</summary>
+    private List<Bar> QueryStored(string code, string granularity, DateTime? start, DateTime? end)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();

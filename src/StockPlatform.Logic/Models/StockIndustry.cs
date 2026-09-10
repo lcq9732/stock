@@ -19,3 +19,21 @@ public class StockIndustry
     /// <summary>可用的最细一级：优先大类，退回门类，都没有则空字符串。</summary>
     public string Best => !string.IsNullOrEmpty(MajorName) ? MajorName : ClassName;
 }
+
+/// <summary>
+/// <c>StockIndustry.source</c> 的取值（2026-09-10）。
+///
+/// 这一列的用处**不只是"分得清哪行是谁给的"**：两个源的大类名分属证监会分类的不同修订版
+/// （"开采辅助活动" vs "开采专业及辅助性活动"、"广播、电视、电影和影视录音制作业" vs
+/// "…录音制作业"），新旧名一旦在库里并存，行业中性化就会把同一个行业拆成两个分组。
+/// 所以这张表只能**整表一次换完**（见 SqliteIndustryRepository.ReplaceAll），
+/// 而这一列就是"整表现在是哪一版"的凭据。
+/// </summary>
+public static class IndustrySources
+{
+    /// <summary>两所门类 + 新浪大类（2026-09-10 前的默认）。</summary>
+    public const string Sina = "sina";
+
+    /// <summary>东财 F10 两级 + 两所门类字母（2026-09-10 起的默认）。</summary>
+    public const string EastMoney = "eastmoney";
+}

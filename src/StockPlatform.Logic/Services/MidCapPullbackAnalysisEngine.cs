@@ -65,11 +65,15 @@ public class MidCapPullbackAnalysisEngine
         if (dayBars.Count < MinDayBarsRequired)
             return Error(code, $"日线历史数据不足（仅 {dayBars.Count} 条），至少需要 {MinDayBarsRequired} 条");
 
-        var weekBars = _barRepository.Query(code, Granularity.Week);
+        // ⚠ 周/月线**直接从手上这份日线聚合**，不走 _barRepository.Query（2026-09-10）。
+        // 它们不落库了，仓储层对 week/month 的实现就是"读日线再聚合"——这里已经有日线了，
+        // 再问仓储两次等于让它把同一份 8000 行日线又读两遍。这是全市场逐只跑的引擎，
+        // 5500 只票就是 11000 次多余的全历史查询。
+        var weekBars = BarAggregator.ToWeekly(dayBars);
         if (weekBars.Count < MinWeekBarsRequired)
             return Error(code, $"周线历史数据不足（仅 {weekBars.Count} 条），至少需要 {MinWeekBarsRequired} 条");
 
-        var monthBars = _barRepository.Query(code, Granularity.Month);
+        var monthBars = BarAggregator.ToMonthly(dayBars);
         if (monthBars.Count < MinMonthBarsRequired)
             return Error(code, $"月线历史数据不足（仅 {monthBars.Count} 条），至少需要 {MinMonthBarsRequired} 条");
 

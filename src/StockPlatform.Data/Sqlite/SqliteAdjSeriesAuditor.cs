@@ -36,11 +36,12 @@ public sealed class SqliteAdjSeriesAuditor
     }
 
     /// <summary>
-    /// 判据四条，任一成立就要重算：
+    /// 判据五条，任一成立就要重算：
     ///   · 压根没算过；
     ///   · 不复权比它**新**（尾巴长出来了）；
     ///   · 不复权比它**长**（前面补了历史）——复权因子是从最早那天累乘上来的，起点一变整条线都变；
-    ///   · 除权事件本身变了（<see cref="CodesWithStaleEvents"/>）。
+    ///   · 除权事件本身变了（<see cref="CodesWithStaleEvents"/>）；
+    ///   · **不复权的值被改过**（<see cref="CodesWithFresherRawBars"/>，2026-09-10 补）。
     /// </summary>
     public Plan BuildPlan()
     {
@@ -50,17 +51,68 @@ public sealed class SqliteAdjSeriesAuditor
         var rawEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayRaw);
         var adjEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayAdj);
         var staleEvents = CodesWithStaleEvents();
+        var fresherRaw = CodesWithFresherRawBars();
 
         var codes = rawLatest
             .Where(kv => !adjLatest.TryGetValue(kv.Key, out var a) || a.Date < kv.Value.Date
                       || !adjEarliest.TryGetValue(kv.Key, out var ae)
                       || (rawEarliest.TryGetValue(kv.Key, out var re) && ae.Date > re.Date)
-                      || staleEvents.Contains(kv.Key))
+                      || staleEvents.Contains(kv.Key)
+                      || fresherRaw.Contains(kv.Key))
             .Select(kv => kv.Key)
             .OrderBy(c => c, StringComparer.Ordinal)
             .ToList();
 
         return new Plan(codes, adjLatest, adjEarliest, staleEvents);
+    }
+
+    /// <summary>
+    /// 有不复权日线的**全部**票（按代码有序）。给「首次整段回补」模式
+    /// 那条"全量重算、不看判据"的路用（2026-09-10）——FetchMode 在 Scheduling 里，Data 引用不到，
+    /// 所以这里只能用名字说。
+    ///
+    /// 为什么不走 <see cref="BuildPlan"/>：那个要六趟 GROUP BY（raw/adj 各自的首末 + 事件 + 抓取时刻），
+    /// 而全量重算压根不看判据，只需要"有哪些票"这一趟。
+    /// </summary>
+    public IReadOnlyList<string> AllCodesWithRawBars() =>
+        new SqliteBarRepository(_dbPath)
+            .GetLatestPeriodStartByCode(Granularity.DayRaw)
+            .Keys
+            .OrderBy(c => c, StringComparer.Ordinal)
+            .ToList();
+
+    /// <summary>
+    /// <c>day_raw</c> 里有行的 <c>fetched_at</c> 比 <c>day_adj</c> 的重算时刻还新——说明**源数据
+    /// 被改过**（不是长出新日期，是同一天的值被覆盖了），复权序列得跟着重算。
+    ///
+    /// ⚠ 这条判据不能少（2026-09-10 补，踩过一次）：另外四条全看**日期范围**和**事件时间戳**，
+    /// 而"修正已有行的值"这件事**一点日期都不变**。2026-09-09~10 修了 5312 只票的 day_raw
+    /// （盘中固化的半天快照：002650 的 2026-09-01 从"四价合一 6.04"改成真实的
+    /// 6.04/6.01/6.08/5.98），之后点【重算回测序列】，四条判据一条都不成立——只认出 2 只
+    /// （还是新股），day_adj 那 5312 只票的价格仍然是从**盘中值**算出来的，而回测吃的就是它。
+    ///
+    /// 判的是"最新抓取时刻 vs 最新重算时刻"，所以日常也顺带成立：抓完 day_raw 还没重算的票会被
+    /// 认出来（本来也该算），重算过之后 adj 的时间戳更新，下一轮不再命中。
+    /// </summary>
+    public HashSet<string> CodesWithFresherRawBars()
+    {
+        var stale = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={_dbPath}");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                WITH raw AS (SELECT code, MAX(fetched_at) f FROM Bar WHERE granularity='day_raw' GROUP BY code),
+                     adj AS (SELECT code, MAX(fetched_at) f FROM Bar WHERE granularity='day_adj' GROUP BY code)
+                SELECT raw.code FROM raw JOIN adj ON adj.code = raw.code
+                WHERE raw.f IS NOT NULL AND adj.f IS NOT NULL AND raw.f > adj.f;
+                """;
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) stale.Add(r.GetString(0));
+        }
+        catch { /* 判据取不到就当没有：宁可少算一轮，也不该让界面上的计数抛异常 */ }
+        return stale;
     }
 
     /// <summary>只要个数（界面上的"待重算 N 只"）。判据跟 <see cref="BuildPlan"/> 是同一份，

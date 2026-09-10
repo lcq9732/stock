@@ -46,9 +46,12 @@ public static class AuditFindingKind
     public const string Ohlc = "ohlc";
 
     /// <summary>
-    /// <c>amount / (volume × close)</c> 不在 ≈100（手）或 ≈1（科创板按股）附近——量或额本身不对。
+    /// <c>amount / (volume × close)</c> 不在 ≈100 附近——volume 的单位是**手**，这是全库唯一口径。
     /// **只报数、不进待补名单**：603999 那种是数据源自己给错的，重抓大概率拿回同样的值，
-    /// 要修得先查清成因（见 memory project_bar_volume_unit_bug）。
+    /// 要修得先查清成因。
+    ///
+    /// ⚠ 比值 ≈1 的那批是**单位错了不是值错了**（按股存的），2026-09-10 起也会被报出来。
+    /// 见到一批 ≈1，跑任务【统一成交量单位】即可，纯本地、幂等，别去查数据源。
     /// </summary>
     public const string Ratio = "ratio";
 

@@ -33,12 +33,22 @@ public class LhbRow
     public double? Deviation { get; set; }
 
     /// <summary>
-    /// 成交量（**万股**，新浪历史行的口径）。
+    /// 成交量。**这一列已作废，全表为 NULL**（2026-09-10 起）。
     ///
-    /// ⚠ **东财源下一律为 null**：接口不给这一列，而本地日K也补不了——Bar.volume 的单位在
-    /// 科创板上是"股"、其余板块是"手"，且部分行的量额本身就不全。详见
-    /// <c>LhbDeviationDeriver.WhyVolumeIsNotDerived</c>。要量能信息用 <see cref="Amount"/>
-    /// （成交额）、<see cref="TurnoverRate"/>（换手率）或龙虎榜买卖额那几列。
+    /// 经过：东财接口不给成交量。本想从本地日K补（÷100 换成万股），2026-09-08 的 59 只只对上
+    /// 39 只——<c>Bar.volume</c> 的单位在科创板是"股"、其余板块是"手"，还有些行的量额本身就不全，
+    /// 详见 <c>LhbDeviationDeriver.WhyVolumeIsNotDerived</c>。09-10 换源整段重抓时按天替换，
+    /// 新浪时代那 259,147 行历史成交量也跟着没了。
+    ///
+    /// **为什么不从备份补回来**：东财源以后永远不写这一列，补完的局面是"2026-09-10 之前有、
+    /// 之后每天都没有"。这种断层比整列空更危险——按成交量筛龙虎榜的分析在历史回测里跑得好好的，
+    /// 上线后静静地筛不出任何东西。全表 NULL 是自洽的，谁都不会误用。
+    /// 换源前的备份在 data/local/backup/Lhb-20260910-091818.sqlite，真要查旧值 ATTACH 即可。
+    ///
+    /// **要成交量就 join <c>Bar</c> 表**（等它的单位问题修好）。这一列留着不删，是因为删列要重建
+    /// 26 万行的表，而留一个恒 NULL 的列成本为零、还让这段历史有个挂注释的地方。
+    /// 量能信息也可以用 <see cref="Amount"/>（成交额）、<see cref="TurnoverRate"/>（换手率）
+    /// 或 <see cref="BillboardBuyAmt"/> 那几列。
     /// </summary>
     public double? Volume { get; set; }
 

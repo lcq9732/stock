@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
-"""把待补名单里的「缺行」段暂存开，只留「值错」段——好让【重新拉取失败】先只修值问题。
+"""把待补名单（manifest.MissingBars）按类型拆开，好分别处理。
 
-为什么要拆：体检报出的缺行有 7000+ 段 / 100 万个交易日，绝大多数是十年的停牌日，补一轮要
-几小时、而且要走满两轮才能重新沉淀进「确认没有」白名单。值问题只有几千段、约 40 分钟。
+两类记录混在同一份名单里，但补法和复查方式完全不同：
+  · 缺行（Reason=gap）——7000+ 段 / 100 万个交易日，绝大多数是十年的停牌日，
+    补一轮要几小时、而且要走满两轮才能重新沉淀进「确认没有」白名单；
+  · 值错（intraday / inconsistent / ohlc）——几千段，约 40 分钟。
 【重新拉取失败】是先补缺行、后修值问题的，不拆的话中途停就轮不到值问题。
 
 用法（在仓库根目录跑）：
-    python park_gaps.py show      看当前构成，不改任何东西
-    python park_gaps.py split     拆：manifest 只留值错段，缺行段存进 parked 文件
-    python park_gaps.py merge     合：把 parked 的缺行段并回 manifest（值错段保持现状）
+    python tools/park_gaps.py show      看当前构成，不改任何东西
+    python tools/park_gaps.py split     拆：manifest 只留值错段，缺行段存进 parked 文件
+    python tools/park_gaps.py merge     合：把 parked 的缺行段并回 manifest
+    python tools/park_gaps.py sample    抽样：只留每类一条值错段做试跑，其余暂存
+    python tools/park_gaps.py restore   把 sample 暂存的值错段并回来
 
 ⚠ 只在**程序空闲**时跑。体检或【重新拉取失败】正在跑的时候 manifest 会被它们改写，
-   这时候拆会互相覆盖。
+   这时候拆会互相覆盖。每次写 manifest 前都自动带时间戳备份。
 """
 import json
 import os
@@ -21,7 +25,8 @@ from collections import Counter
 from datetime import datetime
 
 MANIFEST = os.path.join("publish", "data", "local", "manifest.json")
-PARKED = os.path.join("publish", "data", "local", "missing-gaps-parked.json")
+GAPS_PARKED = os.path.join("publish", "data", "local", "missing-gaps-parked.json")
+VALUES_PARKED = os.path.join("publish", "data", "local", "missing-values-parked.json")
 GAP = "gap"
 
 
@@ -40,108 +45,153 @@ def reason(r):
     return r.get("Reason") or GAP
 
 
+def key_of(r):
+    return (r.get("Code"), r.get("Granularity"), reason(r))
+
+
 def backup(path):
-    dst = f"{path}.bak-park-{datetime.now():%Y%m%d-%H%M%S}"
+    dst = path + ".bak-park-" + datetime.now().strftime("%Y%m%d-%H%M%S")
     shutil.copy(path, dst)
     return dst
 
 
 def describe(rows, title):
     if not rows:
-        print(f"  {title}：0 段")
+        print("  %s：0 段" % title)
         return
-    by_reason = Counter(reason(r) for r in rows)
     days = sum(r.get("Days", 0) for r in rows)
-    print(f"  {title}：{len(rows)} 段 / {days} 个交易日")
-    for k, n in sorted(by_reason.items()):
+    print("  %s：%d 段 / %d 个交易日" % (title, len(rows), days))
+    for k, n in sorted(Counter(reason(r) for r in rows).items()):
         sub = [r for r in rows if reason(r) == k]
-        by_gran = Counter(r.get("Granularity", "?") for r in sub)
-        tries = Counter(r.get("Tries", 0) for r in sub)
-        print(f"     {k:<14} {n:>6} 段 / {sum(x.get('Days', 0) for x in sub):>8} 天"
-              f"   口径 {dict(by_gran)}   Tries {dict(sorted(tries.items()))}")
+        by_gran = dict(Counter(r.get("Granularity", "?") for r in sub))
+        tries = dict(sorted(Counter(r.get("Tries", 0) for r in sub).items()))
+        print("     %-14s %6d 段 / %8d 天   口径 %s   Tries %s"
+              % (k, n, sum(x.get("Days", 0) for x in sub), by_gran, tries))
+
+
+def parked_rows(path):
+    if not os.path.exists(path):
+        return []
+    return load(path).get("MissingBars", [])
 
 
 def cmd_show():
+    rows = load(MANIFEST).get("MissingBars", [])
+    print("manifest: %s" % MANIFEST)
+    describe([r for r in rows if reason(r) == GAP], "缺行（gap）")
+    describe([r for r in rows if reason(r) != GAP], "值错")
+    for path, label in ((GAPS_PARKED, "已暂存的缺行"), (VALUES_PARKED, "已暂存的值错段")):
+        rowsp = parked_rows(path)
+        if rowsp:
+            print()
+            print("parked: %s" % path)
+            describe(rowsp, label)
+
+
+def _park(rows_to_park, rows_to_keep, path, note, label):
+    """把一部分记录挪进 parked 文件，manifest 只留另一部分。"""
+    if parked_rows(path):
+        print("⚠ %s 里已经有暂存记录，先合并回去再拆，否则那批会被这次覆盖掉。中止。" % path)
+        sys.exit(1)
+    b = backup(MANIFEST)
+    save(path, {"MissingBars": rows_to_park,
+                "ParkedAt": datetime.now().isoformat(timespec="seconds"),
+                "Note": note})
+    m = load(MANIFEST)
+    m["MissingBars"] = rows_to_keep
+    save(MANIFEST, m)
+    print()
+    print("已拆分。manifest 备份：%s" % b)
+    print("%s 已暂存到：%s" % (label, path))
+
+
+def _unpark(path, label):
+    """把 parked 文件里的记录并回 manifest（按 code+口径+原因去重，manifest 里已有的优先）。"""
+    parked = parked_rows(path)
+    if not parked:
+        print("没有 %s（或里面是空的），没什么可合并的。" % path)
+        return
     m = load(MANIFEST)
     rows = m.get("MissingBars", [])
-    gaps = [r for r in rows if reason(r) == GAP]
-    vals = [r for r in rows if reason(r) != GAP]
-    print(f"manifest: {MANIFEST}")
-    describe(gaps, "缺行（gap）")
-    describe(vals, "值错")
-    if os.path.exists(PARKED):
-        parked = load(PARKED).get("MissingBars", [])
-        print(f"\nparked: {PARKED}")
-        describe(parked, "已暂存的缺行")
-    else:
-        print(f"\nparked: 还没有（{PARKED}）")
+    have = {key_of(r) for r in rows}
+    add = [r for r in parked if key_of(r) not in have]
+    skipped = len(parked) - len(add)
+
+    print("合并前：")
+    describe(rows, "manifest 现有")
+    describe(add, "要并回来的" + label)
+    if skipped:
+        print("  （%d 段跳过：manifest 里已有同 code+口径+原因的记录，保留那边的 Tries）" % skipped)
+
+    b = backup(MANIFEST)
+    m["MissingBars"] = sorted(rows + add, key=lambda r: (r.get("Code", ""),
+                                                         r.get("Granularity", ""),
+                                                         reason(r)))
+    save(MANIFEST, m)
+    os.remove(path)
+    print()
+    print("已合并。manifest 备份：%s" % b)
+    print("parked 文件已删除。现在名单里共 %d 段。" % len(m["MissingBars"]))
 
 
 def cmd_split():
-    m = load(MANIFEST)
-    rows = m.get("MissingBars", [])
+    rows = load(MANIFEST).get("MissingBars", [])
     gaps = [r for r in rows if reason(r) == GAP]
     vals = [r for r in rows if reason(r) != GAP]
     if not gaps:
         print("名单里没有缺行段，不用拆。")
         return
-
-    if os.path.exists(PARKED):
-        old = load(PARKED).get("MissingBars", [])
-        if old:
-            print(f"⚠ {PARKED} 里已经有 {len(old)} 段暂存的缺行。")
-            print("  先 merge 回去再拆，否则那批会被这次覆盖掉。中止。")
-            sys.exit(1)
-
     print("拆分前：")
     describe(gaps, "缺行（要暂存）")
     describe(vals, "值错（留在 manifest）")
-
-    b = backup(MANIFEST)
-    save(PARKED, {"MissingBars": gaps,
-                  "ParkedAt": datetime.now().isoformat(timespec="seconds"),
-                  "Note": "【全库数据体检】报出的缺行段，暂存以便先只修值问题。用 park_gaps.py merge 并回去。"})
-    m["MissingBars"] = vals
-    save(MANIFEST, m)
-    print(f"\n已拆分。manifest 备份：{b}")
-    print(f"缺行段已暂存到：{PARKED}")
+    _park(gaps, vals, GAPS_PARKED,
+          "【全库数据体检】报出的缺行段，暂存以便先只修值问题。用 park_gaps.py merge 并回去。",
+          "缺行段")
     print("现在跑【重新拉取失败】只会修值问题。")
 
 
 def cmd_merge():
-    if not os.path.exists(PARKED):
-        print(f"没有 {PARKED}，没什么可合并的。")
+    _unpark(GAPS_PARKED, "缺行")
+
+
+def cmd_sample():
+    """只留每类一条值错段做试跑——首次跑新的修复路径时用，几分钟就能看出对不对。"""
+    rows = load(MANIFEST).get("MissingBars", [])
+    vals = [r for r in rows if reason(r) != GAP]
+    if not vals:
+        print("名单里没有值错段，没什么可试的。")
         return
-    parked = load(PARKED).get("MissingBars", [])
-    if not parked:
-        print("parked 文件里是空的。")
-        return
 
-    m = load(MANIFEST)
-    rows = m.get("MissingBars", [])
-    # 按 (Code, Granularity, Reason) 去重：manifest 里已经有的那条优先（它的 Tries 更新）
-    have = {(r.get("Code"), r.get("Granularity"), reason(r)) for r in rows}
-    add = [r for r in parked if (r.get("Code"), r.get("Granularity"), reason(r)) not in have]
-    skipped = len(parked) - len(add)
+    picked = []
+    for k in sorted({reason(r) for r in vals}):
+        same = [r for r in vals if reason(r) == k]
+        # 优先挑手上有确切现状、好验证的（002650 的 2026-09-01 是盘中固化的标准样本）
+        pref = [r for r in same if r.get("Code") in ("002650", "000013")]
+        picked.append((pref or same)[0])
+    picked_ids = {id(r) for r in picked}
+    rest = [r for r in vals if id(r) not in picked_ids]
 
-    print("合并前：")
-    describe(rows, "manifest 现有")
-    describe(add, "要并回来的缺行")
-    if skipped:
-        print(f"  （{skipped} 段跳过：manifest 里已有同 code+口径+原因的记录，保留那边的 Tries）")
+    print("挑出来试跑的：")
+    for r in picked:
+        print("   %-8s %-8s %-14s %s~%s %d天 Tries=%s"
+              % (r.get("Code"), r.get("Granularity"), reason(r),
+                 r.get("From", "")[:10], r.get("To", "")[:10], r.get("Days", 0), r.get("Tries")))
+    describe(rest, "暂存起来的其余值错段")
 
-    b = backup(MANIFEST)
-    m["MissingBars"] = sorted(rows + add,
-                              key=lambda r: (r.get("Code", ""), r.get("Granularity", ""), reason(r)))
-    save(MANIFEST, m)
-    os.remove(PARKED)
-    print(f"\n已合并。manifest 备份：{b}")
-    print(f"parked 文件已删除。现在名单里共 {len(m['MissingBars'])} 段。")
+    keep = [r for r in rows if reason(r) == GAP] + picked
+    _park(rest, keep, VALUES_PARKED,
+          "试跑期间暂存的值错段。用 park_gaps.py restore 并回去。", "其余值错段")
+    print("现在跑【重新拉取失败】只会动这几段，几分钟就完。")
+
+
+def cmd_restore():
+    _unpark(VALUES_PARKED, "值错段")
 
 
 if __name__ == "__main__":
     if not os.path.exists(MANIFEST):
-        print(f"找不到 {MANIFEST}——请在仓库根目录运行。")
+        print("找不到 %s——请在仓库根目录运行。" % MANIFEST)
         sys.exit(1)
     cmd = sys.argv[1] if len(sys.argv) > 1 else "show"
-    {"show": cmd_show, "split": cmd_split, "merge": cmd_merge}.get(cmd, cmd_show)()
+    {"show": cmd_show, "split": cmd_split, "merge": cmd_merge,
+     "sample": cmd_sample, "restore": cmd_restore}.get(cmd, cmd_show)()

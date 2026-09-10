@@ -311,7 +311,8 @@ public static class SqliteSchema
                 code TEXT PRIMARY KEY,      -- 6位股票代码
                 class_code TEXT,            -- 证监会门类代码 A~S（两所官网，覆盖沪深全部）
                 class_name TEXT,            -- 门类名称，如"制造业"（太粗，仅作兜底）
-                major_name TEXT,            -- 证监会大类名称，如"汽车制造业"（新浪，约覆盖58%）
+                major_name TEXT,            -- 证监会大类名称，如"汽车制造业"
+                source TEXT,                -- 这一版是谁给的：sina / eastmoney（见 IndustrySources）
                 fetched_at TEXT
             );
 
@@ -950,6 +951,11 @@ public static class SqliteSchema
         // （见 SqliteBankRegulatoryRepository.Upsert 的 ON CONFLICT … WHERE），
         // 也才能把"这个数是 OCR 认的、还没核对"如实告诉看的人。老行为 NULL，按 'pdf' 处理。
         AddColumnIfMissing(conn, "BankRegulatoryMetric", "source", "TEXT");
+        // 2026-09-10：行业分类换源（新浪大类 → 东财两级），加一列记"整表现在是哪一版"。
+        // 它不只是溯源标记：两个源的大类名分属证监会分类的不同修订版，新旧名并存会把同一个
+        // 行业裂成两个中性化分组，所以这张表只能整表替换（SqliteIndustryRepository.ReplaceAll），
+        // 这一列就是那次替换的凭据。老行为 NULL，按 'sina' 理解。
+        AddColumnIfMissing(conn, "StockIndustry", "source", "TEXT");
         // 龙虎榜席位的三个字段（2026-09-06）——接口 columns=ALL 本来就一起返回，当初没解析。
         // 只对**以后抓的**生效，已有的 177 万行历史这三列是 NULL：为两个比例字段重抓 264 万行
         // 不划算（那是所有抓取项里最慢的一个），用户明确说了历史不补。

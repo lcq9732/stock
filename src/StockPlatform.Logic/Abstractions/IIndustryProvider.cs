@@ -8,5 +8,8 @@ public interface IIndustryProvider
 {
     event Action<string>? OnStatus;
 
+    /// <summary>这一份数据的来源标记，写进 <c>StockIndustry.source</c>，取值见 <see cref="IndustrySources"/>。</summary>
+    string SourceName { get; }
+
     Task<List<StockIndustry>> GetAllAsync(CancellationToken ct = default);
 }

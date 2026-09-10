@@ -151,12 +151,20 @@ public class BarValueAuditTests : IDisposable
 
     // ─────────────────── V6 量额比率 ───────────────────
 
+    /// <summary>
+    /// volume 的单位是**手**，所以 <c>amount / (volume × close)</c> 只有 ≈100 一个正常区间。
+    ///
+    /// ⚠ 2026-09-10 收紧：**≈1 不再放过**。原来它是放行的，因为当时科创板 688/689 的 volume
+    /// 确实按股存（腾讯给股、fetcher 原样入库）。那是 bug 不是第二种合法口径——它让含科创板的
+    /// 板块指数成交量常年虚高 100 倍。现在解析层归一化（<c>BarVolumeUnit</c>）、历史由
+    /// 【统一成交量单位】修，这里就该报出来，否则以后再掺进股口径照样没人发现。
+    /// </summary>
     [Theory]
     [InlineData(100.0, true)]     // 手口径：amount = volume × close × 100
-    [InlineData(1.0, true)]       // 科创板按股：amount = volume × close
+    [InlineData(1.0, false)]      // 按股存的——单位错了，要报
     [InlineData(33.0, false)]     // 603999 那种：amount 少了约 2/3
     [InlineData(1000.0, false)]   // 量额差一个数量级
-    public void V6_比率落在两个正常区间外才报(double multiplier, bool isNormal)
+    public void V6_只有手口径算正常(double multiplier, bool isNormal)
     {
         double close = 10, volume = 100;
         Ok("600000", Granularity.DayRaw, close: close, volume: volume, amount: volume * close * multiplier);

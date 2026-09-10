@@ -182,6 +182,7 @@ public class TencentBarFetcher : IBarDataFetcher
                 var high = double.Parse(row[3].GetString()!, CultureInfo.InvariantCulture);
                 var low = double.Parse(row[4].GetString()!, CultureInfo.InvariantCulture);
                 var volume = len > 5 ? double.Parse(row[5].GetString()!, CultureInfo.InvariantCulture) : 0;
+                volume = BarVolumeUnit.ToLots(code, volume, BarVolumeUnit.Source.Tencent);
 
                 // newfqkline 每行结构：[0]日期 [1]开 [2]收 [3]高 [4]低 [5]成交量(手) [6]{}(占位对象，忽略)
                 // [7]换手率(%) [8]成交额(万元) [9]""。都做长度+类型保护，缺字段就按0（这样万一接口

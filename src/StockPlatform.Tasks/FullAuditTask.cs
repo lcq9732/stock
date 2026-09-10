@@ -711,8 +711,6 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             : string.Join("、", days.Take(MaxListedDays).Select(d => d.ToString("MM-dd")))
               + $"… 等 {days.Count} 天";
 
-    private static string FormatElapsed(TimeSpan elapsed) =>
-        elapsed.TotalHours >= 1
-            ? $"{(int)elapsed.TotalHours}:{elapsed.Minutes:D2}:{elapsed.Seconds:D2}"
-            : $"{elapsed.Minutes:D2}:{elapsed.Seconds:D2}";
+    /// <summary>实现在 <see cref="ElapsedText.Format"/>，这里只转发（2026-09-10 去重）。</summary>
+    private static string FormatElapsed(TimeSpan elapsed) => ElapsedText.Format(elapsed);
 }

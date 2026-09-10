@@ -155,6 +155,35 @@ public static class FetcherSettings
     public static string ReadLhbSource(string settingsPath) =>
         (ReadString(settingsPath, "LhbSource") ?? "em").Trim().ToLowerInvariant();
 
+    /// <summary>
+    /// 行业分类走哪个源，规范化成 <c>"eastmoney"</c>／<c>"sina"</c>，没配就是 <c>"eastmoney"</c>
+    /// （2026-09-10 起的默认）。取值用 <c>IndustrySources</c> 里的常量，跟写进
+    /// <c>StockIndustry.source</c> 列的是同一套字符串。
+    ///
+    /// 换到东财的理由是**覆盖和一致性**：东财一份数据给两级，大类覆盖 6006 只（新浪 3886 只）、
+    /// 门类 19 个标准名（两所那套在库里出现过 32 种叫法）；且实测"库里有、东财无"为 0 只。
+    /// ⚠ 新浪那条**不是能随手切回去的退路**：2026-09-10 实机比对发现它的大类是整组错位的
+    /// （114 只化工股被标成"金属制品、机械和设备修理业"，23 只造纸股被标成"黑色金属冶炼"…
+    /// 共 557 只、占 16%），详见 ExchangeSinaIndustryProvider 类注释。留它只是留档。
+    /// ⚠ 两个源的大类名分属证监会分类的不同修订版，所以**换源必须整表重写**，不能逐条覆盖。
+    /// </summary>
+    public static string ReadIndustrySource(string settingsPath) =>
+        (ReadString(settingsPath, "IndustrySource") ?? "eastmoney").Trim().ToLowerInvariant();
+
+    /// <summary>
+    /// 财务报表走哪个源，规范化成 <c>"sina"</c>／<c>"eastmoney"</c>，没配就是 <c>"sina"</c>。
+    ///
+    /// ⚠ **默认还是新浪**：东财那条路的字段映射已逐值验过（000001/000338 逐格零差异），
+    /// 但**全量比对（200 只 × 全部报告期 × 60 个科目）还没做**，做完才改默认，见
+    /// doc/financial-source-eastmoney-design.md §5.2。想先试就在设置文件里打开那一行。
+    ///
+    /// 换过去之后：保险公司**仍走新浪**（东财整组不填赔付支出/退保金/保单红利/分保费用），
+    /// 由 <c>FinancialSourceRouter</c> 按 ORG_TYPE 分流；银行/券商的净额科目从 B/S 专表取，
+    /// 因为同一个 G 表列对银行是毛额、对券商是净额。
+    /// </summary>
+    public static string ReadFinancialSource(string settingsPath) =>
+        (ReadString(settingsPath, "FinancialSource") ?? "sina").Trim().ToLowerInvariant();
+
     /// <summary>读一个 true/false 设置；读不到就当 false。</summary>
     public static bool ReadBool(string settingsPath, string key)
     {
@@ -338,10 +367,45 @@ public static class FetcherSettings
           //"LhbSource": "em",
           //"LhbSource": "sina",
 
+          // ── 行业分类走哪个源 ────────────────────────────────────────────
+          //  eastmoney ＝ 东财 F10（RPT_F10_ORG_BASICINFO 的 CSRC_INDUSTRY_NAME，一个字段两级）。【默认】
+          //  sina      ＝ 两所门类 + 新浪 84 个行业节点逐个取成分股。
+          //              ⚠ 已证**大类整组错位**（557 只、16%：化工股被标成金属修理业、造纸股被标成钢铁…），
+          //                只作留档，别切回来——真要用得先修错位。
+          //
+          //  2026-09-10 换到东财。全量比对（doc/industry-source-eastmoney-design.md）：
+          //  有大类的票 3886 → 6006 只，门类叫法 32 种 → 19 个标准名（原来沪深两所各说各话），
+          //  "库里有、东财无" 0 只——是超集，换过去不掉数据。
+          //  ⚠ 两个源的大类名分属证监会分类的不同修订版（"开采辅助活动" vs "开采专业及辅助性活动"），
+          //    所以这张表是**整表重写**：切换或切回都会把 StockIndustry 全表换成新的那一版，
+          //    不会出现新旧名并存把同一个行业裂成两个中性化分组的情况。
+          //"IndustrySource": "eastmoney",
+          //"IndustrySource": "sina",
+          // ── 财务报表走哪个源 ────────────────────────────────────────────
+          //  sina      ＝ 新浪 vDOWN_ 报表下载（中文行名匹配）。【默认】
+          //  eastmoney ＝ 东财 F10（RPT_F10_FINANCE_*，固定英文列名，按 ORG_TYPE 选 G/B/S 表）。
+          //
+          //  东财那条路的字段映射是**数值证明**的（拿库里 8 只样本的科目值，去东财所有数值列里
+          //  找相等的那一列），000001/000338 逐格零差异；但**全量比对还没做**，所以默认仍是新浪。
+          //  ⚠ 无论切到哪边，保险那 5 家（平安/太保/国寿/新华/人保）都走新浪——东财**整组不填**
+          //    保险的支出科目（赔付支出/退保金/保单红利/分保费用三处全 null），而赔付率指标要用它。
+          //  ⚠ 切过去之后要把 FinancialKeys.Version +1 才会全量重抓，否则老数据不会被替换。
+          //"FinancialSource": "sina",
+          //"FinancialSource": "eastmoney",
+
           // ── K线数据源 ──────────────────────────────────────────────────
-          //"BarSource": "Tencent",   // 腾讯为主，某只票拿不到时自动回退新浪重试这一只【默认】
-          //"BarSource": "Sina",      // 纯新浪，无回退
-          //"BarSource": "EastMoney", // 东财。⚠ 本机网络下常年连不上，一般别选
+          //"BarSource": "Tencent",   // 纯腾讯。失败自动重试 3 次（间隔 2/10 秒），仍失败进【重新拉取失败】名单【默认】
+          //                          （2026-09-10 拆掉了"回退新浪"：新浪的成交量是股、腾讯主板是手，
+          //                            每回退一次就往那只票历史里掺一段异口径的行，而回退实测只触发过 1 次）
+          //"BarSource": "Sina",      // 纯新浪。⚠ 它只有前复权一种口径，不复权/后复权拿不到
+          //"BarSource": "EastMoney", // 东财 push2his。2026-09-10 沙箱实测**可达**（600000/688001/
+          //                          //  300750/920371 都正常返回），此前"常年连不上"的说法是
+          //                          //  push2 被封那阵的判断，对 push2his 不成立。
+          //                          //  ⚠ 但现有实现 fqt=1 写死，只支持前复权；换成主源之前还要
+          //                          //  验三种复权口径、压测限流、确认退市股能不能拉。
+          //
+          //  三个源的成交量口径不同（腾讯主板给手/科创板给股、新浪一律给股、东财都给手），
+          //  进库前统一换算成"手"，见 Logic/Services/BarVolumeUnit.cs。
 
           // ── 东财 push2 走哪块网卡出去 ──────────────────────────────────
           //  不配（保持注释）＝ 走系统默认路由。【默认】

@@ -52,7 +52,7 @@ flowchart TD
 | **StockPlatform.Logic** | net8.0 类库 | **领域层，零依赖零 IO。** `Models/` 领域模型；`Abstractions/` 端口接口（IXxxFetcher · IXxxProvider · IXxxRepository，约 40 个）；`Services/` 纯算法（八种选股引擎、技术指标、复权、交易日历、市场分类）。两个程序都用，但子集几乎不重叠。 |
 | **StockPlatform.Data** | net8.0 类库 | **适配层，Logic 那些接口的全部实现。** `Remote/` 数据源 HTTP 实现 + 限流；`Sqlite/` 仓储 + schema + 维护；`Local/` 读东财终端落盘文件；`Orchestration/` 抓取编排与路径/清单/设置。 |
 | **StockPlatform.Scheduling** | net8.0 类库 | **"什么时候跑什么"。** 计划模型与持久化、串行执行引擎、数据源占用与准入裁决、静默看门狗、新式任务契约与注册表。只有 Fetcher 用。 |
-| **StockPlatform.Tasks** | net8.0 类库 | **新形状任务的落地处**（2026-09-08 起）。老任务留在 FetchOrchestrator 不迁；新任务一律在这继承 `FetchTaskBase` 写成独立类。目前只有 `TradingCalendarTask`。 |
+| **StockPlatform.Tasks** | net8.0 类库 | **新形状任务的落地处**（2026-09-08 起）。新任务一律在这继承 `FetchTaskBase` 写成独立类；**老任务按"迁移成本+维护成本"判断是否迁过来**（2026-09-10 起，原"老任务不迁"作废）。 |
 | **StockPlatform.Fetcher** | WPF WinExe | 抓取程序：组合根 + 界面。**本身不含抓取逻辑**——造对象、按按钮、显示日志和计划表。 |
 | **StockPlatform.Analyzer** | WPF WinExe | 分析程序：组合根 + 界面 + 图表 + 本地 JSON（自选/持仓/笔记）。**不联网、不写库。** |
 | **StockPlatform.FactorLab** | net8.0 Exe | 因子评估框架，控制台可独立跑；Analyzer 的【因子法】页引用它的 `Core` 跑同一条管线。**自己开 `SqliteConnection` 只读，不走 Data 层仓储**——全 Solution 唯一一处。 |

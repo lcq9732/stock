@@ -38,13 +38,16 @@ public class MainViewModel : INotifyPropertyChanged
     /// <summary>
     /// 抓 K 线用哪家（2026-08-31 起**不再是界面上的选项**）。
     ///
-    /// 为什么撤掉那个下拉：默认的 "Tencent" 本身就是"腾讯为主、单只拿不到时自动回退新浪"，
-    /// 实际用下来一年没切过；EastMoney 在这台机器上基本连不上。一个从不动的下拉却占着
-    /// 每个页面最显眼的位置，不如收起来。
+    /// 为什么撤掉那个下拉：实际用下来一年没切过。一个从不动的下拉却占着每个页面最显眼的
+    /// 位置，不如收起来。
     ///
-    /// 但**切换能力必须留着**——万一腾讯整体不可用（接口改版、被封），逐只回退新浪会慢到不可用，
-    /// 这时要能整体切到纯新浪。所以改成读 data/fetcher-settings.json 里的 <c>BarSource</c>：
-    /// 填 "Sina" 或 "EastMoney" 就换源，不用改代码重新发布。启动时日志里会说明当前用的是哪个。
+    /// 但**切换能力必须留着**——万一腾讯整体不可用（接口改版、被封），要能整体换一家。
+    /// 所以改成读 data/fetcher-settings.json 里的 <c>BarSource</c>：填 "Sina" 或 "EastMoney"
+    /// 就换源，不用改代码重新发布。启动时日志里会说明当前用的是哪个。
+    ///
+    /// ⚠ 2026-09-10 起 "Tencent" 是**纯腾讯**，不再回退新浪（拆除理由见 App.xaml.cs 那段注释：
+    /// 回退实测只触发过 1 次，却让两种成交量口径混进同一只票的历史）。三次重试都失败的票
+    /// 进【重新拉取失败】名单。
     /// </summary>
     public NamedBarSource SelectedSource { get => _selectedSource; private set => Set(ref _selectedSource, value); }
 
@@ -2175,18 +2178,10 @@ public class MainViewModel : INotifyPropertyChanged
                 return _orchestrator.RunFetchMoneyFlowDetailAsync(
                     progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(2)));
 
-            case FetchActionId.RebuildAdjSeries:
-                // 纯本地计算，一只十年约 50 毫秒；给足余量按 0.2 秒/只估
-                return _orchestrator.RunRebuildAdjSeriesAsync(
-                    progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(0.2)));
-
             case FetchActionId.RepairQfq:
                 // 一只票重抓十年约 4 秒（多页），按剩余时间估本轮能取几只，到点前收尾
                 return _orchestrator.RunRepairQfqAsync(
                     SelectedSource, progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(4)));
-
-            case FetchActionId.FetchIndustry:
-                return _orchestrator.RunFetchIndustryAsync(progress, ct);
 
             case FetchActionId.FetchIndexCons:
                 return _orchestrator.RunFetchIndexConsAsync(progress, ct);
@@ -2293,8 +2288,10 @@ public class MainViewModel : INotifyPropertyChanged
                     ? _orchestrator.RunStepBackfillLhbAsync(progress, ct)
                     : _orchestrator.RunStepLhbDayAsync(ParseOptionalDate(item.DateText), progress, ct);
 
-            case FetchActionId.StepLhbMigrate:
-                return _orchestrator.RunStepLhbMigrateAsync(progress, ct);
+            // 【龙虎榜·换源重抓】的 case 删于 2026-09-10（那一项已退役，实现也删了）。
+            // 枚举值还留着——用户计划文件里存的是动作名，删了会让整份计划读不出来。
+            // 走不到 default 那个"还没实现的动作"：退役项由 FetchPlan.MigrateRetired 清出计划，
+            // Normalize 也不会再把它补回来（只补 FetchTaskCatalog.Active）。
 
             case FetchActionId.StepDayCoverage:
                 return _orchestrator.RunStepDayCoverageCheckAsync(progress, ct);
@@ -2388,7 +2385,16 @@ public class MainViewModel : INotifyPropertyChanged
         progress.Report($"　还有 {remaining} 只待补，开始一轮"
             + (cap.HasValue ? $"（本轮限 {cap} 只——{deadline:HH:mm} 前要收尾）" : "")
             + "…（点【停止】可中断，已抓的不会白费）");
-        return await _orchestrator.RunFetchFinancialsAsync(progress, ct, cap);
+        // 2026-09-10 迁成新式任务（StockPlatform.Tasks/FinancialTask.cs）：本轮上限从原来的
+        // maxCount 参数改走框架的 MaxItems（一批＝一只票，语义正好对上），Deadline 一并交给骨架。
+        if (_taskRegistry == null)
+        {
+            var noTask = new FetchResult();
+            noTask.Errors.Add("未注册【拉取财务报表】任务（taskRegistry 为空）");
+            return noTask;
+        }
+        return await _taskRegistry.RunAsync(FetchActionId.FetchFinancials,
+            new TaskRunArgs(MaxItems: cap, Deadline: deadline), progress, ct);
     }
 
     /// <summary>

@@ -61,6 +61,16 @@ public static class AdjustFactorCalculator
         public int Skipped { get; set; }
         public List<string> Notes { get; } = [];
         public double FinalFactor { get; set; } = 1.0;
+
+        /// <summary>
+        /// **真正让 factor 变过的那些交易日**（2026-09-10 加）。给 <see cref="VerifyReturns"/> 用：
+        /// 它要判"这天收益率跟不复权差很多，是复权在起作用、还是算法坏了"，靠的就是这份名单。
+        ///
+        /// 为什么不能直接拿入参 events 的 ExDate 去比：一是除权日停牌时效应落在**复牌那天**
+        /// （<see cref="BuildAdjusted"/> 把事件挂到"当天或之后的第一个交易日"），二是被价格校验
+        /// 剔掉的假除权**根本没动 factor**，那天本该零偏差。只有这份名单跟 factor 的实际变化一一对应。
+        /// </summary>
+        public HashSet<DateTime> AppliedDays { get; } = [];
     }
 
     /// <summary>
@@ -155,6 +165,7 @@ public static class AdjustFactorCalculator
                     {
                         factor *= prevClose / refPrice;
                         report.Applied++;
+                        report.AppliedDays.Add(bar.PeriodStart.Date);
                     }
                 }
             }
@@ -178,22 +189,55 @@ public static class AdjustFactorCalculator
         return result;
     }
 
+    /// <summary>浮点级偏差的上界：0.1%。因子累乘的误差不可能比这大，比这大就是另一码事。</summary>
+    public const double MinorLimit = 0.001;
+
+    /// <summary>
+    /// 收益率自检的结果——<b>两档分开数</b>（2026-09-10 改）。
+    /// </summary>
+    /// <param name="Compared">一共比了多少天。只报绝对天数看不出严重程度，占比才有意义。</param>
+    /// <param name="MinorDrift">
+    /// 偏差落在 (<c>tolerance</c>, <see cref="MinorLimit"/>) 的天数，也就是 0.1% 以内——
+    /// 复权因子累乘的浮点误差，**不是错**。实测 2026-09-10 全库重算 4020 只票、一千多万个交易日，
+    /// 落这一档 743 天（0.006%，最大偏差 0.1%）。原来的日志把它报成
+    /// 「⚠ 收益率对不上真实值（算法可能被改坏了）」，于是每轮都在喊狼来了。
+    /// </param>
+    /// <param name="RealError">
+    /// <b>原来完全没查的那一侧</b>：偏差 ≥ <see cref="MinorLimit"/>，**而且那天 factor 压根没变过**
+    /// （不在 <see cref="Report.AppliedDays"/> 里）。除权日两边本来就该不一样，那正是复权在起作用；
+    /// 但没除权还差出 0.1% 以上，只能是实现坏了——这才配得上警告。
+    ///
+    /// 老判据 <c>diff &gt; tolerance &amp;&amp; diff &lt; 0.001</c> 把所有大偏差一律当"除权日"放过，
+    /// 结果是：真出算法问题时（偏差远超 0.1%）**一天都报不出来**，只有无害的浮点噪声在响。
+    /// </param>
+    public sealed record ReturnCheck(int Compared, int MinorDrift, int RealError);
+
     /// <summary>
     /// 自检：非除权日，复权序列算出的收益率必须**精确等于**真实收益率。
-    /// 这是这套算法唯一的硬指标（数据源那份就是栽在这上面），所以生成之后顺手验一遍，
-    /// 有偏差说明实现被改坏了。返回不合格的天数。
+    /// 这是这套算法唯一的硬指标（数据源那份就是栽在这上面），所以生成之后顺手验一遍。
     /// </summary>
-    public static int VerifyReturns(IReadOnlyList<Bar> rawBars, IReadOnlyList<Bar> adjBars, double tolerance = 1e-9)
+    /// <param name="appliedDays">
+    /// <see cref="Report.AppliedDays"/>——真正应用了除权的交易日。不传就退化成"任何一天都算除权日"，
+    /// 那 <see cref="ReturnCheck.RealError"/> 永远是 0（等于关掉了反向判据），只有测试才该这么用。
+    /// </param>
+    public static ReturnCheck VerifyReturns(
+        IReadOnlyList<Bar> rawBars, IReadOnlyList<Bar> adjBars,
+        IReadOnlySet<DateTime>? appliedDays = null, double tolerance = 1e-9)
     {
-        int bad = 0;
+        int compared = 0, minor = 0, real = 0;
         for (int i = 1; i < rawBars.Count && i < adjBars.Count; i++)
         {
             if (rawBars[i - 1].Close <= 0 || adjBars[i - 1].Close <= 0) continue;
             double rRaw = rawBars[i].Close / rawBars[i - 1].Close - 1;
             double rAdj = adjBars[i].Close / adjBars[i - 1].Close - 1;
-            // 除权日本来就该不一样（那正是复权在起作用），只查没有除权的日子
-            if (Math.Abs(rAdj - rRaw) > tolerance && Math.Abs(rAdj - rRaw) < 0.001) bad++;
+            compared++;
+
+            double diff = Math.Abs(rAdj - rRaw);
+            if (diff <= tolerance) continue;
+            if (diff < MinorLimit) { minor++; continue; }
+            // 偏差超过 0.1%：那天动过 factor 就是应该的，没动过就是真错
+            if (appliedDays is not null && !appliedDays.Contains(adjBars[i].PeriodStart.Date)) real++;
         }
-        return bad;
+        return new ReturnCheck(compared, minor, real);
     }
 }

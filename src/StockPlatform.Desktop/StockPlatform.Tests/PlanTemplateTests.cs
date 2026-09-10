@@ -166,6 +166,32 @@ public class PlanTemplateTests
         Assert.Empty(plan.CheckSchedule());
     }
 
+    /// <summary>
+    /// **用户已有的计划文件里**那一行退役项，加载时要被清掉——上面那条只证明了默认计划干净，
+    /// 而真实用户的 fetch-plan.json 里，退役前 Normalize 已经把它写进去了。
+    ///
+    /// 拿【龙虎榜·换源重抓】当样本（2026-09-10 退役）：它在用户库里是 `Enabled: false`，
+    /// `MigrateRetired` 对未启用的退役项是"直接丢、不留痕"。清不掉的话，界面上会留一行
+    /// 点了就报"还没实现的动作"的死按钮。
+    ///
+    /// ⚠ 同时也钉住"枚举值不许删"：这条测试直接引用 <see cref="FetchActionId.StepLhbMigrate"/>，
+    /// 谁把它从枚举里删掉，编译就过不去——而删了它，用户计划文件里的 "StepLhbMigrate" 字符串
+    /// 会让 JsonStringEnumConverter 抛异常，整份计划被重建成默认，用户排过的顺序和时刻全丢。
+    /// </summary>
+    [Fact]
+    public void Retired_action_already_in_a_users_plan_gets_removed()
+    {
+        var plan = FetchPlan.CreateDefault();
+        plan.Normalize();
+        plan.GroupOf(PlanGroupKind.OnDemand).Items.Add(
+            new FetchPlanItem { Action = FetchActionId.StepLhbMigrate, Enabled = false });
+
+        plan.MigrateRetired();
+        plan.Normalize();   // 不能再把它补回来（Normalize 只补 Active）
+
+        Assert.DoesNotContain(FetchActionId.StepLhbMigrate, plan.AllItems.Select(i => i.Action));
+    }
+
     /// <summary>目录里每个还在用的动作都得在计划里有一行，否则它在界面上就凭空消失了。</summary>
     [Fact]
     public void Normalize_places_every_active_action_somewhere()

@@ -1,70 +1,45 @@
-using System.Net;
-using System.Text;
-using System.Text.Json;
-using System.Text.RegularExpressions;
-using StockPlatform.Logic.Abstractions;
+﻿using System.Text.RegularExpressions;
 using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Data.Remote;
 
 /// <summary>
-/// 全市场证监会行业分类（2026-08-04 新增，三个来源合并，均已实测）：
-/// - **门类**（19类，覆盖沪深全部 5404 只）：
-///   深交所 `szse.cn/api/report/ShowReport/data?CATALOGID=1110&TABKEY=tab1` 的 `sshymc`（形如 "C 制造业"）；
-///   上交所 `query.sse.com.cn/sseQuery/commonQuery.do?sqlId=COMMON_SSE_CP_GPJCTPZ_GPLB_GP_L`
-///   的 `CSRC_CODE`/`CSRC_CODE_DESC`。
-/// - **大类**（84类，约 3200 只）：新浪 `newFLJK.php?param=industry` 给行业清单（hangye_ZAxx），
-///   再逐个用 `Market_Center.getHQNodeData?node=hangye_xxx` 取成分股。
+/// 全市场证监会行业分类，**两所门类 + 新浪大类**（2026-08-04 新增，2026-09-10 抽出
+/// <see cref="IndustryProviderBase"/> 后只剩新浪那一段）：
+/// - **门类**（19 类，覆盖沪深全部）：来自基类的两所官网接口。
+/// - **大类**（84 类，约覆盖 58%）：新浪 <c>newFLJK.php?param=industry</c> 给行业清单
+///   （hangye_ZAxx），再逐个用 <c>Market_Center.getHQNodeData?node=hangye_xxx</c> 取成分股。
 ///
-/// 为什么要两级：门类里"制造业"一类就占全市场六成，拿它做行业中性化等于没中性化；而大类粒度合适
-/// 却只覆盖 58%。所以两级都存，消费端优先用大类、缺失退回门类（见 <see cref="StockIndustry.Best"/>）。
 /// 为什么不用申万：新浪的申万节点(sw2_xxxxxx)虽然能取成分股，但拿不到"所有申万节点"的清单，
 /// 只能靠枚举代码猜，不可靠。
+///
+/// ⚠⚠ <b>2026-09-10 实机验证发现这条路的大类是【整组错位】的，已停用，不要切回来</b>。
+/// 同日两条路各跑一遍全市场、逐票比对（3482 只共有票），**557 只（16%）大类不同**，
+/// 而且是成批错、错得离谱——抽样一看就知道谁对：
+///
+/// | 本类给的 | 东财给的 | 抽样 | 只数 |
+/// |---|---|---|---|
+/// | 金属制品、机械和设备修理业 | 化学原料和化学制品制造业 | 湖北宜化/新金路/红太阳/安道麦/渝三峡 | 114 |
+/// | 黑色金属冶炼和压延加工业 | 造纸和纸制品业 | ST晨鸣/美利云/凯恩股份/太阳纸业 | 23 |
+/// | 石油加工、炼焦和核燃料加工业 | 家具制造业 | 索菲亚/喜临门/永艺/曲美家居 | 7 |
+/// | 铁路、船舶、航空航天和其他运输设备制造业 | 文教、工美、体育和娱乐用品制造业 | 奥飞娱乐/珠江钢琴/海伦钢琴 | 7 |
+///
+/// 病根应该在 <see cref="FetchSinaMajorAsync"/>：节点清单是拿正则从 newFLJK.php 里
+/// 一行行抠出来的 (node, name) 配对，一旦某个节点的字段错位，整个节点的成分股就会被贴上
+/// **别人的行业名**——而且不会报任何错。<b>这个错从 2026-08-04 建表起就一直在库里。</b>
+///
+/// 所以本类现在的定位是**留档**（东财整体不可用时的最后手段，用之前必须先修错位），
+/// 不再是"随时可切的退路"。默认见 <see cref="ExchangeEastMoneyIndustryProvider"/>，
+/// 比对详情见 doc/industry-source-eastmoney-design.md。
 /// </summary>
-public class ExchangeSinaIndustryProvider : IIndustryProvider
+public class ExchangeSinaIndustryProvider(RateLimiter rateLimiter, HttpClient? httpClient = null)
+    : IndustryProviderBase(rateLimiter, httpClient)
 {
-    private readonly HttpClient _http;
-    private readonly RateLimiter _rateLimiter;
+    public override string SourceName => IndustrySources.Sina;
 
-    public event Action<string>? OnStatus;
-
-    static ExchangeSinaIndustryProvider()
+    /// <summary>新浪只补大类；它没收录的票保持"只有门类"（<see cref="StockIndustry.Best"/> 会退回门类）。</summary>
+    protected override async Task ApplyDetailAsync(Dictionary<string, StockIndustry> map, CancellationToken ct)
     {
-        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance); // 新浪是GBK
-    }
-
-    public ExchangeSinaIndustryProvider(RateLimiter rateLimiter, HttpClient? httpClient = null)
-    {
-        _rateLimiter = rateLimiter;
-        _http = httpClient ?? new HttpClient(CreateHandler());
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-        _http.Timeout = TimeSpan.FromSeconds(30);
-        _rateLimiter.OnStatus += m => OnStatus?.Invoke(m);
-    }
-
-    private static HttpClientHandler CreateHandler()
-    {
-        var proxy = WebRequest.GetSystemWebProxy();
-        proxy.Credentials = CredentialCache.DefaultCredentials;
-        return new HttpClientHandler { Proxy = proxy, UseProxy = true, UseDefaultCredentials = true };
-    }
-
-    public async Task<List<StockIndustry>> GetAllAsync(CancellationToken ct = default)
-    {
-        var map = new Dictionary<string, StockIndustry>(StringComparer.Ordinal);
-
-        // ① 门类（覆盖面最广，先铺底）
-        foreach (var (code, cls, name) in await FetchSzseClassAsync(ct))
-            map[code] = new StockIndustry { Code = code, ClassCode = cls, ClassName = name };
-        OnStatus?.Invoke($"深交所行业门类：{map.Count} 只");
-
-        int before = map.Count;
-        foreach (var (code, cls, name) in await FetchSseClassAsync(ct))
-            map[code] = new StockIndustry { Code = code, ClassCode = cls, ClassName = name };
-        OnStatus?.Invoke($"上交所行业门类：{map.Count - before} 只，累计 {map.Count} 只");
-
-        // ② 大类（粒度更细，补在同一条记录上；新浪没收录的保持只有门类）
         int majorHit = 0;
         foreach (var (code, major) in await FetchSinaMajorAsync(ct))
         {
@@ -72,77 +47,14 @@ public class ExchangeSinaIndustryProvider : IIndustryProvider
             else map[code] = new StockIndustry { Code = code, MajorName = major };
             majorHit++;
         }
-        OnStatus?.Invoke($"新浪证监会大类：{majorHit} 只有细分行业；合计 {map.Count} 只");
-
-        return map.Values.ToList();
-    }
-
-    // ── 深交所：A股列表，sshymc 形如 "C 制造业" ──
-    private async Task<List<(string Code, string Cls, string Name)>> FetchSzseClassAsync(CancellationToken ct)
-    {
-        var result = new List<(string, string, string)>();
-        int pageCount = 1;
-        for (int page = 1; page <= pageCount && page <= 300; page++)
-        {
-            var url = $"https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1110&TABKEY=tab1&PAGENO={page}";
-            var txt = await _rateLimiter.RunAsync(() => GetStringAsync(url, "https://www.szse.cn/", gbk: false, ct), ct);
-            using var doc = JsonDocument.Parse(txt);
-            bool got = false;
-            foreach (var block in doc.RootElement.EnumerateArray())
-            {
-                // ⚠️ 响应里有4个tab块（A股/B股/CDR/A+B股），只有A股那块有数据、pagecount=145，
-                // 后面几块都是 0——必须取**最大值**，否则会被后面的 0 覆盖，循环停在第一页只拿到20条
-                // （2026-08-04 实测踩过这个坑）。顺带兼容 pagecount 是字符串的情况。
-                if (page == 1 && block.TryGetProperty("metadata", out var meta) &&
-                    meta.TryGetProperty("pagecount", out var pc) && TryReadInt(pc, out var n) && n > pageCount)
-                    pageCount = n;
-                if (!block.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) continue;
-                foreach (var item in data.EnumerateArray())
-                {
-                    var code = Str(item, "agdm");
-                    var hy = Str(item, "sshymc");     // "C 制造业"
-                    if (code.Length != 6) continue;
-                    got = true;
-                    var parts = hy.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-                    result.Add((code, parts.Length > 0 ? parts[0] : "", parts.Length > 1 ? parts[1] : hy));
-                }
-            }
-            if (!got) break;
-        }
-        return result;
-    }
-
-    // ── 上交所：CSRC_CODE='J' + CSRC_CODE_DESC='金融业' ──
-    private async Task<List<(string Code, string Cls, string Name)>> FetchSseClassAsync(CancellationToken ct)
-    {
-        var result = new List<(string, string, string)>();
-        const int pageSize = 500;
-        for (int page = 1; page <= 20; page++)
-        {
-            var url = "https://query.sse.com.cn/sseQuery/commonQuery.do?sqlId=COMMON_SSE_CP_GPJCTPZ_GPLB_GP_L" +
-                      $"&isPagination=true&pageHelp.pageSize={pageSize}&pageHelp.pageNo={page}" +
-                      $"&pageHelp.beginPage={page}&pageHelp.cacheSize=1";
-            var txt = await _rateLimiter.RunAsync(() => GetStringAsync(url, "https://www.sse.com.cn/", gbk: false, ct), ct);
-            using var doc = JsonDocument.Parse(txt);
-            if (!doc.RootElement.TryGetProperty("result", out var arr) || arr.ValueKind != JsonValueKind.Array) break;
-            int n = 0;
-            foreach (var item in arr.EnumerateArray())
-            {
-                var code = Str(item, "A_STOCK_CODE");
-                if (code.Length != 6) continue;
-                result.Add((code, Str(item, "CSRC_CODE"), Str(item, "CSRC_CODE_DESC")));
-                n++;
-            }
-            if (n < pageSize) break;
-        }
-        return result;
+        Status($"新浪证监会大类：{majorHit} 只有细分行业；合计 {map.Count} 只");
     }
 
     // ── 新浪：先取84个大类清单，再逐个取成分股 ──
     private async Task<List<(string Code, string Major)>> FetchSinaMajorAsync(CancellationToken ct)
     {
         var result = new List<(string, string)>();
-        var listTxt = await _rateLimiter.RunAsync(
+        var listTxt = await Limiter.RunAsync(
             () => GetStringAsync("https://vip.stock.finance.sina.com.cn/q/view/newFLJK.php?param=industry",
                                  "https://finance.sina.com.cn/", gbk: true, ct), ct);
         // 形如 "hangye_ZA01":"hangye_ZA01,农业,15,..."
@@ -150,7 +62,7 @@ public class ExchangeSinaIndustryProvider : IIndustryProvider
             .Select(m => (Node: m.Groups[1].Value, Name: m.Groups[2].Value, Count: int.Parse(m.Groups[3].Value)))
             .Where(x => x.Count > 0)
             .ToList();
-        OnStatus?.Invoke($"证监会大类行业 {nodes.Count} 个，开始逐个取成分股...");
+        Status($"证监会大类行业 {nodes.Count} 个，开始逐个取成分股...");
 
         int done = 0;
         foreach (var (node, name, count) in nodes)
@@ -162,7 +74,7 @@ public class ExchangeSinaIndustryProvider : IIndustryProvider
                 string txt;
                 try
                 {
-                    txt = await _rateLimiter.RunAsync(() => GetStringAsync(url, "https://finance.sina.com.cn/", gbk: false, ct), ct);
+                    txt = await Limiter.RunAsync(() => GetStringAsync(url, "https://finance.sina.com.cn/", gbk: false, ct), ct);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch { break; } // 单个行业取不到不影响整体，它会退回门类
@@ -170,8 +82,8 @@ public class ExchangeSinaIndustryProvider : IIndustryProvider
                 List<string> codes;
                 try
                 {
-                    using var doc = JsonDocument.Parse(txt);
-                    if (doc.RootElement.ValueKind != JsonValueKind.Array) break;
+                    using var doc = System.Text.Json.JsonDocument.Parse(txt);
+                    if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) break;
                     codes = doc.RootElement.EnumerateArray().Select(x => Str(x, "code")).Where(x => x.Length == 6).ToList();
                 }
                 catch { break; }
@@ -179,40 +91,8 @@ public class ExchangeSinaIndustryProvider : IIndustryProvider
                 foreach (var c in codes) result.Add((c, name));
                 if (codes.Count < 80) break;
             }
-            if (++done % 20 == 0) OnStatus?.Invoke($"证监会大类进度 {done}/{nodes.Count}");
+            if (++done % 20 == 0) Status($"证监会大类进度 {done}/{nodes.Count}");
         }
         return result;
-    }
-
-    private async Task<string> GetStringAsync(string url, string referer, bool gbk, CancellationToken ct)
-    {
-        try
-        {
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.Referrer = new Uri(referer);
-            var resp = await _http.SendAsync(req, ct);
-            if (resp.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests)
-                throw new RateLimitedException($"行业接口返回 {(int)resp.StatusCode}，疑似限流");
-            resp.EnsureSuccessStatusCode();
-            var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
-            if (bytes.Length == 0) throw new RateLimitedException("行业接口返回空响应");
-            return gbk ? Encoding.GetEncoding("GBK").GetString(bytes) : Encoding.UTF8.GetString(bytes);
-        }
-        catch (Exception ex) when ((ex is HttpRequestException or TaskCanceledException) && !ct.IsCancellationRequested)
-        {
-            throw new RateLimitedException($"无法连接行业接口：{ex.InnerException?.Message ?? ex.Message}", ex);
-        }
-    }
-
-    private static string Str(JsonElement e, string key) =>
-        e.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-
-    /// <summary>JSON 里数字有时是 number、有时是 string（深交所的 pagecount 就是字符串），两种都读。</summary>
-    private static bool TryReadInt(JsonElement e, out int value)
-    {
-        if (e.ValueKind == JsonValueKind.Number) return e.TryGetInt32(out value);
-        if (e.ValueKind == JsonValueKind.String) return int.TryParse(e.GetString(), out value);
-        value = 0;
-        return false;
     }
 }

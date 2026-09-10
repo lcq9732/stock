@@ -79,9 +79,18 @@ public sealed class SqliteBarValueAuditor
     /// 1997 年的前复权价是 −8.17。那是已知的口径失真、不是脏数据，拿它报警的话一轮体检报出
     /// 5 万行（244 只票，判据上限都被打满），把真问题全淹了。只有原始成交价必须恒 &gt; 0。</para>
     ///
-    /// <para><b>V6 量额比率</b>：<c>amount / (volume × close)</c> 正常≈100（volume 单位是手）
-    /// 或≈1（科创板 688/689 按股返回，见 memory project_bar_volume_unit_bug）。两个区间都放过，
-    /// 落在外面的就是量或额本身不对——603999 在 2026-09-08 的 amount 少了约 2/3，ratio≈33。
+    /// <para><b>V6 量额比率</b>：<c>amount / (volume × close)</c> 必须 ≈100——volume 的单位是
+    /// **手**，全库唯一口径。落在外面的就是量或额本身不对：603999 在 2026-09-08 的 amount
+    /// 少了约 2/3，ratio≈33。
+    ///
+    /// ⚠ <b>2026-09-10 收紧：≈1 不再放过。</b> 原来这条判据把 ≈1 也当正常，因为当时科创板
+    /// 688/689 的 volume 确实是按**股**存的（腾讯给股，而 fetcher 原样入库）。那是个真 bug，
+    /// 不是该被容忍的第二种口径——它让含科创板的板块指数成交量常年虚高 100 倍。
+    /// 现在解析层统一归一化成手（<c>Logic/Services/BarVolumeUnit.cs</c>），历史由任务
+    /// 【统一成交量单位】<c>StepFixVolumeUnit</c> 修正，所以这里必须收紧：不收的话，
+    /// 以后哪个数据源再掺进股口径，照样没人发现。
+    /// <b>体检报出一批 ratio≈1 的行时，先跑【统一成交量单位】</b>（纯本地、幂等，几分钟），
+    /// 而不是去查数据源。
     ///
     /// ⚠ <b>只对「个股 × 不复权」用</b>（2026-09-09 生产实测两次收窄）：
     /// · <b>只对个股</b>——指数和板块指数的 <c>close</c> 是**点位**、不是价格，跟成交额压根没有
@@ -140,7 +149,6 @@ public sealed class SqliteBarValueAuditor
                              AND close IS NOT NULL AND close > 0
                              AND amount IS NOT NULL AND amount > 0
                              AND NOT (amount / (volume * close) BETWEEN 80 AND 125)
-                             AND NOT (amount / (volume * close) BETWEEN 0.8 AND 1.25)
                         THEN 1 ELSE 0 END AS ratio
             FROM Bar
             WHERE granularity IN ({grans})
@@ -158,8 +166,7 @@ public sealed class SqliteBarValueAuditor
                      AND code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'
                      AND volume IS NOT NULL AND volume > 0 AND close IS NOT NULL AND close > 0
                      AND amount IS NOT NULL AND amount > 0
-                     AND NOT (amount / (volume * close) BETWEEN 80 AND 125)
-                     AND NOT (amount / (volume * close) BETWEEN 0.8 AND 1.25))
+                     AND NOT (amount / (volume * close) BETWEEN 80 AND 125))
               );
             """;
         for (int i = 0; i < DailyGranularities.Length; i++)
