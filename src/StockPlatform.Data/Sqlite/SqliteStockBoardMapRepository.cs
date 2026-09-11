@@ -129,6 +129,18 @@ public class SqliteStockBoardMapRepository : IStockBoardMapRepository
         return map;
     }
 
+    public List<(string Code, string BoardCode)> GetAllIndustryLinks()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, board_code FROM StockIndustryEm;";
+        var list = new List<(string, string)>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            list.Add((r.GetString(0), r.GetString(1)));
+        return list;
+    }
+
     public Dictionary<string, (string? Parent, int Level)> GetBoardParents()
     {
         var map = new Dictionary<string, (string?, int)>(StringComparer.OrdinalIgnoreCase);

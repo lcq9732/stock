@@ -734,6 +734,67 @@
                 </Grid>
             </TabItem>
 
+            <!-- 观察项（2026-09-11）：L0 兜底 / L1 派生 / L2 手写 三层，见 doc/watch-item-design.md。
+                 产出是"触发"，清单只是让人看见现在在盯什么、为什么盯。
+                 手写项在这里只读——由人直接编辑 watch/items.json，不给随手加的输入框是有意的
+                 （观察项要过"可判定/能改变动作/有归属层"三条准入，做成输入框就成许愿池了）。 -->
+            <TabItem Header="观察项">
+                <Grid DataContext="{Binding WatchTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="0,0,0,8">
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="重算并求值" Command="{Binding RunCommand}" Width="100"
+                                    ToolTip="重算派生项（条件没了的自动摘掉）→ 逐条求值 → 记录新触发。&#10;手写项一行都不会动。" />
+                            <Button Content="刷新" Command="{Binding RefreshCommand}" Width="70" Margin="8,0,0,0"
+                                    ToolTip="只读当前状态，不重算" />
+                            <TextBlock Text="{Binding Status}" VerticalAlignment="Center" Margin="16,0,0,0"
+                                       Foreground="{DynamicResource Theme.Accent}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding Summary}" Margin="0,6,0,0" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                    </StackPanel>
+
+                    <DataGrid x:Name="WatchItemsGrid" Grid.Row="1" ItemsSource="{Binding Items}" AutoGenerateColumns="False"
+                              IsReadOnly="True" CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="{DynamicResource Theme.Grid.Row.Alternate}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="70" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="100" />
+                            <DataGridTextColumn Header="层" Binding="{Binding Layer}" Width="45"
+                                                 />
+                            <DataGridTextColumn Header="来源" Binding="{Binding Origin}" Width="55" />
+                            <DataGridTextColumn Header="仓位" Binding="{Binding Position}" Width="65" />
+                            <DataGridTextColumn Header="档" Binding="{Binding Priority}" Width="35" />
+                            <DataGridTextColumn Header="取值器" Binding="{Binding Kind}" Width="130" />
+                            <DataGridTextColumn Header="参数" Binding="{Binding Expr}" Width="120" />
+                            <DataGridTextColumn Header="为什么盯" Binding="{Binding Reason}" Width="*" />
+                            <DataGridTextColumn Header="论点" Binding="{Binding Thesis}" Width="200" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <TextBlock Grid.Row="2" Text="触发记录（只增不删——它是&quot;当时确实报过&quot;的证据）"
+                               Margin="0,10,0,4" FontWeight="SemiBold" />
+
+                    <DataGrid x:Name="WatchHitsGrid" Grid.Row="3" ItemsSource="{Binding Hits}" AutoGenerateColumns="False"
+                              IsReadOnly="True" CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="{DynamicResource Theme.Grid.Row.Alternate}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="交易日" Binding="{Binding Date}" Width="90" />
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="70" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="100" />
+                            <DataGridTextColumn Header="档" Binding="{Binding Priority}" Width="35" />
+                            <DataGridTextColumn Header="发生了什么" Binding="{Binding Message}" Width="*" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+
             <TabItem Header="自选股">
                 <Grid DataContext="{Binding WatchlistTab}" Margin="0,10,0,0">
                     <Grid.RowDefinitions>

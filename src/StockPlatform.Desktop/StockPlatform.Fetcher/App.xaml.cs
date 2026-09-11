@@ -413,6 +413,21 @@ public partial class App : Application
             () => new CustomerSupplierTask(custSuppRepository, companyProfileRepository, custSuppProvider));
         taskRegistry.Register(FetchActionId.StepIndustryIndicator,
             () => new IndustryIndicatorTask(indicatorRepository, indicatorProvider));
+        // 【观察指标映射】2026-09-11，见 doc/watch-item-design.md M1。纯本地：三个输入全在
+        // 本地库和本地配置里，不发请求。⚠ 写的是 StockWatchIndicator，不是东财那张
+        // StockIndustryIndicator（那张是全表快照替换，补进去会被静默清空）。
+        // 【回购公告进展】2026-09-11，见 doc/watch-item-design.md M2。
+        // ⚠ 复用上面【中标/订单公告】那两个 provider 实例（announcementSearchProvider /
+        // announcementDetailFetcher），**不要各造一个**：它们各自带着限流器，
+        // 两个实例等于两份配额，会把巨潮的反爬撞出来。
+        taskRegistry.Register(FetchActionId.StepPlanWatch,
+            () => new PlanWatchTask(
+                new SqlitePlanAnnouncementRepository(paths.CurrentDb),
+                announcementSearchProvider, announcementDetailFetcher));
+        taskRegistry.Register(FetchActionId.StepWatchIndicator,
+            () => new WatchIndicatorRuleTask(
+                new SqliteWatchIndicatorRepository(paths.CurrentDb),
+                boardMapRepository, indicatorRepository, paths));
         taskRegistry.Register(FetchActionId.StepFixVolumeUnit,
             () => new BarVolumeUnitFixTask(new SqliteBarVolumeUnitFixer(paths.CurrentDb)));
         // 【拉取行业分类】2026-09-10 从 orchestrator 迁过来（判据见

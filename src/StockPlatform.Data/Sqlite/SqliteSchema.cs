@@ -779,6 +779,73 @@ public static class SqliteSchema
             );
             CREATE INDEX IF NOT EXISTS ix_stockindicator_ind ON StockIndustryIndicator(indicator_id);
 
+            -- ══ 我们自己认定的「这票该看这指标」（2026-09-11）══
+            -- 见 doc/watch-item-design.md。**跟上面那张 StockIndustryIndicator 是两张表，
+            -- 不是一张表加个标记** —— 分开的理由是「所有权」，不是数据质量：
+            --   · 上面那张只有一个主人（东财目录），所以 ReplaceLinks 是 DELETE FROM 全表替换；
+            --   · 这张有两个主人（规则 origin='rule'、人 origin='manual'），
+            --     所以 ReplaceRuleLinks 只删 origin='rule' 那一半。
+            -- 往东财那张表里补映射，下一轮【行业景气指标】跑完就被静默清空，而界面上只表现为
+            -- 「这只票恰好没有指标」，排查时根本想不到是这儿 —— 这张表就是为了绕开那个坑。
+            --
+            -- 为什么需要它：东财的自动映射只给**上游资源股**挂原材料价格。实测锂电池板块
+            -- (BK1303) 33 只成分股里只有 1 只有映射，碳酸锂指数 EMI00662659 只挂给 6 只上游锂矿，
+            -- 宁德时代一个指标都没挂 —— 而锂价正是它的核心成本变量。
+            -- 「中游对上游价格的敏感度」是判断，自动映射给不出来。
+            CREATE TABLE IF NOT EXISTS StockWatchIndicator (
+                code         TEXT NOT NULL,   -- 6 位码
+                indicator_id TEXT NOT NULL,   -- → IndustryIndicator.indicator_id
+                weight       INTEGER,         -- 展示序，越小越相关（跟东财 indicator_order 同语义）
+                origin       TEXT NOT NULL,   -- 'rule'=规则派生，每轮重建；'manual'=人手挂，任何规则不许碰
+                reason       TEXT,            -- 为什么挂它（给人读）
+                created_at   TEXT,
+                PRIMARY KEY (code, indicator_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_watchindicator_ind ON StockWatchIndicator(indicator_id);
+            CREATE INDEX IF NOT EXISTS ix_watchindicator_origin ON StockWatchIndicator(origin);
+
+            -- ══ 方案类公告进展：回购/定增/重组（2026-09-11）══
+            -- 见 doc/watch-item-design.md。**这张表存在的理由不是"记录回购"**——想知道买没买
+            -- 打开公告看一眼就行，不用建表。它存在是因为 L1 要**自动摘除**观察项：
+            -- 方案的生命周期（方案→首次回购→进展→达标→完毕）不落成结构化状态，
+            -- 程序就永远不知道回购已经结束、该把那条待办撤下来，而这个动作人一定会忘。
+            --
+            -- ⚠ **只增不删**：这是事实表。方案结束了要摘的是观察项，不是这里的行——
+            -- 删了就没法回溯「当初方案说的上限是 573」、也没法对账「进展公告拖了几个月」。
+            --
+            -- 数据来源：巨潮全市场标题检索关键词「回购」（发现）+ 东财公告正文接口（取纯文本，
+            -- 绕开 PDF 解析）。两条通道都是 OrderWinAnnouncement 那条管线在用的，已验证。
+            CREATE TABLE IF NOT EXISTS PlanAnnouncement (
+                code           TEXT NOT NULL,   -- 6 位码
+                kind           TEXT NOT NULL,   -- 回购/定增/重组
+                announce_date  TEXT NOT NULL,   -- 公告日
+                -- 方案/首次回购/进展/达标/完毕/终止。**必须独立成列**：
+                -- 「方案」的金额上限和「进展」的累计金额是两个量纲，混一列对不上账。
+                stage          TEXT NOT NULL,
+                name           TEXT,
+                -- 数据截止的交易日，**不是公告日**：月度进展说的是「截至上月末」。
+                -- 见 feedback_trading_date_not_write_date。
+                as_of_date     TEXT,
+                -- ⚠ 0 和 NULL 不是一回事：0＝公告明说「尚未实施」，NULL＝没抽到。
+                -- 混了的话「抽取坏了」会显示成「公司没买」——而那正是这一项要盯的信号。
+                cum_shares     REAL,
+                cum_amount     REAL,            -- 元，不含交易费用
+                price_low      REAL,
+                price_high     REAL,
+                pct_of_capital REAL,            -- 累计已回购占总股本 %
+                plan_cap_price REAL,            -- 只有 stage=方案 才有：回购价格上限（元/股）
+                plan_amount_low  REAL,          -- 只有 stage=方案 才有：资金下限（元）
+                plan_amount_high REAL,          -- 只有 stage=方案 才有：资金上限（元）
+                title          TEXT,
+                art_code       TEXT,
+                source_url     TEXT,
+                fetched_at     TEXT,
+                PRIMARY KEY (code, kind, announce_date, stage)
+            );
+            CREATE INDEX IF NOT EXISTS ix_planann_code ON PlanAnnouncement(code, kind);
+            CREATE INDEX IF NOT EXISTS ix_planann_date ON PlanAnnouncement(announce_date);
+            CREATE INDEX IF NOT EXISTS ix_planann_stage ON PlanAnnouncement(kind, stage);
+
             -- ══ 前五大客户/供应商（2026-09-07）══
             -- 找"产业链上/中/下游"标签一路找空之后能拿到的最硬的产业链数据：不是别人的分类判断，
             -- 是年报里的交易金额 —— 供应商＝上游，客户＝下游。
@@ -824,6 +891,45 @@ public static class SqliteSchema
             --
             -- 一般原则：任务的水位线粒度必须**细于**骨架的截断粒度。
             -- 这里截断粒度是批（2000 行），所以水位线不能是"年（有/无）"，得是"这一年落了多少行"。
+            -- ── 年报里披露的子公司名单（2026-09-11）─────────────────────────────
+            -- 来源是「合并财务报表范围 / 在子公司中的权益」那张表，解析本地已下载的年报 PDF。
+            --
+            -- 干什么用：给交易对手做**实体消歧**。年报里的客户写的是"中国建筑第六工程局有限公司"，
+            -- 本地股票池里只有母公司"中国建筑 601668"，直接对不上。实测 10.9 万个未还原的对手名里
+            -- 有相当一部分是上市公司的子公司。
+            --
+            -- ⚠ 归并是**假设**不是事实：子公司跟你做生意不等于母公司跟你做生意。所以落到
+            --   StockCustomerSupplier.match_type 上单独标 "subsidiary"，用的时候能跟
+            --   exact/normalized 区分开。
+            CREATE TABLE IF NOT EXISTS CompanySubsidiary (
+                code        TEXT NOT NULL,   -- 母公司 A 股代码
+                report_date TEXT NOT NULL,   -- 这份年报的报告期
+                name        TEXT NOT NULL,   -- 子公司全称（已去掉排版造成的换行和空格）
+                -- 持股比例（%）。**经常是 NULL**——各家表格的列名列序都不一样，有的分直接/间接
+                -- 两列、有的合成一列、有的不在这张表里。取不到就留空，**不拿它做过滤**：
+                -- 能进合并报表范围本身就意味着控制，再加一道取不准的过滤只会误杀正确名单。
+                hold_pct    REAL,
+                source_page INTEGER,         -- 在 PDF 第几页找到的，出问题要能翻回原文核对
+                PRIMARY KEY (code, report_date, name)
+            );
+
+            -- 解析水位线。**粒度是"一份 PDF"**，跟骨架的处理单元一致。
+            --
+            -- parser_version：解析规则改了就 +1（见 SubsidiaryParser.ParserVersion），任务据此
+            -- 重新解析已经处理过的 PDF——跟财务报表"科目集版本 v4→v5"同一套路。没有它的话，
+            -- 规则改好了也只对新下载的 PDF 生效，老的永远停在旧结果上。
+            --
+            -- found_count = 0 是**有意义的记录**，不是"没处理过"：那说明这份 PDF 的版式认不出来
+            -- （实测 32 家里有 3 家）。记下来才能统计可用率，也才不会每轮白重试。
+            CREATE TABLE IF NOT EXISTS SubsidiaryParseState (
+                code           TEXT NOT NULL,
+                report_date    TEXT NOT NULL,
+                parser_version INTEGER NOT NULL,
+                found_count    INTEGER NOT NULL,
+                parsed_at      TEXT,
+                PRIMARY KEY (code, report_date)
+            );
+
             CREATE TABLE IF NOT EXISTS CustSuppYearState (
                 year       INTEGER PRIMARY KEY,
                 reported   INTEGER,   -- 接口自报的总行数（**含非 A 股主体**）

@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PDF 工具层（2026-09-11 从 StockPlatform.Data 拆出来）。
+
+    ════ 准入规则 ════
+    只跟 PDF 打交道，**不认识"股票 / 代码 / 报告期 / 指标"任何一个概念**。
+    按这条：BankReportParser 进不来（它认识"不良贷款率"），将来的 SubsidiaryParser 同理——
+    那些是业务解析，留在 Data。这里只回答一个问题："这份 PDF 的第几页有哪些文字、在哪个位置"。
+
+    ════ 零 ProjectReference ════
+    不引用 Logic、不引用 Data。这是"纯工具"的检验标准，不是审美：一旦引了 Logic，
+    就会有人把 BankRegulatoryMetric 之类的业务模型渗进来，边界当天就破。
+    （拆的时候确认过可行——原来的两个 extractor 返回的是匿名元组 (int Page, string Text)，
+    PdfLine 是 BankReportParser 的私有 record struct，没有一个类型来自 Logic。）
+
+    ════ 谁在用 ════
+    Data → BankReportParser（银行/券商/保险监管指标）。后续还会有年报子公司名单的解析。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>StockPlatform.Pdf</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 选 PdfPig：MIT 协议、纯托管无原生依赖（单文件发布不会出幺蛾子）、能按坐标取词，
+         正好用来把表格还原成行。见 PdfPigLineSource。 -->
+    <PackageReference Include="PdfPig" Version="0.1.2" />
+  </ItemGroup>
+
+</Project>

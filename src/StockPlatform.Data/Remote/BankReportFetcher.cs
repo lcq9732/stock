@@ -29,6 +29,9 @@ public class BankReportFetcher
     private readonly RateLimiter _fileLimiter;
     private readonly string _cacheDir;
 
+    /// <summary>解析器。默认用共享装配；测试可以注入只带某一条 source 的组合。</summary>
+    private readonly BankReportParser _parser;
+
     public event Action<string>? OnStatus
     {
         add { _pageLimiter.OnStatus += value; _fileLimiter.OnStatus += value; }
@@ -52,8 +55,9 @@ public class BankReportFetcher
     /// </summary>
     /// <param name="cacheDir">PDF 缓存根目录（<c>data/reports</c>）。</param>
     public BankReportFetcher(RateLimiter pageLimiter, RateLimiter fileLimiter, string cacheDir,
-        HttpClient? httpClient = null)
+        HttpClient? httpClient = null, BankReportParser? parser = null)
     {
+        _parser = parser ?? BankReportParser.Default;
         _pageLimiter = pageLimiter;
         _fileLimiter = fileLimiter;
         _cacheDir = cacheDir;
@@ -282,7 +286,7 @@ public class BankReportFetcher
             }
 
             // 传进度进去：数字被转曲的 PDF 会走 OCR，一页 4~5 秒，不报会像卡死。
-            metrics = BankReportParser.Parse(pdfPath, r.Code, r.ReportDate, kind, progress, ct);
+            metrics = _parser.Parse(pdfPath, r.Code, r.ReportDate, kind, progress, ct);
             if (metrics.Count == 0)
                 return (State(r, "no_match", 0, "PDF 有文本但没匹配到任何指标（版式可能变了）", pdfUrl, pdfPath), metrics);
 

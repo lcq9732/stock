@@ -3858,7 +3858,7 @@ public partial class FetchOrchestrator
             {
                 if (!DateTime.TryParse(Path.GetFileNameWithoutExtension(pdf), out var d)) continue;
 
-                if (!BankReportParser.LooksLikeReport(pdf))
+                if (!BankReportParser.Default.LooksLikeReport(pdf))
                 {
                     progress?.Report($"  {code} {d:yyyy-MM-dd} 下载到的不是报告正文"
                                    + "（多半是问询函/专项报告），已删除，稍后重新下载");
@@ -3886,7 +3886,7 @@ public partial class FetchOrchestrator
                     bool fullyApproved = expected.Length > 0 && expected.All(k =>
                         existing.Any(m => m.ReportDate == d && m.MetricKey == k
                                           && Logic.Models.MetricSources.HumanApproved.Contains(m.Source)));
-                    var ms = BankReportParser.Parse(pdf, code, d, kind,
+                    var ms = BankReportParser.Default.Parse(pdf, code, d, kind,
                         s => progress?.Report(s), ct, allowOcr: !fullyApproved);
                     if (ms.Count == 0) continue;
                     lock (_dbLock)

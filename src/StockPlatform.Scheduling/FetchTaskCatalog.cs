@@ -48,6 +48,8 @@ public enum FetchActionId
     StepBoards,
     StepBoardList,
     StepIndustryIndicator,
+    StepWatchIndicator,
+    StepPlanWatch,
     StepCompanyProfile,
     StepCustomerSupplier,
     StepBoardMembers,
@@ -713,6 +715,35 @@ public static class FetchTaskCatalog
             + "**走 datacenter，不碰 push2**，无需人工过验证码。",
             Sources: [DataSourceId.EmDataCenter]),
 
+        new(FetchActionId.StepPlanWatch, "回购公告进展", "巨潮检索 + 东财正文", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(3), "每日",
+            "回答一个问题：**这家公司的回购到底开始买了没有。**\n"
+            + "法定披露里这个信号最快就是 T+1——首次回购股份的事实发生后**次一交易日**必须公告；"
+            + "回购期间每月前三个交易日披露截至上月末进展；累计每增加总股本 1% 再公告一次。\n"
+            + "⚠ 回购走集中竞价，盘中混在主力资金里，**资金流/大宗/席位都识别不出来**——"
+            + "没有比公告更快的合法渠道，这一项就是天花板。\n"
+            + "抓回来的 stage（方案/首次回购/进展/达标/完毕/终止）是【观察项】自动摘除的依据："
+            + "方案实施完毕后该把待办撤下来，而这个动作人一定会忘。\n"
+            + "复用【中标/订单公告】那两条已验证的通道：巨潮全市场标题检索「回购」+ 东财正文（免解 PDF）。\n"
+            + "回看 14 天（首轮回看 400 天，把还在进行的方案接上），重复扫同一天安全（主键去重）。\n"
+            + "⚠ 库里 `cum_amount=0` 是公告明说「尚未实施」，`NULL` 是没抽到——两者不是一回事。",
+            Sources: [DataSourceId.EmDataCenter]),
+
+        new(FetchActionId.StepWatchIndicator, "观察指标映射", "本地计算", QuotaGroup.Local,
+            TimeSpan.FromSeconds(5), "每日",
+            "把 `data/watch-indicator-rules.json` 里「**板块 → 该盯的行业指标**」的规则，"
+            + "铺成「个股 → 行业指标」的映射。**纯本地查库，一个请求都不发。**\n"
+            + "**为什么需要它**：东财自带的映射只给**上游资源股**挂原材料价格——锂电池板块 33 只成分股里"
+            + "只有 1 只有映射，碳酸锂指数只挂给 6 只上游锂矿，**宁德时代一个指标都没挂**，"
+            + "而锂价正是它的核心成本变量。「中游对上游价格的敏感度」是判断不是结构，自动映射给不出来。\n"
+            + "**写在单独一张 StockWatchIndicator 表里**，东财那张原样不动："
+            + "那张是 DELETE FROM 全表快照替换，补进去下一轮【行业景气指标】跑完就被静默清空。\n"
+            + "⚠ 每轮只重建 `origin='rule'` 的行，**人手挂的（`origin='manual'`）一行不碰**。\n"
+            + "**默认启用锂电池那两条**（BK1303/BK1033 → 碳酸锂指数），开箱产出约 107 条映射；\n"
+            + "不想要就把配置里那行注释掉重跑——规则派生的行每轮整组重建，撤掉规则它自然就没了。\n"
+            + "指标码/板块码写错会在日志里逐条告警，不会静默失效。",
+            Sources: []),
+
         new(FetchActionId.StepCompanyProfile, "公司档案", "东财 datacenter", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(2), "季度",
             "5634 家 A 股的公司档案：全称、省份、成立/上市日期、注册资本、员工数、实控人、董监高、中介机构、主营业务，以及公司简介/沿革/经营范围/经营评述四段长文本。\n"
@@ -1200,6 +1231,15 @@ public static class FetchTaskCatalog
         // 增量很轻——每个指标只拉水位线之后的那几行。
         FetchActionId.StepIndustryIndicator => PlanGroupKind.Daily,
 
+        // 【观察指标映射】（2026-09-11）跟着【行业景气指标】走日更。它本身变得很慢（规则改了才变），
+        // 但重算是纯本地、毫秒级、幂等，每天白跑一次的成本可以忽略；而放到季度组的话，
+        // 改完规则要等下一个季度才生效，或者每次都得手工点一下——那正是这套东西想省掉的事。
+        FetchActionId.StepWatchIndicator => PlanGroupKind.Daily,
+
+        // 【回购公告进展】（2026-09-11）必须日更：首次回购是**次一交易日**披露的，
+        // 晚一天就失去意义——那正是这一项唯一要等的信号。
+        FetchActionId.StepPlanWatch => PlanGroupKind.Daily,
+
         // ── 按周期更新、晚几天没关系的 ──
         FetchActionId.FetchIndustry
             // 【个股行业与题材】（2026-09-03）跟证监会分类同组同频：行业归属变动很慢，季度一轮够了。
@@ -1376,6 +1416,13 @@ public static class FetchTaskCatalog
         // 为什么不排最末：最末那个位置是留给"首轮要跑几小时"的龙虎榜席位的。
         // 这一项首轮也就 120 个请求、4 分钟，排它后面等于白等几小时。
         FetchActionId.StepIndustryIndicator,
+
+        // 【观察指标映射】**必须排在【行业景气指标】之后**（2026-09-11）：它要拿那一项写的
+        // IndustryIndicator 指标字典去校验规则里的指标码。字典是空的时候这一项会整项跳过
+        // （保留上一轮的映射，不会清空），但那样等于白跑一天。
+        FetchActionId.StepPlanWatch,
+
+        FetchActionId.StepWatchIndicator,
 
         // 【龙虎榜席位】排在**整组最末**（2026-09-03）。
         //

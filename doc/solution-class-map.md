@@ -19,6 +19,7 @@ flowchart TD
   D["StockPlatform.Data<br/>数据源 · SQLite 仓储 · 抓取编排"]
   S["StockPlatform.Scheduling<br/>计划 · 调度 · 准入 · 任务契约"]
   T["StockPlatform.Tasks<br/>新形状的具体任务"]
+  P["StockPlatform.Pdf<br/>PDF 提取工具层"]
   F["StockPlatform.Fetcher<br/>WPF · 抓取程序"]
   A["StockPlatform.Analyzer<br/>WPF · 分析程序"]
   X["StockPlatform.FactorLab<br/>Exe · 因子评估框架"]
@@ -27,6 +28,7 @@ flowchart TD
   DB[("data/local/current.sqlite")]
 
   D --> L
+  D --> P
   S --> D
   T --> D
   T --> S
@@ -51,6 +53,7 @@ flowchart TD
 |---|---|---|
 | **StockPlatform.Logic** | net8.0 类库 | **领域层，零依赖零 IO。** `Models/` 领域模型；`Abstractions/` 端口接口（IXxxFetcher · IXxxProvider · IXxxRepository，约 40 个）；`Services/` 纯算法（八种选股引擎、技术指标、复权、交易日历、市场分类）。两个程序都用，但子集几乎不重叠。 |
 | **StockPlatform.Data** | net8.0 类库 | **适配层，Logic 那些接口的全部实现。** `Remote/` 数据源 HTTP 实现 + 限流；`Sqlite/` 仓储 + schema + 维护；`Local/` 读东财终端落盘文件；`Orchestration/` 抓取编排与路径/清单/设置。 |
+| **StockPlatform.Pdf** | net8.0 类库 | **纯 PDF 工具层**（2026-09-11 从 Data 拆出）。PdfPig 取词+坐标聚类、pdftotext 兜底、Tesseract OCR 兜底，外加一个排兜底顺序的组合器。**准入规则：不认识"股票/代码/报告期/指标"任何一个概念**——所以 `BankReportParser` 不在这里，它留在 Data。零 ProjectReference，只依赖 PdfPig 包。 |
 | **StockPlatform.Scheduling** | net8.0 类库 | **"什么时候跑什么"。** 计划模型与持久化、串行执行引擎、数据源占用与准入裁决、静默看门狗、新式任务契约与注册表。只有 Fetcher 用。 |
 | **StockPlatform.Tasks** | net8.0 类库 | **新形状任务的落地处**（2026-09-08 起）。新任务一律在这继承 `FetchTaskBase` 写成独立类；**老任务按"迁移成本+维护成本"判断是否迁过来**（2026-09-10 起，原"老任务不迁"作废）。 |
 | **StockPlatform.Fetcher** | WPF WinExe | 抓取程序：组合根 + 界面。**本身不含抓取逻辑**——造对象、按按钮、显示日志和计划表。 |
@@ -246,9 +249,48 @@ PlanRunner --> FetchPlan : 挑今天该跑的
 PlanRunner --> FetchPlanStore : 回写结果
 FetchTaskBase ..|> IFetchTask
 TradingCalendarTask --|> FetchTaskBase
+PlanWatchTask --|> FetchTaskBase
+WatchIndicatorRuleTask --|> FetchTaskBase
 FetchTaskRegistry --> IFetchTask : 按动作号造
 IFetchTask ..> TaskRunResult : 返回
 ```
+
+### 图 F2b · 观察项那条线（2026-09-11）
+
+设计见 [观察项设计](watch-item-design.md)。分界线是**这条知识属于标的还是属于我**：
+左边（Fetcher / `current.sqlite`）是关于标的的，右边（Analyzer）是关于我的仓位和判断。
+
+```mermaid
+flowchart LR
+  subgraph F["Fetcher 侧 · 关于标的"]
+    PW["PlanWatchTask<br/>巨潮搜『回购』+ 东财正文"]
+    EX["PlanAnnouncementExtractor<br/>标题定 stage · 正文抽数值"]
+    PA[("PlanAnnouncement<br/>只增不删")]
+    WI["WatchIndicatorRuleTask<br/>板块规则 → 个股"]
+    RE["WatchIndicatorRuleEngine"]
+    SWI[("StockWatchIndicator<br/>只重建 origin=rule")]
+    PW --> EX --> PA
+    WI --> RE --> SWI
+  end
+  subgraph A["Analyzer 侧 · 关于我"]
+    WS["WatchService<br/>串四个零件"]
+    WRE["WatchRuleEngine<br/>挂 / 自动摘"]
+    WEV["WatchEvaluator<br/>判触发"]
+    RS["SqliteWatchReadingSource<br/>按 Kind 取值（只读）"]
+    IT[("watch/items.json<br/>待办 · 有挂有摘")]
+    HT[("watch/hits-yyyy.json<br/>事实 · 只增")]
+    WS --> WRE --> IT
+    WS --> RS --> WEV --> HT
+  end
+  PA -.OpenPlans.-> WRE
+  SWI -.该盯哪些指标.-> WRE
+  PA -.stage 现状.-> RS
+```
+
+**三个关键不变量**（每一条都防一类静默事故）：
+`StockWatchIndicator` 只重建 `origin='rule'`（手挂的不动）·
+`WatchItem.Origin=手写` 任何规则不碰 ·
+`PlanAnnouncement` 只增不删（方案结束摘的是待办，不是事实）。
 
 ### 图 F3 · 编排层 → 数据源与存储
 
@@ -390,7 +432,7 @@ EastMoneyTerminalBoardFetcher --> EastMoneyDataCenterClient
 | `FetchOrchestrator`（partial，5800+1400 行） | Data | 抓取程序真正的核心，与 UI 无关。五十多个 `RunStepXxxAsync` 单项入口 + 两个仍保留复合的模式（重拉失败 / 拉取年份区间），共用同一套"逐标的抓取→写库→聚合→更新水位线"躯干。全部直接写 `current.sqlite`。（拉取全部 / 补指定历史日 / 拉取板块 / 一键补齐每日历史 / 一键拉取定期数据那五个整包方法 2026-09-08 已删——它们 09-02 就被拆成原子项，此后只剩【手动】页在调。） |
 | `AnnouncementFetchOrchestrator` · `BoardListFetchLoop` | Data | 两条自成一体的子流程：公告（巨潮搜索→东财正文→解析入库）、板块名单分页循环。 |
 | `FetchPaths` · `FetcherSettings` · `JsonManifestStore` · `Heartbeat` · `ProgressThrottle` · `FetchResult` · `FailedRetrySummary` · `ManualFillWorklist` | Data | 编排层配套件：路径、JSONC 设置、水位线清单、心跳、进度节流、运行结果、失败重试汇总、手工补录清单。 |
-| `Data.Remote`（约 60 个类） | Data | 数据源实现，按"一个数据源/通道一个类"拆：新浪系（K线/财务/分红/股东/指数成分/市值/ETF，龙虎榜留作后备）、东财系（datacenter 客户端 + 预测/龙虎榜概要/龙虎榜席位/资金流/事件/板块映射/行业指标/客户供应商，板块另有 HTTP、页面、终端文件三通道并存）、腾讯 K线、交易所直连（融资/退市名单/深交所日历）、中证权重、巨潮公告与预约。公共件：`RateLimiter`、`NetworkInterfaceBinder`、`EastMoneyJson`、`EastMoneyClistPage`、PDF 文本与 OCR。 |
+| `Data.Remote`（约 60 个类） | Data | 数据源实现，按"一个数据源/通道一个类"拆：新浪系（K线/财务/分红/股东/指数成分/市值/ETF，龙虎榜留作后备）、东财系（datacenter 客户端 + 预测/龙虎榜概要/龙虎榜席位/资金流/事件/板块映射/行业指标/客户供应商，板块另有 HTTP、页面、终端文件三通道并存）、腾讯 K线、交易所直连（融资/退市名单/深交所日历）、中证权重、巨潮公告与预约。公共件：`RateLimiter`、`NetworkInterfaceBinder`、`EastMoneyJson`、`EastMoneyClistPage`。PDF 提取已于 2026-09-11 拆去 `StockPlatform.Pdf`，这里只剩业务解析 `BankReportParser`（给页面判据 + 从行里取数）。 |
 | `Data.Sqlite`（约 40 个类） | Data | 仓储实现，一张（组）表一个类。`SqliteSchema` 是 schema 权威处；`SqliteMaintenance` 管索引与优化；`SqliteMissingBarRepository`/`SqliteDailyTableAuditor` 做缺口与覆盖体检；`SqliteStockDossierReader` 是给分析程序按表直读的旁路。 |
 | `Logic.Services`（抓取侧） | Logic | `BarAggregator`、`AdjustFactorCalculator`、`TradingCalendar`、`MarketClassifier`、`BoardIndexSynthesizer`、`ProbeFloorPlanner`、`DailyBackfillGate`、`YearGapCalculator`/`CalendarYearSlicer`、`CoverageShapeAuditor`、`IndexCatalog`/`MarketIndexCatalog`、`OrderWinExtractor`、`PartnerNameMatcher`、`LimitUpClassifier`。全部纯计算，抽出来就是为了能被单测钉住。 |
 

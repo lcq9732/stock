@@ -33,6 +33,13 @@ public class FetchPaths
     /// </summary>
     public string PlanPath => Path.Combine(BaseDir, "fetch-plan.json");
 
+    /// <summary>
+    /// 「板块 → 该盯的行业指标」规则（2026-09-11 新增，见 doc/watch-item-design.md §5）。
+    /// 又一个独立文件而不是塞进 <see cref="SettingsPath"/>：那个是零散开关，这个是一份**会长**的
+    /// 清单（一个板块一行、还带理由），混进去以后两边都难读。同 <see cref="PlanPath"/> 的理由。
+    /// </summary>
+    public string WatchIndicatorRulesPath => Path.Combine(BaseDir, "watch-indicator-rules.json");
+
     /// <summary>计划执行的当日报告（<c>plan-yyyy-MM-dd.txt</c>）落在日志归档目录里——
     /// 无人值守跑完，第二天早上看这一份就知道昨晚每项什么时候跑的、结果如何。</summary>
     public string PlanReportPath(DateTime day) =>

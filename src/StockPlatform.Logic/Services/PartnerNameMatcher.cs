@@ -26,6 +26,16 @@ public static class PartnerNameMatcher
     public const string Normalized = "normalized";
 
     /// <summary>
+    /// 第三档（2026-09-11）：对手名是**某家上市公司的子公司**，归并到母公司代码。
+    /// 名单来自年报「合并财务报表范围」那张表，见 CompanySubsidiary。
+    ///
+    /// ⚠ **置信度低于前两档**，因为它是个假设：子公司跟你做生意不等于母公司跟你做生意。
+    ///   前两档是"这两个名字指同一个法人主体"，这一档是"这两个法人有控制关系"——
+    ///   完全不同的断言。单独标一档就是为了用的时候能把它们分开。
+    /// </summary>
+    public const string Subsidiary = "subsidiary";
+
+    /// <summary>
     /// 匿名披露的对手名——**不参与匹配**。
     /// 万一真有公司叫"第一名"，也不能让"第一名"这种占位符去撞上它。
     /// </summary>
@@ -104,13 +114,52 @@ public static class PartnerNameMatcher
     public static (string? Code, string? MatchType) Match(
         string partnerName,
         Dictionary<string, string> byFull,
-        Dictionary<string, string> byNorm)
+        Dictionary<string, string> byNorm,
+        Dictionary<string, string>? bySubsidiary = null)
     {
         if (IsAnonymous(partnerName)) return (null, null);
 
         var name = partnerName.Trim();
         if (byFull.TryGetValue(Compact(name), out var c1)) return (c1, Exact);
         if (byNorm.TryGetValue(Normalize(name), out var c2)) return (c2, Normalized);
+
+        // ⚠ 子公司这一档**必须排在最后**：一个名字如果本身就是上市公司（前两档命中），
+        //   那它就是它自己，不该被归并到谁的名下。只有前两档都不认识才轮到这一档。
+        if (bySubsidiary != null)
+        {
+            if (bySubsidiary.TryGetValue(Compact(name), out var c3)) return (c3, Subsidiary);
+            if (bySubsidiary.TryGetValue(Normalize(name), out var c4)) return (c4, Subsidiary);
+        }
         return (null, null);
+    }
+
+    /// <summary>
+    /// 给子公司名单建索引：全称和归一化两个 key 都指向母公司代码，装进同一个字典
+    /// （两种 key 不会撞——归一化只会更短，撞了也是同一家）。
+    /// </summary>
+    public static Dictionary<string, string> BuildSubsidiaryIndex(
+        IEnumerable<(string Name, string ParentCode)> subsidiaries)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (name, parent) in subsidiaries)
+        {
+            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(parent)) continue;
+            var full = Compact(name);
+            var norm = Normalize(name);
+            // 同一个 key 落到不同母公司 = 歧义，**两边都删掉**。硬挑一个就是在造错边。
+            if (full.Length > 0) Put(map, full, parent);
+            if (norm.Length > 0 && norm != full) Put(map, norm, parent);
+        }
+
+        // 把冲突标记（空串）清掉——歧义的 key 一个都不留
+        return map.Where(kv => kv.Value.Length > 0)
+                  .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+
+        static void Put(Dictionary<string, string> map, string key, string parent)
+        {
+            if (map.TryGetValue(key, out var existing) && existing != parent)
+                map[key] = "";          // 冲突标记，下面统一清掉
+            else map[key] = parent;
+        }
     }
 }

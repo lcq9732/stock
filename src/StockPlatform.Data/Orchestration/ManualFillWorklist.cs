@@ -115,7 +115,7 @@ public static class ManualFillWorklist
                 // 待核对的 OCR 行不做这个过滤：它已经有值了，"披没披露"没有疑问。
                 if (missingKeys.Count > 0)
                 {
-                    var disclosed = BankReportParser.DisclosedKeys(pdf);
+                    var disclosed = BankReportParser.Default.DisclosedKeys(pdf);
                     if (disclosed != null)
                         missingKeys = missingKeys
                             // 没登记标签的一律保留，别因为映射不全就把该填的漏掉

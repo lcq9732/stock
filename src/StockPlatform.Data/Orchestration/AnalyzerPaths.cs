@@ -59,6 +59,26 @@ public class AnalyzerPaths
     /// </summary>
     public string NotesDir => Path.Combine(BaseDir, "notes");
 
+    /// <summary>
+    /// 观察项目录（2026-09-11 新增，见 doc/watch-item-design.md §4.2）——
+    /// <c>items.json</c> 存观察项定义，<c>hits-{yyyy}.json</c> 按年存触发记录。
+    ///
+    /// 为什么跟 <see cref="WatchlistPath"/>／<see cref="CorePositionPath"/> 并列而不是塞进去：
+    /// 观察项是**跨两个列表**的（主动仓和底仓的票都会有观察项），塞进任一个都得给另一个再来一份。
+    ///
+    /// 为什么不上 SQLite：A 档触发一年也就几十条，量级跟 trade-fees.json 同级；
+    /// 而 Analyzer 侧已有一整套 json store 的惯例，不值得为此引入第二个数据库文件。
+    /// （观察项**依赖**的数据——PlanAnnouncement、StockWatchIndicator——在 current.sqlite 里，
+    /// 那些是"关于标的的知识"；这里存的是"我要盯什么"，是关于我的。见设计文档 §2.3。）
+    /// </summary>
+    public string WatchDir => Path.Combine(BaseDir, "watch");
+
+    /// <summary>观察项定义（L0/L1/L2 全在这一个文件里，靠 Origin 区分）。</summary>
+    public string WatchItemsPath => Path.Combine(WatchDir, "items.json");
+
+    /// <summary>触发记录，按年切——只增不删，它是"当时确实报过"的证据。</summary>
+    public string WatchHitsPath(int year) => Path.Combine(WatchDir, $"hits-{year}.json");
+
     /// <summary>某只票的笔记文件路径。</summary>
     public string NotePath(string code) => Path.Combine(NotesDir, $"{code}.md");
 

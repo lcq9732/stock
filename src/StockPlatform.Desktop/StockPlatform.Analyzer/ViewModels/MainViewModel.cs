@@ -71,6 +71,9 @@ public class MainViewModel : INotifyPropertyChanged
     public FactorTabViewModel FactorTab { get; }
     public WatchlistTabViewModel WatchlistTab { get; }
 
+    /// <summary>【观察项】页（2026-09-11）——L0/L1/L2 三层观察项的清单和触发，见 doc/watch-item-design.md。</summary>
+    public WatchTabViewModel WatchTab { get; }
+
     /// <summary>【仓位计算器】的账户级参数（可投资总资金/凯利折扣/单票上限）——窗口由 MainWindow
     /// 打开，参数在这里持有，两个入口共用同一份（见 PositionSizingWindow）。</summary>
     public Watchlist.PositionSizingStore SizingStore { get; }
@@ -122,6 +125,9 @@ public class MainViewModel : INotifyPropertyChanged
         CorePositionScreenTab = new CorePositionScreenTabViewModel(paths, barRepository, financialRepository, dividendRepository, watchlistStore, corePositionStore);
         // 底仓法页"加入底仓"后，底仓页要跟着刷新（同主动仓那对页的联动）。
         CorePositionScreenTab.CorePositionsChanged = () => CorePositionTab.Reload();
+        // 【观察项】2026-09-11，见 doc/watch-item-design.md M3。跨主动仓和底仓两个列表——
+        // 所以它两个 store 都要，也因此它自己的状态放在 watch/ 目录而不是塞进任一个 json。
+        WatchTab = new WatchTabViewModel(new WatchService(paths, watchlistStore, corePositionStore));
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, shareholderRepository, marginRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);

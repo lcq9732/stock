@@ -2,7 +2,9 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using StockPlatform.Logic.Models;
-using UglyToad.PdfPig;
+using StockPlatform.Pdf;
+using StockPlatform.Pdf.Sources;
+using StockPlatform.Pdf.Tools;
 
 namespace StockPlatform.Data.Remote;
 
@@ -30,14 +32,51 @@ namespace StockPlatform.Data.Remote;
 /// ③ **同名多处**：同一指标可能有"本集团/本公司"两套。取**第一次命中**——各行财报都是集团
 ///    口径在前，跟对外披露的口径一致。
 /// </summary>
-public static class BankReportParser
+public sealed class BankReportParser
 {
+    // ── 协作者 ──────────────────────────────────────────────────────────────
+    // 2026-09-11：PDF 提取整段搬去了 StockPlatform.Pdf。本类从此只管两件事——
+    // **给页面判据**、**从行里取数**，不再知道底下有几级兜底、更不碰 PdfPig 的 API。
+    // 坐标聚类的阈值（行容差 5.0、字间距取字宽三成）跟着搬进了 PdfExtractOptions。
+
+    /// <summary>兜底链：PdfPig 读不动就退 pdftotext。顺序由装配时决定，本类不关心。</summary>
+    private readonly PdfLineExtractor _lines;
+
+    /// <summary>只要页面原始文字、不要版面结构时用（LooksLikeReport）。</summary>
+    private readonly IPdfTextReader _textReader;
+
     /// <summary>
-    /// 同一行的基线 Y 容差（PDF 单位）。取 5.0 是量出来的：财报表格里多行单元格的值与标签
-    /// 基线只差约 2，而正常行距在 16 上下——5 落在两者中间，既能把被排版拆开的值和标签并回
-    /// 一行，又不会把相邻两行粘在一起。
+    /// OCR。**不在兜底链上**——它的触发条件是"文本层拿到了、但数字被转成了矢量图形"，
+    /// 那是这里的业务判断（LooksLikeDigitsStripped），该 OCR 哪几页也由这里算（CandidatePages）。
+    /// 把那种判断塞进组合器等于又把业务知识漏进协调层，所以由本类直接持有、按需调用。
     /// </summary>
-    private const double LineTolerance = 5.0;
+    private readonly IPdfLineSource? _ocr;
+
+    public BankReportParser(PdfLineExtractor lines, IPdfTextReader textReader,
+                            IPdfLineSource? ocr = null)
+    {
+        _lines = lines;
+        _textReader = textReader;
+        _ocr = ocr;
+    }
+
+    /// <summary>
+    /// 默认装配：PdfPig → pdftotext 兜底，外加 OCR。
+    ///
+    /// ⚠ 这是**装配入口**，不是回到静态类。做成共享单例只为一件事：外部程序的探测结果
+    ///   （pdftotext 在哪、能不能处理中文）缓存在 toolset 实例上，每 new 一套就要重跑一遍
+    ///   探测进程。新的调用点和测试应当自己 new，注入想要的 source 组合。
+    /// </summary>
+    public static BankReportParser Default { get; } = CreateDefault();
+
+    private static BankReportParser CreateDefault()
+    {
+        var poppler = new PopplerToolset();
+        return new BankReportParser(
+            new PdfLineExtractor(new PdfPigLineSource(), new PopplerLineSource(poppler)),
+            new PdfPigTextReader(),
+            new TesseractLineSource(new TesseractToolset(), poppler));
+    }
 
     /// <summary>标签 → metric_key。按长的在前排——"关注类贷款迁徙率"必须先于"关注类"匹配上。</summary>
     private static readonly (string Label, string Key)[] BankLabels =
@@ -229,8 +268,8 @@ public static class BankReportParser
         @"权重法下[^。]*?分别为\s*([\d.]+)\s*%[、,，]\s*([\d.]+)\s*%[和及]\s*([\d.]+)\s*%",
         RegexOptions.Compiled);
 
-    /// <summary>一行文字 + 它所在页码。</summary>
-    private readonly record struct PdfLine(int Page, string Text);
+    // PdfLine（页码 + 行文字）现在来自 StockPlatform.Pdf——原来这里有一份私有的同名
+    // record struct，搬走提取逻辑后没有理由再留一个。
 
     /// <summary>
     /// 某个 metric_key 在财报里可能的所有写法。给「待手工回填清单」判断
@@ -254,17 +293,15 @@ public static class BankReportParser
     /// **读不出文本的一律返回 true**——那是字体问题（比如中国人保），跟"下错文件"是两回事，
     /// 误删了还得重新下 6MB。
     /// </summary>
-    public static bool LooksLikeReport(string pdfPath)
+    public bool LooksLikeReport(string pdfPath)
     {
         string head;
         try
         {
-            using var doc = PdfDocument.Open(pdfPath);
+            // 只要前 3 页的字，不需要版面结构——所以走 IPdfTextReader，不惊动行提取器。
+            // 整份打不开时它返回空列表，下面那条 head.Length < 50 正好兜住（返回 true）。
             var sb = new StringBuilder();
-            for (int i = 1; i <= Math.Min(3, doc.NumberOfPages); i++)
-            {
-                try { sb.Append(doc.GetPage(i).Text); } catch { }
-            }
+            foreach (var p in _textReader.ReadPages(pdfPath, maxPages: 3)) sb.Append(p.Text);
             head = Normalize(sb.ToString());
         }
         catch { return true; }
@@ -298,7 +335,7 @@ public static class BankReportParser
     /// 上面那句话里标签后面跟的是"、一级资本充足率及资本充足率均满足《…》"，下一行也没有数，
     /// 于是判定为未披露；而封面图表那种"标签一行、数值在下一行"的排版仍然算披露。
     /// </summary>
-    public static HashSet<string>? DisclosedKeys(string pdfPath)
+    public HashSet<string>? DisclosedKeys(string pdfPath)
     {
         var all = BankLabels.Concat(BrokerLabels).Concat(InsurerLabels).ToArray();
         List<PdfLine> lines;
@@ -342,7 +379,7 @@ public static class BankReportParser
     /// 人已经全部核对过了，调用方会传 false——OCR 一份要一分钟，跑出来的结果反正也覆盖不了
     /// 人拍板的值，没必要再花这个时间。
     /// </param>
-    public static List<BankRegulatoryMetric> Parse(string pdfPath, string code, DateTime reportDate,
+    public List<BankRegulatoryMetric> Parse(string pdfPath, string code, DateTime reportDate,
         FinancialInstitutionKind kind = FinancialInstitutionKind.Bank,
         Action<string>? progress = null, CancellationToken ct = default, bool allowOcr = true)
     {
@@ -362,16 +399,17 @@ public static class BankReportParser
         // （实测把 "94.5%，" 认成 "94.59%,"），要进回填清单让人核对一次。
         if (allowOcr && LooksLikeDigitsStripped(lines))
         {
-            if (!PdfOcrExtractor.IsAvailable())
+            if (_ocr is not { IsAvailable: true })
                 progress?.Invoke($"    ⚠ {Path.GetFileName(pdfPath)} 的数字被转成了矢量图形，"
-                               + $"文本层里没有数，而 OCR 不可用：{PdfOcrExtractor.UnavailableReason()}");
+                               + $"文本层里没有数，而 OCR 不可用：{_ocr?.UnavailableReason ?? "没装配 OCR"}");
             else
             {
                 var pages = CandidatePages(lines, labels);
                 progress?.Invoke($"    {Path.GetFileName(pdfPath)} 的数字在文本层里是缺的（被转成了矢量图形），"
                                + $"改用 OCR 识别 {pages.Count} 页...");
-                var ocrLines = PdfOcrExtractor.TryOcrPages(pdfPath, pages, progress, ct)
-                    ?.Select(x => new PdfLine(x.Page, x.Text)).ToList();
+                // 只 OCR 这几页——一页 4~5 秒，整份跑要二十分钟。
+                var ocrLines = _ocr.TryExtract(pdfPath,
+                    new PdfExtractOptions { Pages = pages, Progress = progress }, ct)?.ToList();
                 if (ocrLines is { Count: > 0 })
                 {
                     var ocr = ScanAll(ocrLines, labels, code, reportDate, kind, MetricSources.Ocr);
@@ -858,137 +896,28 @@ public static class BankReportParser
     ];
 
     /// <summary>
-    /// 把 PDF 还原成"行"：按基线 Y 聚类、行内按 X 排序。只保留出现过
-    /// <see cref="SectionHints"/> 字样的页——招行 309 页里真正有用的就那几页，
-    /// 全篇扫既慢又容易在叙述段落里误命中。
+    /// 把 PDF 还原成"行"。**怎么还原**不归这里管（交给 PdfLineExtractor 那条兜底链），
+    /// 这里只负责一件事：**告诉工具层哪几页值得要**。
+    ///
+    /// 页面筛选的主判据是"这一页出现了几个我们要的指标名"，章节标题只作补充。
+    /// 原来只按标题匹配，实测漏得厉害——各行财报的表格标题五花八门（"资本状况""流动性"
+    /// "贷款迁徙率""主要监管指标"…），张家港行装着不良率/拨备/迁徙率/成本收入比的那一整页
+    /// 因为标题对不上被整页跳过，青农商行更是一个指标都没解析出来（no_match）。
+    /// 指标表页通常一页就有 5~10 个标签，正文叙述页很少同时出现两个以上。
+    ///
+    /// ⚠ 这个判据以前是**传给工具层的 labels 数组**，工具层拿着银行的标签表自己判断——
+    ///   业务知识漏进了通用工具。改成回调之后判断权回到这里，工具层只管照做。
     /// </summary>
-    private static List<PdfLine> ExtractLines(string pdfPath, (string Label, string Key)[] labels)
+    private List<PdfLine> ExtractLines(string pdfPath, (string Label, string Key)[] labels)
     {
-        var lines = ExtractWithPdfPig(pdfPath, labels);
-        if (lines.Count > 0) return lines;
-
-        // ── PdfPig 一无所获时，退到外部 pdftotext ────────────────────────────────
-        // 触发场景是 PdfPig 读不动的那些字体（Adobe-CNS1/GB1 的 CMap 缺失、TrueType 缺 head 表）。
-        // 这些 PDF **不是扫描件**——查内部结构，交行有 338 个字体定义、人保 24 个，文本层都在，
-        // 只是 PdfPig 解不开。同样几份 pdftotext 一转就出来了（交行 17 万中文字）。
-        // 找不到 pdftotext 就返回空，行为跟以前一样（记为 no_text），不会因为缺它而更糟。
-        var alt = PdfTextExtractor.TryExtractLines(pdfPath);
-        if (alt == null) return lines;
-
-        // pdftotext -layout 的输出本身就是"标签 值 值 值"的行，不需要再做坐标聚类；
-        // 但页面筛选还是要做，避免在正文叙述里误命中。
-        foreach (var pageGroup in alt.GroupBy(x => x.Page))
+        bool KeepPage(string pageText)
         {
-            var pageText = Normalize(string.Join('\n', pageGroup.Select(x => x.Text)));
-            int hits = labels.Count(l => pageText.Contains(l.Label, StringComparison.Ordinal));
-            if (hits < MinLabelHits(labels)
-                && !SectionHints.Any(h => pageText.Contains(h, StringComparison.Ordinal))) continue;
-            foreach (var x in pageGroup) lines.Add(new PdfLine(x.Page, x.Text));
+            var t = Normalize(pageText);
+            int hits = labels.Count(l => t.Contains(l.Label, StringComparison.Ordinal));
+            return hits >= MinLabelHits(labels)
+                   || SectionHints.Any(h => t.Contains(h, StringComparison.Ordinal));
         }
-        return lines;
-    }
 
-    /// <summary>用 PdfPig 提取；整份读不出来时返回空列表（由调用方决定要不要走兜底）。</summary>
-    private static List<PdfLine> ExtractWithPdfPig(string pdfPath, (string Label, string Key)[] labels)
-    {
-        var lines = new List<PdfLine>();
-        PdfDocument doc;
-        // Open 本身就可能因为字体表损坏而抛（"The head table is required"），
-        // 这种也要能落到 pdftotext 兜底，所以整个包起来。
-        try { doc = PdfDocument.Open(pdfPath); }
-        catch { return lines; }
-        using var _ = doc;
-
-        // ⚠ **逐页取、每页单独兜异常**，不能用 foreach (var page in doc.GetPages())。
-        // doc.GetPages() 是惰性的：某一页的字体坏了，异常会从 foreach 里冒出来，
-        // 整份 PDF 就此报废。实测 26 份失败报告里绝大多数是这么丢的——
-        //   "Could not find the referenced CMap: Adobe-CNS1-7 / Adobe-GB1-6"
-        //     PdfPig 不自带这些 CJK CMap 资源（0.1.2 也没有 SkipMissingFonts 选项可关）
-        //   "The head table is required"
-        //     内嵌 TrueType 字体缺 head 表
-        // 这些都是**个别页**的字体问题，而我们要的指标表往往在别的页上，完全能读出来。
-        // 改成按页号取 + 单页 try/catch 之后，坏页跳过、好页照常解析。
-        for (int pageNo = 1; pageNo <= doc.NumberOfPages; pageNo++)
-        {
-            UglyToad.PdfPig.Content.Page page;
-            string pageText;
-            try
-            {
-                page = doc.GetPage(pageNo);
-                pageText = page.Text;
-            }
-            catch { continue; }                      // 这一页读不了，换下一页
-            if (string.IsNullOrWhiteSpace(pageText)) continue;
-            // 页面筛选：**主判据是"这一页出现了几个我们要的指标名"**，章节标题只作补充。
-            // 原来只按标题匹配，实测漏得厉害——各行的表格标题五花八门（"资本状况""流动性"
-            // "贷款迁徙率""主要监管指标"…），张家港行装着不良率/拨备/迁徙率/成本收入比的那一整页
-            // 因为标题对不上被整页跳过，青农商行更是一个指标都没解析出来（no_match）。
-            // 指标表页通常一页就有 5~10 个标签，正文叙述页很少同时出现两个以上。
-            var normalizedPageText = Normalize(pageText);
-            int labelHits = labels.Count(l => normalizedPageText.Contains(l.Label, StringComparison.Ordinal));
-            bool looksLikeTable = labelHits >= MinLabelHits(labels)
-                                  || SectionHints.Any(h => normalizedPageText.Contains(h, StringComparison.Ordinal));
-            if (!looksLikeTable) continue;
-
-            // GetWords() 会重新走一遍字形解析，可能抛出跟 page.Text 不同的异常，
-            // 所以这里也得单独兜住。
-            List<UglyToad.PdfPig.Content.Word> words;
-            try
-            {
-                words = page.GetWords().Where(w => !string.IsNullOrWhiteSpace(w.Text)).ToList();
-            }
-            catch { continue; }
-            if (words.Count == 0) continue;
-
-            // 按基线聚成行：**降序扫过去，跟当前行基线差在容差内就并进来**，超出就另起一行。
-            //
-            // 原来用的是 GroupBy(Round(Bottom / 容差)) 那种"分桶"写法，有个致命的边界问题——
-            // 财报表格里多行单元格的**值和标签基线只差 2**（正常行距是 16），但分桶会按绝对
-            // 位置切，两个只差 2 的基线照样可能落进相邻两个桶。实测山西证券：
-            //     Bottom≈412  "193.08% 195.89% 下降2.81个百分点"   ← 值
-            //     Bottom≈410  "净稳定资金率"                        ← 标签
-            // 被切成两行后，标签那行没有数字、值那行没有标签，这个指标就永远取不到。
-            // 改成相邻聚类后两者合并、行内再按 X 排序（标签在左、值在右），自然拼成
-            // "净稳定资金率 193.08% 195.89% …"。跨行截断的标签（"自营权益类证券及证券衍生"
-            // ＋ "品/净资本"）也一并被这个改动救回来了。
-            var groups = new List<List<UglyToad.PdfPig.Content.Word>>();
-            foreach (var w in words.OrderByDescending(w => w.BoundingBox.Bottom))
-            {
-                if (groups.Count == 0
-                    || Math.Abs(groups[^1][0].BoundingBox.Bottom - w.BoundingBox.Bottom) > LineTolerance)
-                    groups.Add([]);
-                groups[^1].Add(w);
-            }
-
-            foreach (var group in groups)
-            {
-                // ⚠ 财报 PDF 里**中文是一个字一个 word** 存的（"不 良 贷 款 率" 是 5 个 word）。
-                // 无脑用空格拼会得到"不 良 贷 款 率"，标签就永远匹配不上；完全不加空格又会把
-                // 相邻两列的数字粘成"0.940.95"。所以按**字间距**判断：中文字之间几乎贴着
-                // （间距接近 0），表格列之间有明显空白，超过字高的三成才补一个空格。
-                // 阈值按**字宽**算，不能用 BoundingBox.Height——这份 PDF 里 Height 恒为 0
-                // （字形没带高度信息），拿它当基准会让阈值变成 0、每个字之间都插空格。
-                // 实测：相邻中文字的间距约 0.2pt、字宽 8pt，而表格列之间的空白有 20pt 以上，
-                // 取两侧字宽较小者的三成（≈2.4pt）能干净地分开列、又不拆散词。
-                var sb = new StringBuilder();
-                double prevRight = double.NaN, prevWidth = 0;
-                foreach (var w in group.OrderBy(w => w.BoundingBox.Left))
-                {
-                    double width = w.BoundingBox.Width;
-                    if (!double.IsNaN(prevRight))
-                    {
-                        double gap = w.BoundingBox.Left - prevRight;
-                        double threshold = Math.Min(prevWidth, width) * 0.3;
-                        if (gap > threshold) sb.Append(' ');
-                    }
-                    sb.Append(w.Text);
-                    prevRight = w.BoundingBox.Right;
-                    prevWidth = width;
-                }
-                var text = sb.ToString().Trim();
-                if (text.Length > 0) lines.Add(new PdfLine(page.Number, text));
-            }
-        }
-        return lines;
+        return _lines.Extract(pdfPath, new PdfExtractOptions { PageFilter = KeepPage }).ToList();
     }
 }
