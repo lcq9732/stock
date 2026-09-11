@@ -2170,14 +2170,6 @@ public class MainViewModel : INotifyPropertyChanged
             case FetchActionId.FetchStockBoardMap:
                 return _orchestrator.RunFetchStockBoardMapAsync(progress, ct);
 
-            case FetchActionId.FetchMoneyFlowDetail:
-                // 估的是**补历史**那一段：一只约 2 秒（限流器间隔占大头），按空窗剩余时间估几只。
-                // 前面还有个全市场快照（约 60 个请求、一两分钟），它不受这个数控制——
-                // 快照是"一整天要么有要么没有"的事，抓一半没有意义。空窗短的话就是快照跑完、
-                // 补历史抓不了几只，下轮接着来。
-                return _orchestrator.RunFetchMoneyFlowDetailAsync(
-                    progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(2)));
-
             case FetchActionId.RepairQfq:
                 // 一只票重抓十年约 4 秒（多页），按剩余时间估本轮能取几只，到点前收尾
                 return _orchestrator.RunRepairQfqAsync(

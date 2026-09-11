@@ -124,7 +124,7 @@ public sealed class AdjSeriesRebuildTask(string dbPath) : FetchTaskBase<AdjRebui
         var sw = System.Diagnostics.Stopwatch.StartNew();
         // 按**时间**节流而不是按个数：增量的票几毫秒就过、整段重算的要几百毫秒，同样 500 只
         // 快的 3 秒慢的两分半，静默时长完全不可控（实测哑到 2 分 24 秒）。见 ProgressThrottle。
-        var tick = new ProgressThrottle(new ReportSink(Report));
+        var tick = new ProgressThrottle(ProgressSink);
         int seen = 0;
 
         foreach (var code in plan.Codes)
@@ -314,12 +314,5 @@ public sealed class AdjSeriesRebuildTask(string dbPath) : FetchTaskBase<AdjRebui
         return parts.Count == 0
             ? $"，收益率自检全部通过（共比 {_checkedDays:N0} 天）"
             : "，" + string.Join("；", parts);
-    }
-
-    /// <summary>把 <see cref="ProgressThrottle"/> 接到框架的 <c>Report</c> 上。
-    /// 不用 <c>Progress&lt;string&gt;</c>：那个是异步 post 的，几十分钟的循环里顺序会乱。</summary>
-    private sealed class ReportSink(Action<string, int?, int?, string?> report) : IProgress<string>
-    {
-        public void Report(string value) => report(value, null, null, null);
     }
 }

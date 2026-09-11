@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 
 namespace StockPlatform.Scheduling.Tasks;
 
@@ -59,6 +59,20 @@ public abstract class FetchTaskBase<TItem> : IFetchTask
     /// <summary>报一条"我还活着"（看门狗**不**吃这个，见 <see cref="IFetchTask.OnLiveness"/>）。</summary>
     protected void ReportLiveness(string text, TimeSpan elapsed)
         => Raise(OnLiveness, new TaskLiveness(text, elapsed));
+
+    /// <summary>
+    /// 把 <see cref="Report"/> 包成 <c>IProgress&lt;string&gt;</c>：
+    /// <c>ProgressThrottle</c> 和那些还在用 <c>OnStatus</c>／<c>IProgress</c> 的 provider 要的是这个形状。
+    ///
+    /// 不用 <c>Progress&lt;string&gt;</c>：那个是异步 post 的，几十分钟的循环里日志顺序会乱。
+    /// </summary>
+    protected IProgress<string> ProgressSink => _sink ??= new ReportSink(Report);
+    private IProgress<string>? _sink;
+
+    private sealed class ReportSink(Action<string, int?, int?, string?> report) : IProgress<string>
+    {
+        public void Report(string value) => report(value, null, null, null);
+    }
 
     /// <summary>
     /// 逐个订阅者隔离地发。一个订阅者抛异常会中断多播链——后面的订阅者收不到，异常还会冒进

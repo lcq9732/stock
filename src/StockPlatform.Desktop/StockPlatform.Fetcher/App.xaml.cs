@@ -434,6 +434,13 @@ public partial class App : Application
         // 不碰 manifest、不占数据源、调用点只有一个——老任务里最容易迁的一类。
         taskRegistry.Register(FetchActionId.RebuildAdjSeries,
             () => new AdjSeriesRebuildTask(paths.CurrentDb));
+        // 【拉取分档资金流】2026-09-11 从 orchestrator 迁过来。迁的动因是它每天被静默看门狗
+        // 掐一次：老实现每 100 只才报一句进度，而待办只剩 72 只时一句都报不出来（见任务类注释）。
+        // 一批＝一只票，所以 MaxItems/Deadline 直接就是"补历史这一轮抓几只/到点收尾"；
+        // 快照那一段整批落库、不占批额度。两个 provider 可能因配置只启用一条通道，故都可为 null。
+        taskRegistry.Register(FetchActionId.FetchMoneyFlowDetail,
+            () => new MoneyFlowDetailTask(paths, moneyFlowRepository, moneyFlowProvider,
+                                          moneyFlowSnapshotProvider));
 
         var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
 

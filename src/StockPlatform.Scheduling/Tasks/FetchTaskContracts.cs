@@ -1,4 +1,4 @@
-using StockPlatform.Data.Orchestration;
+﻿using StockPlatform.Data.Orchestration;
 
 namespace StockPlatform.Scheduling.Tasks;
 
@@ -119,14 +119,28 @@ public sealed record TaskRunResult(
     TaskState State,
     IReadOnlyList<string> Errors,
     bool NothingToDo = false,
-    string? Progress = null)
+    string? Progress = null,
+    string? SkippedReason = null)
 {
     public static TaskRunResult Ok(bool nothingToDo = false, string? progress = null)
         => new(TaskState.Completed, Array.Empty<string>(), nothingToDo, progress);
 
+    /// <summary>
+    /// 「这一轮**根本没开工**」——数据源在熔断、快照要等收盘清算这类。
+    ///
+    /// 必须跟「完成」分开（2026-09-11 补上，老编排层一直有这个字段、新框架漏了）：
+    /// 记成完成的话界面上是个绿勾，而且 <c>FetchPlanItem.AlreadyRanOn</c> 只认完成——
+    /// **今天就不会再来了**，等熔断过去也白搭。记成跳过，今天恢复之后还有机会补上。
+    /// </summary>
+    public static TaskRunResult Skipped(string reason, IReadOnlyList<string>? errors = null)
+        => new(TaskState.Completed, errors ?? Array.Empty<string>(), SkippedReason: reason);
+
     public FetchResult ToFetchResult()
     {
-        var r = new FetchResult { NothingToDo = NothingToDo, Progress = Progress };
+        var r = new FetchResult
+        {
+            NothingToDo = NothingToDo, Progress = Progress, SkippedReason = SkippedReason,
+        };
         r.Errors.AddRange(Errors);
         // 被停止不是失败：现有引擎靠 OperationCanceledException 区分，这里保持一致——
         // 调度侧接到 Stopped 时本来就在取消路径上，不需要再翻译成错误。

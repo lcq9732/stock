@@ -354,8 +354,17 @@ public enum DataSourceId
     CsIndex,
     /// <summary>东财行情侧 push2——**弹图片验证码的就是这个**，只能人工过。</summary>
     EmPush2,
-    /// <summary>东财行情历史侧 push2his（分档资金流）。跟 push2 不同域名、不同限流。</summary>
+    /// <summary>东财行情历史侧 push2his（分档资金流逐股补历史）。跟 push2 不同域名、不同限流。</summary>
     EmPush2His,
+
+    /// <summary>
+    /// 东财延时行情 push2delay（分档资金流的全市场当日快照，2026-09-11 补登记）。
+    ///
+    /// 单列一个源：它跟 push2his 是**不同域名、独立计数**，谁被切都不影响另一条，限流参数也差着
+    /// 一个量级（这条 1 秒间隔跑 60 页，那条 5 秒间隔、每 15 个歇 2 分钟）。此前【拉取分档资金流】
+    /// 只登记了 push2his，快照打的这个域名在占用表上是隐身的。
+    /// </summary>
+    EmPush2Delay,
     /// <summary>东财数据中心 datacenter（业绩预告、龙虎榜席位、市场事件、个股题材）。</summary>
     EmDataCenter,
 
@@ -377,7 +386,7 @@ public static class DataSourceCatalog
     [
         DataSourceId.Tencent, DataSourceId.Sina, DataSourceId.Exchange, DataSourceId.Cninfo,
         DataSourceId.CsIndex, DataSourceId.EmPush2, DataSourceId.EmPush2His, DataSourceId.EmDataCenter,
-        DataSourceId.EmQuote,
+        DataSourceId.EmQuote, DataSourceId.EmPush2Delay,
     ];
 
     public static string NameOf(DataSourceId id) => id switch
@@ -389,6 +398,7 @@ public static class DataSourceCatalog
         DataSourceId.CsIndex => "中证",
         DataSourceId.EmPush2 => "东财 push2",
         DataSourceId.EmPush2His => "东财 push2his",
+        DataSourceId.EmPush2Delay => "东财 push2delay",
         DataSourceId.EmDataCenter => "东财 datacenter",
         DataSourceId.EmQuote => "东财 quote",
         _ => id.ToString(),
@@ -918,11 +928,17 @@ public static class FetchTaskCatalog
             + "判断一波行情是谁在买，靠的就是这个结构。\n"
             + "⚠ **接口只给最近约 120 个交易日**，lmt=0 也突破不了——所以拿不到长历史，"
             + "历史深度只能靠定期抓取慢慢养。短期内做不了长周期回测，但看「当下这波是谁在买」够用。\n"
-            + "⚠ **只能按股票查**，没有「某天全市场」的入口，全市场一轮 5500+ 个请求、2 秒间隔约 3 小时。\n"
-            + "断点续传按「这只票今天抓过没有」判断（接口是滚动窗口，没有增量入口，"
-            + "不能像别的任务那样用数据日期做水位线）。跑不完下轮接着来，连续 15 只失败会判定被限流、提前收尾。",
+            + "两条通道：**当日全市场快照**（push2delay，约 60 个请求、一两分钟，日常增量全靠它）"
+            + "＋**逐股补历史**（push2his，一只票一个请求给 120 天，只有它补得了历史缺口）。\n"
+            + "补历史的排队判据是「这只票库里有多少行」（不足 100 行就排队），**不是**「今天抓过没有」"
+            + "——快照每天会把每只票都刷一遍，那个判据恒为真。按最久没抓的先抓，跑不完下轮接着来，"
+            + "连续 15 只失败会判定被限流、提前收尾。",
             SupportsPartialRun: true,
-            Sources: [DataSourceId.EmPush2His]),
+            // 10 分钟而不是默认 5 分钟：push2his 每 15 个请求主动歇 2 分钟，单只失败还要静默重试
+            // （2s+10s，三次 25 秒超时摊下来近 90 秒）。5 分钟余量太紧，2026-09-11 就是这么被
+            // 误判成卡死掐断的。任务侧已改成按时间报进度，这里是第二道保险。
+            MaxQuiet: TimeSpan.FromMinutes(10),
+            Sources: [DataSourceId.EmPush2His, DataSourceId.EmPush2Delay]),
 
         new(FetchActionId.FetchRawBars, "补不复权历史", "腾讯", QuotaGroup.Mixed,
             TimeSpan.FromHours(2), "一次性（补完就不用再跑了）",
