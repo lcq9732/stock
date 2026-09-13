@@ -199,46 +199,58 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
     /// </summary>
     private void CommitScope(string scope, List<AuditFinding> gaps)
     {
-        var gran = scope.Split(ScopeSep)[1];
+        var parts = scope.Split(ScopeSep);
+        var (type, gran) = (parts[0], parts[1]);
+        var taskId = TaskIdOfScope(type, gran);
         var codes = _scopeCodes.TryGetValue(scope, out var l)
             ? l.ToHashSet(StringComparer.Ordinal)
             : new HashSet<string>(StringComparer.Ordinal);
 
         var manifest = _manifestStore.Load();
-        var triesByKey = new Dictionary<(string, string, string), int>();
-        foreach (var m in manifest.MissingBars)
-            triesByKey[(m.Code, NormalizeGran(m.Granularity), m.EffectiveReason)] = m.Tries;
+        var todo = manifest.Todo(taskId, RetryTodoKind.Gap);
+        var triesByCode = todo?.Targets.ToDictionary(t => t.Code, t => t.Tries, StringComparer.Ordinal)
+                          ?? new Dictionary<string, int>(StringComparer.Ordinal);
 
-        // ⚠ 只替换本面的**缺行**记录（Reason=gap）。值类记录（盘中固化/NULL/OHLC/不一致）归
-        //   CommitValueFindings 管——不加 `!m.IsValueIssue` 这一条，扫完"个股·不复权"这个面
-        //   就会把同一只票同一口径的值类记录连带删掉，而且删得很安静（2026-09-09 被
-        //   "值类记录的Tries按Reason分别继承"那个测试抓出来）。
-        var kept = manifest.MissingBars
-            .Where(m => !(codes.Contains(m.Code)
-                          && NormalizeGran(m.Granularity) == gran
-                          && !m.IsValueIssue))
+        // 只替换**本面**的记录。以前这里要额外排掉值类记录（`!m.IsValueIssue`）和别的口径
+        // ——因为那时候所有待办挤在一个 MissingBars 里，扫完"个股·不复权"会把同一只票的
+        // 值类记录连带删掉，而且删得很安静（2026-09-09 被那个 Tries 继承的测试抓出来）。
+        // 现在待办按 (TaskId, Kind) 分开存，本面的记录本来就只在这一条里，条件只剩 code。
+        var kept = (todo?.Targets ?? new List<RetryTarget>())
+            .Where(t => !codes.Contains(t.Code))
             .ToList();
 
         var fresh = gaps
             .Where(f => f.Code != null)
-            .Select(f => new MissingBarRange
+            .Select(f => new RetryTarget
             {
-                Code = f.Code!, Granularity = gran,
+                Code = f.Code!, Gran = gran,
                 From = f.From, To = f.To, Days = f.Days,
-                Reason = AuditFindingKind.Gap,
-                Tries = triesByKey.GetValueOrDefault((f.Code!, gran, AuditFindingKind.Gap)),
+                Tries = triesByCode.GetValueOrDefault(f.Code!),
             })
             .ToList();
 
-        manifest.MissingBars = kept.Concat(fresh)
-            .OrderBy(r => r.Code, StringComparer.Ordinal)
-            .ThenBy(r => r.Granularity, StringComparer.Ordinal)
-            .ToList();
+        manifest.SetTodo(taskId, RetryTodoKind.Gap,
+            kept.Concat(fresh).OrderBy(t => t.Code, StringComparer.Ordinal).ToList());
         _manifestStore.Save(manifest);
 
         _totalRanges += fresh.Count;
         _totalDays += fresh.Sum(r => r.Days);
     }
+
+    /// <summary>
+    /// 面（标的类型 × 口径）→ **该补它的那个任务**（2026-09-13）。
+    ///
+    /// 这个映射一直都在——<see cref="FetchableScopes"/> 那五个面本来就是照着任务列表定的
+    /// （见类注释："拆成独立任务之后，后复权、不复权、ETF、指数各自成了一项"）。
+    /// 以前 CommitScope 落账时 `scope.Split(sep)[1]` 只取口径、把类型扔了，于是 ETF 和指数的
+    /// 空洞跟个股前复权混进同一堆，重试那边只能按口径归堆。现在类型留住了。
+    /// </summary>
+    private static string TaskIdOfScope(string type, string gran) => (type, gran) switch
+    {
+        (SqliteStockMetaUpsert.TypeEtf, _) => RetryTaskIds.EtfBars,
+        (SqliteStockMetaUpsert.TypeIndex, _) => RetryTaskIds.IndexBars,
+        _ => RetryTaskIds.ForGranularity(gran),
+    };
 
     /// <summary>
     /// 扫一个面（一批标的 × 一个口径）。返回"空洞 + 一条汇总行"——**汇总行必须带上**，
@@ -477,14 +489,51 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
                         + $"（{FormatDays(r.TailMissingDays)}）");
             if (r.EmptyDays.Count > 0)
                 parts.Add($"{r.EmptyDays.Count} 天一行都没有（{FormatDays(r.EmptyDays)}）"
-                        + (queued > 0 ? $"，其中 {queued} 天已记入待补名单" : ""));
+                        + EmptyDaysNote(spec, r.EmptyDays.Count, queued));
             if (r.ThinDays.Count > 0)
                 parts.Add($"{r.ThinDays.Count} 天行数明显偏少、疑似只抓了一半"
                         + $"（{FormatDays(r.ThinDays.Select(t => t.Day).ToList())}）");
-            lines.Add($"　{spec.Label}：{span}——{string.Join("；", parts)}。补法：{spec.HowToFill}");
+            lines.Add($"　{spec.Label}：{span}——{string.Join("；", parts)}。"
+                    + $"补法：{HowToFill(spec, r.EmptyDays.Count, queued)}");
         }
 
         return lines;
+    }
+
+    /// <summary>
+    /// 空日那句后面跟的说明——**只有资金净流入这一张表会把空日记进待补名单**，
+    /// 别的表只报不记（补法各异，见 <see cref="SqliteDailyTableAuditor.Spec.HowToFill"/>）。
+    ///
+    /// <paramref name="queued"/> 是写回之后名单里**还剩几天**，不是"这轮新加了几天"：
+    /// 已经补满两轮拿不到的那些早被移进 <see cref="Manifest.ConfirmedNetInflowDays"/>，
+    /// <see cref="QueueMissingNetInflowDays"/> 会把它们过滤掉，所以 queued 可能比空日数少、甚至是 0。
+    /// </summary>
+    internal static string EmptyDaysNote(SqliteDailyTableAuditor.Spec spec, int emptyCount, int queued)
+    {
+        if (spec.Table != "NetInflow") return "";
+        if (queued == 0) return "——都已判定「数据源确实没有」，不再补";
+        if (queued < emptyCount)
+            return $"，其中 {queued} 天已记入待补名单、"
+                 + $"其余 {emptyCount - queued} 天已判定「数据源确实没有」";
+        return $"，其中 {queued} 天已记入待补名单";
+    }
+
+    /// <summary>
+    /// "补法"那句。
+    ///
+    /// ⚠ 为什么不能直接用 <see cref="SqliteDailyTableAuditor.Spec.HowToFill"/>（2026-09-13 修）：
+    /// 资金净流入那条写死的是"空日已记进待补名单，跑一次【重新拉取失败】即可（约 1.75 小时）"，
+    /// 可空日**全被白名单吸收**时一天都没进名单——照那句话去跑，白等 1.75 小时。
+    /// 2026-09-13 那轮体检就是这样：报了 9 天空，9 天全在 ConfirmedNetInflowDays 里，
+    /// 而旁边"其中 N 天已记入待补名单"因为带了条件、正确地没出现，两句话自相矛盾。
+    /// </summary>
+    internal static string HowToFill(SqliteDailyTableAuditor.Spec spec, int emptyCount, int queued)
+    {
+        if (spec.Table == "NetInflow" && emptyCount > 0 && queued == 0)
+            return "这些天**不会**再进待补名单，跑【重新拉取失败】也不会去动它们——"
+                 + "它们补满两轮仍拿不到，已判定「数据源确实没有」（多半那天本来就没有数据）。"
+                 + "要推翻这个结论，把这一项的模式设成「彻底重查」跑一次，名单会被清空重查。";
+        return spec.HowToFill;
     }
 
     /// <summary>
@@ -531,19 +580,20 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
         if (thorough) manifest.ConfirmedNetInflowDays = [];
 
         var confirmed = manifest.ConfirmedNetInflowDays.Select(d => d.Date).ToHashSet();
-        var triesByDay = manifest.MissingNetInflowDays
-            .GroupBy(m => m.Day.Date)
-            .ToDictionary(g => g.Key, g => g.Max(m => m.Tries));
+        var triesByDay = (manifest.Todo(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays)?.Targets ?? [])
+            .Where(t => t.Day.HasValue)
+            .GroupBy(t => t.Day!.Value.Date)
+            .ToDictionary(g => g.Key, g => g.Max(t => t.Tries));
 
-        manifest.MissingNetInflowDays = emptyDays
+        manifest.SetTodo(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays, emptyDays
             .Select(d => d.Date)
             .Where(d => !confirmed.Contains(d))
             .Distinct()
             .OrderBy(d => d)
-            .Select(d => new MissingDayRetry { Day = d, Tries = triesByDay.GetValueOrDefault(d) })
-            .ToList();
+            .Select(d => new RetryTarget { Day = d, Tries = triesByDay.GetValueOrDefault(d) })
+            .ToList());
         _manifestStore.Save(manifest);
-        return manifest.MissingNetInflowDays.Count;
+        return manifest.Todo(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays)?.Targets.Count ?? 0;
     }
 
 
@@ -657,19 +707,24 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
     {
         var manifest = _manifestStore.Load();
 
+        // Tries 按 (code, 口径, 原因) 继承——同一只票同一口径可能同时有几类值问题，
+        // 合并计数的话补掉一类就把另一类的计数也带走了（2026-09-09 那个测试守的就是这条）。
         var tries = new Dictionary<(string, string, string), int>();
-        foreach (var m in manifest.MissingBars)
-            tries[(m.Code, NormalizeGran(m.Granularity), m.EffectiveReason)] = m.Tries;
+        foreach (var t in manifest.Todos.Where(x => x.Kind == RetryTodoKind.ValueIssue).SelectMany(x => x.Targets))
+            tries[(t.Code, NormalizeGran(t.Gran), t.Reason ?? AuditFindingKind.Gap)] = t.Tries;
 
-        var kept = manifest.MissingBars.Where(m => !m.IsValueIssue).ToList();
+        // 值体检是**全表一次扫出来的**（按口径分四次扫是四倍的钱），所以一批横跨四个口径、
+        // 落账时整体替换：先把所有值类待办清掉，再按口径分别写回。
+        // ⚠ 只清 ValueIssue 那一类——缺行待办归 CommitScope 管，连带清掉会很安静地丢一大批。
+        manifest.Todos.RemoveAll(x => x.Kind == RetryTodoKind.ValueIssue);
 
         var fresh = findings
             .Where(f => f.Code != null)
             .GroupBy(f => (f.Code!, f.Granularity ?? Granularity.Day, f.Kind))
-            .Select(g => new MissingBarRange
+            .Select(g => new RetryTarget
             {
                 Code = g.Key.Item1,
-                Granularity = g.Key.Item2,
+                Gran = g.Key.Item2,
                 From = g.Min(x => x.From),
                 To = g.Max(x => x.To),
                 // finding 现在已经是**段级**（ValueAudit 用 RowIssueSegments 聚合过），
@@ -680,11 +735,12 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             })
             .ToList();
 
-        manifest.MissingBars = kept.Concat(fresh)
-            .OrderBy(r => r.Code, StringComparer.Ordinal)
-            .ThenBy(r => r.Granularity, StringComparer.Ordinal)
-            .ThenBy(r => r.EffectiveReason, StringComparer.Ordinal)
-            .ToList();
+        foreach (var g in fresh.GroupBy(t => RetryTaskIds.ForGranularity(t.Gran)))
+        {
+            manifest.SetTodo(g.Key, RetryTodoKind.ValueIssue,
+                g.OrderBy(t => t.Code, StringComparer.Ordinal)
+                 .ThenBy(t => t.Reason, StringComparer.Ordinal).ToList());
+        }
         _manifestStore.Save(manifest);
 
         _totalRanges += fresh.Count;

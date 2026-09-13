@@ -22,6 +22,17 @@ public class FetchPaths
     /// 约 250MB/年，**不进数据库**——几百 MB 的 BLOB 会让 7.5GB 的库备份和 VACUUM 都难受。</summary>
     public string ReportsDir => Path.Combine(BaseDir, "reports");
 
+    /// <summary>
+    /// 全市场年报 PDF（2026-09-11 新增）——给「年报子公司名单」解析用，见 SubsidiaryParser。
+    ///
+    /// ⚠ **故意跟 <see cref="ReportsDir"/> 分开**，这是踩过的坑：把非金融年报放进那个目录后，
+    ///   【重解析已有PDF】扫到它们，用 BankReportParser.LooksLikeReport 一判——那个判据是为
+    ///   "拦截下错的问询函"写的，看前 3 页有没有年报结构关键词，而非金融年报前几页是封面和
+    ///   图片，撞不上 → 判成下错文件 → **把 PDF 删了**。实测一轮删掉 14 份。
+    ///   两种用途的数据共用一个目录，迟早还会互相踩，所以分开。
+    /// </summary>
+    public string AnnualReportsDir => Path.Combine(BaseDir, "annual-reports");
+
     /// <summary>抓取程序自己的界面设置（2026-08-27新增）——目前只有"空闲时自动补财务数据"这个
     /// 开关。跟 manifest.json 分开：那个是数据状态（抓到哪天了），这个是用户偏好。</summary>
     public string SettingsPath => Path.Combine(BaseDir, "fetcher-settings.json");

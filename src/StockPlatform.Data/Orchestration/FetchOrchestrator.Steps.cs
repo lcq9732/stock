@@ -170,7 +170,8 @@ public partial class FetchOrchestrator
         finally { source.Fetcher.OnStatus -= Forward; }
         progress?.Report($"本项汇总：{stats.Summarize()}");
         return FinishFetchRun(errors, "指数日K",
-            MarketIndexCatalog.All.Select(i => i.Symbol).ToList(), failed, progress);
+            MarketIndexCatalog.All.Select(i => i.Symbol).ToList(), failed, progress,
+            taskId: RetryTaskIds.IndexBars);
     }
 
     // ──────────────────── 5~7. 个股日K（前复权 / 后复权 / 不复权） ────────────────────
@@ -242,7 +243,8 @@ public partial class FetchOrchestrator
         }
         finally { source.Fetcher.OnStatus -= Forward; }
         progress?.Report($"本项汇总：{stats.Summarize()}");
-        return FinishFetchRun(errors, kind, codes, failed, progress);
+        return FinishFetchRun(errors, kind, codes, failed, progress,
+            taskId: RetryTaskIds.ForGranularity(gran));
     }
 
     // ───────────────────────────── 8. ETF 日K ─────────────────────────────
@@ -261,7 +263,7 @@ public partial class FetchOrchestrator
         }
         finally { source.Fetcher.OnStatus -= Forward; }
         progress?.Report($"本项汇总：{stats.Summarize()}");
-        return FinishFetchRun(errors, "ETF日K", etfCodes, failed, progress);
+        return FinishFetchRun(errors, "ETF日K", etfCodes, failed, progress, taskId: RetryTaskIds.EtfBars);
     }
 
     // ───────────────────────────── 9. 退市股收尾 ─────────────────────────────
@@ -280,7 +282,7 @@ public partial class FetchOrchestrator
         }
         finally { source.Fetcher.OnStatus -= Forward; }
         progress?.Report($"本项汇总：{stats.Summarize()}");
-        return FinishFetchRun(errors, "退市股收尾", codes, failed, progress);
+        return FinishFetchRun(errors, "退市股收尾", codes, failed, progress, taskId: RetryTaskIds.DelistedTails);
     }
 
     // ─────────────────────── 10. 板块指数合成（本地计算） ───────────────────────
@@ -506,7 +508,7 @@ public partial class FetchOrchestrator
         lock (_dbLock)
         {
             var manifest = _manifestStore.Load();
-            manifest.FailedIndexConsCodes = ComputeUpdatedFailedCodes(manifest.FailedIndexConsCodes, attempted, consFailed);
+            SetFailedTodo(manifest, RetryTaskIds.IndexCons, attempted, consFailed);
             _manifestStore.Save(manifest);
         }
         progress?.Report($"指数成分完成：{ok} 个指数有数据、{empty} 个无成分、失败 {consFailed.Count} 个"
@@ -599,8 +601,7 @@ public partial class FetchOrchestrator
         {
             var manifest = _manifestStore.Load();
             // 失败名单只针对**本轮问过的**那些（跳过的不该被清出名单，也不该被记进去）
-            manifest.FailedIndexWeightCodes =
-                ComputeUpdatedFailedCodes(manifest.FailedIndexWeightCodes, targets, weightFailed);
+            SetFailedTodo(manifest, RetryTaskIds.IndexWeight, targets, weightFailed);
             foreach (var code in newlyMissing) manifest.IndexWeightMissing[code] = today;
             // 这次抓到权重的，把"没有文件"的记录撤掉（中证补上了文件的情况）
             foreach (var code in targets.Except(newlyMissing, StringComparer.Ordinal))
@@ -711,163 +712,189 @@ public partial class FetchOrchestrator
     /// 确实没有"。更要紧的是**后复权和不复权只有腾讯给**：数据源切到新浪时这两组必须原样留着、
     /// 连 Tries 都不能加，否则跑两轮就把一大片正常数据永久打进白名单。
     /// </summary>
-    private async Task FillAuditedGapsAsync(
-        NamedBarSource source, SqliteBarRepository currentRepo,
+    private async Task FillGapTodoAsync(
+        string taskId, NamedBarSource source, SqliteBarRepository currentRepo,
         ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, List<string> done,
         IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
     {
-        List<MissingBarRange> pending;
-        lock (_dbLock) pending = _manifestStore.Load().MissingBars.ToList();
+        // 只认领**自己这一条**待办（2026-09-13 二期）。以前这里是一次读走整份 MissingBars、
+        // 自己按口径分组——那是因为待办没有归属、只能按口径归堆。现在归属在存储里，
+        // 分组由分派完成（谁调这个方法就补谁的），这里少了一层循环。
+        List<RetryTarget> pending;
+        lock (_dbLock)
+            pending = _manifestStore.Load().Todo(taskId, RetryTodoKind.Gap)?.Targets.ToList()
+                      ?? new List<RetryTarget>();
         if (pending.Count == 0) return;
 
-        // 老 manifest 的记录没有口径字段，一律按前复权（2026-09-04 之前只体检前复权）
-        foreach (var r in pending) r.Granularity = NormalizeGran(r.Granularity);
-
+        var gran = NormalizeGran(pending[0].Gran);
+        string label = TaskLabel(taskId);
         var audit = new SqliteMissingBarRepository(_paths.CurrentDb);
-        int filledTotal = 0, confirmedTotal = 0;
-        var parts = new List<string>();
 
-        // 待补名单按口径分组，**每跑完一批就把这一组的结果写回 manifest**（2026-09-07 改）。
-        //
-        // 原来是三个口径全部跑完才写一次。2026-09-07 实测的后果：前复权那 2852 段跑了
-        // 1 小时 52 分、Tries 从 0 加到 1，可这个记账只在内存里——中途停掉（或程序崩了、
-        // 断电了）全部白费，下一轮又从 Tries=0 开始，那 8103 段永远收敛不进"数据源确实没有"
-        // 白名单。用户的原话：完成多少就记录多少，应该落库。
-        //
-        // 现在的粒度是"一批 500 段"（约 17 分钟），中断最多损失这一批。做得到是因为这里的
-        // 抓取本来就是**顺序**的（见下面那句注释：并发只会更快撞配额），抓完一批立刻能复查。
-        // 值类记录（行在但值错，2026-09-09 起也走这条管道）**这一轮先原样留着**：
-        // 它们的补法和复查方式跟缺行不一样（缺行看"行在不在"，值错要重查对应判据；
-        // 多口径不一致还只能覆盖量额换手三列、不能动 OHLC），见 doc/bar-value-audit-design.md §5。
-        // ⚠ 但必须在 SaveProgress 里带着它们一起写回——不然跑一轮【重新拉取失败】就把
-        //   体检刚报出来的值问题全清了，而且清得很安静。
-        var valuePending = pending.Where(r => r.IsValueIssue).ToList();
-        var byGran = pending.Where(r => !r.IsValueIssue)
-                            .GroupBy(r => r.Granularity, StringComparer.Ordinal)
-                            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+        // 后复权/不复权只有腾讯给。数据源不支持时整条原样留着、**Tries 一动不动**——
+        // 让它们空跑两轮的后果是几千只票被永久打进"数据源确实没有"白名单。
+        if (gran != Granularity.Day && !source.Fetcher.SupportsHfq)
+        {
+            progress?.Report($"（{label} {pending.Count} 段先留着：数据源 {source.Name} 不提供这个口径，"
+                           + "要补请把数据源切到 Tencent 再跑一次【重新拉取失败】）");
+            done.Add($"{label}空洞 {pending.Count} 段跳过（数据源不支持）");
+            return;
+        }
 
-        // 把当前各口径的名单拼平写回 manifest。已处理的批换成复查结果，没轮到的批原样留着——
-        // 少了后半句就会把"还没开始跑的那两个口径"整个清掉，比不落库更糟。
+        // **每跑完一批就落账**（2026-09-07 改）。原来是全部跑完才写一次，实测后果：
+        // 前复权那 2852 段跑了 1 小时 52 分、Tries 从 0 加到 1，可这个记账只在内存里——
+        // 中途停掉（或程序崩了、断电了）全部白费，下一轮又从 Tries=0 开始，那 8103 段
+        // 永远收敛不进"数据源确实没有"白名单。用户的原话：完成多少就记录多少，应该落库。
+        //
+        // 粒度是"一批 500 段"（约 17 分钟），中断最多损失这一批。做得到是因为这里的抓取
+        // 本来就是**顺序**的（见下面那句注释：并发只会更快撞配额），抓完一批立刻能复查。
+        var still = new List<RetryTarget>();
+        int batchNo = 0, filled = 0, confirmed = 0;
+        int batchTotal = (pending.Count + AuditBatchSize - 1) / AuditBatchSize;
+
+        // 已处理的批换成复查结果，没轮到的批原样留着——少了后半句就会把还没跑的那部分
+        // 整个清掉，比不落库更糟（安静的错）。
         void SaveProgress()
         {
             lock (_dbLock)
             {
                 var m = _manifestStore.Load();
-                m.MissingBars = byGran.Values.SelectMany(x => x).Concat(valuePending).ToList();
+                m.SetTodo(taskId, RetryTodoKind.Gap,
+                    still.Concat(pending.Skip(batchNo * AuditBatchSize)).ToList());
                 _manifestStore.Save(m);
             }
         }
 
-        progress?.Report($"补全库体检查出的历史空洞：{pending.Count} 段、"
-                       + $"共 {pending.Sum(r => r.Days)} 个交易日（每段按区间抓一次，每 {AuditBatchSize} 段落一次账）…");
+        progress?.Report($"补 {label} 空洞：{pending.Count} 段、共 {pending.Sum(r => r.Days)} 个交易日"
+                       + $"（每段按区间抓一次，分 {batchTotal} 批，每批跑完就落账）…");
+        var stats = new FetchStats();
+        int done2 = 0;
 
-        // 前复权先补：它是界面和大多数分析用的口径，也是另外两套的参照
-        foreach (var gran in byGran.Keys
-                                   .OrderBy(k => k == Granularity.Day ? 0 : 1)
-                                   .ThenBy(k => k, StringComparer.Ordinal)
-                                   .ToList())
+        foreach (var batch in pending.Chunk(AuditBatchSize))
         {
-            ct.ThrowIfCancellationRequested();
-            var list = byGran[gran];
-            if (list.Count == 0) continue;
-            string label = GranLabel(gran);
-
-            // 后复权/不复权只有腾讯给。数据源不支持时整组原样留着、**Tries 一动不动**——
-            // 让它们空跑两轮的后果是几千只票被永久打进"数据源确实没有"白名单。
-            if (gran != Granularity.Day && !source.Fetcher.SupportsHfq)
+            batchNo++;
+            foreach (var range in batch)
             {
-                progress?.Report($"（{label} {list.Count} 段先留着：数据源 {source.Name} 不提供这个口径，"
-                               + "要补请把数据源切到 Tencent 再跑一次【重新拉取失败】）");
-                parts.Add($"{label} {list.Count} 段跳过（数据源不支持）");
-                continue;
+                ct.ThrowIfCancellationRequested();
+                // 顺序抓、不并发：这批可能上千只，并发只会更快撞数据源配额（见 PlanRunner 的类注释）
+                await ProcessOneStockAsync(range.Code, source, range.From ?? AShareMarketOpen,
+                    range.To ?? DateTime.Today, currentRepo,
+                    errors, failedCodes, stats, progress, pending.Count,
+                    () => Interlocked.Increment(ref done2), sw, ct, granularity: gran);
             }
 
-            int batchTotal = (list.Count + AuditBatchSize - 1) / AuditBatchSize;
-            progress?.Report($"补 {label} 空洞：{list.Count} 段、共 {list.Sum(r => r.Days)} 个交易日"
-                           + $"（分 {batchTotal} 批，每批跑完就落账）…");
-            var stats = new FetchStats();
-            int done2 = 0;
-            var granStill = new List<MissingBarRange>();
-            int granFilled = 0, granConfirmed = 0, batchNo = 0;
-
-            foreach (var batch in list.Chunk(AuditBatchSize))
+            // 抓完立刻复查这一批还缺不缺——判据仍是"交易日历里有、这只票没有"
+            var toConfirm = new List<(string Code, DateTime Day)>();
+            var batchStill = new List<RetryTarget>();
+            var gaps = audit.FindGaps(batch.Select(r => r.Code).ToList(), gran,
+                MarketIndexCatalog.ShanghaiCompositeSymbol);
+            foreach (var r in batch)
             {
-                batchNo++;
-                foreach (var range in batch)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    // 顺序抓、不并发：这批可能上千只，并发只会更快撞数据源配额（见 PlanRunner 的类注释）
-                    await ProcessOneStockAsync(range.Code, source, range.From, range.To, currentRepo,
-                        errors, failedCodes, stats, progress, list.Count,
-                        () => Interlocked.Increment(ref done2), sw, ct, granularity: gran);
-                }
+                if (!gaps.TryGetValue(r.Code, out var days)) continue;          // 补齐了
+                var left = days.Where(d => d >= (r.From ?? DateTime.MinValue)
+                                        && d <= (r.To ?? DateTime.MaxValue)).ToList();
+                if (left.Count == 0) continue;
 
-                // 抓完立刻复查这一批还缺不缺——判据仍是"交易日历里有、这只票没有"
-                var toConfirm = new List<(string Code, DateTime Day)>();
-                var batchStill = new List<MissingBarRange>();
-                var gaps = audit.FindGaps(batch.Select(r => r.Code).ToList(), gran,
-                    MarketIndexCatalog.ShanghaiCompositeSymbol);
-                foreach (var r in batch)
-                {
-                    if (!gaps.TryGetValue(r.Code, out var days)) continue;      // 补齐了
-                    var left = days.Where(d => d >= r.From && d <= r.To).ToList();
-                    if (left.Count == 0) continue;
-
-                    int tries = r.Tries + 1;
-                    if (tries >= AuditMaxTries)
-                        toConfirm.AddRange(left.Select(d => (r.Code, d)));      // 认了：数据源就是没有
-                    else
-                        batchStill.Add(new MissingBarRange
-                        {
-                            Code = r.Code, Granularity = gran,
-                            From = left[0], To = left[^1], Days = left.Count, Tries = tries,
-                        });
-                }
-
-                // 白名单本来就是即时落库的；这里补上的是"还缺几段、Tries 加到几"那部分记账
-                if (toConfirm.Count > 0) audit.Confirm(toConfirm, gran, AuditMaxTries);
-                int confirmedInBatch = toConfirm.Select(x => x.Code).Distinct().Count();
-                int filledInBatch = Math.Max(0, batch.Length - batchStill.Count - confirmedInBatch);
-                granStill.AddRange(batchStill);
-                granConfirmed += confirmedInBatch;
-                granFilled += filledInBatch;
-
-                // 落账：这个口径**已跑过的批**换成复查结果，还没轮到的批原样留着
-                byGran[gran] = granStill.Concat(list.Skip(batchNo * AuditBatchSize)).ToList();
-                SaveProgress();
-                progress?.Report($"　{label} 第 {batchNo}/{batchTotal} 批已落账："
-                               + $"补上 {filledInBatch} 段、还缺 {batchStill.Count} 段、"
-                               + $"{confirmedInBatch} 段判定数据源确实没有"
-                               + (batchNo < batchTotal ? "（现在停也不会丢前面几批的进度）" : ""));
+                int tries = r.Tries + 1;
+                if (tries >= AuditMaxTries)
+                    toConfirm.AddRange(left.Select(d => (r.Code, d)));          // 认了：数据源就是没有
+                else
+                    batchStill.Add(new RetryTarget
+                    {
+                        Code = r.Code, Gran = gran,
+                        From = left[0], To = left[^1], Days = left.Count, Tries = tries,
+                    });
             }
 
-            byGran[gran] = granStill;
+            // 白名单本来就是即时落库的；这里补上的是"还缺几段、Tries 加到几"那部分记账
+            if (toConfirm.Count > 0) audit.Confirm(toConfirm, gran, AuditMaxTries);
+            int confirmedInBatch = toConfirm.Select(x => x.Code).Distinct().Count();
+            int filledInBatch = Math.Max(0, batch.Length - batchStill.Count - confirmedInBatch);
+            filled += filledInBatch;
+            confirmed += confirmedInBatch;
+            still.AddRange(batchStill);
+
             SaveProgress();
-            filledTotal += granFilled;
-            confirmedTotal += granConfirmed;
-
-            progress?.Report($"　{label}：{stats.Summarize()}；补上 {granFilled} 段、"
-                           + $"还缺 {granStill.Count} 段（下轮再试）、{granConfirmed} 段判定数据源确实没有");
-            parts.Add($"{label} 补上 {granFilled}/{list.Count} 段");
+            progress?.Report($"　{label} 第 {batchNo}/{batchTotal} 批已落账："
+                           + $"补上 {filledInBatch} 段、还缺 {batchStill.Count} 段、"
+                           + $"{confirmedInBatch} 段判定数据源确实没有"
+                           + (batchNo < batchTotal ? "（现在停也不会丢前面几批的进度）" : ""));
         }
 
         SaveProgress();
-
-        // ── 值问题（行在但值错）：补法和复查都跟缺行不一样，见 FillValueIssuesAsync ──
-        if (valuePending.Count > 0)
-            valuePending = await FillValueIssuesAsync(
-                source, currentRepo, valuePending, errors, failedCodes, parts, progress, sw, ct,
-                updated => { valuePending = updated; SaveProgress(); });
-
-        SaveProgress();
-
-        int stillTotal = byGran.Values.Sum(x => x.Count) + valuePending.Count;
-        progress?.Report($"历史空洞补齐汇总：{string.Join("；", parts)}。\n"
-            + $"　合计补上 {filledTotal} 段；还缺 {stillTotal} 段（下轮再试）；"
-            + $"{confirmedTotal} 段补满 {AuditMaxTries} 轮仍拿不到，"
-            + "已判定为数据源确实没有（多半是停牌），以后体检不再报。");
-        done.Add($"历史空洞 {pending.Count} 段");
+        progress?.Report($"　{label}：{stats.Summarize()}；补上 {filled} 段、"
+                       + $"还缺 {still.Count} 段（下轮再试）、{confirmed} 段判定数据源确实没有"
+                       + (confirmed > 0 ? "（多半是停牌，以后体检不再报）" : ""));
+        done.Add($"{label}空洞 {pending.Count} 段");
     }
+
+    /// <summary>
+    /// 修体检报出的**值问题**（行在但值错）——认领自己那一条（2026-09-13 二期）。
+    ///
+    /// 跟缺行分开是因为复查方式根本不同：值错的行**一直都在**，拿"行在不在"去复查会一律
+    /// 判成"已补齐"划掉，哪怕值根本没被覆盖。实际的抓改逻辑在 <see cref="FillValueIssuesAsync"/>，
+    /// 那里和 <c>ValueIssueFixPlan</c> 一行没动——这里只做待办格式的进出转换。
+    /// </summary>
+    private async Task FillValueTodoAsync(
+        string taskId, NamedBarSource source, SqliteBarRepository currentRepo,
+        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, List<string> done,
+        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
+    {
+        List<RetryTarget> pending;
+        lock (_dbLock)
+            pending = _manifestStore.Load().Todo(taskId, RetryTodoKind.ValueIssue)?.Targets.ToList()
+                      ?? new List<RetryTarget>();
+        if (pending.Count == 0) return;
+
+        void Save(List<MissingBarRange> updated)
+        {
+            lock (_dbLock)
+            {
+                var m = _manifestStore.Load();
+                m.SetTodo(taskId, RetryTodoKind.ValueIssue, updated.Select(ToTarget).ToList());
+                _manifestStore.Save(m);
+            }
+        }
+
+        var parts = new List<string>();
+        var left = await FillValueIssuesAsync(
+            source, currentRepo, pending.Select(ToRange).ToList(),
+            errors, failedCodes, parts, progress, sw, ct, Save);
+        Save(left);
+        done.Add($"{TaskLabel(taskId)}值问题 {pending.Count} 段");
+    }
+
+    /// <summary>待办 ↔ 值问题修复那条链用的老结构之间的转换（只在 <see cref="FillValueTodoAsync"/> 用）。</summary>
+    private static MissingBarRange ToRange(RetryTarget t) => new()
+    {
+        Code = t.Code, Granularity = NormalizeGran(t.Gran),
+        From = t.From ?? DateTime.MinValue, To = t.To ?? DateTime.MaxValue,
+        Days = t.Days, Tries = t.Tries, Reason = t.Reason ?? AuditFindingKind.Gap,
+    };
+
+    private static RetryTarget ToTarget(MissingBarRange r) => new()
+    {
+        Code = r.Code, Gran = NormalizeGran(r.Granularity),
+        From = r.From, To = r.To, Days = r.Days, Tries = r.Tries,
+        Reason = r.EffectiveReason,
+    };
+
+    /// <summary>任务 id → 日志里那个短标签。</summary>
+    private static string TaskLabel(string taskId) => taskId switch
+    {
+        RetryTaskIds.StockHfqBars => "个股·后复权",
+        RetryTaskIds.StockRawBars => "个股·不复权",
+        RetryTaskIds.StockDayBars => "个股·前复权",
+        RetryTaskIds.EtfBars => "ETF",
+        RetryTaskIds.IndexBars => "指数",
+        RetryTaskIds.NetInflow => "资金净流入",
+        RetryTaskIds.Roster => "流通市值",
+        RetryTaskIds.IndexCons => "指数成分",
+        RetryTaskIds.IndexWeight => "指数权重",
+        RetryTaskIds.Shareholder => "股东数据",
+        RetryTaskIds.Dividend => "分红送配",
+        RetryTaskIds.DelistedTails => "退市股收尾",
+        _ => taskId,
+    };
 
 
     /// <summary>
@@ -914,56 +941,26 @@ public partial class FetchOrchestrator
         foreach (var batch in pending.Chunk(AuditBatchSize))
         {
             batchNo++;
-            var skipped = new HashSet<MissingBarRange>();
+            // 阶段一/阶段二（挑出抓不了的、按 (票,口径) 分组、inconsistent 连基准 day 一起抓）
+            // 都在 ValueIssueFixPlan 里——纯函数、有单测，理由同 ValueIssueRecheck：
+            // 这条路错了是静默的（每轮照发请求、每轮修不掉），而 orchestrator 没法单测。
+            var plan = ValueIssueFixPlan.Build(batch, source.Fetcher.SupportsHfq);
+            var skipped = plan.Skipped;
 
-            // ── 阶段一：先把抓不了的挑出来（Tries 一动不动，免得空跑两轮被误判）──
-            foreach (var r in batch)
-            {
-                // 后复权/不复权只有腾讯给。数据源不支持这个口径就原样留着。
-                if (r.Granularity != Granularity.Day && r.Granularity != Granularity.DayAdj
-                    && !source.Fetcher.SupportsHfq)
-                    skipped.Add(r);
-                // day_adj 是本地重算的产物，抓不来——留着，等【重算回测序列】跑。
-                else if (r.Granularity == Granularity.DayAdj)
-                    skipped.Add(r);
-            }
-
-            // ── 阶段二：按 (票, 口径) 分组，一组只抓一次 ──
-            //
-            // 同一 (票, 口径) 常有几条不同 Reason 的记录：2026-09-01 那批盘中行既是半天快照
-            // （intraday）、量额自然也跟 day 对不上（inconsistent），两条判据都命中。
-            // 逐段抓的话 9398 段里有 4020 段是白发的请求（2026-09-09 实测），多花二十分钟。
-            // 抓一次、取各条日期的并集，复查再按各自判据分别判。
-            var groups = batch
-                .Where(r => !skipped.Contains(r))
-                .GroupBy(r => (r.Code, r.Granularity))
-                .Select(g => new
-                {
-                    g.Key.Code,
-                    g.Key.Granularity,
-                    From = g.Min(x => x.From),
-                    To = g.Max(x => x.To),
-                    // "只覆盖量额换手三列"那条路，只在这一组**全是** inconsistent 时才够用；
-                    // 混着别的 Reason（盘中固化的 OHLC 也错了）就得整段重抓——那条路顺带也会
-                    // 把量额修好，所以不会漏。
-                    OnlyInconsistent = g.All(x => x.EffectiveReason == AuditFindingKind.Inconsistent),
-                })
-                .ToList();
-
-            foreach (var g in groups)
+            foreach (var f in plan.Fetches)
             {
                 ct.ThrowIfCancellationRequested();
                 try
                 {
                     var (_, fresh) = await source.Fetcher.FetchAsync(
-                        g.Code, g.Granularity, g.From, g.To, ct);
+                        f.Code, f.Granularity, f.From, f.To, ct);
 
-                    if (g.OnlyInconsistent)
+                    if (f.Write == ValueFixWrite.ThreeColumns)
                     {
                         // 只覆盖 volume/amount/turnover 三列、**绝不动 OHLC**：历史行的价格是
                         // 当年抓取时的复权基准，覆盖会造成同一序列里新旧基准混杂。
                         int n;
-                        lock (_dbLock) n = currentRepo.UpdateVolumeAmountTurnover(fresh, g.Granularity);
+                        lock (_dbLock) n = currentRepo.UpdateVolumeAmountTurnover(fresh, f.Granularity);
                         if (n > 0) stats.FetchedWithNewData(); else stats.FetchedButEmpty();
                     }
                     else if (fresh.Count > 0)
@@ -980,13 +977,14 @@ public partial class FetchOrchestrator
                     }
                     else stats.FetchedButEmpty();
 
-                    Interlocked.Increment(ref done);
+                    // 基准重抓不是名单里的段（是为了修别的口径顺带抓的），不计进度
+                    if (!f.IsBaselineRefetch) Interlocked.Increment(ref done);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    errors.Add($"{g.Code} {GranLabel(g.Granularity)} 值修复失败：{ex.Message}");
-                    failedCodes.Add(g.Code);
+                    errors.Add($"{f.Code} {GranLabel(f.Granularity)} 值修复失败：{ex.Message}");
+                    failedCodes.Add(f.Code);
                 }
             }
 

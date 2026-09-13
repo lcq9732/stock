@@ -69,17 +69,21 @@ public class MainViewModel : INotifyPropertyChanged
     private readonly StreamWriter? _logFileWriter;
     private readonly FetchPaths _paths;
 
-    /// <summary>还有哪些东西等着重试（见 FetchOrchestrator.GetFailedRetrySummary）——
-    /// 只在 <see cref="HasFailed"/> 为真时"重新拉取失败股票"按钮才可点。
+    /// <summary>还有哪些东西等着重试（见 FetchOrchestrator.GetRetryBacklog）。
+    /// <see cref="HasFailed"/> 是**自动重试**的判据（计划表那行的「执行」按钮一直可点，
+    /// 点进去之后由重取入口自己判断有没有活）。
     ///
     /// 2026-08-19 由原来的"一个总数"改成分类汇总：流通市值是整轮扫描，失败时会把整批代码记进
     /// 名单，加总后按钮上会显示"（5547）"，被读成丢了5547只票的数据，实际只是一次市值快照没取到
-    /// 外加3只资金流。现在按钮直接显示"K线 0 只 · 市值 1 轮 · 净流入 3 只"这样的分类文字。</summary>
+    /// 外加3只资金流。现在按钮直接显示"K线 0 只 · 市值 1 轮 · 净流入 3 只"这样的分类文字。
+    ///
+    /// 2026-09-13 换成 <see cref="RetryBacklog"/>：老的那份清单在代码里手抄了三遍，
+    /// 体检写进来的历史空洞漏抄了两周——界面显示"09-11日线 1 只"，点下去实际跑 1909 段。</summary>
     // 初值是 null 而不是 new()：**"还没读到" 和 "读到了、是空的" 必须分得开**。
     // 用 new() 顶上会让统计失败时界面显示"无失败"，用户据此判断"不用管了"——而实际上
     // 名单可能有几千只没补（2026-09-03 用户："要不能用户无法判断数据是否取正确了"）。
-    private FailedRetrySummary? _failedRetry;
-    public FailedRetrySummary? FailedRetry
+    private RetryBacklog? _failedRetry;
+    public RetryBacklog? FailedRetry
     {
         get => _failedRetry;
         private set
@@ -87,6 +91,7 @@ public class MainViewModel : INotifyPropertyChanged
             Set(ref _failedRetry, value);
             Raise(nameof(FailedRetryText));
             Raise(nameof(HasFailed));
+            PushBacklogToPlanItems();
         }
     }
 
@@ -246,8 +251,8 @@ public class MainViewModel : INotifyPropertyChanged
         PendingFinancials < 0 ? "待补数还没算出来"
         : PendingFinancials > 0 ? $"待补 {PendingFinancials} 只" : "已补齐";
 
-    // 名单还没读到（null）时按"没有失败"算：这个属性是【重新拉取失败】按钮的 CanExecute，
-    // 界面一渲染就会调到，那会儿后台统计还没跑完。文字那边会照实说"失败名单还没读到"。
+    // 名单还没读到（null）时按"没有失败"算——那会儿后台统计还没跑完，
+    // 这时候排一轮自动重试没有意义。文字那边会照实说"失败名单还没读到"。
     public bool HasFailed => _failedRetry?.Any == true;
 
     /// <summary>自动重试的状态文字（"将于 21:00 自动重试（…）"），空=当前没有排定。</summary>
@@ -729,11 +734,11 @@ public class MainViewModel : INotifyPropertyChanged
             //    界面上这些数字从此不再变化，而且一点提示都没有（2026-09-03 用户发现）。
             try
             {
-                FailedRetrySummary? failed = null;
+                RetryBacklog? failed = null;
                 // null = 这一项没算出来。别用 0 顶替——"取不到"和"真的是 0"在界面上是两句话，
                 // 混在一起用户就没法判断"该不该做、做了没有"了。
                 int? qfq = null, raw = null, adj = null, fin = null, earn = null;
-                try { failed = _orchestrator.GetFailedRetrySummary(); } catch { }
+                try { failed = _orchestrator.GetRetryBacklog(); } catch { }
                 // 待重取前复权的计数跟失败名单同源（都在 manifest.json 里），一起刷新
                 try { qfq = _orchestrator.GetPendingQfqRepairCount(); } catch { /* 只是个计数 */ }
                 try { raw = _orchestrator.GetPendingRawBarCount(); } catch { }
@@ -981,8 +986,34 @@ public class MainViewModel : INotifyPropertyChanged
     private int _autoRetryLastPending;
 
     /// <summary>待重试的总量（逐只那几类的股票数 + 市值那一轮算 1）——用来判断自动重试有没有进展。</summary>
-    private int PendingRetryCount()
-        => _failedRetry is { } f ? f.PerStockTotal + (f.MarketCapPending ? 1 : 0) : 0;
+    private int PendingRetryCount() => _failedRetry?.ActionableCount ?? 0;
+
+    /// <summary>
+    /// 把待办清单推给【全库数据体检】那一行（2026-09-13）。
+    ///
+    /// 为什么是"推"而不是让那行自己绑：数据在 manifest 里、要 orchestrator 去读，
+    /// 而 ToolTip 不在计划行的可视树里——在 tooltip 内部 `RelativeSource AncestorType=Window`
+    /// 取不到 Window，绑不到这个 ViewModel。做成本行自己的属性由这里写入，DataContext 天然正确。
+    ///
+    /// 体检行显示**全部**待办（它是发现者，问题全貌归它），【重新拉取失败】那行只显示
+    /// 点下去会降的那些——分工见 RetryBacklog 的类注释。
+    /// </summary>
+    private void PushBacklogToPlanItems()
+    {
+        var row = PlanItems.FirstOrDefault(x => x.IsFullAudit);
+        if (row == null) return;
+        if (_failedRetry is not { } b)
+        {
+            row.AuditBacklogText = "待补量还没读到";
+            row.AuditBacklogDetail = "程序启动后在后台统计，库大时要几十秒。";
+            return;
+        }
+        // 行内那句只报体检自己查出来的（空洞 + 值问题）——别的几类是抓取失败，不是体检的产物。
+        var mine = b.Items.Where(i => i.Kind is RetryKind.Gaps or RetryKind.ValueIssues).ToList();
+        int segs = mine.Sum(i => i.Count);
+        row.AuditBacklogText = segs > 0 ? $"待补 {segs} 段" : "无待补";
+        row.AuditBacklogDetail = b.DescribeAll();
+    }
 
     /// <summary>
     /// 每个操作跑完后决定要不要排一次自动重试（2026-08-21新增）。
@@ -1303,6 +1334,15 @@ public class MainViewModel : INotifyPropertyChanged
     {
         PlanGroups.Clear();
         PlanItems.Clear();
+
+        // ⚠ **不要在这里对 PlanGroups 重新排序**（2026-09-11 试过，翻车了）。
+        // 看着它只是个显示集合，其实 SyncPlanFromUi 把它当**权威顺序**写回 _plan.Groups
+        // （那是拖动排序的实现方式，见该方法的注释）。所以任何"只改显示"的排序都会在
+        // 下一次存盘时固化成存储顺序，进而改掉执行顺序，还会让 GroupOf(kind) 按下标认错组
+        // ——实测把早间组排到显示第一位后，它真的变成了 Groups[0]，即 Daily 组。
+        //
+        // 想让某个组在界面上靠前，只能真的调整它在计划里的位置（那就是执行顺序），
+        // 或者先把 GroupOf 从"按下标认组"改成按 Kind 认组——那是另一件事，不能顺手做。
         foreach (var g in _plan.Groups)
         {
             var gvm = new PlanGroupViewModel(g, OnPlanItemEdited);
@@ -1316,6 +1356,8 @@ public class MainViewModel : INotifyPropertyChanged
         }
         RenumberPlanItems();
         RefreshPlanWarning();
+        // 重建之后那几行是新对象，待办文字得重新推一遍——不然切换计划模板后体检那行是空的
+        PushBacklogToPlanItems();
     }
 
     /// <summary>
@@ -1929,6 +1971,13 @@ public class MainViewModel : INotifyPropertyChanged
             var result = await ExecutePlanItemAsync(vm.Model, null, new Progress<string>(Log), CancellationToken.None);
             vm.Model.LastEnd = DateTime.Now;
 
+            // 失败原因必须落到日志里（2026-09-12 补）。以前只有**计划自动跑**的那条路打这些
+            // （PlanRunner.FinishRunAsync），手动点【执行】压根不看 result.Errors——于是界面上
+            // 只有"失败 15 只"这个数字，一个字的原因都没有。分档资金流被网关拦掉那次，
+            // 光是定位到"push2his 连不上"就翻了半天日志，而原因其实一直攥在这个对象里。
+            if (result?.Errors is { Count: > 0 } errs)
+                foreach (var err in errs) Log($"错误：{err}");
+
             // 「根本没开工」不能记成完成（2026-09-04）：原来这里无条件写 Ok、连返回值都没看，
             // 结果数据源还在限流熔断里、一行都没抓，界面上照样是绿勾"09:25 完成"。
             // 更要命的是 FetchPlanItem.AlreadyRanOn 只认 Ok——记成完成的话今天就不会再跑了。
@@ -2127,6 +2176,13 @@ public class MainViewModel : INotifyPropertyChanged
     private Task<FetchResult> DispatchPlanActionAsync(
         FetchPlanItem item, DateTime? deadline, IProgress<string> progress, CancellationToken ct)
     {
+        // ── 【只补待办】走这一条总分支（2026-09-13）──
+        // 这个模式跟具体是哪一项无关：都是"读 Manifest.Todos 里属于我的那几条、补上"，
+        // 所以在这里一次分派掉，下面那个 switch 和新式任务注册表都不用管它。
+        // 【重新拉取失败】自己也是遍历待办的 TaskId 走这条路（见 RunRetryFailedInternalAsync）。
+        if (item.EffectiveMode == FetchMode.FillBacklog)
+            return _orchestrator.RunFillBacklogAsync(item.Action.ToString(), SelectedSource, progress, ct);
+
         // ── 新式任务走这一条总分支（2026-09-08）──
         // 加过这一次之后，**再新增任务就不用碰这个 switch 了**：写一个类（继承 FetchTaskBase，
         // 放 StockPlatform.Tasks）+ 在 App.xaml.cs 的注册表里加一行即可。

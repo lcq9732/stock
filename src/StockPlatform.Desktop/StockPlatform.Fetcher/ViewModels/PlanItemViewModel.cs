@@ -37,14 +37,25 @@ public sealed record PacingOption(RunPacing Value, string Text)
 /// 每一行只列**自己支持的**模式——不支持是有具体原因的（快照接口没有历史、
 /// 某些数据在老的【补指定历史日】里走的本来就是水位线增量），列出来只会让人选了没效果。
 /// </summary>
-public sealed record ModeOption(FetchMode Value, string Text)
+/// <param name="Help">下拉框 ToolTip 里给这个模式的一句话（见 <see cref="PlanItemViewModel.ModeTooltip"/>）。</param>
+public sealed record ModeOption(FetchMode Value, string Text, string Help)
 {
     public static readonly IReadOnlyList<ModeOption> All =
     [
-        new(FetchMode.Incremental, "增量"),
-        new(FetchMode.SpecificDay, "只抓某一天"),
-        new(FetchMode.FirstBackfill, "首次整段回补"),
-        new(FetchMode.Thorough, "彻底重查"),
+        new(FetchMode.Incremental, "增量",
+            "每个标的从自己上次抓到那天续抓到今天（日常用这个，只有它会补断档）。"),
+        new(FetchMode.SpecificDay, "只抓某一天",
+            "不看水位线、只补日期格里那一天（原【补指定历史日】）。"),
+        new(FetchMode.FirstBackfill, "首次整段回补",
+            "只补以前缺的、已有的不动，补完就不用再跑了（原【补不复权历史】【一键补齐每日历史】）。"),
+        new(FetchMode.Thorough, "彻底重查",
+            "不管原来有没有、全部重来一次：忽略并清空那几张\"确认没有\"的结论名单（慢，数据源当时抽风、后来补上了才用）。"),
+        new(FetchMode.FillBacklog, "只补待办",
+            "只补这一项欠着的那些——自己抓失败的、全库体检查出它这个口径有空洞或值问题的、"
+            + "当天数据没到位的。\n"
+            + "⚠ 跟「增量」的分界是**目标从哪来**：增量按每只标的的水位线往后续抓，"
+            + "而历史空洞正好在水位线**之下**，拿增量跑一整轮也补不上一段。\n"
+            + "【重新拉取失败】就是拿这个模式把各项挨个跑一遍；单独给某一项设成它，就是只补这一项欠的。"),
     ];
 
     /// <summary>某个动作支持的那几项。</summary>
@@ -191,6 +202,21 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
     /// <summary>只有一种模式可选的行（大多数）不显示这个下拉——摆一个只有一项的下拉纯属噪音。</summary>
     public bool ShowMode => ModeOptions.Count > 1;
 
+    /// <summary>
+    /// 模式下拉的说明（2026-09-11）：**只列这一行自己支持的那几个模式**。
+    ///
+    /// 原来这句话写死在 MainWindow.xaml 里，列的是 2026-09-02 当时的三个模式。后来加了
+    /// <see cref="FetchMode.Thorough"/>、各行的 SupportedModes 也各不相同，于是【拉取分档资金流】
+    /// 那一格出现了"列出来的三条一条都选不到、能选的那个反而没解释"——用户当场就问是不是坏了。
+    /// 按行生成之后，加模式只要在 <see cref="ModeOption.All"/> 里写一句，不会再脱节。
+    ///
+    /// 末尾那句指回行说明：同一个模式在不同行含义不同（【拉取分档资金流】的「首次整段回补」
+    /// 只能补到 120 个交易日，别的行是从开市首日抓起），通用文案说不全。
+    /// </summary>
+    public string ModeTooltip =>
+        string.Join("\n", ModeOptions.Select(o => $"{o.Text}＝{o.Help}"))
+        + "\n\n（同一个模式在不同任务里的具体范围不一样，以这一行的说明为准。）";
+
     public ModeOption SelectedMode
     {
         get => ModeOptions.FirstOrDefault(o => o.Value == Model.EffectiveMode) ?? ModeOptions[0];
@@ -266,6 +292,27 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
     /// 它没有"还差多少只"这种待办量，人判断"还要不要再取"看的就是这个日期。
     /// </summary>
     public bool IsTradingCalendar => Model.Action == FetchActionId.StepTradingCalendar;
+
+    /// <summary>
+    /// 是不是【全库数据体检】那一行——它是**发现者**，所以问题的全貌归它显示（2026-09-13）。
+    ///
+    /// 分工：体检这里列**全部**待办（含值问题那种重取补不了的）；
+    /// 【重新拉取失败】那行只列它自己点下去会降的（见 <see cref="RetryBacklog"/> 的 Actionable）。
+    /// </summary>
+    public bool IsFullAudit => Model.Action == FetchActionId.StepFullAudit;
+
+    // ⚠ 这两段文字由 MainViewModel.PushBacklogToPlanItems 写进来，**不是这一行自己算的**：
+    //   数据在 manifest 里、由 orchestrator 读。做成本行的属性而不是绑 Window.DataContext，
+    //   是因为 ToolTip 不在这一行的可视树里——`RelativeSource AncestorType=Window` 在 ToolTip
+    //   内部取不到 Window（现有那几格能用是因为它们绑在行本身、不在 tooltip 里）。
+    private string _auditBacklogText = "";
+    /// <summary>体检那行参数格里的一句汇总（"待补 1909 段"）。</summary>
+    public string AuditBacklogText { get => _auditBacklogText; set { _auditBacklogText = value; Raise(); } }
+
+    private string _auditBacklogDetail = "";
+    /// <summary>体检那行 tooltip 里的逐项明细（<see cref="RetryBacklog.DescribeAll"/>）。</summary>
+    public string AuditBacklogDetail { get => _auditBacklogDetail; set { _auditBacklogDetail = value; Raise(); } }
+
     public bool NeedsKeywords => Info.Params.HasFlag(FetchActionParams.Keywords);
     public bool NeedsAnyParam => NeedsDate || NeedsYearRange || NeedsLookback || NeedsKeywords;
 

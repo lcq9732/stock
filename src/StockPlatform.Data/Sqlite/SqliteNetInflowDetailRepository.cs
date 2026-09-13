@@ -141,6 +141,25 @@ public class SqliteNetInflowDetailRepository : INetInflowDetailRepository
         return map;
     }
 
+    /// <summary>
+    /// 某一段交易日窗口内，每只票有多少行（2026-09-11）。判据必须用它而不是全表计数，
+    /// 理由见接口上的注释。闭区间。
+    /// </summary>
+    public Dictionary<string, int> GetRowCountByCode(DateTime from, DateTime to)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT code, COUNT(*) FROM NetInflowDetail "
+          + "WHERE trade_date >= $from AND trade_date <= $to GROUP BY code";
+        cmd.Parameters.AddWithValue("$from", from.ToString(DateFormat, CultureInfo.InvariantCulture));
+        cmd.Parameters.AddWithValue("$to", to.ToString(DateFormat, CultureInfo.InvariantCulture));
+        var map = new Dictionary<string, int>(StringComparer.Ordinal);
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) map[r.GetString(0)] = r.GetInt32(1);
+        return map;
+    }
+
     public int Count()
     {
         using var conn = Open();

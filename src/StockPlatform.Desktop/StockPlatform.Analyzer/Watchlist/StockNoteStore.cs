@@ -21,6 +21,22 @@ public class StockNoteStore
 
     public string PathOf(string code) => Path.Combine(_notesDir, $"{code}.md");
 
+    /// <summary>
+    /// 从笔记里摘出**一句话的个人观点**，给【观察项】页那列显示（2026-09-11）。
+    ///
+    /// 约定：正文里以 <c>观点：</c> 开头的那一行就是它，前面可以带 markdown 的
+    /// <c>&gt;</c>、<c>-</c>、<c>#</c> 等符号。取**第一条**。例：
+    /// <code>
+    /// &gt; 观点：估值压到18x，压制来自政策成本+去宁化；回购是情绪转折点
+    /// </code>
+    ///
+    /// 为什么要个标记而不是取首行：笔记是自由 markdown，首行往往是标题或日期。
+    /// 但也**只认这一个标记**——不强制模板，其余内容随便写。
+    /// 没写就返回 null，那一列留空，不影响任何判断。
+    /// </summary>
+    public string? ReadOpinion(string code)
+        => Logic.Services.NoteOpinionParser.Parse(Read(code));
+
     public bool Exists(string code) => File.Exists(PathOf(code));
 
     /// <summary>读笔记；文件不存在时返回 null（调用方据此决定要不要给新建模板）。</summary>

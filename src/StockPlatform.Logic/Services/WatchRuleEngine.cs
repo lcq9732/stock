@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Models;
+﻿using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Services;
 
@@ -66,13 +66,21 @@ public static class WatchRuleEngine
             // 下一轮重建时这条自然消失。**这就是自动摘除的全部实现**。
             if (input.OpenPlans.TryGetValue(code, out var plan))
             {
-                var cap = plan.PlanCapPrice is { } p ? $"，价格上限 {p:0.##} 元" : "";
+                // 方案的三个关键数都摆出来：**计划花多少钱**、价格上限、公告日。
+                // 只写价格上限不够——"计划 4~8 亿"才是判断这家有多认真的第一个数
+                //（2026-09-11 用户反馈）。方案参数由 GetOpenPlans 从「方案」那条补齐，
+                // 因为最新一条通常是「进展」、它身上没有这些字段。
+                var bits = new List<string> { $"{plan.AnnounceDate:yyyy-MM-dd} 公告" };
+                if (plan.PlanAmountLow is { } lo && plan.PlanAmountHigh is { } hi && hi > 0)
+                    bits.Add($"计划 {lo / 1e8:0.##}~{hi / 1e8:0.##} 亿");
+                if (plan.PlanCapPrice is { } p) bits.Add($"价格上限 {p:0.##} 元");
+
                 derived.Add(new WatchItem
                 {
                     Code = code, Name = name, Layer = WatchLayer.L1, Origin = WatchOrigin.Derived,
                     Position = pos, Kind = WatchKind.PlanStage, Expr = plan.Kind,
                     Op = WatchOp.StageChange, Priority = "A",
-                    Reason = $"{plan.Kind}方案进行中（{plan.AnnounceDate:yyyy-MM-dd} 公告{cap}）",
+                    Reason = $"{plan.Kind}方案进行中（{string.Join("，", bits)}）",
                 });
             }
 
@@ -104,30 +112,34 @@ public static class WatchRuleEngine
                     // 取值是**对均线的偏离率**（%），所以阈值是 0：由正转负＝跌破。
                     // 见 SqliteWatchReadingSource.ReadPriceMa 的注释。
                     Op = WatchOp.CrossDown, Threshold = 0, Priority = "B",
-                    Reason = "主动仓：跌破 MA20",
+                    Reason = "跌破 MA20",
                 });
             }
             else if (pos == PositionKind.Core)
             {
                 // 底仓吃分红，盯的是分红能力不是价格。
+                // 30 天窗口：分红方案从预案到实施跨度以月计，窗口太窄会在两次求值之间漏过去。
                 derived.Add(new WatchItem
                 {
                     Code = code, Name = name, Layer = WatchLayer.L1, Origin = WatchOrigin.Derived,
-                    Position = pos, Kind = WatchKind.EventTable, Expr = "Dividend",
-                    Op = WatchOp.StageChange, Priority = "B",
-                    Reason = "底仓：分红方案变化",
+                    Position = pos, Kind = WatchKind.EventRecent, Expr = "Dividend",
+                    Op = WatchOp.Within, Threshold = 30, Priority = "B",
+                    // ⚠ 措辞别写成"分红方案**变化**"（2026-09-11 改）：取值器取的是**最新一条**方案，
+                    // 并没有跟上一版比较过。说成"变化"是在承诺一件没做的事——
+                    // 真要判变化得存上一版方案再 diff，那是另一件事。
+                    Reason = "分红方案",
                 });
             }
 
             // ── 规则④：所有在册的票都挂 L0 兜底事件 ──
             // L0 是"所有票都有"，所以不按画像挑，挂就完了。
-            foreach (var (table, why, pri) in L0Events)
+            foreach (var (kind, table, days, why, pri) in L0Events)
             {
                 derived.Add(new WatchItem
                 {
                     Code = code, Name = name, Layer = WatchLayer.L0, Origin = WatchOrigin.Builtin,
-                    Position = pos, Kind = WatchKind.EventTable, Expr = table,
-                    Op = WatchOp.StageChange, Priority = pri, Reason = why,
+                    Position = pos, Kind = kind, Expr = table,
+                    Op = WatchOp.Within, Threshold = days, Priority = pri, Reason = why,
                 });
             }
         }
@@ -160,13 +172,34 @@ public static class WatchRuleEngine
     /// <summary>
     /// L0 兜底事件表。**零新增数据**——这些表早就全市场抓着了，L0 缺的只是"读它们"。
     /// 这也是为什么设计文档的数据模型里一张 L0 的表都没有。
+    ///
+    /// ⚠ **两类时间语义必须分开**（2026-09-11 实机踩出来的，见 WatchKind 的注释）：
+    /// 原来五张表共用一个取值器、一律 <c>MAX(日期)</c> + <c>StageChange</c>，结果一轮重算
+    /// 产出 380 多条横跨 2011~2030 年的触发——解禁取到了 2030 年那次（它是**日程表**，
+    /// MAX 就是最远的未来），龙虎榜取到了 2011 年（那只是"十五年没上过榜"）。
+    ///
+    /// 窗口天数也是判据的一部分：**没有窗口，"最新一条"就不是事件、只是现状**。
     /// </summary>
-    private static readonly (string Table, string Why, string Priority)[] L0Events =
+    private static readonly (string Kind, string Table, double Days, string Why, string Priority)[] L0Events =
     [
-        ("EarningsForecast", "L0：业绩预告（比财报早一个月以上）", "A"),
-        ("EarningsSchedule", "L0：定期报告预约披露日", "B"),
-        ("ShareLift",        "L0：限售解禁", "A"),
-        ("HolderChange",     "L0：股东增减持", "B"),
-        ("Lhb",              "L0：龙虎榜上榜", "C"),
+        // ⚠ Reason 是**界面上直接显示的那句话**，只写"盯的是什么"，别写设计注解。
+        //    原来业绩预告那条写成"L0：业绩预告（比财报早一个月以上）"——那个括号是解释
+        //    "为什么值得盯"，结果被读成"已经提早了？还是计划提早？"（2026-09-11 用户反馈）。
+        //    为什么值得盯属于这里的代码注释，不属于界面。
+
+        // ── 未来日程：取最近一次**将来**的，提前 N 天提醒 ──
+        // 解禁提前 30 天：够看到"下个月有一批解禁"，又不会把一年后的事天天摆在眼前。
+        (WatchKind.ScheduleAhead, "ShareLift",        30, "限售解禁", "A"),
+        // 预约披露日提前 7 天：知道"这周要出报"就够，提前一个月没意义。
+        (WatchKind.ScheduleAhead, "EarningsSchedule",  7, "定期报告预约披露", "B"),
+
+        // ── 已发生的事：只报最近 N 天内发生的 ──
+        // 值得 A 档是因为它比正式财报早一个月以上，是提前量最大的基本面信号。7 天窗口跨长假也不漏。
+        // ⚠ 别跟上面那条【定期报告预约披露】搞混：这条是**正式财报前的简要说明**（预增/预亏多少），
+        //   那条是**正式财报哪天发**。两张表、两回事。
+        (WatchKind.EventRecent,   "EarningsForecast",  7, "业绩预告", "A"),
+        (WatchKind.EventRecent,   "HolderChange",      7, "股东增减持", "B"),
+        // 龙虎榜是 C 档（只落库不推送），窗口收到 3 天——它天天有，窗口一宽就成刷屏。
+        (WatchKind.EventRecent,   "Lhb",               3, "龙虎榜上榜", "C"),
     ];
 }

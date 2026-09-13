@@ -674,6 +674,23 @@ public class DailyOrderRationaleTests
     }
 
     [Fact]
+    public void 分档资金流的彻底重查会迁成首次整段回补()
+    {
+        // 2026-09-11 改名：这一项只补窗口内缺的、齐了的票一个请求都不发，那是回补不是"全部重来"。
+        // 模式名字进 json，不迁的话 EffectiveMode 会把 Thorough 静默回落成「增量」——门槛
+        // 从 1 行跳回 3 行，用户以为还在补历史、其实早停了。
+        var plan = FetchPlan.CreateDefault();
+        var item = plan.AllItems.First(i => i.Action == FetchActionId.FetchMoneyFlowDetail);
+        item.Mode = FetchMode.Thorough;
+
+        var notes = plan.MigrateRetired();
+
+        Assert.Equal(FetchMode.FirstBackfill, item.Mode);
+        Assert.Equal(FetchMode.FirstBackfill, item.EffectiveMode);   // 没被回落成增量
+        Assert.NotEmpty(notes);
+    }
+
+    [Fact]
     public void K线必须排在所有消费它的项之前()
     {
         var d = Daily();

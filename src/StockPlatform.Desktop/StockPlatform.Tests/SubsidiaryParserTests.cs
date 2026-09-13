@@ -15,7 +15,7 @@ namespace StockPlatform.Tests;
 /// </summary>
 public class SubsidiaryParserTests
 {
-    private const string Reports = @"C:\Chingli\Git\stock\publish\data\reports";
+    private const string Reports = @"C:\Chingli\Git\stock\publish\data\annual-reports";
     private static readonly DateTime Period = new(2025, 12, 31);
 
     private readonly ITestOutputHelper _out;
@@ -78,6 +78,57 @@ public class SubsidiaryParserTests
                 Assert.DoesNotContain("\n", s.Name);
             }
         }
+    }
+
+    [Fact]
+    public void 断片_只剩通用词的名字不许落库()
+    {
+        // 真机第一轮跑出来的脏数据，一个个钉住：这几个都是排版把前面的专名截掉之后剩下的，
+        // 总长刚好 6 字压着下限过了清洗。
+        foreach (var code in new[] { "600271", "600998", "688009", "000157" })
+        {
+            var pdf = Pdf(code);
+            if (pdf == null) continue;
+
+            var subs = SubsidiaryParser.Default.Parse(pdf, code, Period);
+            foreach (var bad in new[] { "信息有限公司", "医药有限公司", "科技有限公司" })
+                Assert.DoesNotContain(subs, x => x.Name == bad);
+        }
+    }
+
+    [Theory]
+    // 断片：去掉机构后缀只剩行业通用词，没有任何专名
+    [InlineData("科技有限公司", false)]
+    [InlineData("信息有限公司", false)]
+    [InlineData("医药有限公司", false)]
+    [InlineData("实业有限公司", false)]
+    [InlineData("投资有限公司", false)]
+    // ⚠ 短品牌名的**正规公司**，一个都不许杀
+    [InlineData("华纺股份有限公司", true)]      // 600448，去后缀只剩"华纺"2 字
+    [InlineData("比亚迪股份有限公司", true)]    // 002594，只剩"比亚迪"3 字
+    [InlineData("上汽集团有限公司", true)]
+    // 正常的长名字
+    [InlineData("江阴长电先进封装有限公司", true)]
+    [InlineData("中国建筑第六工程局有限公司", true)]
+    // 断片：开头就是残缺的
+    [InlineData("州）有限公司", false)]
+    // 正文句子和表头
+    [InlineData("本公司持有华东医药温州有限公司", false)]
+    [InlineData("子公司名称", false)]
+    public void 清洗判据(string raw, bool shouldPass)
+    {
+        // ⚠ 这组用例是为了钉住一个**差点上线的错判据**，而且说明了为什么不能靠样本测。
+        //
+        // 断片规则先写成"去掉机构后缀后不足 4 字就扔"，32 份 PDF 测试全绿——
+        // 可它会误杀 "华纺股份有限公司"(剩"华纺")、"比亚迪股份有限公司"(剩"比亚迪")。
+        // 全市场跑必然出事，只是那批样本里恰好没有这类公司。
+        // 事后确认：v5 名单 493 条里，去后缀后不足 4 字的**一条都没有**——
+        // 也就是说，拿这批样本永远测不出那个 bug。判据是纯函数，就该喂字符串直接测。
+        var got = SubsidiaryParser.Clean(raw);
+        if (shouldPass)
+            Assert.False(string.IsNullOrEmpty(got), $"「{raw}」被误杀了");
+        else
+            Assert.True(string.IsNullOrEmpty(got), $"「{raw}」不该通过，却得到「{got}」");
     }
 
     [Fact]

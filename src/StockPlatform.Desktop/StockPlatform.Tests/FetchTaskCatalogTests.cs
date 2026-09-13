@@ -235,4 +235,28 @@ public class FetchTaskCatalogTests
         foreach (var id in FetchTaskCatalog.FetchAllSteps)
             Assert.Equal(id, FetchTaskCatalog.Info(id).Id);
     }
+
+    /// <summary>
+    /// ★【回购公告进展】必须占用**全部联网源**，别给它填 Sources（2026-09-11 踩过）。
+    ///
+    /// 它横跨巨潮全文检索 + 东财 np-anotice/np-cnotice，而 np-* 在 <see cref="DataSourceId"/>
+    /// 里没有对应项。原先填了 <c>[EmDataCenter]</c>——一个它根本不打的源——而
+    /// <see cref="FetchTaskInfo.EffectiveSources"/> 是"填了就只认填的、没填才退回 AllOnline"，
+    /// 于是 <see cref="QuotaGroup.Mixed"/> 的保守兜底被关掉、冲突检查形同虚设：
+    /// 实测它跟【拉取分档资金流】并发跑没被拦住，push2his 那边连续 15 只全失败。
+    ///
+    /// 在 np-* 有自己的枚举项之前，这一项就该保守占满——**填一个错的比不填更糟**。
+    /// </summary>
+    [Fact]
+    public void 回购公告进展_占用全部联网源()
+    {
+        var info = FetchTaskCatalog.Info(FetchActionId.StepPlanWatch);
+
+        Assert.Null(info.Sources);   // 别"好心"补上，补错就重新打开这个洞
+        Assert.Equal(QuotaGroup.Mixed, info.Quota);
+        Assert.Equal(DataSourceCatalog.AllOnline.ToHashSet(), info.EffectiveSources.ToHashSet());
+        // 具体地：必须跟分档资金流用的那两个源冲突，否则拦不住并发
+        Assert.Contains(DataSourceId.EmPush2His, info.EffectiveSources);
+        Assert.Contains(DataSourceId.Cninfo, info.EffectiveSources);
+    }
 }

@@ -104,6 +104,22 @@ public partial class App : Application
             new("Sina", new SinaBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))), new SinaStockListProvider()),
         };
 
+#if DEBUG
+        // 【离线模拟】——一个请求都不发，按区间凭空造K线（见 MockBarFetcher 的类注释）。
+        // 用来在 Debug 实例里把【重新拉取失败】那条链（分派→各任务补待办→复查→落账→收敛）
+        // 真跑一遍：真跑一轮要几千个请求、几小时，还会跟正在抓数据的正式实例抢配额。
+        //
+        // ⚠ **只在 DEBUG 构建里注册**，Release 的数据源下拉里没有它——它写进库的是假数据，
+        //    误选一次就得清库。另一道闸是 Debug 实例的数据目录在 bin\Debug 下，
+        //    跟正式实例的 publish\data 天然隔离。两道都别拆。
+        // 名字要短：它是 fetcher-settings.json 里 BarSource 的值，按名字精确匹配（ResolveBarSource）。
+        sources.Add(new NamedBarSource("Mock",
+            new MockBarFetcher(),
+            new MockStockListProvider(() =>
+                SqliteStockMetaUpsert.GetAll(paths.CurrentDb)
+                    .Select(s => new StockListEntry(s.Code, s.Name)).ToList())));
+#endif
+
         var manifestStore = new JsonManifestStore(paths.ManifestPath);
         var fundamentalRepository = new SqliteFundamentalMetricRepository(paths.CurrentDb);
         fundamentalRepository.EnsureSchema();
@@ -384,6 +400,7 @@ public partial class App : Application
         custSuppRepository.EnsureSchema();
         var companyProfileProvider = new EastMoneyCompanyProfileProvider(emDataCenter);
         var companyProfileRepository = new SqliteCompanyProfileRepository(paths.CurrentDb);
+        var companySubsidiaryRepository = new SqliteCompanySubsidiaryRepository(paths.CurrentDb);
         companyProfileRepository.EnsureSchema();
 
         // ═══ 新式任务的注册表（2026-09-08 起）═══
@@ -410,7 +427,11 @@ public partial class App : Application
         taskRegistry.Register(FetchActionId.StepCompanyProfile,
             () => new CompanyProfileTask(companyProfileRepository, companyProfileProvider));
         taskRegistry.Register(FetchActionId.StepCustomerSupplier,
-            () => new CustomerSupplierTask(custSuppRepository, companyProfileRepository, custSuppProvider));
+            () => new CustomerSupplierTask(custSuppRepository, companyProfileRepository,
+                                           custSuppProvider, companySubsidiaryRepository));
+        taskRegistry.Register(FetchActionId.StepSubsidiaryExtract,
+            () => new SubsidiaryExtractTask(companySubsidiaryRepository, companyProfileRepository,
+                                            paths.AnnualReportsDir));
         taskRegistry.Register(FetchActionId.StepIndustryIndicator,
             () => new IndustryIndicatorTask(indicatorRepository, indicatorProvider));
         // 【观察指标映射】2026-09-11，见 doc/watch-item-design.md M1。纯本地：三个输入全在
@@ -449,13 +470,18 @@ public partial class App : Application
         // 不碰 manifest、不占数据源、调用点只有一个——老任务里最容易迁的一类。
         taskRegistry.Register(FetchActionId.RebuildAdjSeries,
             () => new AdjSeriesRebuildTask(paths.CurrentDb));
-        // 【拉取分档资金流】2026-09-11 从 orchestrator 迁过来。迁的动因是它每天被静默看门狗
-        // 掐一次：老实现每 100 只才报一句进度，而待办只剩 72 只时一句都报不出来（见任务类注释）。
-        // 一批＝一只票，所以 MaxItems/Deadline 直接就是"补历史这一轮抓几只/到点收尾"；
-        // 快照那一段整批落库、不占批额度。两个 provider 可能因配置只启用一条通道，故都可为 null。
-        taskRegistry.Register(FetchActionId.FetchMoneyFlowDetail,
-            () => new MoneyFlowDetailTask(paths, moneyFlowRepository, moneyFlowProvider,
-                                          moneyFlowSnapshotProvider));
+        // 【分档资金流】两项（2026-09-12 拆开，理由见两个任务类的注释）：
+        //   · 快照 走 push2delay，日更，一批＝一整天的全市场；漏一天就永久补不回来。
+        //   · 补历史 走 push2his，季度组·空闲时补，一批＝一只票的 120 天，
+        //     所以 MaxItems/Deadline 直接就是"这一轮补几只/到点收尾"。
+        // 两个 provider 都可能因配置（MoneyFlowChannel）只启用一条通道，为 null 时就不注册那一项——
+        // 注册一个拿不到 provider 的任务，只会在跑起来的时候才炸。
+        if (moneyFlowSnapshotProvider != null)
+            taskRegistry.Register(FetchActionId.FetchMoneyFlowSnapshot,
+                () => new MoneyFlowSnapshotTask(moneyFlowRepository, moneyFlowSnapshotProvider));
+        if (moneyFlowProvider != null)
+            taskRegistry.Register(FetchActionId.FetchMoneyFlowDetail,
+                () => new MoneyFlowBackfillTask(paths, moneyFlowRepository, moneyFlowProvider));
 
         var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
 

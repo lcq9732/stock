@@ -110,6 +110,41 @@ public class PlanAnnouncementExtractorTests
     public void 认不出明确stage的_不收(string title)
         => Assert.False(PlanAnnouncementExtractor.IsBuybackAnnouncement(title));
 
+    /// <summary>
+    /// ★ 融资租赁的「回购担保」是对客户的担保义务，跟公司回购自家股票毫无关系
+    /// （2026-09-11 实机误收）。它标题同时含"回购"和"进展"，穿过了前面所有判据，
+    /// 落库后表现为一条各字段全空的「进展」——界面上就是一行读不出金额的回购记录。
+    /// </summary>
+    [Theory]
+    [InlineData("杭叉集团：杭叉集团股份有限公司关于公司为客户提供融资租赁业务回购担保的进展公告")]
+    [InlineData("某公司：关于为经销商融资租赁提供回购担保额度的公告")]
+    public void 融资租赁回购担保_不是股份回购(string title)
+        => Assert.False(PlanAnnouncementExtractor.IsBuybackAnnouncement(title));
+
+    /// <summary>
+    /// ★ 语序陷阱（2026-09-11 实机踩出来）：三环集团那份方案先写资金总额、紧接着写价格上限，
+    /// 两者都用「不超过…元」，只差一个「/股」后缀。
+    ///
+    /// 没有 <c>(?!/股)</c> 断言时，正则在全文找第一个"不超过…元"会抓到 **135**（价格），
+    /// 当成资金上限，而 135 后面没有"亿"，显示时就成了「计划 4.5~0 亿」。
+    /// </summary>
+    [Fact]
+    public void 方案资金区间_不能把每股价格当成资金上限()
+    {
+        const string body = """
+            公司拟使用自有资金以集中竞价交易方式回购公司股份，回购资金总额不低于人民币 4.5 亿元
+            且不超过人民币 9 亿元。本次回购的价格不超过人民币 135 元/股（含），
+            该回购价格上限不超过董事会通过回购股份决议前 30 个交易日公司股票交易均价的 150%。
+            """;
+
+        var r = PlanAnnouncementExtractor.Extract("300408", "三环集团",
+            "关于2026年第二期回购公司股份方案的公告暨回购股份报告书", new DateTime(2026, 7, 20), body);
+
+        Assert.Equal(4.5e8, r.PlanAmountLow);
+        Assert.Equal(9e8, r.PlanAmountHigh);    // ← 不是 135
+        Assert.Equal(135, r.PlanCapPrice);      // 价格上限该归到这里
+    }
+
     [Theory]
     [InlineData("宁德时代:关于回购公司A股股份的进展公告")]
     [InlineData("美的集团:关于以集中竞价交易方式回购A股股份进展情况的公告")]
@@ -201,6 +236,33 @@ public class PlanAnnouncementExtractorTests
         Assert.Equal(400e8, r.PlanAmountHigh);
     }
 
+    /// <summary>
+    /// ★ 方案公告**不该有** as_of_date（2026-09-11 修）。
+    ///
+    /// 「数据截止日」只对进展类有意义（截至上月末累计回购了多少）；方案公告里出现的日期
+    /// 是别的语境——股本基准日、董事会决议日、前 30 个交易日均价的起算日…
+    /// 硬抽的后果是拿不相干的日期当"值所属日期"：实机上宁德 07-25 那份被抽成 06-30、
+    /// 山东高速 08-26 那份被抽成 03-31，观察项的触发记录就按这个错日期归档了
+    /// （日报里出现"2026-03-31 山东高速 回购方案进行中"这种读不懂的行）。
+    /// </summary>
+    [Fact]
+    public void 方案公告_不抽as_of_date()
+    {
+        // 正文里**确实有**「截至…日」，但那是股本基准日，不是回购数据的截止日
+        const string body = """
+            截至2026年6月30日，公司总股本为4,626,651,000股。
+            同意公司使用不低于人民币200亿元且不超过人民币400亿元自有资金回购部分A股股份，
+            回购价格上限为573元/股。
+            """;
+
+        var r = PlanAnnouncementExtractor.Extract("300750", "宁德时代",
+            "关于回购公司股份方案的公告暨回购股份报告书", new DateTime(2026, 7, 25), body);
+
+        Assert.Equal(PlanStage.Proposal, r.Stage);
+        Assert.Null(r.AsOfDate);              // ← 不拿股本基准日冒充
+        Assert.Equal(573, r.PlanCapPrice);    // 该抽的照样抽
+    }
+
     /// <summary>取不到正文是软失败：标题那部分照样要留下来，不能整条丢掉。</summary>
     [Fact]
     public void 没有正文_也要留下标题和stage()
@@ -268,6 +330,67 @@ public class PlanAnnouncementExtractorTests
         Assert.Equal(12.12, r.PriceLow);           // 「最低价为」
         // 单日首次回购没有「截至X日」也没有区间，靠「X日，公司通过…」这条兜
         Assert.Equal(new DateTime(2026, 6, 12), r.AsOfDate);
+    }
+
+    /// <summary>
+    /// ★ 大北农 002385，2026-06-16。就差一个「为」字：
+    /// 「成交总金额 3,033,800.00 元」直接跟数字，而原正则写的是 <c>总金额为</c>（必需）。
+    /// 这一个字让 **437 条（进展类的 33%）** 金额抽不到——而那些公告股数、占比、成交价
+    /// 全都抽到了，唯独金额空着，在界面上看起来像"没买"。
+    /// </summary>
+    [Fact]
+    public void 成交总金额后面不跟为字_也要抽得出()
+    {
+        const string body = """
+            2026 年 6 月 15 日，公司首次通过股份回购专用证券账户以集中竞价方式实施回购股份，
+            回购股份数量 1,010,000 股，占公司总股本的 0.02%，最高成交价为 3.01 元/股，
+            最低成交价为 3.00 元/股，成交总金额 3,033,800.00 元（不含交易费用）。
+            """;
+
+        var r = PlanAnnouncementExtractor.Extract("002385", "大北农",
+            "关于以集中竞价交易方式首次回购公司股份的公告", new DateTime(2026, 6, 16), body);
+
+        Assert.Equal(3_033_800.00, r.CumAmount);
+        Assert.Equal(1_010_000, r.CumShares);
+        Assert.Equal(0.02, r.PctOfCapital);
+    }
+
+    /// <summary>
+    /// ★ 雷柏科技 002577，2026-07-02：「**暂未**通过回购专用证券账户…回购公司股份」。
+    /// 原正则只认「尚未」，于是这条既没抽到金额、也没判成未实施，落库是一片 null——
+    /// **把一个明确的答案（没买）变成了看似的数据故障**。这是这一类里代价最大的漏判。
+    /// </summary>
+    [Fact]
+    public void 暂未回购_也要记成0()
+    {
+        const string body = """
+            二、股份回购实施进展
+            截至2026年6月30日，公司暂未通过回购专用证券账户以集中竞价交易方式回购公司股份。
+            """;
+
+        var r = PlanAnnouncementExtractor.Extract("002577", "雷柏科技",
+            "关于回购公司股份的进展公告", new DateTime(2026, 7, 2), body);
+
+        Assert.Equal(0, r.CumAmount);
+        Assert.Equal(0, r.CumShares);
+        Assert.Equal(new DateTime(2026, 6, 30), r.AsOfDate);
+    }
+
+    /// <summary>放宽「尚未…回购」之后不能误伤：同一句里没有"回购"的否定句不算。</summary>
+    [Fact]
+    public void 未实施的判据_不跨句误伤()
+    {
+        // "尚未收到" 和 "回购" 分属两句，不该被判成未实施
+        const string body = """
+            截至2026年8月31日，公司尚未收到相关批复。
+            公司通过回购专用证券账户累计回购股份数量为 500,000 股，成交总金额 1,000,000 元。
+            """;
+
+        var r = PlanAnnouncementExtractor.Extract("000001", "测试",
+            "关于回购公司股份的进展公告", new DateTime(2026, 9, 3), body);
+
+        Assert.Equal(500_000, r.CumShares);        // 正常抽到，没被当成"未实施"
+        Assert.Equal(1_000_000, r.CumAmount);
     }
 
     /// <summary>★ 0 和 null 必须分得开，否则"抽取坏了"会显示成"公司没买"。</summary>

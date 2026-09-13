@@ -25,4 +25,9 @@
     <ProjectReference Include="..\StockPlatform.Scheduling\StockPlatform.Scheduling.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 任务类里那几个纯函数（体检报告的措辞判断之类）要能单测，又不值得公开成 API。 -->
+    <InternalsVisibleTo Include="StockPlatform.Tests" />
+  </ItemGroup>
+
 </Project>

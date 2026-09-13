@@ -164,6 +164,13 @@ public class BarValueAuditTests : IDisposable
     [InlineData(1.0, false)]      // 按股存的——单位错了，要报
     [InlineData(33.0, false)]     // 603999 那种：amount 少了约 2/3
     [InlineData(1000.0, false)]   // 量额差一个数量级
+    [InlineData(5.0, false)]      // 1991-92 老数据那种：成交量少记 5 倍（比值 ≈500 的反面）
+    [InlineData(10.0, false)]     // 差 10 倍
+    // ── 2026-09-12 放宽到 [50,250] 之后，这一档不再报 ──
+    // 成因是**当日均价偏离收盘**，不是数据错。生产实测 592 行命中里 318 行是这种，
+    // 集中在北交所 920xxx 和 1990 年代成交稀疏的老股。见 RatioLow/RatioHigh 的注释。
+    [InlineData(60.0, true)]      // 均价比收盘低 40%
+    [InlineData(200.0, true)]     // 均价比收盘高一倍
     public void V6_只有手口径算正常(double multiplier, bool isNormal)
     {
         double close = 10, volume = 100;
@@ -208,6 +215,49 @@ public class BarValueAuditTests : IDisposable
         Ok("600000", Granularity.Day, amount: 495638100);
         Ok("600000", Granularity.DayRaw, amount: 495638100.00000006);   // 1e4 换算的末位噪声
         Assert.Empty(_auditor.CrossGranularityMismatch(Cutoff));
+    }
+
+    /// <summary>
+    /// 腾讯成交额只有 100 元刻度，两个端点各自四舍五入，偶尔落在相邻的两格上——
+    /// 2026-09-11 查到 31 只北交所票的 49 行全部**正好差 100 元**（920010 2021-06-02：
+    /// 434,000 vs 434,100），东财本地那份元级数据证明余数恒为 49，两个值都只是同一个真值的
+    /// 舍入结果。判据要求的精度超过了源的分辨率，那样的段修不掉也报不完。
+    /// </summary>
+    [Fact]
+    public void V3_成交额差一个刻度不算不一致()
+    {
+        Ok("920010", Granularity.Day, amount: 434_000);
+        Ok("920010", Granularity.DayRaw, amount: 434_100);
+        Assert.Empty(_auditor.CrossGranularityMismatch(Cutoff));
+    }
+
+    [Fact]
+    public void V3_一格上再带末位浮点噪声也要放过()
+    {
+        // 入库的 amount 是「万元 × 1e4」算出来的，自带末位噪声：920819 的 day 存成
+        // 1010699.9999999999，跟 day_raw 的 1010800 差 100.00000000011——
+        // 判据写 > 100 的话，正好差一格的行会险些全部漏网（2026-09-12 实测 49 行里漏了 3 行）
+        Ok("920819", Granularity.Day, amount: 1_010_699.9999999999);
+        Ok("920819", Granularity.DayRaw, amount: 1_010_800);
+        Assert.Empty(_auditor.CrossGranularityMismatch(Cutoff));
+    }
+
+    [Fact]
+    public void V3_成交额差两个刻度照样报()
+    {
+        // 只放过**一格**。差 200 元就不是舍入能解释的了
+        Ok("920010", Granularity.Day, amount: 434_000);
+        Ok("920010", Granularity.DayRaw, amount: 434_200);
+        Assert.Single(_auditor.CrossGranularityMismatch(Cutoff));
+    }
+
+    [Fact]
+    public void V3_放宽刻度之后量额差100倍照样报()
+    {
+        // 放过的是绝对 100 元，不是比例——单位错（手/股）那种相对误差 99，一格都藏不住
+        Ok("688122", Granularity.Day, volume: 331_101.6, amount: 1_358_249_400);
+        Ok("688122", Granularity.DayRaw, volume: 33_110_160, amount: 1_358_249_400);
+        Assert.Single(_auditor.CrossGranularityMismatch(Cutoff));
     }
 
     // ─────────────────── V5 day_adj 与 day_raw ───────────────────

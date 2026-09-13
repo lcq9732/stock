@@ -251,6 +251,8 @@ FetchTaskBase ..|> IFetchTask
 TradingCalendarTask --|> FetchTaskBase
 PlanWatchTask --|> FetchTaskBase
 WatchIndicatorRuleTask --|> FetchTaskBase
+MoneyFlowSnapshotTask --|> FetchTaskBase
+MoneyFlowBackfillTask --|> FetchTaskBase
 FetchTaskRegistry --> IFetchTask : 按动作号造
 IFetchTask ..> TaskRunResult : 返回
 ```

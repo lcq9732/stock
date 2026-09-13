@@ -40,6 +40,49 @@ public sealed class SqliteBarValueAuditor
     private const int MarketCloseHour = 16;
 
     /// <summary>
+    /// 成交额的**量化刻度**（元）——两个口径差在这个数以内不算不一致（2026-09-12 用户定，
+    /// doc/bar-value-audit-design.md §16 缺陷二方案 A）。
+    ///
+    /// ════ 为什么不是 0 ════
+    /// 腾讯的成交额只有 **100 元刻度**（源给「万元」两位小数，入库 ×1e4；1995/2015/2026 各抽一整天
+    /// 验过，万元从不出现第 3 位小数）。两个端点用的是同一个四舍五入规则，但在极少数行上
+    /// <c>day_raw</c> 会偏高一格——2026-09-11 查到 31 只北交所票的 49 行，全部**正好差 100 元**。
+    /// 拿**东财本地**那份元级精度的数据当第三方裁判，这些行的余数**恒为 49 &lt; 50**，四舍五入本该
+    /// 得低值，也就是说两个渲染值都只是同一个真值的舍入结果。
+    ///
+    /// 所以这不是"数据不好看就放宽规则"：原来的 1e-6 要求的精度**超过了数据源能提供的分辨率**，
+    /// 那样的段修不掉也报不完，<c>Tries</c> 只会一路爬。放过的宽度**正好是源的刻度**，
+    /// 不是随手给的数——真错（量额差 100 倍）的相对误差是 99，照样必报。
+    ///
+    /// ⚠ 只放过**一格**。差 200 元就不是舍入了，仍然报。
+    ///
+    /// ⚠ 写成 <c>一格 + 浮点余量</c>（不是 <c>MAX(一格, 浮点余量)</c>）：入库的 amount 是
+    /// 「万元 × 1e4」算出来的，本身就带末位噪声（920819 的 <c>day</c> 存的是
+    /// <c>1010699.9999999999</c>），差值算出来是 <c>100.00000000011</c>——拿 <c>&gt; 100</c> 去卡，
+    /// 正好差一格的行会**险些全部漏网**（2026-09-12 实测：49 行里 3 行因此仍被报）。
+    /// </summary>
+    private const int AmountQuantumYuan = 100;
+
+    /// <summary>
+    /// V6 的正常区间（2026-09-12 从 <c>[80,125]</c> 放宽到 <c>[50,250]</c>）。
+    ///
+    /// 原来的 ±25% 余量**太紧**：生产实测 592 行命中里 **318 行是误报**——比值落在 50~80 或
+    /// 125~250，成因只是**当日均价偏离收盘** 20~37%。这在流动性差的标的上很正常（误报集中在
+    /// 北交所 920xxx、以及 1990 年代成交稀疏的老股），一天之内价格走一段、成交集中在某一侧，
+    /// 均价就会离收盘很远。
+    ///
+    /// 而**真错的特征是"整数倍偏离"**，一眼能跟噪声分开：实测的真问题全是
+    /// ≈1（按股存）、≈2、≈5、≈10、≈500（1991-92 老数据成交量少记 5 倍）。
+    /// 放宽到 [50,250] 之后：318 行误报归零，192 行真问题一条不漏
+    /// （数量级错至少差 2 倍，离 50/250 这两个边界还很远）。
+    ///
+    /// ⚠ 代价说清楚：**恰好差 2 倍**的错（比如成交额翻倍）会被放过。实测一例都没有，
+    /// 而且那种错另有 V3（跨口径）兜着——四个口径不会一起差 2 倍。
+    /// 一条**六成是误报**的判据等于没有判据，这个取舍值得。
+    /// </summary>
+    private const int RatioLow = 50, RatioHigh = 250;
+
+    /// <summary>
     /// 单行内能判出来的四类问题（V1/V2/V4/V6）。**一次扫描出四类**——分四遍扫 7000 万行是四倍的钱。
     /// </summary>
     /// <param name="Code">标的代码。</param>
@@ -148,7 +191,7 @@ public sealed class SqliteBarValueAuditor
                              AND volume IS NOT NULL AND volume > 0
                              AND close IS NOT NULL AND close > 0
                              AND amount IS NOT NULL AND amount > 0
-                             AND NOT (amount / (volume * close) BETWEEN 80 AND 125)
+                             AND NOT (amount / (volume * close) BETWEEN {RatioLow} AND {RatioHigh})
                         THEN 1 ELSE 0 END AS ratio
             FROM Bar
             WHERE granularity IN ({grans})
@@ -166,7 +209,7 @@ public sealed class SqliteBarValueAuditor
                      AND code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'
                      AND volume IS NOT NULL AND volume > 0 AND close IS NOT NULL AND close > 0
                      AND amount IS NOT NULL AND amount > 0
-                     AND NOT (amount / (volume * close) BETWEEN 80 AND 125))
+                     AND NOT (amount / (volume * close) BETWEEN {RatioLow} AND {RatioHigh}))
               );
             """;
         for (int i = 0; i < DailyGranularities.Length; i++)
@@ -241,9 +284,12 @@ public sealed class SqliteBarValueAuditor
               AND ($since IS NULL OR a.period_start >= $since)
               {codeFilter}
               AND (
-                   -- volume / amount 是**硬事实**：同源抓回来必须逐值相同，1e-6 只留浮点噪声的余量
+                   -- volume 是**硬事实**：同源抓回来必须逐值相同，1e-6 只留浮点噪声的余量
                    ABS(COALESCE(a.volume, 0) - COALESCE(b.volume, 0)) > 1e-6 * MAX(ABS(COALESCE(a.volume, 0)), 1)
-                OR ABS(COALESCE(a.amount, 0) - COALESCE(b.amount, 0)) > 1e-6 * MAX(ABS(COALESCE(a.amount, 0)), 1)
+                   -- amount 放过**一个量化刻度**（见 AmountQuantumYuan）：源只有百元精度，
+                   -- 两个端点各自四舍五入，偶尔会落在相邻的两格上
+                OR ABS(COALESCE(a.amount, 0) - COALESCE(b.amount, 0))
+                     > {AmountQuantumYuan} + 1e-6 * MAX(ABS(COALESCE(a.amount, 0)), 1)
                    -- turnover 是数据源**算出来的派生值**（成交量 ÷ 流通股本），而各口径是不同时刻
                    -- 抓的：期间股本一变（解禁/增发），同一天的换手率就被重算成另一个数。
                    -- 2026-09-09 实测 000153 的 08-27：volume/amount 完全一致，turnover 7.39 vs 7.36

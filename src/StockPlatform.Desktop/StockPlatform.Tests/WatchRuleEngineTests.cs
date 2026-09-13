@@ -23,6 +23,7 @@ public class WatchRuleEngineTests
     {
         Code = code, Kind = PlanKind.Buyback, Stage = PlanStage.Proposal,
         AnnounceDate = new DateTime(2026, 7, 25), PlanCapPrice = 573,
+        PlanAmountLow = 200e8, PlanAmountHigh = 400e8,
     };
 
     private static readonly Dictionary<string, string> Catl = new() { ["300750"] = "宁德时代" };
@@ -38,6 +39,26 @@ public class WatchRuleEngineTests
         Assert.Equal(WatchOrigin.Derived, item.Origin);
         Assert.Contains("573", item.Reason);
         Assert.Contains(r.Added, i => i.Kind == WatchKind.PlanStage);
+
+        // ★ 计划花多少钱是判断"这家有多认真"的第一个数，不能只写价格上限
+        //（2026-09-11 用户反馈）
+        Assert.Contains("计划 200~400 亿", item.Reason);
+    }
+
+    /// <summary>资金区间缺失（没抽到）时不能显示成"计划 ~0 亿"，整段省掉。</summary>
+    [Fact]
+    public void 方案没有资金区间_理由里就不提()
+    {
+        var plan = Plan("300750");
+        plan.PlanAmountLow = null;
+        plan.PlanAmountHigh = null;
+
+        var r = WatchRuleEngine.Rebuild([], Input(
+            active: Catl, plans: new() { ["300750"] = plan }));
+
+        var item = r.Items.Single(i => i.Kind == WatchKind.PlanStage);
+        Assert.DoesNotContain("计划", item.Reason);
+        Assert.Contains("573", item.Reason);   // 有的那个照样写
     }
 
     /// <summary>★ L1 的核心：方案不在 OpenPlans 里了（已完毕/终止），观察项要自动消失。</summary>
@@ -116,7 +137,7 @@ public class WatchRuleEngineTests
     {
         var coreOnly = WatchRuleEngine.Rebuild([], Input(core: Catl));
         Assert.DoesNotContain(coreOnly.Items, i => i.Kind == WatchKind.PriceMA);
-        Assert.Contains(coreOnly.Items, i => i.Kind == WatchKind.EventTable && i.Expr == "Dividend");
+        Assert.Contains(coreOnly.Items, i => i.Kind == WatchKind.EventRecent && i.Expr == "Dividend");
 
         var activeOnly = WatchRuleEngine.Rebuild([], Input(active: Catl));
         Assert.Contains(activeOnly.Items, i => i.Kind == WatchKind.PriceMA);
@@ -141,6 +162,44 @@ public class WatchRuleEngineTests
         Assert.Contains(l0, i => i.Expr == "ShareLift");
         Assert.Contains(l0, i => i.Expr == "EarningsForecast");
         Assert.All(l0, i => Assert.Equal(WatchOrigin.Builtin, i.Origin));
+    }
+
+    /// <summary>
+    /// ★ 每条 L0 都必须带时间窗（2026-09-11 事故的根因）。
+    /// 原来全是 <c>StageChange</c>、没有窗口，于是首次求值就把每张表的"最新一条"报了一遍——
+    /// 一轮重算产出横跨 2011~2030 年的 380 多条触发，全是噪音。
+    /// </summary>
+    [Fact]
+    public void L0每一条都必须带时间窗()
+    {
+        var l0 = WatchRuleEngine.Rebuild([], Input(active: Catl))
+            .Items.Where(i => i.Layer == WatchLayer.L0).ToList();
+
+        Assert.NotEmpty(l0);
+        Assert.All(l0, i =>
+        {
+            Assert.Equal(WatchOp.Within, i.Op);
+            Assert.NotNull(i.Threshold);
+            Assert.True(i.Threshold > 0, $"{i.Expr} 的窗口必须是正数");
+            // 两类时间语义必须明确归类，不能再有"一个取值器打天下"
+            Assert.True(i.Kind is WatchKind.ScheduleAhead or WatchKind.EventRecent,
+                $"{i.Expr} 的 Kind 是 {i.Kind}");
+        });
+    }
+
+    /// <summary>解禁和预约披露是**未来日程**，其余是**已发生的事**——取值方式相反，不能混。</summary>
+    [Theory]
+    [InlineData("ShareLift", WatchKind.ScheduleAhead)]
+    [InlineData("EarningsSchedule", WatchKind.ScheduleAhead)]
+    [InlineData("EarningsForecast", WatchKind.EventRecent)]
+    [InlineData("HolderChange", WatchKind.EventRecent)]
+    [InlineData("Lhb", WatchKind.EventRecent)]
+    public void L0各表归到正确的时间语义(string table, string expectedKind)
+    {
+        var item = WatchRuleEngine.Rebuild([], Input(active: Catl))
+            .Items.Single(i => i.Layer == WatchLayer.L0 && i.Expr == table);
+
+        Assert.Equal(expectedKind, item.Kind);
     }
 
     [Fact]

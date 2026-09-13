@@ -416,13 +416,15 @@
                                 <DataTemplate>
                                   <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                     <!-- 抓哪一段。只有支持不止一种模式的行才显示（6 行），其余这一格里没有它。
-                                         排在最前面是因为它决定后面那个日期框有没有意义（整段回补时日期没用、会自动隐藏）。 -->
+                                         排在最前面是因为它决定后面那个日期框有没有意义（整段回补时日期没用、会自动隐藏）。
+                                         说明文字 2026-09-11 改成绑 ModeTooltip：写死在这里的那份只覆盖了当时的三个模式，
+                                         跟各行实际能选的对不上（见 PlanItemViewModel.ModeTooltip）。 -->
                                     <ComboBox ItemsSource="{Binding ModeOptions}" DisplayMemberPath="Text"
                                               IsSynchronizedWithCurrentItem="False"
                                               SelectedItem="{Binding SelectedMode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                               Width="98" Margin="0,0,10,0" VerticalAlignment="Center"
                                               Visibility="{Binding ShowMode, Converter={StaticResource BoolToVis}}"
-                                              ToolTip="增量＝每个标的从自己上次抓到那天续抓到今天（日常用这个，只有它会补断档）。&#10;只抓某一天＝不看水位线、只补日期格里那一天（原【补指定历史日】）。&#10;首次整段回补＝从头补齐历史，补完就不用再跑了（原【补不复权历史】【一键补齐每日历史】）。" />
+                                              ToolTip="{Binding ModeTooltip}" />
                                     <!-- 这里原来有个「不早于」框（2026-09-01 从独立列并进来的）。
                                          2026-09-02 分组之后去掉了：组里是**串行**跑的，给单项设时刻不起作用
                                          （排在后面的项跑到它时早过点了），而真要"更晚才开始"就是另一个触发时机，
@@ -458,7 +460,30 @@
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.FailedRetryText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="上次抓取留下的失败名单，按类型分开计数（K线/市值/资金流/指数成分/权重/股东/分红各自独立记录）。&#10;跑这一行就是重试它们；名单为空时秒过。&#10;另外后台还有一套自动重试：跑完 1 小时后、且不早于当天 21:00，最多 3 轮，没进展就停。" />
+                                                   ToolTip="这一行要补的全部待办，按类型分开计数——量词不同是故意的：&#10;　· 失败名单：K线/资金流/指数成分/权重/股东/分红按「只」，市值是整轮扫描所以按「轮」&#10;　· 【全库数据体检】查出的历史空洞按「段」，后面跟着涉及多少个交易日（段数≈请求数、决定要跑多久）&#10;&#10;⚠ 只列**点这一行会下降**的项。体检查出的「值问题」（行在但值错）也归这一行补，只是补法和复查方式跟缺行不一样。&#10;要看全部待补（含以后可能出现的、这一行补不了的项）去【全库数据体检】那一行的提示。&#10;&#10;名单为空时秒过。另外后台还有一套自动重试：跑完 1 小时后、且不早于当天 21:00，最多 3 轮，没进展就停。" />
+                                        <!-- 【全库数据体检】那一行：它是发现者，所以问题的全貌归它显示（2026-09-13）。
+                                             行内一句汇总，tooltip 列全部待办——含【重新拉取失败】补不了的值问题。
+                                             ⚠ 这两段文字绑的是 PlanItemViewModel 自己的属性（由 MainViewModel 推进来），
+                                             不是 Window.DataContext：ToolTip 不在这一行的可视树里，
+                                             RelativeSource AncestorType=Window 在 tooltip 内部取不到 Window。 -->
+                                        <TextBlock VerticalAlignment="Center"
+                                                   Visibility="{Binding IsFullAudit, Converter={StaticResource BoolToVis}}"
+                                                   Foreground="{DynamicResource Theme.Foreground.Subtle}"
+                                                   Text="{Binding AuditBacklogText}">
+                                            <TextBlock.ToolTip>
+                                                <ToolTip>
+                                                    <StackPanel>
+                                                        <!-- ⚠ 别写成"体检查出的项目"：这里列的是**当前全部**待补项，
+                                                             其中"当天日线"来自日更末尾的覆盖检查、几类失败名单来自抓取本身，
+                                                             都不是体检的产物（2026-09-13 实机截图里就混着一条 09-11日线）。 -->
+                                                        <TextBlock Text="当前所有还没补上的项目——体检查出的历史空洞，加上抓取失败、当天日线没到位的那几类。补由【重新拉取失败】那一行做。"
+                                                                   TextWrapping="Wrap" MaxWidth="460" />
+                                                        <TextBlock Text="{Binding AuditBacklogDetail}" Margin="0,6,0,0"
+                                                                   TextWrapping="Wrap" MaxWidth="460" />
+                                                    </StackPanel>
+                                                </ToolTip>
+                                            </TextBlock.ToolTip>
+                                        </TextBlock>
                                         <TextBlock VerticalAlignment="Center"
                                                    Visibility="{Binding IsRepairQfq, Converter={StaticResource BoolToVis}}"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"

@@ -48,6 +48,7 @@ public static class PlanAnnouncementExtractor
         + @"|要约收购|协议转让"
         + @"|贷款承诺|融资支持|专项贷款"           // 「获得回购股份融资支持」是融资公告，不是回购进展
         + @"|权益投资|土地|资产回购|债券回购"      // 回购的不是自家股份
+        + @"|融资租赁|回购担保|担保"               // 「为客户提供融资租赁业务回购担保」是担保义务
         + @"|提议",                                // 「控股股东提议回购」连方案都还没有
         RegexOptions.Compiled);
 
@@ -92,8 +93,17 @@ public static class PlanAnnouncementExtractor
     //   · 「**成交总金额**为**人民币** 1,863,178 元」——不是"支付的总金额"
     // 所以每条都按"骨架词 + 可选修饰"来写，别把某一家的措辞当通例。
 
+    /// <summary>
+    /// 「还没开始买」的各种说法。★ 这条**漏一个说法的代价最大**：漏掉之后那条记录既没有
+    /// 金额、也没被判成"未实施"，落进库里是一片 null——而 null 在界面上是"数据缺失"，
+    /// 不是"没买"。**把一个明确的答案变成了看似的故障。**
+    ///
+    /// 实测到的说法：尚未实施／尚未开始实施／**暂未**通过回购专用证券账户…回购。
+    /// 所以骨架放成「尚未|暂未|未 + (中间十来个字随便) + 回购」，
+    /// 但**限定在同一句话内**（不跨越 。；）——跨句会把"尚未收到…回购款"这种误判进来。
+    /// </summary>
     private static readonly Regex NotYetStarted = new(
-        @"尚未(?:开始)?\s*(?:实施|进行|开展)?\s*(?:股份)?回购|未实施(?:股份)?回购", RegexOptions.Compiled);
+        @"(?:尚未|暂未|暂无|未曾)[^。；;]{0,20}?回购(?:公司)?(?:[A-Za-z]\s*股)?股?份?", RegexOptions.Compiled);
 
     /// <summary>骨架＝「回购 … 股份 … 数字 股」，中间的"公司/A股/数量/为"全可选，单位可带万/亿。</summary>
     private static readonly Regex CumShares = new(
@@ -107,20 +117,45 @@ public static class PlanAnnouncementExtractor
         @"(?:最高成交价|成交的?最高价|最高价)(?:格)?为\s*" + N + @"\s*元\s*/\s*股", RegexOptions.Compiled);
     private static readonly Regex PriceLow = new(
         @"(?:最低成交价|成交的?最低价|最低价)(?:格)?为\s*" + N + @"\s*元\s*/\s*股", RegexOptions.Compiled);
-    /// <summary>「支付的/已支付的/成交/回购」+「总金额为」，可带"人民币"，单位可带万/亿。</summary>
+    /// <summary>
+    /// 「支付的/已支付的/成交/回购」+「总金额」+ 数字。可带"人民币"，单位可带万/亿。
+    ///
+    /// ⚠ **「为」必须是可选的**（2026-09-11 实机查出来的）。原来写成 <c>总金额为</c>（必需），
+    /// 结果漏掉了「成交总金额 3,033,800.00 元」这种直接跟数字的写法——
+    /// 就差一个「为」字，却让 437 条（进展类的 33%）金额抽不到。
+    /// 而这些公告股数、占比、成交价都抽到了，唯独金额空着，在界面上看起来像"没买"。
+    /// </summary>
     private static readonly Regex CumAmount = new(
-        @"(?:已)?(?:支付的?|成交的?|回购|使用资金)?\s*总金额为\s*(?:人民币)?\s*" + NU + @"\s*元",
+        @"(?:已)?(?:支付的?|成交的?|回购|使用资金)?\s*总金额(?:为)?\s*(?:人民币)?\s*" + NU + @"\s*元",
         RegexOptions.Compiled);
 
-    /// <summary>方案：'回购价格上限为573元/股' / '回购价格不超过 573 元/股'</summary>
+    /// <summary>
+    /// 方案的价格上限。三种真实写法都要吃下：
+    ///   · 宁德「回购**价格上限为** 573 元/股」
+    ///   · 「回购**价格不超过** 573 元/股」
+    ///   · 三环「本次回购**的价格不超过**人民币 135 元/股（含）」← 中间多了"的"、"本次回购"打头
+    ///
+    /// 所以骨架是「价格 + 上限为/不超过/不高于 + 数字 + 元/股」，
+    /// 前面的"回购/本次回购的"全可选。**「/股」后缀是这条的身份标记**——
+    /// 没有它就会跟资金总额的"不超过…元"撞车（见 <see cref="AmountHigh"/> 的注释）。
+    /// </summary>
     private static readonly Regex CapPrice = new(
-        @"回购价格(?:上限为|不超过|不高于)\s*(?:人民币)?\s*" + N + @"\s*元\s*/\s*股", RegexOptions.Compiled);
+        @"价格(?:上限)?(?:为|不超过|不高于)\s*(?:人民币)?\s*" + N + @"\s*元\s*/\s*股", RegexOptions.Compiled);
 
-    /// <summary>方案资金区间：'不低于人民币200亿元…不超过人民币400亿元'。亿/万要换算。</summary>
+    /// <summary>
+    /// 方案资金区间：'不低于人民币200亿元…不超过人民币400亿元'。亿/万要换算。
+    ///
+    /// ⚠ 末尾的 <c>(?!\s*/\s*股)</c> 是必须的（2026-09-11 踩出来的语序陷阱）：
+    /// 三环集团那份写的是「回购资金总额不低于人民币 4.5 亿元且不超过人民币 9 亿元」，
+    /// 但下一句是「**不超过人民币 135 元/股**（含）」——那是**价格**上限。
+    /// 没有这个否定断言时，正则在全文里找第一个"不超过…元"就抓到了 135，
+    /// 于是资金上限被算成 135 元、显示时四舍五入成「0 亿」。
+    /// 「元/股」和「元」共用一个"元"字，是中文公告的天然歧义，只能靠单位后缀排除。
+    /// </summary>
     private static readonly Regex AmountLow = new(
-        @"不低于\s*(?:人民币)?\s*" + N + @"\s*(亿|万)?元", RegexOptions.Compiled);
+        @"不低于\s*(?:人民币)?\s*" + N + @"\s*(亿|万)?元(?!\s*/\s*股)", RegexOptions.Compiled);
     private static readonly Regex AmountHigh = new(
-        @"不超过\s*(?:人民币)?\s*" + N + @"\s*(亿|万)?元", RegexOptions.Compiled);
+        @"不超过\s*(?:人民币)?\s*" + N + @"\s*(亿|万)?元(?!\s*/\s*股)", RegexOptions.Compiled);
 
     /// <summary>
     /// 标题是不是一条值得解析的回购公告。false＝直接丢掉，别落库。
@@ -178,10 +213,19 @@ public static class PlanAnnouncementExtractor
         };
         if (string.IsNullOrWhiteSpace(content)) return rec;
 
-        // 三种写法按优先级试：「截至X日」最准 → 区间取末尾 → 单日的「X日，公司…」
-        rec.AsOfDate = MatchDate(AsOfCn, content)
-                       ?? MatchDate(DateRangeEnd, content)
-                       ?? MatchDate(DateThenCompany, content);
+        // ⚠ **方案公告不抽 as_of_date**（2026-09-11 修）。
+        // 「数据截止日」这个概念只对进展类有意义（截至上月末累计回购了多少）；方案公告里出现的
+        // 日期是别的语境——股本基准日、董事会决议日、前 30 个交易日均价的起算日…
+        // 硬抽的后果是拿一个不相干的日期当"值所属日期"：实测宁德 07-25 那份方案被抽成 06-30、
+        // 山东高速 08-26 那份被抽成 03-31，观察项的触发记录就按这个错日期归档了。
+        // 抽不到就让它是 null，下游（SqliteWatchReadingSource.ReadPlanStage）会退回用公告日。
+        if (rec.Stage != PlanStage.Proposal)
+        {
+            // 三种写法按优先级试：「截至X日」最准 → 区间取末尾 → 单日的「X日，公司…」
+            rec.AsOfDate = MatchDate(AsOfCn, content)
+                           ?? MatchDate(DateRangeEnd, content)
+                           ?? MatchDate(DateThenCompany, content);
+        }
 
         if (NotYetStarted.IsMatch(content))
         {

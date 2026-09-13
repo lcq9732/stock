@@ -17,7 +17,7 @@ namespace StockPlatform.Tests;
 /// </summary>
 public class RuledTableExtractorTests
 {
-    private const string Reports = @"C:\Chingli\Git\stock\publish\data\reports";
+    private const string Reports = @"C:\Chingli\Git\stock\publish\data\annual-reports";
     private readonly ITestOutputHelper _out;
     public RuledTableExtractorTests(ITestOutputHelper output) => _out = output;
 

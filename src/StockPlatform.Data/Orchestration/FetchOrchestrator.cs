@@ -991,6 +991,14 @@ public partial class FetchOrchestrator
         if (quotes.Count > 0) _boardRepository.UpdateQuotes(quotes);
         if (synthesizedMeta.Count > 0)
             SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, synthesizedMeta, SqliteStockMetaUpsert.TypeBoard);
+        // ⚠ 主动回收 WAL（2026-09-12 加）——这条路是全库写得最重的一条（950 个板块 × 约 4900 根
+        // ≈ 468 万行）。SQLite 的 autocheckpoint 是**被动**的，只要有任何读连接活着就跳过；
+        // 2026-09-10 就是因为一个残留进程握着库两个多小时，这 468 万行全堆在 WAL 里、涨到 162GB，
+        // C 盘 931G 用到 0 可用。拿到 busy 会明确报出来——那是"有人握着库"的唯一早期信号。
+        // （当时记的"单事务写 468 万行"是误判：这个循环一直是一个板块一个事务。）
+        var walNote = new SqliteMaintenance(_paths.CurrentDb).CheckpointWalAndDescribe();
+        if (walNote != null) progress?.Report(walNote);
+
         progress?.Report($"板块指数合成完成：{boards.Count} 个板块，其中 {withBars} 个成分股数据足够、已写入 {totalBars} 根日K（code=板块代码，不进个股选股）。");
     }
 
@@ -1959,8 +1967,9 @@ public partial class FetchOrchestrator
         {
             var codes = LocalStockCodes();
             if (codes.Count == 0) return null;
-            var (todo, never) = MoneyFlowBackfillPlan.Build(codes, _moneyFlowRepository);
-            return (todo.Count, never);
+            var q = MoneyFlowBackfillPlan.Build(_paths.CurrentDb, codes, _moneyFlowRepository,
+                                                MoneyFlowBackfillPlan.DefaultGapThreshold);
+            return (q.Todo.Count, q.Never);
         }
         catch { return null; }
     }
@@ -2510,11 +2519,16 @@ public partial class FetchOrchestrator
     private async Task FillMissingNetInflowDaysAsync(
         List<string> done, IProgress<string>? progress, CancellationToken ct)
     {
-        List<MissingDayRetry> pending;
-        lock (_dbLock) pending = _manifestStore.Load().MissingNetInflowDays.ToList();
+        // 认领属于自己的那条待办（2026-09-13 二期：不再翻整份 manifest 找字段）
+        List<RetryTarget> pending;
+        lock (_dbLock)
+            pending = _manifestStore.Load().Todo(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays)
+                                   ?.Targets.ToList() ?? new List<RetryTarget>();
         if (pending.Count == 0) return;
 
-        var days = pending.Select(p => p.Day.Date).Distinct().OrderBy(d => d).ToList();
+        var days = pending.Where(p => p.Day.HasValue).Select(p => p.Day!.Value.Date)
+                          .Distinct().OrderBy(d => d).ToList();
+        if (days.Count == 0) return;
         var wanted = days.ToHashSet();
         var codes = LocalStockCodes();
         if (codes.Count == 0) return;
@@ -2573,16 +2587,17 @@ public partial class FetchOrchestrator
         {
             var manifest = _manifestStore.Load();
             var confirmed = manifest.ConfirmedNetInflowDays.Select(d => d.Date).ToHashSet();
-            var triesByDay = pending.GroupBy(p => p.Day.Date)
+            var triesByDay = pending.Where(p => p.Day.HasValue)
+                                    .GroupBy(p => p.Day!.Value.Date)
                                     .ToDictionary(g => g.Key, g => g.Max(p => p.Tries));
-            var next = new List<MissingDayRetry>();
+            var next = new List<RetryTarget>();
             foreach (var d in stillEmpty)
             {
                 int tries = triesByDay.GetValueOrDefault(d) + 1;
                 if (tries >= AuditMaxTries) { confirmed.Add(d); confirmedNow++; }
-                else next.Add(new MissingDayRetry { Day = d, Tries = tries });
+                else next.Add(new RetryTarget { Day = d, Tries = tries });
             }
-            manifest.MissingNetInflowDays = next;
+            manifest.SetTodo(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays, next);
             manifest.ConfirmedNetInflowDays = confirmed.OrderBy(d => d).ToList();
             _manifestStore.Save(manifest);
         }
@@ -2668,7 +2683,7 @@ public partial class FetchOrchestrator
         lock (_dbLock)
         {
             var manifest = _manifestStore.Load();
-            manifest.FailedNetInflowCodes = ComputeUpdatedFailedCodes(manifest.FailedNetInflowCodes, codes, failedNetInflowCodes);
+            SetFailedTodo(manifest, RetryTaskIds.NetInflow, codes, failedNetInflowCodes);
             _manifestStore.Save(manifest);
         }
     }
@@ -2712,157 +2727,291 @@ public partial class FetchOrchestrator
             ? "本轮没有需要重试的项目"
             : "本轮重试完成：" + string.Join("、", done));
 
-        var left = GetFailedRetrySummary();
+        var left = GetRetryBacklog();
         progress?.Report(left.Any
             ? $"仍有待重试：{left.Describe()}——可以再点一次这个按钮"
             : "失败名单已全部清零，没有遗留项目");
     }
 
+    /// <summary>
+    /// 【重新拉取失败】——2026-09-13 二期起它**自己不抓任何东西**，只是个调度器：
+    /// 读统一待办清单 → 按 <see cref="RetryTodo.TaskId"/> 挨个调对应任务的"补待办"入口。
+    ///
+    /// 改成这样的原因：原来这里是一长串 <c>if (xxx.Count > 0)</c>，每加一类待办就要在这里
+    /// 再写一段。于是 2026-09-02 加的历史空洞、09-06 加的资金流缺失日，执行链加上了、
+    /// 界面摘要却没人回头改——显示"09-11日线 1 只"，点下去实际跑 1909 段、几个小时。
+    /// 现在"有哪些待办"只有 <see cref="Manifest.MigrateLegacyTodos"/> 一处知道，
+    /// 显示、按钮、这里的分派全读同一份，加一类待办漏不掉。
+    /// </summary>
     private async Task<FetchResult> RunRetryFailedInternalAsync(
         NamedBarSource source, IProgress<string>? progress, CancellationToken ct)
     {
         if (!File.Exists(_paths.CurrentDb))
             throw new InvalidOperationException("本地还没有任何数据，无法重新拉取，请先执行一次\"拉取全部\"");
 
-        var manifest = _manifestStore.Load();
-        var failedCodesList = manifest.FailedCodes;
-        var failedMarketCapCodes = manifest.FailedMarketCapCodes;
-        var failedNetInflowCodes = manifest.FailedNetInflowCodes;
-        var failedIndexConsCodes = manifest.FailedIndexConsCodes;
-        var failedIndexWeightCodes = manifest.FailedIndexWeightCodes;
-        var failedShareholderCodes = manifest.FailedShareholderCodes;
-        var failedDividendCodes = manifest.FailedDividendCodes;
-        // 这一份不是"失败"名单，是体检出来的"当天日线还缺着"名单（见 CheckLatestDayCoverage）——
-        // 用户角度它跟失败一样都是"数据没到位、要再抓一次"，所以并进同一个按钮里重试。
-        var missingDayCodes = manifest.MissingDayCodes;
-        var missingDayDate = manifest.MissingDayDate;
-
-        if (failedCodesList.Count == 0 && failedMarketCapCodes.Count == 0 && failedNetInflowCodes.Count == 0
-            && failedIndexConsCodes.Count == 0 && failedIndexWeightCodes.Count == 0 && failedShareholderCodes.Count == 0
-            && failedDividendCodes.Count == 0 && missingDayCodes.Count == 0)
+        // ⚠ 判"这轮有没有活"必须走 RetryBacklog，**不能在这里手写一串 .Count == 0**
+        //   （2026-09-13 修）：原来那八个 .Count 只数了几份失败名单，漏掉了体检写进来的
+        //   历史空洞和资金流缺失日——名单里躺着 1909 段，只要那几份清零就会从这里直接
+        //   返回"不需要重试"，**那 1909 段永远补不上而且一声不吭**。
+        var backlog = RetryBacklog.From(_manifestStore.Load());
+        if (!backlog.Any)
         {
             progress?.Report("目前没有记录到抓取失败或缺当天数据的股票，不需要重试");
             return new FetchResult();
         }
 
-        // 逐类重试，每类做完记一条"干了什么"——最后统一汇总。原来没有这个汇总，跑完只在末尾留下
-        // 一句"K线没有失败的股票需要重试"，看起来像整个操作什么都没做（用户 2026-08-19 反馈），
-        // 实际上市值和资金流已经重试完并清零了。
+        var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
+        currentRepo.EnsureSchema();
+        var sw = Stopwatch.StartNew();
+        var errors = new ConcurrentBag<string>();
+        var failedCodes = new ConcurrentBag<string>();
         var done = new List<string>();
 
-        if (failedMarketCapCodes.Count > 0)
+        progress?.Report($"本轮要补：{backlog.Describe()}");
+
+        var taskIds = DispatchOrder(backlog);
+        var attempted = new List<string>();
+        foreach (var taskId in taskIds)
         {
-            // 市值是整轮扫描，不是逐只重试——名单里那一大批代码只代表"有一轮要重来"，日志要讲清楚，
-            // 否则"重试 5544 只"和后面"写入 5544 条"看起来像两件事。
-            progress?.Report($"流通市值：整轮重新扫描（上次整轮失败，名单里那 {failedMarketCapCodes.Count} 个代码是当时那批的全体，"
+            ct.ThrowIfCancellationRequested();
+            attempted.AddRange(await RunFillBacklogAsync(
+                taskId, source, currentRepo, errors, failedCodes, done, progress, sw, ct));
+        }
+
+        // 收尾：本轮碰过的代码里这次没失败的一律移出失败名单（"之前失败、这次成功了"），
+        // 并顺手再体检一次当天覆盖情况——上面刚补过的话名单得重建。
+        var result = FinishFetchRun(errors, "重新拉取失败股票",
+            attempted.Distinct(StringComparer.Ordinal).ToList(), failedCodes,
+            progress, checkDayCoverage: true);
+        ReportRetrySummary(done, progress);
+        return result;
+    }
+
+    /// <summary>
+    /// 【重新拉取失败】这一轮要按什么顺序调哪些任务（2026-09-13 二期）。
+    ///
+    /// 顺序是固定的，日志才可预期：便宜的整轮扫描排前面，K线那几项最重、排后面。
+    /// 不在这张表里的任务排最后、按 id 字典序——新加一个任务忘了登记顺序也跑得起来，
+    /// 只是排在末尾。
+    ///
+    /// 抽成静态方法是为了能单测：**分派对不对是这一版的核心**，而
+    /// <see cref="RunRetryFailedInternalAsync"/> 一跑就要发几千个网络请求，测不了。
+    /// </summary>
+    public static List<string> DispatchOrder(RetryBacklog backlog)
+    {
+        var order = new[]
+        {
+            RetryTaskIds.Roster, RetryTaskIds.NetInflow,
+            RetryTaskIds.IndexCons, RetryTaskIds.IndexWeight,
+            RetryTaskIds.Shareholder, RetryTaskIds.Dividend,
+            RetryTaskIds.StockDayBars, RetryTaskIds.StockHfqBars, RetryTaskIds.StockRawBars,
+            RetryTaskIds.EtfBars, RetryTaskIds.IndexBars, RetryTaskIds.DelistedTails,
+        };
+        return backlog.Actionable.Select(i => i.TaskId).Distinct(StringComparer.Ordinal)
+            .OrderBy(id => Array.IndexOf(order, id) is var i && i >= 0 ? i : int.MaxValue)
+            .ThenBy(id => id, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// 【只补待办】单项入口（<c>FetchMode.FillBacklog</c>）——把某一个任务欠的账补上。
+    ///
+    /// 跟这一项的日常入口（<c>RunStepXxxAsync</c>）的分界是**目标从哪来**：日常是按每只标的的
+    /// 水位线往后续抓，这里是照着待办清单补。两者不能互相替代——历史空洞在水位线**之下**，
+    /// 跑一整轮增量也补不上一段（见 <see cref="FillGapTodoAsync"/>）。
+    ///
+    /// 【重新拉取失败】就是拿它把有待办的任务挨个跑一遍；单独给某一项设成这个模式也行。
+    /// </summary>
+    public async Task<FetchResult> RunFillBacklogAsync(
+        string taskId, NamedBarSource source, IProgress<string>? progress, CancellationToken ct = default)
+    {
+        if (!File.Exists(_paths.CurrentDb))
+            throw new InvalidOperationException("本地还没有任何数据，无法补待办，请先执行一次\"拉取全部\"");
+
+        var (repo, errors, failed, _, sw) = BeginStep();
+        var done = new List<string>();
+        void Forward(string m) => progress?.Report(m);
+        source.Fetcher.OnStatus += Forward;
+        List<string> attempted;
+        try
+        {
+            attempted = await RunFillBacklogAsync(taskId, source, repo, errors, failed, done, progress, sw, ct);
+        }
+        finally { source.Fetcher.OnStatus -= Forward; }
+
+        if (done.Count == 0)
+        {
+            progress?.Report($"【{TaskLabel(taskId)}】没有待补的项目。");
+            return new FetchResult { NothingToDo = true };
+        }
+        progress?.Report("本轮补完：" + string.Join("、", done));
+        return FinishFetchRun(errors, $"{TaskLabel(taskId)}·补待办",
+            attempted.Distinct(StringComparer.Ordinal).ToList(), failed, progress, taskId: taskId);
+    }
+
+    /// <summary>
+    /// 补一个任务的全部待办（2026-09-13 二期）——**"归谁补"这件事在这里落地**。
+    ///
+    /// 每一类待办的补法和复查方式都不一样，所以这里只做分派，具体怎么补、怎么复查、
+    /// 什么时候从名单里划掉，都在各自的方法里（见 doc/retry-backlog-design.md §3.5）：
+    /// 缺行看"行在不在"、值错要按 Reason 重查对应判据、失败名单是"这轮没失败就移出"。
+    ///
+    /// ⚠ 别把它接到任务的**日常入口**上（RunStepXxxAsync）：那些是按水位线跑的，
+    /// 而历史空洞正好在水位线**之下**——那样跑不仅慢，而且一段也补不上
+    /// （FillGapTodoAsync 存在的理由就是这个）。
+    /// </summary>
+    /// <returns>本轮真的去抓过的代码（收尾时用来更新失败名单）。</returns>
+    private async Task<List<string>> RunFillBacklogAsync(
+        string taskId, NamedBarSource source, SqliteBarRepository currentRepo,
+        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, List<string> done,
+        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
+    {
+        var attempted = new List<string>();
+        var manifest = _manifestStore.Load();
+
+        List<string> CodesOf(string kind) =>
+            manifest.Todo(taskId, kind)?.Targets.Select(t => t.Code).ToList() ?? new List<string>();
+
+        // ── 整轮扫描类（流通市值）：名单里那一大批代码只代表"有一轮要重来" ──
+        if (CodesOf(RetryTodoKind.Round) is { Count: > 0 } roundCodes)
+        {
+            progress?.Report($"流通市值：整轮重新扫描（上次整轮失败，名单里那 {roundCodes.Count} 个代码是当时那批的全体，"
                            + "不是逐只失败——市值一次请求拿回全市场）");
-            await FetchMarketCapAsync(source, failedMarketCapCodes, progress, ct);
+            await FetchMarketCapAsync(source, roundCodes, progress, ct);
             done.Add("流通市值 1 轮");
         }
 
-        if (failedNetInflowCodes.Count > 0)
+        // ── 逐只失败：各类用各自的补法 ──
+        var failed = CodesOf(RetryTodoKind.Failed);
+        if (failed.Count > 0)
         {
-            await FetchNetInflowAsync(failedNetInflowCodes, DateTime.Today, exactDayOnly: false, progress, ct);
-            done.Add($"主力净流入 {failedNetInflowCodes.Count} 只");
+            switch (taskId)
+            {
+                case RetryTaskIds.NetInflow:
+                    await FetchNetInflowAsync(failed, DateTime.Today, exactDayOnly: false, progress, ct);
+                    done.Add($"主力净流入 {failed.Count} 只");
+                    break;
+                case RetryTaskIds.IndexCons:
+                    await RetryIndexAsync(failed, new List<string>(), progress, ct);
+                    done.Add($"指数成分 {failed.Count} 个");
+                    break;
+                case RetryTaskIds.IndexWeight:
+                    await RetryIndexAsync(new List<string>(), failed, progress, ct);
+                    done.Add($"指数权重 {failed.Count} 个");
+                    break;
+                case RetryTaskIds.Shareholder:
+                    await RetryShareholderAsync(failed, progress, ct);
+                    done.Add($"股东数据 {failed.Count} 只");
+                    break;
+                case RetryTaskIds.Dividend:
+                    await RetryDividendAsync(failed, progress, ct);
+                    done.Add($"分红送配 {failed.Count} 只");
+                    break;
+                default:
+                    // K线：**按这个任务自己的口径**重抓（2026-09-13 二期修的就是这条）。
+                    // 以前所有K线失败挤在一个 FailedCodes 里，重试一律走 Granularity.Day，
+                    // 后复权/不复权任务失败的票走这条路补不回自己的口径，得绕一轮体检。
+                    attempted.AddRange(await RefetchFailedBarsAsync(
+                        taskId, failed, source, currentRepo, errors, failedCodes, done, progress, sw, ct));
+                    break;
+            }
         }
 
-        // 指数成分/权重的失败重试（2026-07-16新增）——跟市值/资金流一样，在K线重试之前处理，
-        // 各自用自己的失败名单精确重试，可反复点击直到清零（见 RetryIndexAsync）。
-        if (failedIndexConsCodes.Count > 0 || failedIndexWeightCodes.Count > 0)
+        // ── 当天日线还缺着（不是失败，是数据源当时还没出这些股票的当天数据）──
+        var missingDay = manifest.Todo(taskId, RetryTodoKind.MissingDay);
+        if (missingDay is { Targets.Count: > 0 } && missingDay.Day is { } missDate)
         {
-            await RetryIndexAsync(failedIndexConsCodes, failedIndexWeightCodes, progress, ct);
-            if (failedIndexConsCodes.Count > 0) done.Add($"指数成分 {failedIndexConsCodes.Count} 个");
-            if (failedIndexWeightCodes.Count > 0) done.Add($"指数权重 {failedIndexWeightCodes.Count} 个");
-        }
-
-        // 股东数据的失败重试（2026-07-16新增）——逐只精确重试，见 RetryShareholderAsync。
-        if (failedShareholderCodes.Count > 0)
-        {
-            await RetryShareholderAsync(failedShareholderCodes, progress, ct);
-            done.Add($"股东数据 {failedShareholderCodes.Count} 只");
-        }
-
-        // 分红送配的失败重试（2026-07-31新增）——逐只精确重试，见 RetryDividendAsync。
-        if (failedDividendCodes.Count > 0)
-        {
-            await RetryDividendAsync(failedDividendCodes, progress, ct);
-            done.Add($"分红送配 {failedDividendCodes.Count} 只");
-        }
-
-        var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
-        currentRepo.EnsureSchema();
-        var today = DateTime.Today;
-        var sw = Stopwatch.StartNew();
-
-        var errors = new ConcurrentBag<string>();
-        var failedCodes = new ConcurrentBag<string>();
-        var stats = new FetchStats();
-
-        // ── 当天日线缺失的重补（2026-08-21新增）──
-        // 这批股票的请求上一轮**根本没失败**，是数据源盘后还没更新到它们（见 Manifest.MissingDayCodes）。
-        // 窗口取"缺的那个交易日 → 今天"；前复权走 ProcessOneStockAsync，后复权走 FetchHfqBarsAsync
-        // （它自己按 day_hfq 的水位线算缺口）——已经补齐的那条线会在水位线判定里跳过、不发请求。
-        if (missingDayCodes.Count > 0 && missingDayDate.HasValue)
-        {
+            var codes = missingDay.Targets.Select(t => t.Code).ToList();
             var missStats = new FetchStats();
             int missDone = 0;
-            progress?.Report($"补 {missingDayDate.Value:yyyy-MM-dd} 还缺的个股日线，共 {missingDayCodes.Count} 只"
+            var today = DateTime.Today;
+            progress?.Report($"补 {missDate:yyyy-MM-dd} 还缺的个股日线，共 {codes.Count} 只"
                            + $"（上一轮不是失败，是数据源当时还没出这些股票的当天数据），数据源：{source.Name}");
-            await Task.WhenAll(missingDayCodes.Select(code =>
-                ProcessOneStockAsync(code, source, missingDayDate.Value, today, currentRepo,
-                    errors, failedCodes, missStats, progress, missingDayCodes.Count,
+            // 窗口取"缺的那个交易日 → 今天"。前复权走 ProcessOneStockAsync，后复权/不复权走
+            // FetchHfqBarsAsync（它自己按各口径的水位线算缺口）——已经补齐的那条线会在水位线
+            // 判定里跳过、不发请求。
+            await Task.WhenAll(codes.Select(code =>
+                ProcessOneStockAsync(code, source, missDate, today, currentRepo,
+                    errors, failedCodes, missStats, progress, codes.Count,
                     () => Interlocked.Increment(ref missDone), sw, ct)));
-            await FetchHfqBarsAsync(source, missingDayCodes,
+            await FetchHfqBarsAsync(source, codes,
                 code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears),
                 currentRepo, errors, failedCodes, missStats, progress, sw, ct);
-            await FetchHfqBarsAsync(source, missingDayCodes,
+            await FetchHfqBarsAsync(source, codes,
                 code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears, Granularity.DayRaw),
                 currentRepo, errors, failedCodes, missStats, progress, sw, ct, gran: Granularity.DayRaw);
             progress?.Report($"当天日线重补汇总：{missStats.Summarize()}");
-            done.Add($"{missingDayDate.Value:MM-dd}日线 {missingDayCodes.Count} 只");
+            done.Add($"{missDate:MM-dd}日线 {codes.Count} 只");
+            attempted.AddRange(codes);
         }
 
-        // ── 全库体检查出来的历史空洞（2026-09-02 新增）──
-        await FillAuditedGapsAsync(source, currentRepo, errors, failedCodes, done, progress, sw, ct);
+        // ── 全库体检查出来的：历史空洞 / 值问题（各自的复查方式，见方法注释）──
+        await FillGapTodoAsync(taskId, source, currentRepo, errors, failedCodes, done, progress, sw, ct);
+        await FillValueTodoAsync(taskId, source, currentRepo, errors, failedCodes, done, progress, sw, ct);
 
-        // ── 资金净流入整天缺失的那几天（2026-09-06 新增，同样由全库体检写入名单）──
-        await FillMissingNetInflowDaysAsync(done, progress, ct);
+        // ── 整天缺失的日子（资金净流入）──
+        if (manifest.Todo(taskId, RetryTodoKind.MissingDays) is { Targets.Count: > 0 })
+            await FillMissingNetInflowDaysAsync(done, progress, ct);
 
-        if (failedCodesList.Count == 0)
+        return attempted;
+    }
+
+    /// <summary>
+    /// 重抓某个K线任务失败的那些票，**用它自己的口径**。
+    ///
+    /// 前复权走 <see cref="ProcessOneStockAsync"/>（并发，水位线没有时用默认回看年数兜底）；
+    /// 后复权/不复权走 <see cref="FetchHfqBarsAsync"/>——它按那个口径自己的水位线算缺口，
+    /// 已经齐的票一个请求都不发。
+    /// </summary>
+    private async Task<List<string>> RefetchFailedBarsAsync(
+        string taskId, List<string> codes, NamedBarSource source, SqliteBarRepository currentRepo,
+        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, List<string> done,
+        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
+    {
+        var gran = taskId switch
         {
-            // K线名单是空的，但上面几类可能已经重试完了——只报"K线没有失败"会让人以为整轮什么都没干。
-            done.Add("K线 0 只（名单本来就是空的）");
-            // 体检要跑：上面刚补过的话名单得重建，没补过也顺手确认一次当天覆盖情况。
-            var emptyBarResult = FinishFetchRun(errors, "重新拉取失败股票", missingDayCodes, failedCodes,
-                progress, checkDayCoverage: true);
-            ReportRetrySummary(done, progress);
-            return emptyBarResult;
+            RetryTaskIds.StockHfqBars => Granularity.DayHfq,
+            RetryTaskIds.StockRawBars => Granularity.DayRaw,
+            _ => Granularity.Day,
+        };
+        string label = TaskLabel(taskId);
+        var today = DateTime.Today;
+        var stats = new FetchStats();
+
+        if (gran != Granularity.Day && !source.Fetcher.SupportsHfq)
+        {
+            progress?.Report($"（{label} {codes.Count} 只先留着：数据源 {source.Name} 不提供这个口径，"
+                           + "要补请把数据源切到 Tencent 再跑一次）");
+            done.Add($"{label} {codes.Count} 只跳过（数据源不支持）");
+            return new List<string>();
         }
 
-        progress?.Report($"重新拉取上次失败的K线，共 {failedCodesList.Count} 只，数据源：{source.Name}");
-        int completed = 0;
-        var tasks = failedCodesList.Select(code =>
+        progress?.Report($"重新拉取上次失败的{label}K线，共 {codes.Count} 只，数据源：{source.Name}");
+
+        if (gran == Granularity.Day)
         {
-            // 失败的股票水位线可能是很久以前的（如果一直失败），也可能压根没有（第一次就失败）——
-            // 后一种情况用跟"拉取全部"默认回看年数一样的3年兜底，这里没有单独的"回看年数"输入框。
-            // "今天"这一天同样要看是不是收盘后确认的（跟RunFetchAllInternalAsync同样的逻辑）。
-            DateTime start;
-            lock (_dbLock)
+            int completed = 0;
+            await Task.WhenAll(codes.Select(code =>
             {
-                start = IncrementalStart(currentRepo.GetLatestBarInfo(code, Granularity.Day), today, 3);
-            }
-            return ProcessOneStockAsync(code, source, start, today, currentRepo, errors, failedCodes, stats, progress, failedCodesList.Count, () => Interlocked.Increment(ref completed), sw, ct);
-        });
-        await Task.WhenAll(tasks);
+                // 失败的票水位线可能很旧（一直失败），也可能压根没有（第一次就失败）——
+                // 后一种用跟【拉取全部】默认一样的回看年数兜底，这里没有单独的输入框。
+                DateTime start;
+                lock (_dbLock)
+                    start = IncrementalStart(currentRepo.GetLatestBarInfo(code, Granularity.Day), today, 3);
+                return ProcessOneStockAsync(code, source, start, today, currentRepo, errors, failedCodes,
+                    stats, progress, codes.Count, () => Interlocked.Increment(ref completed), sw, ct);
+            }));
+        }
+        else
+        {
+            await FetchHfqBarsAsync(source, codes,
+                code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears, gran),
+                currentRepo, errors, failedCodes, stats, progress, sw, ct, gran: gran);
+        }
 
-        progress?.Report($"K线本轮汇总：{stats.Summarize()}");
-        done.Add($"K线 {failedCodesList.Count} 只（其中 {failedCodes.Count} 只仍失败）");
-        // attempted 要把"当天缺失"那批也算上——它们这轮也真的抓过了，成功的就该从失败名单里移出。
-        var attemptedThisRetry = failedCodesList.Concat(missingDayCodes).Distinct(StringComparer.Ordinal).ToList();
-        var retryResult = FinishFetchRun(errors, "重新拉取失败股票", attemptedThisRetry, failedCodes,
-            progress, checkDayCoverage: true);
-        ReportRetrySummary(done, progress);
-        return retryResult;
+        progress?.Report($"{label}K线本轮汇总：{stats.Summarize()}");
+        done.Add($"{label}K线 {codes.Count} 只");
+        return codes;
     }
 
     /// <summary>
@@ -3382,7 +3531,7 @@ public partial class FetchOrchestrator
         lock (_dbLock)
         {
             var manifest = _manifestStore.Load();
-            manifest.FailedMarketCapCodes = ComputeUpdatedFailedCodes(manifest.FailedMarketCapCodes, codes, failedThisRun);
+            SetFailedTodo(manifest, RetryTaskIds.Roster, codes, failedThisRun);
             _manifestStore.Save(manifest);
         }
 
@@ -3534,7 +3683,7 @@ public partial class FetchOrchestrator
         lock (_dbLock)
         {
             var manifest = _manifestStore.Load();
-            manifest.FailedNetInflowCodes = ComputeUpdatedFailedCodes(manifest.FailedNetInflowCodes, codes, failedNetInflowCodes);
+            SetFailedTodo(manifest, RetryTaskIds.NetInflow, codes, failedNetInflowCodes);
             _manifestStore.Save(manifest);
         }
     }
@@ -3582,12 +3731,22 @@ public partial class FetchOrchestrator
     private FetchResult FinishFetchRun(
         ConcurrentBag<string> errors, string fetchKind,
         IReadOnlyCollection<string> attemptedCodes, ConcurrentBag<string> failedCodesThisRun,
-        IProgress<string>? progress = null, bool checkDayCoverage = false)
+        IProgress<string>? progress = null, bool checkDayCoverage = false,
+        string? taskId = null)
     {
         var manifest = _manifestStore.Load();
         manifest.LastFetchAt = DateTime.Now;
         manifest.LastFetchKind = fetchKind;
-        manifest.FailedCodes = ComputeUpdatedFailedCodes(manifest.FailedCodes, attemptedCodes, failedCodesThisRun);
+        // 失败名单记到**是哪个任务失败的**那一格里（2026-09-13 二期）。
+        //
+        // 以前这里是 manifest.FailedCodes 一个大池子——同一个方法里，一行之隔，
+        // LastRunByTask 明明是按任务分域记的，失败名单却不分。后果：后复权/不复权任务
+        // 失败的票跟前复权混在一起，【重新拉取失败】只能一律按 Granularity.Day 重抓，
+        // 那两个口径的缺口这条路补不回来（得绕一轮全库体检才补得上）。
+        //
+        // taskId 不传＝按前复权算，跟改之前等价：那些调用点要么本来就是前复权
+        //（【拉取全部】【拉取N年】这类复合动作），要么根本不记失败名单（attemptedCodes 为空）。
+        SetFailedTodo(manifest, taskId ?? RetryTaskIds.StockDayBars, attemptedCodes, failedCodesThisRun);
         // 按任务分域记一条（2026-09-02）：拆细之后 LastFetchKind 只剩"今天最后收尾的那一项"，
         // 看不出别的项跑没跑。这份字典让"数据状态"能逐项显示"上次什么时候跑的、干不干净"。
         manifest.LastRunByTask[fetchKind] = new TaskRunRecord
@@ -3660,8 +3819,12 @@ public partial class FetchOrchestrator
         }
 
         var manifest = _manifestStore.Load();
-        manifest.MissingDayCodes = missing;
-        manifest.MissingDayDate = missing.Count > 0 ? latest : null;
+        // 归【个股日K·前复权】补：三套口径的缺口这里是并集，而重试那边补这一批时
+        // 前复权走 ProcessOneStockAsync、后复权/不复权走 FetchHfqBarsAsync 各自的水位线，
+        // 一条待办就够（见 FillMissingDayTodoAsync）。
+        manifest.SetTodo(RetryTaskIds.StockDayBars, RetryTodoKind.MissingDay,
+            missing.Select(c => new RetryTarget { Code = c }).ToList(),
+            missing.Count > 0 ? latest : null);
         _manifestStore.Save(manifest);
 
         progress?.Report(missing.Count == 0
@@ -3707,28 +3870,17 @@ public partial class FetchOrchestrator
         };
     }
 
-    /// <summary>各份失败名单的待重试量（2026-08-19 由原来的"一个总数"改成分类汇总）。
+    /// <summary>【重新拉取失败】的待办清单（2026-09-13 由 <c>GetFailedRetrySummary</c> 改过来）。
     ///
     /// 为什么不能只给一个总数：**流通市值是整轮扫描**，一次请求拿全市场，接口失败时会保守地把
     /// 这批代码全部记进名单（见 <see cref="FetchMarketCapAsync"/> 的 catch）。于是"1次接口失败"
     /// 在总数里表现成"5544 支失败"，按钮上写"重新拉取失败股票（5547）"会被读成丢了5547只票的
-    /// 数据，实际上只是一次市值快照没取到、外加3只资金流。所以市值单独按"轮"表达。</summary>
-    public FailedRetrySummary GetFailedRetrySummary()
-    {
-        var manifest = _manifestStore.Load();
-        return new FailedRetrySummary
-        {
-            BarCodes = manifest.FailedCodes.Count,
-            MissingDayCodes = manifest.MissingDayCodes.Count,
-            MissingDayDate = manifest.MissingDayDate,
-            MarketCapCodes = manifest.FailedMarketCapCodes.Count,
-            NetInflowCodes = manifest.FailedNetInflowCodes.Count,
-            IndexConsCodes = manifest.FailedIndexConsCodes.Count,
-            IndexWeightCodes = manifest.FailedIndexWeightCodes.Count,
-            ShareholderCodes = manifest.FailedShareholderCodes.Count,
-            DividendCodes = manifest.FailedDividendCodes.Count,
-        };
-    }
+    /// 数据，实际上只是一次市值快照没取到、外加3只资金流。所以市值单独按"轮"表达。
+    ///
+    /// 为什么换成 <see cref="RetryBacklog"/>：原来那份清单在代码里手抄了三遍，
+    /// 体检写进来的两类待办漏抄了整整两周，界面上显示"1 只"而实际要跑 1909 段。
+    /// 详见 RetryBacklog 的类注释和 doc/retry-backlog-design.md。</summary>
+    public RetryBacklog GetRetryBacklog() => RetryBacklog.From(_manifestStore.Load());
 
     /// <summary>
     /// 本轮尝试过（无论最终成功/失败/跳过）的代码，凡是这次没有失败的一律移出失败名单——覆盖
@@ -3743,6 +3895,22 @@ public partial class FetchOrchestrator
         stillFailed.ExceptWith(attemptedCodes);
         stillFailed.UnionWith(failedCodesThisRun);
         return stillFailed.OrderBy(c => c).ToList();
+    }
+
+    /// <summary>
+    /// 把一份失败名单写进统一待办（2026-09-13 二期）——七类失败名单共用这一套，
+    /// 判据仍是上面那个 <see cref="ComputeUpdatedFailedCodes"/>，只是存的地方从
+    /// 九个各自为政的字段换成了 <see cref="Manifest.Todos"/> 里按 (TaskId, Kind) 索引的一条。
+    ///
+    /// **taskId 就是那件事该归谁补**：以前所有K线失败挤在一个 FailedCodes 里，
+    /// 重试时只能一律按前复权重抓，后复权/不复权任务失败的票走这条路补不回自己的口径。
+    /// </summary>
+    private static void SetFailedTodo(Manifest m, string taskId,
+        IReadOnlyCollection<string> attemptedCodes, IReadOnlyCollection<string> failedThisRun)
+    {
+        var current = m.Todo(taskId, RetryTodoKind.Failed)?.Targets.Select(t => t.Code).ToList() ?? new List<string>();
+        var updated = ComputeUpdatedFailedCodes(current, attemptedCodes, failedThisRun);
+        m.SetTodo(taskId, RetryTodoKind.Failed, updated.Select(c => new RetryTarget { Code = c }).ToList());
     }
 
     /// <summary>
@@ -3817,8 +3985,8 @@ public partial class FetchOrchestrator
         lock (_dbLock)
         {
             var manifest = _manifestStore.Load();
-            manifest.FailedIndexConsCodes = ComputeUpdatedFailedCodes(manifest.FailedIndexConsCodes, attempted, consFailed);
-            manifest.FailedIndexWeightCodes = ComputeUpdatedFailedCodes(manifest.FailedIndexWeightCodes, attempted, weightFailed);
+            SetFailedTodo(manifest, RetryTaskIds.IndexCons, attempted, consFailed);
+            SetFailedTodo(manifest, RetryTaskIds.IndexWeight, attempted, weightFailed);
             _manifestStore.Save(manifest);
         }
 
@@ -3845,12 +4013,31 @@ public partial class FetchOrchestrator
     {
         if (!Directory.Exists(_paths.ReportsDir)) return;
 
-        int reparsed = 0, reparseFixed = 0;
+        int reparsed = 0, reparseFixed = 0, skippedNonFinancial = 0;
         progress?.Report("正在用当前解析规则重跑本地已缓存的 PDF（不联网）...");
         foreach (var dir in Directory.GetDirectories(_paths.ReportsDir))
         {
             ct.ThrowIfCancellationRequested();
             var code = Path.GetFileName(dir);
+
+            // ⚠ **只碰金融股**（2026-09-11 补）。下面那段判定失败时会 File.Delete，
+            //   而删文件这种事，判据必须收紧到"我确定这是我该管的文件"。
+            //
+            //   踩过的坑：为子公司解析下载的 32 份非金融年报也放在这个目录里，被这里扫到，
+            //   LooksLikeReport（判据是前 3 页有没有年报的结构关键词，为拦截问询函而写）
+            //   对它们一律返回 false —— 非金融年报前几页是封面和图片 —— 于是当成"下错的
+            //   文件"删掉，一轮删了 14 份（比亚迪 4 期全没）。
+            //   年报现在有自己的目录（FetchPaths.AnnualReportsDir），但这道防护照样要有：
+            //   目录分开只是让它们不再相遇，这里才是"不该删的别删"。
+            if (!latest.TryGetValue(code, out var snapshot)
+                || Logic.Services.BankHealthCheckBuilder.ClassifyInstitution(snapshot)
+                   is not (Logic.Models.FinancialInstitutionKind.Bank
+                        or Logic.Models.FinancialInstitutionKind.Broker
+                        or Logic.Models.FinancialInstitutionKind.Insurer))
+            {
+                skippedNonFinancial++;
+                continue;
+            }
             // 这家已经存下的指标，用来判断哪几期不用再 OCR（见下面 fullyApproved）。
             List<Logic.Models.BankRegulatoryMetric> existing;
             lock (_dbLock) existing = repo.GetByCode(code);
@@ -3905,6 +4092,9 @@ public partial class FetchOrchestrator
         }
         if (reparsed > 0)
             progress?.Report($"  本地重解析完成：{reparsed} 份报告、{reparseFixed} 个指标已按新规则刷新。");
+        // 跳过了多少要说出来。不报的话，目录里躺着一批它压根没碰的东西，而没人知道。
+        if (skippedNonFinancial > 0)
+            progress?.Report($"  跳过 {skippedNonFinancial} 个非金融股目录（这一项只管银行/券商/保险）。");
     }
 
     /// <summary>ETF→指数 名称匹配（尽力）——ETF 名称几乎都含指数名（"沪深300ETF华泰"→沪深300），用它在
@@ -3997,8 +4187,8 @@ public partial class FetchOrchestrator
         lock (_dbLock)
         {
             var manifest = _manifestStore.Load();
-            manifest.FailedIndexConsCodes = ComputeUpdatedFailedCodes(manifest.FailedIndexConsCodes, consCodes, consFailed);
-            manifest.FailedIndexWeightCodes = ComputeUpdatedFailedCodes(manifest.FailedIndexWeightCodes, weightCodes, weightFailed);
+            SetFailedTodo(manifest, RetryTaskIds.IndexCons, consCodes, consFailed);
+            SetFailedTodo(manifest, RetryTaskIds.IndexWeight, weightCodes, weightFailed);
             _manifestStore.Save(manifest);
         }
     }
@@ -4128,7 +4318,7 @@ public partial class FetchOrchestrator
         lock (_dbLock)
         {
             var manifest = _manifestStore.Load();
-            manifest.FailedShareholderCodes = ComputeUpdatedFailedCodes(manifest.FailedShareholderCodes, attempted, failed.ToList());
+            SetFailedTodo(manifest, RetryTaskIds.Shareholder, attempted, failed.ToList());
             _manifestStore.Save(manifest);
         }
 
@@ -4183,7 +4373,7 @@ public partial class FetchOrchestrator
         lock (_dbLock)
         {
             var manifest = _manifestStore.Load();
-            manifest.FailedShareholderCodes = ComputeUpdatedFailedCodes(manifest.FailedShareholderCodes, codes, failed.ToList());
+            SetFailedTodo(manifest, RetryTaskIds.Shareholder, codes, failed.ToList());
             _manifestStore.Save(manifest);
         }
     }
@@ -5016,7 +5206,7 @@ public partial class FetchOrchestrator
             lock (_dbLock)
             {
                 var manifest = _manifestStore.Load();
-                manifest.FailedDividendCodes = ComputeUpdatedFailedCodes(manifest.FailedDividendCodes, attempted, failed.ToList());
+                SetFailedTodo(manifest, RetryTaskIds.Dividend, attempted, failed.ToList());
                 _manifestStore.Save(manifest);
             }
 
@@ -5073,7 +5263,7 @@ public partial class FetchOrchestrator
         lock (_dbLock)
         {
             var manifest = _manifestStore.Load();
-            manifest.FailedDividendCodes = ComputeUpdatedFailedCodes(manifest.FailedDividendCodes, codes, failed.ToList());
+            SetFailedTodo(manifest, RetryTaskIds.Dividend, codes, failed.ToList());
             _manifestStore.Save(manifest);
         }
     }

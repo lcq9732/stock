@@ -52,6 +52,7 @@ public enum FetchActionId
     StepPlanWatch,
     StepCompanyProfile,
     StepCustomerSupplier,
+    StepSubsidiaryExtract,
     StepBoardMembers,
     StepReparseBankPdf,
     StepFullAudit,
@@ -62,6 +63,17 @@ public enum FetchActionId
     FetchEarningsForecast,
     FetchLhbSeat,
     FetchMoneyFlowDetail,
+    /// <summary>
+    /// 【分档资金流快照】（2026-09-12 从 <see cref="FetchMoneyFlowDetail"/> 拆出来）——
+    /// push2delay 全市场当日快照那一条通道。
+    ///
+    /// 拆的理由是**时效性**：原来两条通道挤在一项里，被"逐股补历史耗时长、没时效压力"
+    /// 那个归类连累进了季度组·空闲时补；可快照恰恰是全库时效性最强的数据之一——接口只给
+    /// **最近一个交易日**，当天收盘后没跑，下一个交易日开盘一到就永久取不回来了。
+    /// 2026-09-09 全市场分档资金流整天缺失就是这么来的（当天没轮到跑，隔天补不回来，
+    /// 而逐股那条通道要 5500 个请求才能补一天）。
+    /// </summary>
+    FetchMoneyFlowSnapshot,
     FetchMarketEvents,
     FetchStockBoardMap,
 
@@ -157,6 +169,10 @@ public enum FetchMode
     /// <summary>
     /// 首次整段回补，不看水位线（原【补不复权历史】【一键补齐每日历史】）。
     /// 补完就不用再跑了——日常那一根增量在 <see cref="Incremental"/> 里已经带上。
+    ///
+    /// **只补缺的、已有的不动**——这是它跟 <see cref="Thorough"/> 的分界（2026-09-11 定）。
+    /// 「整段」有多长由各项自己的数据源决定：K线那几行是从开市首日抓起，
+    /// 【拉取分档资金流】的接口只给最近 120 个交易日，那个窗口就是它的"整段"。
     /// </summary>
     FirstBackfill = 4,
 
@@ -164,12 +180,32 @@ public enum FetchMode
     /// 彻底重查（2026-09-09，只有【全库数据体检】用）：忽略并清空那三张"确认没有"的结论名单
     /// ——「确认没有」白名单、「数据源没有更早数据」水位、日频表空日名单。
     ///
+    /// ⚠ 词义分界（2026-09-11 用户定）：**彻底重查＝不管原来有没有、全部重来一次**；
+    /// 只补缺、不动已有的那种是 <see cref="FirstBackfill"/>。【拉取分档资金流】原来挂的是这个模式，
+    /// 但它只把缺行的票排进队、齐了的一个请求都不发，按这条分界已经改回 FirstBackfill。
+    ///
     /// 原来这是界面上一个单独的勾（<c>PlanItemViewModel.ThoroughAudit</c>）。收成模式是因为
     /// 项目里"模式是参数、不是任务"这个概念已经在了（见 doc/fetch-plan-atomic-tasks-design.md），
     /// 而 catalog 的 <see cref="FetchAction.SupportedModes"/> 天然能声明"这一项支持哪几个模式"、
     /// 界面复用现成的模式下拉——比再加一个只服务一项的勾干净。
     /// </summary>
     Thorough = 8,
+
+    /// <summary>
+    /// 只补**待办清单**里属于这一项的那些（2026-09-13 新增，见 doc/retry-backlog-design.md）。
+    ///
+    /// 待办从哪来：这一项自己抓失败的、全库体检查出它这个口径有历史空洞或值问题的、
+    /// 日更末尾发现当天数据还没到位的——全都按任务 id 记在
+    /// <c>Manifest.Todos</c> 里（见 <c>RetryTodo</c>）。
+    ///
+    /// ⚠ **跟 <see cref="Incremental"/> 的分界是"目标从哪来"**，这是它必须单独成一个模式的原因：
+    /// 增量是按每只标的的**水位线**往后续抓，而历史空洞正好在水位线**之下**——
+    /// 拿增量去补空洞，跑一整轮 5500 只也补不上一段（见 FillGapTodoAsync 的注释）。
+    ///
+    /// 【重新拉取失败】就是拿这个模式把各项挨个跑一遍；单独给某一项设成这个模式也行，
+    /// 那就是"只把这一项欠的补上"。
+    /// </summary>
+    FillBacklog = 16,
 }
 
 /// <summary>
@@ -446,7 +482,7 @@ public static class FetchTaskCatalog
             + "模式选「只抓某一天」就按那一天精确取（原【补指定历史日】的做法），日期留空＝今天。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.Date,
             SoftDependsOn: [FetchActionId.StepRoster],
-            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay),
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay | FetchMode.FillBacklog),
 
         new(FetchActionId.StepAnnouncements, "中标/订单公告", "巨潮检索 + 正文", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(3), "每工作日",
@@ -474,7 +510,7 @@ public static class FetchTaskCatalog
             + "早于各指数发布日的部分数据源自然返回空（创业板综 2010 才有、北证50 2021 才有），"
             + "跑完会逐条报出\"本地最早到哪天\"。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
-            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill | FetchMode.FillBacklog,
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.StepStockDayBars, "个股日K·前复权", "腾讯", QuotaGroup.Mixed,
@@ -488,7 +524,7 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.StepRoster],
             // 只有前复权这一路支持"补某一天"：后复权/不复权/ETF/指数在原来的【补指定历史日】里
             // 走的也一直是水位线增量，不是"只抓那天"。
-            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay,
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay | FetchMode.FillBacklog,
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.StepStockHfqBars, "个股日K·后复权", "腾讯", QuotaGroup.Mixed,
@@ -498,6 +534,7 @@ public static class FetchTaskCatalog
             + " day_adj**，这一条现在主要是对照和历史兼容。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
             SoftDependsOn: [FetchActionId.StepRoster],
+            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.StepStockRawBars, "个股日K·不复权", "腾讯", QuotaGroup.Mixed,
@@ -508,7 +545,7 @@ public static class FetchTaskCatalog
             + "整段回补支持分批：设成重复「空闲时」就会在空档里一点点补、到点前收尾。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
             SoftDependsOn: [FetchActionId.StepRoster],
-            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill | FetchMode.FillBacklog,
             SupportsPartialRun: true,
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
@@ -517,6 +554,7 @@ public static class FetchTaskCatalog
             "全市场 ETF 的日K（约 1000 只，水位线增量）。代码带前缀存（sh510300），天然被挡在个股选股全集外。"
             + "名单和K线是两家，但\"没有名单就抓不了K线\"，所以是一项。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
+            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
             Sources: [DataSourceId.Sina, DataSourceId.Tencent]),
 
         new(FetchActionId.StepDelistedTails, "退市股收尾", "两所官网 + 腾讯K线", QuotaGroup.Mixed,
@@ -727,7 +765,21 @@ public static class FetchTaskCatalog
             + "复用【中标/订单公告】那两条已验证的通道：巨潮全市场标题检索「回购」+ 东财正文（免解 PDF）。\n"
             + "回看 14 天（首轮回看 400 天，把还在进行的方案接上），重复扫同一天安全（主键去重）。\n"
             + "⚠ 库里 `cum_amount=0` 是公告明说「尚未实施」，`NULL` 是没抽到——两者不是一回事。",
-            Sources: [DataSourceId.EmDataCenter]),
+            // ⚠ **故意不填 Sources**（2026-09-11 修，这是踩出来的）。
+            //
+            // 原先填了 `[EmDataCenter]`，结果两处都错：发现那一步走的是**巨潮**全文检索
+            // （跟【中标/订单公告】同一个 provider），正文走的是 **np-anotice / np-cnotice**
+            // 而不是 datacenter —— 枚举里根本没有对应 np-* 的源。
+            //
+            // 而**填了 Sources 这个动作本身**会关掉 QuotaGroup.Mixed 的保守兜底
+            // （见 FetchTaskInfo.EffectiveSources：填了就只认填的，没填才退回 AllOnline）。
+            // 于是这一项在占用表上只占了一个它根本不打的源，调度的冲突检查形同虚设——
+            // 实测它跟【拉取分档资金流】并发跑起来没被拦，push2his 那边连续 15 只全失败。
+            //
+            // **填一个错的比不填更糟**，正是 EffectiveSources 注释里"宁可挡住，别撞配额"要防的。
+            // 这一项横跨巨潮 + 东财 np-*，在 np-* 有自己的枚举项之前，让 Mixed 保守占用全部
+            // 联网源是正确的：它首轮要跑几十分钟，期间本来也不该有别的联网任务插进来。
+            Sources: null),
 
         new(FetchActionId.StepWatchIndicator, "观察指标映射", "本地计算", QuotaGroup.Local,
             TimeSpan.FromSeconds(5), "每日",
@@ -766,6 +818,23 @@ public static class FetchTaskCatalog
             Sources: [DataSourceId.EmDataCenter],
             // 软依赖：没有公司档案也能抓，只是对手方还原不出来、partner_code 全是 NULL；
             // 下轮档案有了会自动补上。所以不是硬前置。
+            SoftDependsOn: [FetchActionId.StepCompanyProfile]),
+
+        new(FetchActionId.StepSubsidiaryExtract, "年报子公司名单", "本地计算·不联网", QuotaGroup.Local,
+            TimeSpan.FromMinutes(10), "下载了新年报之后",
+            "解析本地已下载的年报 PDF，提出「合并财务报表范围」那张表里的**子公司名单**。\n"
+            + "**干什么用**：给【客户与供应商】的对手方还原补第三档。年报里的客户写的是"
+            + "「中国建筑第六工程局有限公司」，本地股票池里只有母公司「中国建筑 601668」，直接对不上——"
+            + "库里 10.9 万个未还原的对手名里有相当一部分是上市公司的子公司。\n"
+            + "⚠ 归并是**假设**不是事实：子公司跟你做生意不等于母公司跟你做生意。所以单独标"
+            + "match_type='subsidiary'，置信度低于 exact/normalized，用的时候能分开。\n"
+            + "**双策略解析**：有线框的表按线框还原成二维单元格（窄表单元格内会换行，纯文本行处理不了）；"
+            + "没线框的按坐标聚类成行。\n"
+            + "**实测**（32 家非金融样本）：可用率 81%、提出 773 家子公司，"
+            + "拿去还原对手名命中 148 个、回填 920 行、多连出 **328 条全新产业链边**（现有 6632 条，+4.9%）。\n"
+            + "读 publish/data/annual-reports（**不是** reports/，那是【金融监管指标】的 PDF 缓存，"
+            + "把年报放进去会被【重解析已有PDF】当成下错的文件删掉）。\n"
+            + "解析规则改了就把 SubsidiaryParser.ParserVersion +1，下轮自动重跑已处理过的。",
             SoftDependsOn: [FetchActionId.StepCompanyProfile]),
 
         new(FetchActionId.StepBoardMembers, "板块成分股", "东财 push2", QuotaGroup.Mixed,
@@ -949,8 +1018,24 @@ public static class FetchTaskCatalog
             SupportsPartialRun: false,
             Sources: [DataSourceId.EmDataCenter]),
 
-        new(FetchActionId.FetchMoneyFlowDetail, "拉取分档资金流", "东财", QuotaGroup.Mixed,
-            TimeSpan.FromHours(3), "季度定期组·空闲时补",
+        new(FetchActionId.FetchMoneyFlowSnapshot, "分档资金流快照", "东财", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(2), "每日",
+            "抓**当日全市场**的分档资金流：超大单/大单/中单/小单各自的净额和净占比，共 10 个维度。\n"
+            + "走东财 push2delay 的全市场排行接口，约 60 个请求、一两分钟把 5500 只全拿到——"
+            + "日常增量全靠这一条通道。\n"
+            + "⚠ **漏一天就永久没了**：这个接口只给「最近一个交易日」，当天收盘后没跑，"
+            + "下一个交易日开盘一到就滚到新一天。2026-09-09 全市场整天缺失就是这么来的——"
+            + "补回来要走逐股那条通道、5500 个请求只换回一天数据。所以它归日更，不归「空闲时补」。\n"
+            + "⚠ **盘中不入库**：收盘清算前拿到的是半天的资金流，写进去会污染当天那一行、"
+            + "事后完全看不出来。判据是接口自报的行情时间；盘中跑会记「本轮没开工」，当天稍后还会再来。\n"
+            + "对账：服务端自报的总数减去停牌数就是该拿到的行数，差额会报出来——"
+            + "翻页少翻一页、某页被限流截断，表现出来都只是「今天少几百只」，不报的话没人会发现。\n"
+            + "历史缺口归【分档资金流·补历史】那一项，两项写的是同一张表（逐条比对过、零差异）。",
+            SupportsPartialRun: false,
+            Sources: [DataSourceId.EmPush2Delay]),
+
+        new(FetchActionId.FetchMoneyFlowDetail, "分档资金流·补历史", "东财", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(6), "季度定期组·空闲时补（每轮 30 只）",
             "抓**分档**资金流：超大单/大单/中单/小单各自的净额和净占比，共 10 个维度。\n"
             + "⚠ 跟已有的【资金净流入】**不是替换、是同一件事的不同精度**：那张表 1077 万行，"
             + "但每行只存了一个「主力净额合计」。\n"
@@ -959,17 +1044,28 @@ public static class FetchTaskCatalog
             + "判断一波行情是谁在买，靠的就是这个结构。\n"
             + "⚠ **接口只给最近约 120 个交易日**，lmt=0 也突破不了——所以拿不到长历史，"
             + "历史深度只能靠定期抓取慢慢养。短期内做不了长周期回测，但看「当下这波是谁在买」够用。\n"
-            + "两条通道：**当日全市场快照**（push2delay，约 60 个请求、一两分钟，日常增量全靠它）"
-            + "＋**逐股补历史**（push2his，一只票一个请求给 120 天，只有它补得了历史缺口）。\n"
-            + "补历史的排队判据是「这只票库里有多少行」（不足 100 行就排队），**不是**「今天抓过没有」"
-            + "——快照每天会把每只票都刷一遍，那个判据恒为真。按最久没抓的先抓，跑不完下轮接着来，"
-            + "连续 15 只失败会判定被限流、提前收尾。",
+            + "这一项只做**逐股补历史**（push2his，一只票一个请求给 120 天，只有它补得了历史缺口）；"
+            + "当日增量归【分档资金流快照】那一项（2026-09-12 拆开，两项写同一张表，已验零差异）。\n"
+            + "补历史的排队判据：**期望行数按本地日K根数算**（有K线的那天就该有资金流），不是固定行数门槛——上市不足 100 个交易日的次新股永远凑不出 100 行，老口径让它们每轮重抓。\n"
+            + "  · 「增量」＝窗口内缺 3 行以上才补。缺 1~2 行（多半是某天全市场快照漏了）"
+            + "只在日志里报一句——全市场为一行各补一次是 5500 个请求、约 20 小时机时，不值当；\n"
+            + "  · 「首次整段回补」＝缺一行就补，用来把那种整天缺失补回来（一只一个请求，会跨好几轮）。"
+            + "\n⚠ 这一项的「整段」只能是那 120 个交易日的窗口（别的项是"
+            + "从开市首日抓起）——接口给不了更早的，窗口内补齐了就是这一项能到的头，"
+            + "界面上那句「历史已补齐」说的就是它（2026-09-11 从「彻底重查」改过来：这一项只补缺、"
+            + "不动已有的票，那是回补不是重查；「彻底重查」＝不管有没有全部重来，只有【全库数据体检】是那个意思）。\n"
+            + "⚠ **每轮只问 30 只**（2026-09-12）：push2his 累计 16~35 个请求就被切，一轮不限量就是十几个小时、期间别的任务全得让路。这份数据没有时效压力（120 天窗口内随时补），\n"
+            + "所以改成一轮一轮慢慢补——勾上「空闲时自动补」它自己会补完，也可以多点几次执行。\n"
+            + "估时 6 分钟说的就是这一轮（空闲调度拿它判断空档塞不塞得下，写成全量耗时会让它永远排不上）。\n"
+            + "按最久没抓的先抓，跑不完下轮接着来，连续 15 只失败会判定被限流、提前收尾。",
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
             SupportsPartialRun: true,
             // 10 分钟而不是默认 5 分钟：push2his 每 15 个请求主动歇 2 分钟，单只失败还要静默重试
             // （2s+10s，三次 25 秒超时摊下来近 90 秒）。5 分钟余量太紧，2026-09-11 就是这么被
             // 误判成卡死掐断的。任务侧已改成按时间报进度，这里是第二道保险。
             MaxQuiet: TimeSpan.FromMinutes(10),
-            Sources: [DataSourceId.EmPush2His, DataSourceId.EmPush2Delay]),
+            // 拆走快照之后这一项只碰 push2his——声明窄一点，才跟走 push2delay 的快照并行不冲突
+            Sources: [DataSourceId.EmPush2His]),
 
         new(FetchActionId.FetchRawBars, "补不复权历史", "腾讯", QuotaGroup.Mixed,
             TimeSpan.FromHours(2), "一次性（补完就不用再跑了）",
@@ -1227,6 +1323,11 @@ public static class FetchTaskCatalog
         FetchActionId.FetchEarningsForecast or FetchActionId.FetchLhbSeat
             or FetchActionId.FetchMarketEvents => PlanGroupKind.Daily,
 
+        // 【分档资金流快照】（2026-09-12 拆出来）归日更，而且是"漏一天就永久没了"的那一类：
+        // push2delay 只给最近一个交易日的资金流，当晚没抓，下一个交易日开盘接口就滚到新一天，
+        // 事后只能靠逐股那条通道 5500 个请求换回一天。59 个请求、一两分钟，放日更毫无负担。
+        FetchActionId.FetchMoneyFlowSnapshot => PlanGroupKind.Daily,
+
         // 【行业景气指标】（2026-09-07）归日更：116 个指标里 45 个是日频，每天都变。
         // 增量很轻——每个指标只拉水位线之后的那几行。
         FetchActionId.StepIndustryIndicator => PlanGroupKind.Daily,
@@ -1249,9 +1350,12 @@ public static class FetchTaskCatalog
             or FetchActionId.FetchDividend or FetchActionId.BankRegulatory
             or FetchActionId.StepReparseBankPdf or FetchActionId.ImportManual
             or FetchActionId.FetchFinancials
-            // 分档资金流归定期而不是日更：接口是 120 天滚动窗口、**没有增量入口**，每轮都得把
-            // 5500 只重抓一遍（约 3 小时），放日更会把每晚占满。而这一组是「空闲时补」，
-            // 正适合这种"没有时效压力但耗时长"的活——跟财务报表同样的处境。
+            // 【分档资金流·补历史】归定期而不是日更（2026-09-12 订正理由）：日常增量早就不走它了——
+            // 那是【分档资金流快照】的事（59 个请求、一两分钟，已归日更）。留在这一组的只有
+            // 逐股补历史：一只票一个请求、全市场一轮 5500 个请求十几小时，而且 120 天窗口内
+            // 随时补都来得及、没有时效压力。正是"空闲时补"的典型。
+            // ⚠ 老注释说的"没有增量入口、每轮得把 5500 只重抓一遍"已经不成立（那是 09-03 只有
+            //   逐股一条通道时的情形），别照着它再把整项挪回日更。
             or FetchActionId.FetchMoneyFlowDetail
             // 【板块成分股】(2026-09-04 拆出来）跟分档资金流同样的处境：请求量大（约 2500 个）、
             // 没有时效压力（7 天内抓过就算新鲜），正适合"空闲时补"，别占着日更那一段。
@@ -1263,6 +1367,10 @@ public static class FetchTaskCatalog
             // 而首轮要把 2002 年至今 76.5 万行抓全（约 1531 个请求）。没有时效压力、量又大，
             // 正是"空闲时补"这一组的典型。
             or FetchActionId.StepCustomerSupplier
+            // 【年报子公司名单】(2026-09-11) 紧跟【客户与供应商】：它产出的名单就是给
+            // 那一项的对手方还原当第三档用的。纯本地计算、没有时效压力，没有新 PDF 时
+            // 自己就判定无事可做（水位线按份记）。
+            or FetchActionId.StepSubsidiaryExtract
             or FetchActionId.FetchIndexCons => PlanGroupKind.Periodic,   // 最后这个已退役
 
         // ── 按需启动：想起来才做的一次性活（往回补历史、全库体检、建索引）──
@@ -1379,6 +1487,10 @@ public static class FetchTaskCatalog
         FetchActionId.StepIndexBars,
         // ── 资金与交易 ──
         FetchActionId.StepNetInflow,
+        // 【分档资金流快照】紧跟在【资金净流入】后面（2026-09-12）：两者是同一件事的两个精度
+        // （那边是主力净额合计，这边拆成超大/大/中/小四档），放一起看得出是一族。
+        // 它必须当天跑成——接口只给最近一个交易日，隔一个开盘就永久取不回来了。
+        FetchActionId.FetchMoneyFlowSnapshot,
         FetchActionId.StepMargin,
         FetchActionId.StepLhb,
         // 【市场事件】大宗交易/机构调研/限售解禁/股东增减持，都是按日出的筹码面信息。
@@ -1460,9 +1572,11 @@ public static class FetchTaskCatalog
         FetchActionId.FetchFinancials,        // 监管指标要靠它认机构类型，所以排在前面
         // 【公司档案】+【客户与供应商】紧跟财务报表（2026-09-07/09-08）：
         // 它们是同一份年报里的东西，一起更新才不会出现"财务是新的、客户集中度还是去年的"错配。
-        // ⚠ 两项**必须挨着且档案在前**：客户与供应商跑完会拿档案里的全称做对手方还原，
-        //   档案排在后面的话，同一轮里还原用的永远是上一轮的旧档案。
+        // ⚠ 这三项**必须挨着且按这个顺序**：客户与供应商跑对手方还原时，要用前两项的产出——
+        //   档案给全称（前两档），子公司名单给归并关系（第三档）。任何一项排在后面，
+        //   同一轮里还原用的就永远是上一轮的旧数据。
         FetchActionId.StepCompanyProfile,
+        FetchActionId.StepSubsidiaryExtract,
         FetchActionId.StepCustomerSupplier,
         FetchActionId.BankRegulatory,
         FetchActionId.StepReparseBankPdf,

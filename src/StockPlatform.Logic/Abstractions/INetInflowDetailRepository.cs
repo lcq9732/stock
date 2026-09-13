@@ -36,6 +36,15 @@ public interface INetInflowDetailRepository
     /// </summary>
     Dictionary<string, int> GetRowCountByCode();
 
+    /// <summary>
+    /// 每只票在 <b>某一段交易日窗口内</b>有多少行（2026-09-11）。
+    ///
+    /// 排队判据只能用这个、不能用上面那个全表计数：这张表是**累积**的（每天快照追一行），
+    /// 全表行数迟早超过任何固定门槛，判据于是恒为假、一只都不排——而接口只给最近约 120 个
+    /// 交易日，能不能补齐说的从来只是那个窗口里的事。
+    /// </summary>
+    Dictionary<string, int> GetRowCountByCode(DateTime from, DateTime to);
+
     int Count();
     int CountCodes();
 

@@ -41,7 +41,8 @@ namespace StockPlatform.Tasks;
 public sealed class CustomerSupplierTask(
     ICustomerSupplierRepository repository,
     ICompanyProfileRepository profiles,
-    EastMoneyCustomerSupplierProvider provider) : FetchTaskBase<CustomerSupplier>
+    EastMoneyCustomerSupplierProvider provider,
+    ICompanySubsidiaryRepository? subsidiaries = null) : FetchTaskBase<CustomerSupplier>
 {
     public override FetchActionId Id => FetchActionId.StepCustomerSupplier;
 
@@ -197,15 +198,38 @@ public sealed class CustomerSupplierTask(
         Report($"对手方还原：{names.Count} 个不同的名字，比对 {companies.Count} 家上市公司...", phase: "消歧");
 
         var (byFull, byNorm) = PartnerNameMatcher.BuildIndex(companies);
+
+        // 第三档：年报里披露的子公司名单，归并到母公司（2026-09-11）。
+        // 没有这份数据（还没跑过【年报子公司名单】）就是 null，退回原来的两档，行为不变。
+        //
+        // ⚠ 两层去歧义缺一不可：仓储那层丢掉"一个名字落到多个母公司"的，
+        //   BuildSubsidiaryIndex 那层再丢掉"归一化之后才撞上"的——后者是前者看不见的，
+        //   去掉括号和公司后缀之后本来不同的两个名字可能变成同一个 key。
+        Dictionary<string, string>? bySub = null;
+        if (subsidiaries != null)
+        {
+            var map = subsidiaries.GetNameToParent();
+            if (map.Count > 0)
+            {
+                bySub = PartnerNameMatcher.BuildSubsidiaryIndex(
+                    map.Select(kv => (Name: kv.Key, ParentCode: kv.Value)));
+                Report($"第三档可用：{map.Count} 个子公司名（归并到母公司，置信度低于前两档）。",
+                       phase: "消歧");
+            }
+        }
+
         var hits = new Dictionary<string, (string Code, string MatchType)>(StringComparer.Ordinal);
         foreach (var name in names)
         {
-            var (code, type) = PartnerNameMatcher.Match(name, byFull, byNorm);
+            var (code, type) = PartnerNameMatcher.Match(name, byFull, byNorm, bySub);
             if (code != null && type != null) hits[name] = (code, type);
         }
 
         int rows = repository.ApplyMatches(hits);
-        Report($"对手方还原完成：{hits.Count}/{names.Count} 个名字对上了上市公司，回填 {rows} 行。",
-               phase: "消歧");
+        // 分档报出来——第三档是假设，混在总数里看不出这次回填有多少是"推断的"
+        int bySubCount = hits.Count(h => h.Value.MatchType == PartnerNameMatcher.Subsidiary);
+        Report($"对手方还原完成：{hits.Count}/{names.Count} 个名字对上了上市公司"
+             + (bySubCount > 0 ? $"（其中 {bySubCount} 个是经子公司归并的）" : "")
+             + $"，回填 {rows} 行。", phase: "消歧");
     }
 }

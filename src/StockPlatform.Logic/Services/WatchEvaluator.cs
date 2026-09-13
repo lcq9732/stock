@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Models;
+﻿using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Services;
 
@@ -8,12 +8,18 @@ namespace StockPlatform.Logic.Services;
 /// <param name="PrevValue">上一个**不同的**值（见 <see cref="WatchEvaluator"/> 的自然日坑）。</param>
 /// <param name="StageText">stage 类的当前状态文字（如回购的 "首次回购"）。</param>
 /// <param name="PrevStageText">上一次记录到的 stage，用来判跃迁。</param>
+/// <param name="Magnitude">
+/// **这件事有多大**——给按量分档用（解禁＝占流通股百分比）。跟 <see cref="Value"/> 分开：
+/// Value 是判触发的那个数（解禁那路是"还有几天"），Magnitude 是判轻重的那个数。
+/// 混用的话"还有 27 天"会被当成"占流通 27%"。见 <see cref="WatchPriority"/>。
+/// </param>
 public sealed record WatchReading(
     DateTime? TradeDate,
     double? Value = null,
     double? PrevValue = null,
     string? StageText = null,
-    string? PrevStageText = null);
+    string? PrevStageText = null,
+    double? Magnitude = null);
 
 /// <summary>
 /// 把一条观察项 + 它的当前取值，判成"触发/没触发"。见 doc/watch-item-design.md §4.3。
@@ -41,16 +47,18 @@ public static class WatchEvaluator
         // Manual：只在有截止日提醒时产出"该去查了"，措辞上绝不说"已触发"
         if (item.Kind == WatchKind.Manual || item.Op == WatchOp.Remind)
             return Hit(item, reading, reading.Value,
-                $"【需人工核对】{item.Reason}（库里没有这个数据源，请自行查证）");
+                "【需人工核对】库里没有这个数据源，请自行查证");
 
         // stage 跃迁：跟上次记录的不一样就报
         if (item.Op == WatchOp.StageChange)
         {
             if (string.IsNullOrEmpty(reading.StageText)) return null;
             if (reading.StageText == reading.PrevStageText) return null;
+            // ⚠ 消息里**不带事项名**——那是 WatchHit.ItemName 单独一列的事。
+            // 拼进来的话事项名会把数据挤出显示宽度，进展看着就"笼统"（2026-09-11 用户反馈）。
             var msg = string.IsNullOrEmpty(reading.PrevStageText)
-                ? $"{item.Reason} → 现状：{reading.StageText}"
-                : $"{item.Reason}：{reading.PrevStageText} → **{reading.StageText}**";
+                ? $"现状：{reading.StageText}"
+                : $"{reading.PrevStageText} → **{reading.StageText}**";
             return Hit(item, reading, reading.Value, msg);
         }
 
@@ -58,14 +66,22 @@ public static class WatchEvaluator
 
         switch (item.Op)
         {
+            case WatchOp.Within:
+                // 值＝距今天数（日程类：还有几天；事件类：几天前）。只有落在窗口内才算"事件"。
+                // ⚠ 窗口是这类判据的**全部意义**：不加窗口，"最新一条"就不是事件、只是现状，
+                // 一轮重算能报出横跨二十年的触发（2026-09-11 实机踩过）。
+                if (item.Threshold is { } win && v >= 0 && v <= win)
+                    return Hit(item, reading, v, reading.StageText ?? "");
+                break;
+
             case WatchOp.Lt:
                 if (item.Threshold is { } lt && v < lt)
-                    return Hit(item, reading, v, $"{item.Reason}：当前 {Fmt(v)} < 阈值 {Fmt(lt)}");
+                    return Hit(item, reading, v, $"当前 {Fmt(v)} < 阈值 {Fmt(lt)}");
                 break;
 
             case WatchOp.Gt:
                 if (item.Threshold is { } gt && v > gt)
-                    return Hit(item, reading, v, $"{item.Reason}：当前 {Fmt(v)} > 阈值 {Fmt(gt)}");
+                    return Hit(item, reading, v, $"当前 {Fmt(v)} > 阈值 {Fmt(gt)}");
                 break;
 
             case WatchOp.CrossDown:
@@ -74,12 +90,17 @@ public static class WatchEvaluator
                 if (item.Threshold is { } cd)
                 {
                     if (reading.PrevValue is { } pd && pd >= cd && v < cd)
-                        return Hit(item, reading, v, $"{item.Reason}：下穿 {Fmt(cd)}（{Fmt(pd)} → {Fmt(v)}）");
+                        // 取值器给了人话就用人话。⚠ 别退回显示原始值：跌破均线那一路的值是
+                        // **对均线的偏离率**（内部口径），直接显示会变成"下穿 0（0.1981 → -0.4497）"，
+                        // 人读不出这是"跌破 MA20"（2026-09-11 用户反馈）。
+                        return Hit(item, reading, v, string.IsNullOrEmpty(reading.StageText)
+                            ? $"下穿 {Fmt(cd)}（{Fmt(pd)} → {Fmt(v)}）"
+                            : reading.StageText);
                 }
                 else if (reading.PrevValue is { } p2 && v < p2)
                 {
                     var pct = p2 == 0 ? 0 : (v / p2 - 1) * 100;
-                    return Hit(item, reading, v, $"{item.Reason}：{Fmt(p2)} → {Fmt(v)}（{pct:+0.0;-0.0}%）");
+                    return Hit(item, reading, v, $"{Fmt(p2)} → {Fmt(v)}（{pct:+0.0;-0.0}%）");
                 }
                 break;
 
@@ -87,12 +108,12 @@ public static class WatchEvaluator
                 if (item.Threshold is { } cu)
                 {
                     if (reading.PrevValue is { } pu && pu <= cu && v > cu)
-                        return Hit(item, reading, v, $"{item.Reason}：上穿 {Fmt(cu)}（{Fmt(pu)} → {Fmt(v)}）");
+                        return Hit(item, reading, v, $"上穿 {Fmt(cu)}（{Fmt(pu)} → {Fmt(v)}）");
                 }
                 else if (reading.PrevValue is { } p3 && v > p3)
                 {
                     var pct = p3 == 0 ? 0 : (v / p3 - 1) * 100;
-                    return Hit(item, reading, v, $"{item.Reason}：{Fmt(p3)} → {Fmt(v)}（{pct:+0.0;-0.0}%）");
+                    return Hit(item, reading, v, $"{Fmt(p3)} → {Fmt(v)}（{pct:+0.0;-0.0}%）");
                 }
                 break;
         }
@@ -104,11 +125,14 @@ public static class WatchEvaluator
         ItemId = item.ItemId,
         Code = item.Code,
         Name = item.Name,
+        ItemName = item.Reason,
         // 值所属交易日；实在没有才退回今天（Manual 项常常没有）
         TriggerTradeDate = reading.TradeDate ?? DateTime.Today,
         ObservedValue = value,
         Message = msg,
-        Priority = item.Priority,
+        // 档位按**实际的量**重算：解禁 74 股不该跟解禁占流通 30% 同为 A 档。
+        // 不需要按量分档的事项，Resolve 原样返回挂上时定的档。
+        Priority = WatchPriority.Resolve(item, reading.Magnitude),
     };
 
     private static string Fmt(double v)

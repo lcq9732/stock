@@ -783,6 +783,18 @@ public sealed class FetchPlan
             notes.Add($"【{FetchTaskCatalog.Info(item.Action).Name}】的「彻底体检」勾已换成模式「彻底重查」");
         }
 
+        // 【拉取分档资金流】的补历史模式 2026-09-11 从 Thorough 换成 FirstBackfill（它只补缺的、
+        // 齐了的票一个请求都不发，那是回补不是"全部重来"的彻底重查）。模式名字是进 json 的，
+        // 不迁的话老计划里存的 Thorough 不在这一项的 SupportedModes 里，FetchPlanItem.EffectiveMode
+        // 会把它静默回落成「增量」——门槛从 1 行跳回 3 行，用户以为在补历史、其实早停了。
+        foreach (var item in AllItems.Where(
+                     i => i.Action == FetchActionId.FetchMoneyFlowDetail && i.Mode == FetchMode.Thorough))
+        {
+            item.Mode = FetchMode.FirstBackfill;
+            notes.Add($"【{FetchTaskCatalog.Info(item.Action).Name}】的模式「彻底重查」已改名为「首次整段回补」"
+                    + "（行为不变：窗口内缺一行就补）");
+        }
+
         foreach (var group in Groups)
         {
             for (int idx = 0; idx < group.Items.Count; idx++)

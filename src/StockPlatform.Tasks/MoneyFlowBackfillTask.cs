@@ -10,14 +10,7 @@ using StockPlatform.Scheduling.Tasks;
 namespace StockPlatform.Tasks;
 
 /// <summary>
-/// 【拉取分档资金流】（2026-09-11 从 FetchOrchestrator 迁成新式任务）。
-///
-/// ════ 为什么迁 ════
-/// 老实现每 100 只才报一句进度。2026-09-11 那轮待办只剩 72 只——一句都报不出来，而
-/// push2his 是 5 秒间隔、每 15 个请求歇 2 分钟、单只失败还要静默重试 2s+10s（三次 25 秒超时
-/// 摊下来近 90 秒），于是**必然**哑过 5 分钟，被静默看门狗当成卡死掐断。掐断本身不丢数据
-/// （落库的都在），但这一项每天记一次失败，而且待办数只要少于 100 只就永远卡在这儿。
-/// 框架的形状正好治这个：一批＝一只票，抓一只存一只，进度按时间报，到点/到量由骨架收尾。
+/// 【分档资金流·补历史】——逐股把 120 天窗口里缺的行补回来（东财 push2his）。
 ///
 /// ════ 它是什么 ════
 /// 超大单/大单/中单/小单各自的净额与净占比。跟【资金净流入】那张 1077 万行的表是**同一件事的
@@ -25,24 +18,22 @@ namespace StockPlatform.Tasks;
 /// 同样"主力净流入 1 亿"，超大单进、小单出（机构建仓）跟大单进、超大单出（游资接力）含义
 /// 完全相反，合计数把这个信息抹平了。
 ///
-/// ════ 两条通道，一前一后跑，各干各的 ════
-/// <b>① 全市场当日快照</b>（<see cref="EastMoneyMoneyFlowSnapshotProvider"/>，push2delay）——
-/// 约 60 个请求把**当天全市场**拿全，一两分钟。日常增量全靠它。
-/// <b>② 逐股补历史</b>（<see cref="EastMoneyMoneyFlowProvider"/>，push2his）——
-/// 一只票一个请求、给它最近 120 个交易日。快照只有当天，历史缺口只有它补得了。
-/// 两条通道的数据**逐条比对过、零差异**（见快照 provider 的类注释），所以混写同一张表是安全的。
+/// ════ 只剩这一条通道（2026-09-12 拆分）════
+/// 当日增量归 <see cref="MoneyFlowSnapshotTask"/>（push2delay，59 个请求、一两分钟，已归日更）。
+/// 拆开是因为两段的时效性正好相反：快照漏一天就永久没了，补历史 120 天内随时补都来得及。
+/// 合在一项里时整项被"耗时长、没时效压力"归进了季度组，快照跟着遭殃——2026-09-09 全市场
+/// 整天缺失就是这么丢的。两条通道的数据**逐条比对过、零差异**，写同一张表是安全的。
 ///
-/// ════ ⚠ 快照不走骨架的批，直接落库 ════
-/// 快照是"一整天要么有要么没有"的事：整批 Upsert，中断这一批就不落库、下次重来。它要是也
-/// 当成一批 yield 出去，就会占掉 <see cref="TaskRunArgs.MaxItems"/> 一个额度，而那个额度的
-/// 语义应该纯粹是"补历史这一轮抓几只"。所以快照在 <see cref="FetchAsync"/> 里自己写完，
-/// 只有逐股那段才 yield。
+/// ════ 一批＝一只票（2026-09-11 迁成新式任务时定的）════
+/// 老实现每 100 只才报一句进度。那轮待办只剩 72 只——一句都报不出来，而 push2his 是 5 秒间隔、
+/// 每 15 个请求歇 2 分钟、单只失败还要静默重试 2s+10s，于是**必然**哑过 5 分钟，被静默看门狗
+/// 当成卡死掐断（掐断不丢数据，但这一项每天记一次失败）。现在抓一只存一只、进度按时间报，
+/// <see cref="TaskRunArgs.MaxItems"/>／Deadline 的语义也正好是"这一轮补几只、到点收尾"。
 /// </summary>
-public sealed class MoneyFlowDetailTask(
+public sealed class MoneyFlowBackfillTask(
     FetchPaths paths,
     INetInflowDetailRepository repository,
-    EastMoneyMoneyFlowProvider? perStock,
-    EastMoneyMoneyFlowSnapshotProvider? snapshot,
+    EastMoneyMoneyFlowProvider perStock,
     TimeSpan? progressInterval = null) : FetchTaskBase<NetInflowDetail>
 {
     public override FetchActionId Id => FetchActionId.FetchMoneyFlowDetail;
@@ -58,8 +49,20 @@ public sealed class MoneyFlowDetailTask(
     /// <summary>本轮没开工的原因（熔断中／还没收盘清算）。第一条为准，跟老实现一致。</summary>
     private string? _skipped;
 
-    private bool _snapshotWrote;
     private int _ok, _failed, _empty, _rows, _consecutiveFail, _todoCount;
+
+    /// <summary>整个队列还有多少只（不是本轮抓的那几只）——有每轮上限在，
+    /// "完成"很容易被读成"补齐了"，所以收尾时必须把还欠多少报出来。</summary>
+    private int _pendingCount;
+
+    /// <summary>最后一次失败的原因——收尾时要报出来。
+    /// "连不上"和"被限流"的处置完全不同（前者要换网络，后者等着就行），
+    /// 只报一句"失败 N 只"等于把这个区别藏起来。</summary>
+    private string? _lastFailure;
+
+    /// <summary>有缺口但没到门槛、这一轮故意不补的只数与合计行数。
+    /// 必须报出来——"待办 0"很容易被读成"一行不缺"。</summary>
+    private int _minorCodes, _minorRows;
 
     protected override async IAsyncEnumerable<IReadOnlyList<NetInflowDetail>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
@@ -67,21 +70,9 @@ public sealed class MoneyFlowDetailTask(
         repository.EnsureSchema();
         _errors.Clear();
         _skipped = null;
-        _snapshotWrote = false;
-        _ok = _failed = _empty = _rows = _consecutiveFail = _todoCount = 0;
+        _ok = _failed = _empty = _rows = _consecutiveFail = _todoCount = _pendingCount = 0;
+        _lastFailure = null;
         _sw.Restart();
-
-        if (perStock == null && snapshot == null)
-        {
-            Report("没有配置分档资金流数据源（东财），跳过。");
-            yield break;
-        }
-
-        // ── 通道①：全市场当日快照（整批落库，不走骨架的批）──
-        await RunSnapshotAsync(ct);
-
-        // ── 通道②：逐股补历史 ──
-        if (perStock == null) yield break;
 
         if (perStock.PausedUntil is { } until)
         {
@@ -99,17 +90,50 @@ public sealed class MoneyFlowDetailTask(
             yield break;
         }
 
-        var (todo, never) = MoneyFlowBackfillPlan.Build(codes, repository);
+        // 门槛：「首次整段回补」＝缺一行就补；「增量」＝缺 3 行以上才补。单日缺口全市场补一遍是
+        // 20 小时机时，不该由程序默认替人花掉（用户 2026-09-11 拍板），所以只报不补。
+        // 这个模式 2026-09-11 之前挂的是 FetchMode.Thorough，换成 FirstBackfill 是因为它只补缺的、
+        // 齐了的票一个请求都不发——按词义那是回补，不是"不管有没有全部重来"的彻底重查。
+        bool backfill = args.Mode == FetchMode.FirstBackfill;
+        var queue = MoneyFlowBackfillPlan.Build(
+            paths.CurrentDb, codes, repository,
+            backfill ? MoneyFlowBackfillPlan.BackfillGapThreshold
+                     : MoneyFlowBackfillPlan.DefaultGapThreshold);
+        _minorCodes = queue.MinorCodes;
+        _minorRows = queue.MinorRows;
+
+        if (queue.Unavailable is { } why)
+        {
+            _errors.Add(why);
+            yield break;
+        }
+
+        var pending = queue.Todo;
+        int never = queue.Never;
+        // 每轮上限：调度给了就听调度的，没给就按 MaxPerRun 兜底（跟财务报表同一个形状）。
+        // 截在**问几只**上、不是"成功几只"：限流限的是请求数，失败的那几只照样花掉了配额，
+        // 骨架的 MaxItems 只数成功批次，单靠它会在一轮里把 5000 只全问一遍。
+        int cap = args.MaxItems is > 0 ? args.MaxItems.Value : MoneyFlowBackfillPlan.MaxPerRun;
+        var todo = pending.Count > cap ? pending.Take(cap).ToList() : pending;
+        _pendingCount = pending.Count;
         if (todo.Count == 0)
         {
-            Report("分档资金流：每只票的 120 天历史都齐了，不用补——日常增量走快照就够。");
+            Report($"分档资金流：窗口内（{queue.From:MM-dd}~{queue.To:MM-dd}，"
+                 + $"{MoneyFlowBackfillPlan.WindowTradingDays} 个交易日）该有的都有了，不用补"
+                 + "——日常增量走快照就够。"
+                 + MinorNote(backfill));
             yield break;
         }
 
         _todoCount = todo.Count;
-        Report($"分档资金流补历史：{todo.Count} 只不足 {MoneyFlowBackfillPlan.FullWindowRows} 行"
-             + (never > 0 ? $"（其中 {never} 只库里一行都没有）" : "")
-             + "，按最久没抓的先抓（到点或做满本轮上限就收尾，下轮接着来）。",
+        Report($"分档资金流补历史：待补 {pending.Count} 只，本轮抓 {todo.Count} 只"
+             + (pending.Count > todo.Count ? $"（每轮上限 {cap} 只，剩下的下轮接着来）" : "")
+             + "——在窗口内缺 "
+             + (backfill ? "1" : $"{MoneyFlowBackfillPlan.DefaultGapThreshold}") + " 行以上"
+             + $"（窗口 {queue.From:MM-dd}~{queue.To:MM-dd}，期望按本地日K根数算）"
+             + (never > 0 ? $"，其中 {never} 只窗口内一行都没有" : "")
+             + "，按最久没抓的先抓（到点或做满本轮上限就收尾，下轮接着来）。"
+             + MinorNote(backfill),
                0, todo.Count);
 
         void Forward(string s) => Report(s);
@@ -133,13 +157,24 @@ public sealed class MoneyFlowDetailTask(
                 catch (Exception ex)
                 {
                     _failed++; _consecutiveFail++;
+                    _lastFailure = ex.Message;
                     if (_failed <= 5) _errors.Add($"{code} 分档资金流失败：{ex.Message}");
                     // 连续失败＝已被限流，继续打只会让封禁更久；抓到的都落库了，下轮接着来。
                     if (_consecutiveFail >= 15)
                     {
-                        Report($"⚠ 连续 {_consecutiveFail} 只失败，判定被限流，补历史提前收尾。"
+                        // ⚠ 别一口咬定"被限流"（2026-09-12 改）：2026-09-11 公司网关按域名把
+                        //   push2his 整个拦了（TCP/TLS 都通，一发请求就被切、收到 0 字节），
+                        //   日志却写着"判定被限流"——把人往"等一会儿就好了"的方向带，
+                        //   实际等多久都不会好，得换网络。两者的处置完全不同，不能混为一谈。
+                        bool unreachable = _lastFailure?.Contains("无法连接") == true;
+                        var verdict = unreachable
+                            ? "这条链路连不上 push2his（多半是网关按域名拦了：TCP 通、一发请求就被切）"
+                            : "判定被限流（等一段时间会自己恢复）";
+                        Report($"⚠ 连续 {_consecutiveFail} 只失败，{verdict}，补历史提前收尾。"
+                             + $"最后一次的原因：{_lastFailure}。"
                              + $"已成功 {_ok} 只，剩余 {todo.Count - i - 1} 只下轮继续。");
-                        _errors.Add($"push2his 限流，本轮只补到 {_ok}/{todo.Count} 只。");
+                        _errors.Add($"{verdict}，本轮只补到 {_ok}/{todo.Count} 只。"
+                                  + $"最后一次的原因：{_lastFailure}");
                         break;
                     }
                 }
@@ -174,91 +209,22 @@ public sealed class MoneyFlowDetailTask(
         }
     }
 
+    /// <summary>
+    /// 「有缺口但没补」的那一句。<paramref name="backfill"/>＝true 时门槛已经是 1 行，
+    /// 不会再有"没到门槛"的缺口，所以不说话。
+    /// </summary>
+    private string MinorNote(bool backfill)
+        => _minorCodes == 0 || backfill
+            ? ""
+            : $" ⚠ 另有 {_minorCodes} 只各缺 1~{MoneyFlowBackfillPlan.DefaultGapThreshold - 1} 行"
+              + $"（合计 {_minorRows} 行），按当前门槛不补——多半是某天的全市场快照漏了。"
+              + "要补的话把这一项的模式切成「首次整段回补」跑一轮（一只一个请求，会跨好几轮）。";
+
     /// <summary>一批＝一只票的 120 天。</summary>
     protected override Task SaveBatchAsync(IReadOnlyList<NetInflowDetail> batch, CancellationToken ct)
     {
         _rows += repository.Upsert(batch);
         return Task.CompletedTask;
-    }
-
-    /// <summary>
-    /// 通道①：全市场当日快照。
-    ///
-    /// 三种不写库的情况，都不算失败：没配这条通道、通道正在熔断、**还没收盘清算**。
-    /// 最后一种要紧——盘中拿到的是半天的资金流，写进去会污染当天那一行，事后完全看不出来。
-    /// </summary>
-    private async Task RunSnapshotAsync(CancellationToken ct)
-    {
-        if (snapshot == null) return;
-
-        if (snapshot.PausedUntil is { } until)
-        {
-            var mins = Math.Max(1, (int)Math.Ceiling((until - DateTime.Now).TotalMinutes));
-            var reason = $"东财 push2delay 限流熔断中，预计 {until:HH:mm} 恢复（还有约 {mins} 分钟）";
-            Report($"{reason}，本轮不抓快照。");
-            _skipped ??= reason;
-            return;
-        }
-
-        void Forward(string s) => Report(s);
-        snapshot.OnStatus += Forward;
-        var sw = Stopwatch.StartNew();
-        try
-        {
-            Report($"分档资金流快照：从 {snapshot.Host} 拉当日全市场"
-                 + $"（每页 {EastMoneyMoneyFlowSnapshotProvider.PageSize} 只、约 60 页）…",
-                   phase: "快照");
-            var snap = await snapshot.FetchAllAsync(ProgressSink, ct);
-
-            if (snap.TradeDate is not { } day || snap.Rows.Count == 0)
-            {
-                var msg = "分档资金流快照一行都没拿到（接口变了或被限流），本轮跳过快照。";
-                Report($"⚠ {msg}");
-                _errors.Add(msg);
-                return;
-            }
-
-            if (snap.IsIntraday)
-            {
-                var reason = $"分档资金流快照要等收盘清算（行情时间 {snap.QuoteTime:M-d HH:mm}）";
-                Report($"⚠ {reason}——这会儿拿到的是半天的资金流，不入库。收盘后再跑这一项。");
-                _skipped ??= reason;
-                return;
-            }
-
-            // 整批写：中断这一批就不落库，下次重来即可（所以不走骨架的流式落库）。
-            int rows = repository.Upsert(snap.Rows);
-            _snapshotWrote = true;
-            Report($"分档资金流快照：{day:yyyy-MM-dd} 写入 {rows} 行"
-                 + $"（全市场 {snap.Total} 只，停牌等没数据的 {snap.Suspended} 只），"
-                 + $"用时 {Fmt(sw.Elapsed)}。", phase: "快照");
-
-            // 对账：服务端自报的总数减去停牌的，就是本该拿到的行数。差额是**静默丢数据**的唯一
-            // 信号——翻页少翻一页、某页被限流截断，表现出来都只是"今天少几百只"，没人会发现。
-            int missing = snap.Total - snap.Suspended - snap.Rows.Count;
-            if (missing > 0)
-            {
-                var msg = $"分档资金流快照少了 {missing} 只（自报 {snap.Total}、停牌 {snap.Suspended}、"
-                        + $"实收 {snap.Rows.Count}）——多半是某页被限流截断，下轮会补上。";
-                Report($"⚠ {msg}");
-                _errors.Add(msg);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            Report("分档资金流快照中断。快照是整批写的，中断这一批不落库，下次重来即可。");
-            throw;
-        }
-        catch (Exception ex)
-        {
-            var msg = $"分档资金流快照失败：{ex.Message}";
-            Report($"⚠ {msg}（补历史那一段照跑）");
-            _errors.Add(msg);
-        }
-        finally
-        {
-            snapshot.OnStatus -= Forward;
-        }
     }
 
     protected override Task OnStoppedAsync(TaskRunStats stats)
@@ -272,8 +238,13 @@ public sealed class MoneyFlowDetailTask(
     {
         if (_todoCount > 0)
         {
+            int left = Math.Max(0, _pendingCount - _ok - _empty);
             Report($"分档资金流补历史：本轮成功 {_ok} 只、失败 {_failed} 只、接口没数据 {_empty} 只、"
-                 + $"写入 {_rows} 行，用时 {Fmt(_sw.Elapsed)}。");
+                 + $"写入 {_rows} 行，用时 {Fmt(_sw.Elapsed)}。"
+                 + (left > 0 ? $"⚠ 还有 {left} 只没补——这一项每轮只做 "
+                             + $"{MoneyFlowBackfillPlan.MaxPerRun} 只（push2his 限流太凶），"
+                             + "勾上【空闲时自动补】让它一轮一轮补完，或者再点几次执行。"
+                             : ""));
 
             // 大面积"接口没数据"不是数据的问题，是我们请求拼错了——secid 前缀、代码段判断这类。
             // 它不会抛异常，所以不主动喊一声就永远没人知道（2026-09-06 那 342 只就是这么埋了两天）。
@@ -295,8 +266,8 @@ public sealed class MoneyFlowDetailTask(
         if (_skipped is { } why)
             return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, _errors.ToList()));
 
-        // 两段都没活干才算"这一期做完了"。
-        bool nothingToDo = !_snapshotWrote && _ok == 0 && _errors.Count == 0;
+        // 一只都没补、也没出错，才算"这一期做完了"（窗口内本来就齐的时候就是这样）。
+        bool nothingToDo = _ok == 0 && _errors.Count == 0;
         return Task.FromResult<TaskRunResult?>(
             new TaskRunResult(TaskState.Completed, _errors.ToList(), nothingToDo, summary));
     }

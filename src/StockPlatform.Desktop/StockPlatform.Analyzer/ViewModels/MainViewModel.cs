@@ -127,7 +127,10 @@ public class MainViewModel : INotifyPropertyChanged
         CorePositionScreenTab.CorePositionsChanged = () => CorePositionTab.Reload();
         // 【观察项】2026-09-11，见 doc/watch-item-design.md M3。跨主动仓和底仓两个列表——
         // 所以它两个 store 都要，也因此它自己的状态放在 watch/ 目录而不是塞进任一个 json。
-        WatchTab = new WatchTabViewModel(new WatchService(paths, watchlistStore, corePositionStore));
+        // NoteStore 传进去是为了读「个人观点」——它写在 notes/{code}.md 里以"观点："开头的那行，
+        // 不在观察项数据里（判断归笔记、数据归库，见 AnalyzerPaths.NotesDir）。
+        WatchTab = new WatchTabViewModel(
+            new WatchService(paths, watchlistStore, corePositionStore), NoteStore);
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, shareholderRepository, marginRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);

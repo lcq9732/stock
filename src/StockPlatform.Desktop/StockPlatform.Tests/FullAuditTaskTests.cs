@@ -75,6 +75,51 @@ public class FullAuditTaskTests : IDisposable
 
     // ─────────────────── ① 面级落账 ───────────────────
 
+    /// <summary>
+    /// 二期（2026-09-13）把 manifest 上那份 MissingBars 换成了按任务分域的 Todos。
+    /// 这个 helper 把它摊平回"每段一条"的老形状，好让下面这些判据继续照原样断言——
+    /// 它们守的是**体检的行为**（哪些段该报出来、Tries 怎么继承、别的面会不会被误删），
+    /// 跟存储换成什么形状无关。
+    /// </summary>
+    private List<MissingBarRange> Bars() => _manifest.Load().Todos
+        .Where(t => t.Kind is RetryTodoKind.Gap or RetryTodoKind.ValueIssue)
+        .SelectMany(t => t.Targets.Select(x => new MissingBarRange
+        {
+            Code = x.Code,
+            Granularity = x.Gran ?? Granularity.Day,
+            From = x.From ?? default,
+            To = x.To ?? default,
+            Days = x.Days,
+            Tries = x.Tries,
+            Reason = x.Reason ?? AuditFindingKind.Gap,
+        }))
+        .ToList();
+
+    /// <summary>写入前置状态：把几段缺口挂到某个任务名下（体检落账时就是这么存的）。</summary>
+    private void SeedGaps(string taskId, params MissingBarRange[] ranges)
+    {
+        var m = _manifest.Load();
+        m.SetTodo(taskId, RetryTodoKind.Gap, ranges.Select(r => new RetryTarget
+        {
+            Code = r.Code, Gran = r.Granularity,
+            From = r.From, To = r.To, Days = r.Days, Tries = r.Tries,
+            Reason = r.Reason == AuditFindingKind.Gap ? null : r.Reason,
+        }).ToList());
+        _manifest.Save(m);
+    }
+
+    /// <summary>同上，但挂的是值类记录（行在但值错）。</summary>
+    private void SeedValueIssues(string taskId, params MissingBarRange[] ranges)
+    {
+        var m = _manifest.Load();
+        m.SetTodo(taskId, RetryTodoKind.ValueIssue, ranges.Select(r => new RetryTarget
+        {
+            Code = r.Code, Gran = r.Granularity,
+            From = r.From, To = r.To, Days = r.Days, Tries = r.Tries, Reason = r.Reason,
+        }).ToList());
+        _manifest.Save(m);
+    }
+
     [Fact]
     public async Task 扫个股那个面_不会动掉ETF那个面的旧记录()
     {
@@ -83,20 +128,15 @@ public class FullAuditTaskTests : IDisposable
         Insert("600000", Granularity.Day, Days[0], Days[2]);
 
         // ETF 的旧记录：这一轮 ETF 一只都没有（名册里没有），所以体检不会碰这个面
-        var m = _manifest.Load();
-        m.MissingBars =
-        [
-            new MissingBarRange
-            {
-                Code = "sh510300", Granularity = Granularity.Day,
-                From = Days[0], To = Days[0], Days = 1, Tries = 1,
-            },
-        ];
-        _manifest.Save(m);
+        SeedGaps(RetryTaskIds.EtfBars, new MissingBarRange
+        {
+            Code = "sh510300", Granularity = Granularity.Day,
+            From = Days[0], To = Days[0], Days = 1, Tries = 1,
+        });
 
         await NewTask().RunAsync(Args(), CancellationToken.None);
 
-        var after = _manifest.Load().MissingBars;
+        var after = Bars();
         // ETF 那条必须还在（同一个口径 day，但不同的面）
         Assert.Contains(after, r => r.Code == "sh510300" && r.Tries == 1);
         // 个股那条本轮报了出来
@@ -110,22 +150,17 @@ public class FullAuditTaskTests : IDisposable
         Meta("600000", SqliteStockMetaUpsert.TypeStock);
         Insert("600000", Granularity.Day, Days);
 
-        var m = _manifest.Load();
-        m.MissingBars =
-        [
-            new MissingBarRange
-            {
-                Code = "600000", Granularity = Granularity.Day,
-                From = Days[1], To = Days[1], Days = 1, Tries = 1,
-            },
-        ];
-        _manifest.Save(m);
+        SeedGaps(RetryTaskIds.StockDayBars, new MissingBarRange
+        {
+            Code = "600000", Granularity = Granularity.Day,
+            From = Days[1], To = Days[1], Days = 1, Tries = 1,
+        });
 
         await NewTask().RunAsync(Args(), CancellationToken.None);
 
         // 空批也要落账——不然"补上了"这个事实永远写不回名单（框架对空批不调 SaveBatchAsync，
         // 所以 ScanScope 必须始终带一条汇总行，见它的注释）
-        Assert.DoesNotContain(_manifest.Load().MissingBars,
+        Assert.DoesNotContain(Bars(),
             r => r.Code == "600000" && r.Granularity == Granularity.Day);
     }
 
@@ -137,20 +172,15 @@ public class FullAuditTaskTests : IDisposable
         Meta("600000", SqliteStockMetaUpsert.TypeStock);
         Insert("600000", Granularity.Day, Days[0], Days[2]);   // 缺 9-2
 
-        var m = _manifest.Load();
-        m.MissingBars =
-        [
-            new MissingBarRange
-            {
-                Code = "600000", Granularity = Granularity.Day,
-                From = Days[1], To = Days[1], Days = 1, Tries = 1,   // 已经补过一轮
-            },
-        ];
-        _manifest.Save(m);
+        SeedGaps(RetryTaskIds.StockDayBars, new MissingBarRange
+        {
+            Code = "600000", Granularity = Granularity.Day,
+            From = Days[1], To = Days[1], Days = 1, Tries = 1,   // 已经补过一轮
+        });
 
         await NewTask().RunAsync(Args(), CancellationToken.None);
 
-        var again = _manifest.Load().MissingBars
+        var again = Bars()
             .Single(r => r.Code == "600000" && r.Granularity == Granularity.Day);
         Assert.Equal(1, again.Tries);
     }
@@ -162,20 +192,15 @@ public class FullAuditTaskTests : IDisposable
         Insert("600000", Granularity.Day, Days[0], Days[2]);      // 前复权缺 9-2
         Insert("600000", Granularity.DayRaw, Days[0], Days[2]);   // 不复权也缺 9-2
 
-        var m = _manifest.Load();
-        m.MissingBars =
-        [
-            new MissingBarRange
-            {
-                Code = "600000", Granularity = Granularity.Day,
-                From = Days[1], To = Days[1], Days = 1, Tries = 2,
-            },
-        ];
-        _manifest.Save(m);
+        SeedGaps(RetryTaskIds.StockDayBars, new MissingBarRange
+        {
+            Code = "600000", Granularity = Granularity.Day,
+            From = Days[1], To = Days[1], Days = 1, Tries = 2,
+        });
 
         await NewTask().RunAsync(Args(), CancellationToken.None);
 
-        var after = _manifest.Load().MissingBars.Where(r => r.Code == "600000").ToList();
+        var after = Bars().Where(r => r.Code == "600000").ToList();
         Assert.Equal(2, after.Single(r => r.Granularity == Granularity.Day).Tries);
         Assert.Equal(0, after.Single(r => r.Granularity == Granularity.DayRaw).Tries);
     }
@@ -192,7 +217,7 @@ public class FullAuditTaskTests : IDisposable
         await NewTask().RunAsync(Args(maxItems: 1), CancellationToken.None);
 
         // 第一个面是"个股·前复权"，它落了账；"个股·不复权"这一轮根本没扫到
-        var after = _manifest.Load().MissingBars;
+        var after = Bars();
         Assert.Contains(after, r => r.Granularity == Granularity.Day);
         Assert.DoesNotContain(after, r => r.Granularity == Granularity.DayRaw);
     }
@@ -235,7 +260,7 @@ public class FullAuditTaskTests : IDisposable
 
         Assert.Equal(had, audit.ConfirmedCount());
         // 白名单挡住了那一天，所以这一轮不该再报它
-        Assert.DoesNotContain(_manifest.Load().MissingBars, r => r.Code == "600000");
+        Assert.DoesNotContain(Bars(), r => r.Code == "600000");
     }
 
     // ─────────────────── ⑤ 值体检接入（2026-09-09）───────────────────
@@ -255,7 +280,7 @@ public class FullAuditTaskTests : IDisposable
 
         await NewTask().RunAsync(Args(), CancellationToken.None);
 
-        var hit = _manifest.Load().MissingBars
+        var hit = Bars()
             .Where(r => r.EffectiveReason == AuditFindingKind.Intraday).ToList();
         Assert.Single(hit);
         Assert.Equal("600000", hit[0].Code);
@@ -269,27 +294,22 @@ public class FullAuditTaskTests : IDisposable
         Meta("600000", SqliteStockMetaUpsert.TypeStock);
         Insert("600000", Granularity.Day, Days);          // 这轮完全干净
 
-        var m = _manifest.Load();
-        m.MissingBars =
-        [
-            // 上一轮报的盘中固化（现在已经修好了，本轮该消失）
-            new MissingBarRange
-            {
-                Code = "600000", Granularity = Granularity.Day, Reason = AuditFindingKind.Intraday,
-                From = Days[1], To = Days[1], Days = 1, Tries = 1,
-            },
-            // 别的面的缺行记录（值体检一行都不该碰）
-            new MissingBarRange
-            {
-                Code = "sh510300", Granularity = Granularity.Day, Reason = AuditFindingKind.Gap,
-                From = Days[0], To = Days[0], Days = 1, Tries = 2,
-            },
-        ];
-        _manifest.Save(m);
+        // 上一轮报的盘中固化（现在已经修好了，本轮该消失）
+        SeedValueIssues(RetryTaskIds.StockDayBars, new MissingBarRange
+        {
+            Code = "600000", Granularity = Granularity.Day, Reason = AuditFindingKind.Intraday,
+            From = Days[1], To = Days[1], Days = 1, Tries = 1,
+        });
+        // 别的面的缺行记录（值体检一行都不该碰）
+        SeedGaps(RetryTaskIds.EtfBars, new MissingBarRange
+        {
+            Code = "sh510300", Granularity = Granularity.Day, Reason = AuditFindingKind.Gap,
+            From = Days[0], To = Days[0], Days = 1, Tries = 2,
+        });
 
         await NewTask().RunAsync(Args(), CancellationToken.None);
 
-        var after = _manifest.Load().MissingBars;
+        var after = Bars();
         // 值类记录清掉了——这一条靠"汇总行也带 ValueScope"才成立（否则零发现时压根不落账）
         Assert.DoesNotContain(after, r => r.IsValueIssue);
         // 缺行记录原样保留，Tries 也没被动
@@ -310,20 +330,15 @@ public class FullAuditTaskTests : IDisposable
             FetchedAt = Days[0].AddHours(10),
         }]);
 
-        var m = _manifest.Load();
-        m.MissingBars =
-        [
-            new MissingBarRange
-            {
-                Code = "600000", Granularity = Granularity.DayRaw, Reason = AuditFindingKind.Intraday,
-                From = Days[0], To = Days[0], Days = 1, Tries = 1,
-            },
-        ];
-        _manifest.Save(m);
+        SeedValueIssues(RetryTaskIds.StockRawBars, new MissingBarRange
+        {
+            Code = "600000", Granularity = Granularity.DayRaw, Reason = AuditFindingKind.Intraday,
+            From = Days[0], To = Days[0], Days = 1, Tries = 1,
+        });
 
         await NewTask().RunAsync(Args(), CancellationToken.None);
 
-        var intraday = _manifest.Load().MissingBars
+        var intraday = Bars()
             .Single(r => r.EffectiveReason == AuditFindingKind.Intraday);
         Assert.Equal(1, intraday.Tries);      // 继承，没清零
     }

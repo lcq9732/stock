@@ -534,6 +534,23 @@ public partial class MainWindow : Window
         new QuoteDetailWindow(code, name, vm.BarRepository, vm.CurrentDbPath, vm.NoteStore) { Owner = this }.ShowDialog();
     }
 
+    /// <summary>
+    /// 【观察项】页那列 📝——打开这只票的分析笔记。
+    ///
+    /// 这是 L2「个人观点」的录入入口（2026-09-11）。观点写在 <c>notes/{code}.md</c> 里而不是
+    /// 表格里直接编辑：笔记本来就是"数据能重算、判断不能"那类东西的去处
+    /// （见 AnalyzerPaths.NotesDir），而且"要写成一段话存进文件"这件事本身就是个门槛，
+    /// 能拦住随手许愿——观察项要过"可判定／能改变动作／有归属层"三条准入。
+    /// </summary>
+    private void WatchNote_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if ((sender as FrameworkElement)?.DataContext is not WatchItemRow row) return;
+        if (string.IsNullOrWhiteSpace(row.Code)) return;
+
+        new StockNoteWindow(vm.NoteStore, row.Code, row.Name) { Owner = this }.ShowDialog();
+    }
+
     /// <param name="cutoffDate">非空时把K线截到这一天(含)——阶梯低点法的"按历史截止日期验证"
     /// 模式用，保证详情图和当时的判定用同一批数据。</param>
     private bool TryGetBars(MainViewModel vm, ResultRowViewModel row, out List<Bar> bars, DateTime? cutoffDate = null)

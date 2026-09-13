@@ -30,6 +30,66 @@ public class SqliteMaintenance
         return conn;
     }
 
+    /// <summary>一次 WAL 回收的结果。字段就是 <c>PRAGMA wal_checkpoint</c> 返回的那三列。</summary>
+    /// <param name="Busy">1 = 没拿到独占、没能完整回收（**有连接握着这个库**）。</param>
+    /// <param name="LogPages">WAL 里现有的页数。</param>
+    /// <param name="CheckpointedPages">这次搬回主库的页数。<c>== LogPages</c> 说明数据已全进主库。</param>
+    public readonly record struct WalCheckpointResult(int Busy, int LogPages, int CheckpointedPages)
+    {
+        /// <summary>一页 4KB（SQLite 默认），换算成 MB 好读。</summary>
+        public double LogMegabytes => LogPages * 4096.0 / 1024 / 1024;
+        public bool FullyReclaimed => Busy == 0 && LogPages == CheckpointedPages;
+    }
+
+    /// <summary>
+    /// 主动回收 WAL（2026-09-12 新增）。**批量写完之后叫一次**。
+    ///
+    /// ════ 为什么必须主动做 ════
+    /// SQLite 默认的 autocheckpoint 是**被动**的：commit 时顺带试一下，而**只要有任何读连接
+    /// 活着就跳过**。2026-09-10 那次 C 盘被 162GB 的 WAL 撑爆（931G 用到 0 可用）就是这么来的——
+    /// 上一个会话在 scratchpad 里 <c>dotnet run</c> 起的验证程序跑完没退出，握着这个库两个多小时，
+    /// 其间【板块指数合成】写了 468 万行，每一页都只能堆在 WAL 里。
+    ///
+    /// ⚠ **当时的诊断"单事务写 468 万行"是错的**（2026-09-12 查证）：那个循环从
+    /// <c>1a69255</c> 起就是**一个板块一个事务**（<see cref="SqliteBarRepository.InsertOrRefreshUnconfirmed"/>
+    /// 自己开连接 + <c>BeginTransaction</c>），950 个板块 = 950 个事务，每个约 4900 行。
+    /// 拆事务修不了这个问题，因为本来就是拆的。
+    ///
+    /// ════ 为什么用 TRUNCATE ════
+    /// <c>PASSIVE</c> 只搬数据、不缩文件；<c>TRUNCATE</c> 搬完还把 WAL 文件截成 0。
+    /// 拿不到独占时它**不会阻塞**，直接返回 <c>busy=1</c>——所以调用方拿到 busy 要**报出来**，
+    /// 那正是"有人握着库、WAL 正在失控增长"的唯一早期信号。
+    ///
+    /// ⚠ 别给这个连接设长 timeout：busy 时会空等满整个 timeout 才返回，看着像死锁其实是忙等。
+    /// </summary>
+    public WalCheckpointResult CheckpointWal()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+        cmd.CommandTimeout = 15;      // busy 就赶紧回来，别忙等
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return new WalCheckpointResult(0, 0, 0);
+        return new WalCheckpointResult(r.GetInt32(0), r.GetInt32(1), r.GetInt32(2));
+    }
+
+    /// <summary>
+    /// 回收 WAL 并把结果说成人话，给日志用。没什么可说的（WAL 本来就小、又全回收了）就返回 null。
+    /// </summary>
+    public string? CheckpointWalAndDescribe()
+    {
+        WalCheckpointResult r;
+        try { r = CheckpointWal(); }
+        catch (Exception ex) { return $"⚠ 回收 WAL 失败：{ex.Message}"; }
+
+        if (r.Busy != 0)
+            return $"⚠ **WAL 没能回收**（还有 {r.LogPages} 页 / {r.LogMegabytes:F0} MB，"
+                 + $"这次只搬回 {r.CheckpointedPages} 页）——**有别的连接握着这个库**。"
+                 + "不处理的话它会一直涨：2026-09-10 那次涨到 162GB、C 盘可用归零。"
+                 + "先看还有谁开着（Analyzer、或者调试起的程序），关掉再跑一次。";
+        return r.LogMegabytes >= 64 ? $"已回收 WAL（{r.LogMegabytes:F0} MB）" : null;
+    }
+
     /// <summary>还没建的索引名；空 = 已经都建好了。</summary>
     public List<string> GetMissingIndexes()
     {

@@ -67,6 +67,39 @@ public sealed class PlanWatchTask(
     /// <summary>巨潮每页大致条数，只用来估"是不是撞到翻页上限了"，不必精确。</summary>
     private const int PageSizeGuess = 10;
 
+    /// <summary>
+    /// 定本轮要搜的起点。**纯函数，所以能单独测**（见 PlanWatchResumeTests）。
+    ///
+    /// ════ 这里修过一个会静默丢数据的 bug（2026-09-11）════
+    /// 原来是 <c>start = today.AddDays(-(水位线有没有 ? 14 : 90))</c>——
+    /// 水位线只用来**选回看几天**，没用来**定起点**。后果：首轮跑到 07-02 被中断后再点一次，
+    /// 起点算成 today−14＝08-28，**07-03～08-27 这 56 天永久跳过**，而且不报任何错。
+    /// 跟这套设计要躲的其它坑同一类：不报错、但数据少了一截。
+    ///
+    /// 现在起点从**水位线**算，中断在哪就从哪续。
+    ///
+    /// ════ 为什么还要往回多退 14 天 ════
+    /// 水位线是 <c>MAX(announce_date)</c>，它只说明"这天有公告入库了"，不保证那天**抓全了**——
+    /// 骨架会在 MaxItems/Deadline 到点时从批中间收尾，那天可能只写了一半。
+    /// 往回退一段重抓，靠主键 upsert 去重，只多花请求、不会写脏。
+    /// 日更场景下水位线就是昨天，退 14 天正好是设计里的增量窗口，行为跟以前一致。
+    ///
+    /// ════ 为什么要夹在首轮窗口内 ════
+    /// 再往前正文取不到（东财按"该股最近 100 条公告"匹配标题，见 <see cref="FirstRunLookbackDays"/>），
+    /// 捞回来的只会是一堆没有数值的空壳记录——那比不抓更糟，在库里长得像"这些公司都没在回购"。
+    /// </summary>
+    /// <returns>(起点, 是不是首轮)。</returns>
+    public static (DateOnly Start, bool IsFirstRun) ResolveSearchWindow(DateTime? watermark, DateOnly today)
+    {
+        var firstRunStart = today.AddDays(-FirstRunLookbackDays);
+        if (watermark is not { } w) return (firstRunStart, true);
+
+        var start = DateOnly.FromDateTime(w).AddDays(-LookbackDays);
+        if (start < firstRunStart) start = firstRunStart;   // 再往前正文取不到
+        if (start > today) start = today;                   // 水位线在未来（手工塞过数据）时兜一下
+        return (start, false);
+    }
+
     private int _hits, _parsed, _noDetail;
     private readonly List<string> _warnings = [];
 
@@ -79,12 +112,10 @@ public sealed class PlanWatchTask(
 
         var watermark = repository.GetLatestAnnounceDate(PlanKind.Buyback);
         var today = DateOnly.FromDateTime(DateTime.Today);
-        // 首轮（库里空）往回捞一年多：回购期限通常 12 个月，这样才能把"还在进行中"的方案接上。
-        var days = watermark is null ? FirstRunLookbackDays : LookbackDays;
-        var start = today.AddDays(-days);
+        var (start, isFirstRun) = ResolveSearchWindow(watermark, today);
         Report($"搜索关键词「回购」，{start:yyyy-MM-dd} 至 {today:yyyy-MM-dd}"
-               + (watermark is null
-                   ? $"（首轮，回看 {days} 天——再往前正文取不到，见类注释）"
+               + (isFirstRun
+                   ? $"（首轮，回看 {FirstRunLookbackDays} 天——再往前正文取不到，见类注释）"
                    : $"（增量，库里最新到 {watermark:yyyy-MM-dd}）"));
 
         // ⚠ **必须按天切片搜索，不能一次搜整个区间**（2026-09-11 实测发现）：

@@ -154,6 +154,91 @@ public class Manifest
     /// MissingBarConfirmed 白名单是一个道理，只是量小（十年才几天），没必要单开一张表。
     /// </summary>
     public List<DateTime> ConfirmedNetInflowDays { get; set; } = new();
+
+    /// <summary>
+    /// 统一的待办清单（2026-09-13）——**这是"还有什么没补上"的唯一权威**，
+    /// 上面那九个名单是它的历史前身，只在 <see cref="MigrateLegacyTodos"/> 里读一次就清空。
+    ///
+    /// 换成它的原因见 <see cref="RetryTodo"/> 的类注释：九个各自为政的名单让"写的地方"和
+    /// "用的地方"没法协调，体检写进来的两类待办漏报了两周，而且重试拿到代码也不知道归谁补。
+    /// </summary>
+    public List<RetryTodo> Todos { get; set; } = new();
+
+    /// <summary>
+    /// 把九个老名单并进 <see cref="Todos"/> 然后清空它们——<c>JsonManifestStore.Load</c> 每次读完就调，
+    /// 所以进到内存里的 manifest 永远是新格式，全程序不用再有第二种读法。
+    ///
+    /// ⚠ **这是"manifest 上哪些东西算待办"的唯一登记表**。以前这份知识在代码里抄了四遍
+    /// （摘要文字一遍、按钮可点判定一遍、重试入口的 early-return 一遍、执行链一遍），
+    /// 加新待办的人不知道要去抄第五遍——2026-09-02 和 09-06 加的两类就是这么漏的。
+    /// 现在新增一类待办只要在这里登记，显示、按钮、分派全都自动跟上。
+    ///
+    /// 幂等：老名单清空之后再调不会重复并入；已经在 Todos 里的同 (TaskId, Kind) 不覆盖
+    /// （新格式写进来的是权威，老字段只是还没清干净的残留）。
+    /// </summary>
+    public void MigrateLegacyTodos()
+    {
+        void Take(string taskId, string kind, IEnumerable<RetryTarget> targets, DateTime? day = null)
+        {
+            var list = targets.ToList();
+            if (list.Count == 0) return;
+            if (Todos.Any(t => t.TaskId == taskId && t.Kind == kind)) return;
+            Todos.Add(new RetryTodo { TaskId = taskId, Kind = kind, Day = day, Targets = list });
+        }
+        static IEnumerable<RetryTarget> Codes(IEnumerable<string> codes)
+            => codes.Select(c => new RetryTarget { Code = c });
+
+        Take(RetryTaskIds.StockDayBars, RetryTodoKind.Failed, Codes(FailedCodes));
+        Take(RetryTaskIds.StockDayBars, RetryTodoKind.MissingDay, Codes(MissingDayCodes), MissingDayDate);
+        Take(RetryTaskIds.Roster, RetryTodoKind.Round, Codes(FailedMarketCapCodes));
+        Take(RetryTaskIds.NetInflow, RetryTodoKind.Failed, Codes(FailedNetInflowCodes));
+        Take(RetryTaskIds.IndexCons, RetryTodoKind.Failed, Codes(FailedIndexConsCodes));
+        Take(RetryTaskIds.IndexWeight, RetryTodoKind.Failed, Codes(FailedIndexWeightCodes));
+        Take(RetryTaskIds.Shareholder, RetryTodoKind.Failed, Codes(FailedShareholderCodes));
+        Take(RetryTaskIds.Dividend, RetryTodoKind.Failed, Codes(FailedDividendCodes));
+        Take(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays,
+            MissingNetInflowDays.Select(d => new RetryTarget { Day = d.Day, Tries = d.Tries }));
+
+        // 历史空洞/值问题：按口径分给三个个股日K任务——它们是三个独立任务，各补各的。
+        // 缺行和值问题分成两条 Kind：复查方式不一样（缺行看"行在不在"，值错要按 Reason 重查判据），
+        // 混成一条的话值问题会被 FindGaps 一律判成"已补齐"划掉，而且划得很安静。
+        foreach (var g in MissingBars.GroupBy(r => (
+                     Task: RetryTaskIds.ForGranularity(r.Granularity),
+                     Kind: r.IsValueIssue ? RetryTodoKind.ValueIssue : RetryTodoKind.Gap)))
+        {
+            Take(g.Key.Task, g.Key.Kind, g.Select(r => new RetryTarget
+            {
+                Code = r.Code,
+                Gran = string.IsNullOrEmpty(r.Granularity) ? Granularity.Day : r.Granularity,
+                From = r.From, To = r.To, Days = r.Days, Tries = r.Tries,
+                Reason = r.IsValueIssue ? r.EffectiveReason : null,
+            }));
+        }
+
+        FailedCodes.Clear();
+        MissingDayCodes.Clear();
+        MissingDayDate = null;
+        FailedMarketCapCodes.Clear();
+        FailedNetInflowCodes.Clear();
+        FailedIndexConsCodes.Clear();
+        FailedIndexWeightCodes.Clear();
+        FailedShareholderCodes.Clear();
+        FailedDividendCodes.Clear();
+        MissingNetInflowDays.Clear();
+        MissingBars.Clear();
+    }
+
+    /// <summary>取某一条待办（没有就是 null）。(TaskId, Kind) 是主键。</summary>
+    public RetryTodo? Todo(string taskId, string kind)
+        => Todos.FirstOrDefault(t => t.TaskId == taskId && t.Kind == kind);
+
+    /// <summary>写回某一条待办：空名单直接移除（留个空壳只会让"还有没有活"的判断变复杂）。</summary>
+    public void SetTodo(string taskId, string kind, IReadOnlyList<RetryTarget> targets, DateTime? day = null)
+    {
+        Todos.RemoveAll(t => t.TaskId == taskId && t.Kind == kind);
+        if (targets.Count > 0)
+            Todos.Add(new RetryTodo { TaskId = taskId, Kind = kind, Day = day, Targets = targets.ToList() });
+    }
 }
 
 /// <summary>
