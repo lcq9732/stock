@@ -44,7 +44,6 @@ public class StockEventRow
 {
     public string Code { get; init; } = "";
     public string Name { get; init; } = "";
-    public string Priority { get; init; } = "";
 
     /// <summary>个人观点，来自 <c>notes/{code}.md</c> 里「观点：」开头那行。</summary>
     public string Opinion { get; init; } = "";
@@ -97,6 +96,20 @@ public class WatchTabViewModel : INotifyPropertyChanged
         private set { _status = value; OnPropertyChanged(); }
     }
 
+    private bool _trackedScope;
+    /// <summary>
+    /// 勾上＝看**全部跟踪**（主动仓全部＋底仓），不勾＝只看**持仓**（默认）。
+    ///
+    /// 默认只看持仓，是因为实测这三个清单里真正有钱在里面的只有 9 只，而原来一律盯 67 只
+    /// （见 <see cref="WatchScope"/>）。没建仓的票，建仓前用【分析详情】查一次就够，
+    /// 不需要天天摆在眼前。
+    /// </summary>
+    public bool TrackedScope
+    {
+        get => _trackedScope;
+        set { _trackedScope = value; OnPropertyChanged(); Run(); }
+    }
+
     private string _filter = "";
     /// <summary>
     /// 按代码或名称找票（2026-09-14 加）。盯的票多了以后一页翻不完，
@@ -141,7 +154,8 @@ public class WatchTabViewModel : INotifyPropertyChanged
         {
             Status = "重算中…";
             var r = _service.Run();
-            var (stocks, market) = _service.BuildEvents(r);
+            var (stocks, market) = _service.BuildEvents(
+                _trackedScope ? WatchScope.Tracked : WatchScope.Holding);
 
             _allStocks = stocks.Select(ToRow).ToList();
             ApplyFilter();
@@ -151,13 +165,18 @@ public class WatchTabViewModel : INotifyPropertyChanged
                 Market.Add(new MarketWatchRow { Date = m.Date.ToString("yyyy-MM-dd"), Text = m.Text });
 
             // 一行说完（2026-09-14 按用户要求从两行并成一行）。
-            // 并的时候顺手去掉了重复——原来上行说"2 条触发（A 档 1 条）"、下行说"命中 2 条"，
+            // 并的时候顺手去掉了重复——原来上行说"2 条触发"、下行说"命中 2 条"，
             // 是同一个数换了个说法，两行并排时那种重复格外刺眼。
-            var a = r.TopHits.Count(h => h.Priority == "A");
-            Status = $"{_allStocks.Count} 只票有动静；观察项 {r.ItemCount} 条"
-                     + $"（新挂 {r.Added}、摘掉 {r.Expired}），求值 {r.Evaluated} 条，"
-                     + (r.Hits == 0 ? "没有触发。" : $"命中 {r.Hits} 条（A 档 {a} 条），新记录 {r.NewHits} 条。")
-                     + FilterNote();
+            var scopeName = _trackedScope ? "全部跟踪" : "持仓";
+            Status = _allStocks.Count == 0
+                // 全清仓时这页会空。**得说清是"没持仓"而不是"坏了"**，并指一下出口。
+                ? (_trackedScope
+                    ? "主动仓和底仓里都没有票。"
+                    : "当前没有持仓——勾上【全部跟踪】可以看主动仓里还没买的那些。")
+                : $"{scopeName} {_allStocks.Count} 只有动静；观察项 {r.ItemCount} 条"
+                  + $"（新挂 {r.Added}、摘掉 {r.Expired}），求值 {r.Evaluated} 条，"
+                  + (r.Hits == 0 ? "没有触发。" : $"命中 {r.Hits} 条，新记录 {r.NewHits} 条。")
+                  + FilterNote();
         }
         catch (Exception ex)
         {
@@ -199,7 +218,7 @@ public class WatchTabViewModel : INotifyPropertyChanged
 
     private static StockEventRow ToRow(StockWatchEvents s) => new()
     {
-        Code = s.Code, Name = s.Name, Priority = s.Priority, Opinion = s.Opinion,
+        Code = s.Code, Name = s.Name, Opinion = s.Opinion,
         Lines = s.Events.Select(e => new WatchEventLine
         {
             Date = e.Date.ToString("yyyy-MM-dd"),

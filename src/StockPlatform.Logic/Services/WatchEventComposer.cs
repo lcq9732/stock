@@ -49,16 +49,4 @@ public static class WatchEventComposer
 
         return groups.SelectMany(g => g.Items).ToList();
     }
-
-    /// <summary>
-    /// 这只票所有事件里最紧要的那个档。界面上一股一行，得有个代表档。
-    /// A &lt; B &lt; C，取最高的。
-    /// </summary>
-    public static string TopPriority(IEnumerable<string> priorities)
-    {
-        var all = priorities.ToList();
-        if (all.Contains("A")) return "A";
-        if (all.Contains("B")) return "B";
-        return all.Count > 0 ? "C" : "";
-    }
 }

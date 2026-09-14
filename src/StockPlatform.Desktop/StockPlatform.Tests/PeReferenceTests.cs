@@ -97,28 +97,50 @@ public class PeReferenceTests
         Assert.Equal(Verdict.Neutral, line!.Verdict);
     }
 
+    /// <summary>
+    /// 分档要真的分开档 —— 但**不钉具体措辞**。
+    ///
+    /// 2026-09-14 措辞从"处在最便宜的 10%"改成了"全市场PE 最低的 10%"，改得对：
+    /// PE 行钉死 Verdict.Neutral 不上色正是因为"贵"不预示跌，却在文字里写"便宜"，
+    /// 等于把刚守住的纪律又破了。原来那版用例钉着旧文本，于是在别人改对的时候报了假警。
+    /// 措辞该能改，**分档边界不该乱**——钉后者。
+    /// </summary>
     [Fact]
-    public void 分位描述按档走_不假装精确()
+    public void 分档边界要真的分开()
+    {
+        var m = MarketPeStats.Builtin;
+        var buckets = new[]
+        {
+            m.DescribePosition(m.P10 - 1),
+            m.DescribePosition(m.P25 - 1),
+            m.DescribePosition(m.Median - 1),
+            m.DescribePosition(m.Median + 1),
+            m.DescribePosition(m.P75 + 1),
+            m.DescribePosition(m.P90 + 1),
+        };
+        foreach (var b in buckets) _out.WriteLine(b);
+
+        Assert.Equal(6, buckets.Distinct().Count());      // 六档互不相同
+        Assert.All(buckets, b => Assert.False(string.IsNullOrWhiteSpace(b)));
+    }
+
+    /// <summary>
+    /// 分位必须单调递增。这是**改不得**的性质：谁更新了 Builtin 的数、顺序写乱了，这条会红。
+    ///
+    /// ⚠ 原来这里钉的是 <c>Median == 38.6</c>，今天被打红了 —— 因为那个数本身是错的：
+    ///   用 share_capital 当股数算 PE，而那是「实收资本」、是金额，面值不是 1 元的票全错
+    ///   （中芯国际算出 3.9、真值 139.5）。钉一个会变的数，等于把 bug 也钉了进去。
+    /// </summary>
+    [Fact]
+    public void 分位必须单调递增()
     {
         var m = MarketPeStats.Builtin;
         _out.WriteLine($"P10 {m.P10}　P25 {m.P25}　中位 {m.Median}　P75 {m.P75}　P90 {m.P90}");
 
-        Assert.Equal("处在最便宜的 10%", m.DescribePosition(m.P10 - 1));
-        Assert.Equal("处在最便宜的 25%", m.DescribePosition(m.P25 - 1));
-        Assert.Equal("低于中位", m.DescribePosition(m.Median - 1));
-        Assert.Equal("高于中位", m.DescribePosition(m.Median + 1));
-        Assert.Equal("处在最贵的 25%", m.DescribePosition(m.P75 + 1));
-        Assert.Equal("处在最贵的 10%", m.DescribePosition(m.P90 + 1));
-    }
-
-    [Fact]
-    public void 分位口径必须是总股本_不是流通市值()
-    {
-        // ⚠ BuildReturnAndValuation 用 price × share_capital 算 PE（那行注释：
-        //   "股本用报表的实收资本，不是流通市值倒推"）。内置分位也必须同口径，
-        //   否则界面上的数和参考值不是一把尺子。
-        //   实测差别不小：流通市值口径中位 32.0 倍，总股本口径 38.6 倍。
-        Assert.Equal(38.6, MarketPeStats.Builtin.Median, precision: 1);
-        Assert.False(MarketPeStats.Builtin.IsLive);   // 目前只有内置快照，没做实算
+        Assert.True(m.P10 < m.P25, "P10 应小于 P25");
+        Assert.True(m.P25 < m.Median, "P25 应小于中位");
+        Assert.True(m.Median < m.P75, "中位应小于 P75");
+        Assert.True(m.P75 < m.P90, "P75 应小于 P90");
+        Assert.True(m.SampleSize > 1000, "样本太小，分位没有代表性");
     }
 }

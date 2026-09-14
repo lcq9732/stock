@@ -66,7 +66,10 @@ public partial class FinancialAnalysisWindow : Window
         InitializeComponent();
         _report = report;
 
-        Title = $"财务分析 — {report.Code} {report.Name}".TrimEnd();
+        // 标题跟列表页那个按钮的名字对齐（2026-09-14 用户要求）：按钮早就从【财务分析】
+        // 改叫【分析详情】了，窗口标题还写着"财务分析"，两处对不上。窗口里确实不止财务——
+        // 右边还有观察项和事件，"分析详情"更诚实。
+        Title = $"分析详情 — {report.Code} {report.Name}".TrimEnd();
 
         if (report.Error != null)
         {
@@ -86,6 +89,18 @@ public partial class FinancialAnalysisWindow : Window
         HeadlineBorder.Visibility = Visibility.Collapsed;
         HeaderText.Inlines.Add(new System.Windows.Documents.Run(
             $"{report.Code} {report.Name}".TrimEnd()) { FontWeight = FontWeights.Bold });
+        // 紧跟名字的是**算估值用的那个价**（2026-09-14 用户要求）。日期一定要带：这个价是本地库里
+        // 最新一根日K，而本地未必抓到了今天——PE/PB/股息率算的是那一天的估值，不标日期会被当成现价。
+        // 尤其 PE 的另一个输入（总股本）走的是日更，两个输入的日期可能差着几天。
+        if (report.Price is > 0)
+        {
+            var priceText = report.PriceDate is { } pd
+                ? $"　·　{report.Price.Value:F2} 元（{pd:M-d} 收盘）"
+                : $"　·　{report.Price.Value:F2} 元";
+            var priceRun = new System.Windows.Documents.Run(priceText) { FontSize = 14 };
+            priceRun.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Theme.Foreground.Muted");
+            HeaderText.Inlines.Add(priceRun);
+        }
         if (report.ReportDate != default)
             HeaderText.Inlines.Add(new System.Windows.Documents.Run($"　·　{report.PeriodName}")
                 { FontSize = 14 });
@@ -251,8 +266,9 @@ public partial class FinancialAnalysisWindow : Window
 
             // 现价和每股股息用于估值/股息率；取不到就让分析器跳过那几行
             double? price = null;
+            DateTime? priceDate = null;
             var bars = vm.BarRepository.Query(code, Granularity.Day);
-            if (bars.Count > 0) price = bars[^1].Close;
+            if (bars.Count > 0) { price = bars[^1].Close; priceDate = bars[^1].PeriodStart; }
 
             double? dps = null;
             var trailing = vm.DividendRepository.GetTrailingCashDividendPerShare(DateTime.Today.AddYears(-1));
@@ -282,8 +298,16 @@ public partial class FinancialAnalysisWindow : Window
                 catch { /* 这张表是可选增强，取不到不该拦住整份财务分析 */ }
             }
 
+            // 总股本（PE/PB 的股数）。取不到就传 null，分析器会回退用报表实收资本并在界面上标识
+            // ——这两个口径只有面值 1.00 元才相等，详见 MetricKeys.TotalShares。
+            double? totalShares = LoadTotalShares(vm, code);
+
+            // 行业 PE 分位（2026-09-14）。没有行业归属的票（退市股、个别新股，实测 41 只）
+            // 拿不到，PE 行就只显示全市场那半句——跟这个功能上线前的行为一致。
+            var industryPe = LoadIndustryPe(vm, code);
+
             var report = new StockPlatform.Logic.Services.FinancialAnalyzer(peers)
-                .Analyze(code, name, history, price, dps, regulatory);
+                .Analyze(code, name, history, price, dps, regulatory, null, totalShares, priceDate, industryPe);
 
             var w = new FinancialAnalysisWindow(report) { Owner = owner };
             // 右上角的观察项。**在构造之后单独装**：构造函数在 report.Error 时会提前 return，
@@ -295,6 +319,61 @@ public partial class FinancialAnalysisWindow : Window
         {
             MessageBox.Show(owner, $"财务分析失败：{ex.Message}", "财务分析",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    /// <summary>
+    /// 取这只票最新的总股本（<c>MetricKeys.TotalShares</c>，Fetcher 的【总股本】日更）。
+    ///
+    /// 取不到就返回 null —— 没跑过那一项、或这只票接口里没有（退市/停牌居多）。调用方据此
+    /// 回退报表实收资本并标识，**不在这里替它猜**：偏大那一类（H 股会计口径，中国移动
+    /// 4703.59 亿元 vs 216.91 亿股）没有任何本地判据能发现。
+    ///
+    /// 不缓存：一次查询按主键走索引，比银行分位那种全市场扫描便宜得多；而且缓存了就得处理
+    /// "用户中途跑完抓取"的失效问题，不值当。
+    /// </summary>
+    private static double? LoadTotalShares(ViewModels.MainViewModel vm, string code)
+    {
+        try
+        {
+            var rows = new StockPlatform.Data.Sqlite.SqliteFundamentalMetricRepository(vm.CurrentDbPath)
+                .Query(code, StockPlatform.Logic.Models.MetricKeys.TotalShares);
+            var latest = rows.OrderByDescending(r => r.AsOfDate).FirstOrDefault();
+            return latest is { Value: > 0 } ? latest.Value : null;
+        }
+        catch { return null; }   // 这一项是可选增强，取不到不该拦住整份财务分析
+    }
+
+    // ── 行业 PE 分位的会话内缓存 ──────────────────────────────────────────────
+    // 算一次要扫全市场（3900 多只票的 TTM 净利 + 总股本 + 最新收盘），四条 SQL 约 1~2 秒。
+    // 连着看好几只票时不该每次都重算——这个分布一天之内基本不动。缓存策略跟银行分位一致。
+    private static Dictionary<string, StockPlatform.Logic.Models.IndustryPeStats>? _cachedIndustryPe;
+    private static DateTime _cachedIndustryPeAt;
+
+    /// <summary>
+    /// 实算这只票所属行业的 PE 分位。返回 null 表示这只票没有行业归属、或所属行业样本太少
+    /// （二级 &lt;10 只会退到一级，一级也不够才是 null）——那时 PE 行只显示全市场那半句。
+    ///
+    /// ⚠ 不走内置快照那条路：行业分位有 31+127 组，硬编码进代码既丑又会过期；而且
+    /// **一次扫描把所有行业一起算出来，成本和只算一个全市场中位完全一样**。
+    /// </summary>
+    private static StockPlatform.Logic.Models.IndustryPeStats? LoadIndustryPe(
+        ViewModels.MainViewModel vm, string code)
+    {
+        try
+        {
+            if (_cachedIndustryPe == null || DateTime.Now - _cachedIndustryPeAt > TimeSpan.FromMinutes(30))
+            {
+                var (pes, industries) = new StockPlatform.Data.Sqlite.SqliteMarketPeSource(vm.CurrentDbPath).Read();
+                _cachedIndustryPe = StockPlatform.Logic.Services.IndustryPeStatsBuilder.Build(pes, industries);
+                _cachedIndustryPeAt = DateTime.Now;
+            }
+            return _cachedIndustryPe.GetValueOrDefault(code);
+        }
+        catch
+        {
+            // 跟银行分位同样的态度：参考值那一列算不出来，不该让整个财务分析打不开。
+            return null;
         }
     }
 

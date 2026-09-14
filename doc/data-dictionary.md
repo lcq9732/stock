@@ -34,7 +34,7 @@
 | 分类 | 表 | 一句话 |
 |---|---|---|
 | 行情 | `Bar` | 日/周/月 K线（个股+指数+ETF+板块指数） |
-| 基本面 | `FundamentalMetric` | 流通市值（可扩展的通用指标表） |
+| 基本面 | `FundamentalMetric` | 流通市值、总股本（可扩展的通用指标表） |
 |  | `ShareholderCount` | 股东户数（按报告期） |
 |  | `TopShareholder` | 十大股东 / 十大流通股东 |
 |  | `Dividend` | 分红送配（历年方案，每10股口径） |
@@ -204,17 +204,33 @@
 ## 基本面
 
 ### FundamentalMetric — 通用基本面指标
-"维度值代替写死字段"的设计——加新指标不用改表。**目前只有** `circulating_market_cap`（流通市值，元）。**数据源**：新浪股票列表顺带的 `nmc` 字段（`SinaListMarketCapFetcher`）。**更新**：拉取全部/当天全市场扫描，同一交易日重复抓覆盖。`as_of_date`=**该快照所属的交易日**（不是抓取日；2026-08-04 起，盘前/周末/节假日抓到的值会归到上一个交易日，见 data-platform-design.md 9.2节）。
+"维度值代替写死字段"的设计——加新指标不用改表。`as_of_date`=**该值所属的交易日**（不是抓取日；2026-08-04 起，盘前/周末/节假日抓到的值会归到上一个交易日，见 data-platform-design.md 9.2节）。
+
+| metric_key | 含义 | 单位 | 数据源 | 更新 |
+|---|---|---|---|---|
+| `circulating_market_cap` | 流通市值 | 元 | 新浪股票列表顺带的 `nmc`（`SinaListMarketCapFetcher`） | 拉取全部/当天全市场扫描 |
+| `total_shares` | **总股本** | **股** | 东财条件选股接口 `TOTAL_SHARES`（`EastMoneyTotalSharesProvider`） | 【总股本】日更，一个请求 |
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
 | code | TEXT | 6位股票代码 |
-| metric_key | TEXT | 指标键，目前=`circulating_market_cap` |
-| as_of_date | TEXT | 指标日期 |
-| value | REAL | 指标值（流通市值=元） |
+| metric_key | TEXT | 指标键，见上表 |
+| as_of_date | TEXT | 值所属交易日 |
+| value | REAL | 指标值（单位见上表） |
 | source | TEXT | 来源标记 |
 | fetched_at | TEXT | 抓取时刻 |
 | | | **主键** (code, metric_key, as_of_date) |
+
+> ⚠ **`total_shares` 不能用 `FinancialReport.share_capital` 代替**（2026-09-14）。后者是财报科目
+> 「实收资本(或股本)」，是**金额、单位元**：`share_capital = 总股本 × 每股面值`。A 股绝大多数票
+> 面值 1.00 元，两个数恰好相等——PE/PB 一直把这个巧合当定义用。逐只比对，5561 只里 **373 只对不上**：
+> 269 只报表偏小（面值 <1 元，紫金矿业差 10 倍、诺诚健华差 7.5 万倍），104 只报表偏大
+> （H 股会计口径含股本溢价，中国移动 4703.59 亿元 vs 216.91 亿股）。重算后 277 只（7.1%）的 PE 变了。
+>
+> ⚠ 偏大那一类**没有本地判据能发现**——「流通市值÷收盘价 > 报表股本」只抓得出偏小的。
+>
+> ⚠ **拿不到就是没有这一行**，不写 0 占位。消费方查不到时回退 `share_capital` 并在界面标识
+> （`FinancialAnalyzer`）。退市股（库里 231 只有财报）在选股接口里永远没有，这是常态不是故障。
 
 ### ShareholderCount — 股东户数
 **数据源**：新浪股本股东页（`vCI_StockHolder`）。**更新**：一键拉取定期数据；新浪一次返回该股**历年全部报告期**，按 code 删旧写新（历史完整、天然按报告期版本化）。

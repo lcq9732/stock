@@ -8,18 +8,12 @@ namespace StockPlatform.Logic.Services;
 /// <param name="PrevValue">上一个**不同的**值（见 <see cref="WatchEvaluator"/> 的自然日坑）。</param>
 /// <param name="StageText">stage 类的当前状态文字（如回购的 "首次回购"）。</param>
 /// <param name="PrevStageText">上一次记录到的 stage，用来判跃迁。</param>
-/// <param name="Magnitude">
-/// **这件事有多大**——给按量分档用（解禁＝占流通股百分比）。跟 <see cref="Value"/> 分开：
-/// Value 是判触发的那个数（解禁那路是"还有几天"），Magnitude 是判轻重的那个数。
-/// 混用的话"还有 27 天"会被当成"占流通 27%"。见 <see cref="WatchPriority"/>。
-/// </param>
 public sealed record WatchReading(
     DateTime? TradeDate,
     double? Value = null,
     double? PrevValue = null,
     string? StageText = null,
-    string? PrevStageText = null,
-    double? Magnitude = null);
+    string? PrevStageText = null);
 
 /// <summary>
 /// 把一条观察项 + 它的当前取值，判成"触发/没触发"。见 doc/watch-item-design.md §4.3。
@@ -130,9 +124,6 @@ public static class WatchEvaluator
         TriggerTradeDate = reading.TradeDate ?? DateTime.Today,
         ObservedValue = value,
         Message = msg,
-        // 档位按**实际的量**重算：解禁 74 股不该跟解禁占流通 30% 同为 A 档。
-        // 不需要按量分档的事项，Resolve 原样返回挂上时定的档。
-        Priority = WatchPriority.Resolve(item, reading.Magnitude),
     };
 
     private static string Fmt(double v)

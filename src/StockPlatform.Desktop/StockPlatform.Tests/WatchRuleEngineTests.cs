@@ -35,7 +35,6 @@ public class WatchRuleEngineTests
             active: Catl, plans: new() { ["300750"] = Plan("300750") }));
 
         var item = Assert.Single(r.Items.Where(i => i.Kind == WatchKind.PlanStage));
-        Assert.Equal("A", item.Priority);
         Assert.Equal(WatchOrigin.Derived, item.Origin);
         Assert.Contains("573", item.Reason);
         Assert.Contains(r.Added, i => i.Kind == WatchKind.PlanStage);

@@ -156,12 +156,4 @@ public class WatchEventComposerTests
 
         Assert.Equal(4, WatchEventComposer.Compose(events).Count);
     }
-
-    [Theory]
-    [InlineData(new[] { "C", "B", "A" }, "A")]
-    [InlineData(new[] { "C", "B" }, "B")]
-    [InlineData(new[] { "C" }, "C")]
-    [InlineData(new string[0], "")]
-    public void 取最高档(string[] input, string expected)
-        => Assert.Equal(expected, WatchEventComposer.TopPriority(input));
 }

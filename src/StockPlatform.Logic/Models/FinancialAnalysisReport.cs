@@ -94,6 +94,17 @@ public class FinancialAnalysisReport
     /// <summary>报告期的中文说法（"2026年中报"）。</summary>
     public string PeriodName { get; init; } = "";
 
+    /// <summary>
+    /// 算 PE/PB/股息率用的那个收盘价，以及它是**哪一天**的（2026-09-14 用户要求显示在标题上）。
+    ///
+    /// 为什么日期必须一起给：这个价取的是本地库里最新一根日K，而本地未必抓到了今天——
+    /// 估值三行算出来的是"那一天的估值"，不标日期的话看到的人会默认它是现价。
+    /// 尤其是 PE：股本走的是日更的 <c>total_shares</c>（今天的），价格却可能是几天前的，
+    /// 两个输入日期不同，标出来才对得上账。
+    /// </summary>
+    public double? Price { get; init; }
+    public DateTime? PriceDate { get; init; }
+
     /// <summary>最上面那句总结。</summary>
     public string Headline { get; init; } = "";
 

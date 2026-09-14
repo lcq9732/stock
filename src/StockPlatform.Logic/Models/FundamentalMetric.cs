@@ -37,6 +37,32 @@ public static class MetricKeys
     ///    另外注意值不一定是**收盘**价算的：盘中跑到的就是那一刻的实时快照，日期对但值偏；同一交易日
     ///    收盘后再跑一次会覆盖成收盘值（Upsert 主键含 as_of_date）。</summary>
     public const string CirculatingMarketCap = "circulating_market_cap";
+
+    /// <summary>
+    /// 总股本，单位**股**（2026-09-14 新增）。写入方是 TotalSharesTask，日更，
+    /// 来源是东财条件选股接口的 <c>TOTAL_SHARES</c>。
+    ///
+    /// ⚠ **不要用财报的 <c>share_capital</c> 代替它**——那个是「实收资本(或股本)」，
+    /// 单位是**元**，等于 总股本 × 每股面值。A 股绝大多数票面值 1.00 元，两个数恰好相等，
+    /// 于是这个巧合被当成了定义，面值不是 1 元的票就全错。2026-09-14 逐只比对，
+    /// 5561 只里 373 只对不上，两个方向都有：
+    ///   · 报表偏小（面值 &lt; 1 元）269 只——紫金矿业 26.59 亿 vs 265.91 亿股（面值 0.1）、
+    ///     中芯国际差 35 倍、诺诚健华（美元面值）差 7.5 万倍；
+    ///   · 报表偏大（H 股会计口径，股本科目含溢价）104 只——中国移动 4703.59 亿元
+    ///     vs 216.91 亿股。
+    /// 换成这个 key 之后重算，3923 只里 277 只（7.1%）的 PE 变了：中国移动 348.8 → 16.1、
+    /// 分众传媒 0.5 → 20.1、诺诚健华 0.0 → 50.7。
+    ///
+    /// ⚠ **拿不到就是没有这一行**，不写 0、不写占位——消费方查不到时回退 <c>share_capital</c>
+    /// 并在界面上标识（见 FinancialAnalyzer）。写 0 会算出「市值 0、PE 0」。
+    ///
+    /// 口径：总股本 = A 股流通 + A 股限售 + H 股/B 股，跟 <c>share_capital</c> 涵盖范围一致
+    /// （工行 3564 亿股 = A 股 2696 亿 + H 股 868 亿）。
+    ///
+    /// as_of_date 跟 <see cref="CirculatingMarketCap"/> 同样是「值所属交易日」，
+    /// 落库前用本地交易日历校过（接口自报的日期不直接信）。
+    /// </summary>
+    public const string TotalShares = "total_shares";
 }
 
 /// <summary>One row of the key-value FundamentalMetric table (see doc/data-platform-design.md section 4).</summary>

@@ -239,9 +239,7 @@ public class SqliteWatchReadingSource
             double? freeRatio = r.IsDBNull(3) ? null : r.GetDouble(3);
             if (freeRatio is > 0) parts.Add($"占流通 {freeRatio:0.##}%");
 
-            // Magnitude＝占流通比，**判轻重用**（解禁 74 股不该跟占流通 30% 同档）。
-            // 跟 Value（还有几天，判触发用）分开传，混用会把"还有 27 天"当成"占 27%"。
-            return new WatchReading(fd, ahead, null, string.Join("，", parts), Magnitude: freeRatio);
+            return new WatchReading(fd, ahead, null, string.Join("，", parts));
         }
 
         using var cmd = conn.CreateCommand();

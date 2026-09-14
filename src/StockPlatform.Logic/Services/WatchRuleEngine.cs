@@ -79,7 +79,7 @@ public static class WatchRuleEngine
                 {
                     Code = code, Name = name, Layer = WatchLayer.L1, Origin = WatchOrigin.Derived,
                     Position = pos, Kind = WatchKind.PlanStage, Expr = plan.Kind,
-                    Op = WatchOp.StageChange, Priority = "A",
+                    Op = WatchOp.StageChange,
                     Reason = $"{plan.Kind}方案进行中（{string.Join("，", bits)}）",
                 });
             }
@@ -93,7 +93,7 @@ public static class WatchRuleEngine
                     {
                         Code = code, Name = name, Layer = WatchLayer.L1, Origin = WatchOrigin.Derived,
                         Position = pos, Kind = WatchKind.IndustryIndicator, Expr = ind.IndicatorId,
-                        Op = WatchOp.CrossDown, Priority = "B",
+                        Op = WatchOp.CrossDown,
                         Reason = ind.Reason,
                     });
                 }
@@ -111,7 +111,7 @@ public static class WatchRuleEngine
                     Position = pos, Kind = WatchKind.PriceMA, Expr = "20",
                     // 取值是**对均线的偏离率**（%），所以阈值是 0：由正转负＝跌破。
                     // 见 SqliteWatchReadingSource.ReadPriceMa 的注释。
-                    Op = WatchOp.CrossDown, Threshold = 0, Priority = "B",
+                    Op = WatchOp.CrossDown, Threshold = 0,
                     Reason = "跌破 MA20",
                 });
             }
@@ -123,7 +123,7 @@ public static class WatchRuleEngine
                 {
                     Code = code, Name = name, Layer = WatchLayer.L1, Origin = WatchOrigin.Derived,
                     Position = pos, Kind = WatchKind.EventRecent, Expr = "Dividend",
-                    Op = WatchOp.Within, Threshold = 30, Priority = "B",
+                    Op = WatchOp.Within, Threshold = 30,
                     // ⚠ 措辞别写成"分红方案**变化**"（2026-09-11 改）：取值器取的是**最新一条**方案，
                     // 并没有跟上一版比较过。说成"变化"是在承诺一件没做的事——
                     // 真要判变化得存上一版方案再 diff，那是另一件事。
@@ -133,13 +133,13 @@ public static class WatchRuleEngine
 
             // ── 规则④：所有在册的票都挂 L0 兜底事件 ──
             // L0 是"所有票都有"，所以不按画像挑，挂就完了。
-            foreach (var (kind, table, days, why, pri) in L0Events)
+            foreach (var (kind, table, days, why) in L0Events)
             {
                 derived.Add(new WatchItem
                 {
                     Code = code, Name = name, Layer = WatchLayer.L0, Origin = WatchOrigin.Builtin,
                     Position = pos, Kind = kind, Expr = table,
-                    Op = WatchOp.Within, Threshold = days, Priority = pri, Reason = why,
+                    Op = WatchOp.Within, Threshold = days, Reason = why,
                 });
             }
         }
@@ -180,7 +180,7 @@ public static class WatchRuleEngine
     ///
     /// 窗口天数也是判据的一部分：**没有窗口，"最新一条"就不是事件、只是现状**。
     /// </summary>
-    private static readonly (string Kind, string Table, double Days, string Why, string Priority)[] L0Events =
+    private static readonly (string Kind, string Table, double Days, string Why)[] L0Events =
     [
         // ⚠ Reason 是**界面上直接显示的那句话**，只写"盯的是什么"，别写设计注解。
         //    原来业绩预告那条写成"L0：业绩预告（比财报早一个月以上）"——那个括号是解释
@@ -189,17 +189,17 @@ public static class WatchRuleEngine
 
         // ── 未来日程：取最近一次**将来**的，提前 N 天提醒 ──
         // 解禁提前 30 天：够看到"下个月有一批解禁"，又不会把一年后的事天天摆在眼前。
-        (WatchKind.ScheduleAhead, "ShareLift",        30, "限售解禁", "A"),
+        (WatchKind.ScheduleAhead, "ShareLift",        30, "限售解禁"),
         // 预约披露日提前 7 天：知道"这周要出报"就够，提前一个月没意义。
-        (WatchKind.ScheduleAhead, "EarningsSchedule",  7, "定期报告预约披露", "B"),
+        (WatchKind.ScheduleAhead, "EarningsSchedule",  7, "定期报告预约披露"),
 
         // ── 已发生的事：只报最近 N 天内发生的 ──
-        // 值得 A 档是因为它比正式财报早一个月以上，是提前量最大的基本面信号。7 天窗口跨长假也不漏。
+        // 它比正式财报早一个月以上，是提前量最大的基本面信号。7 天窗口跨长假也不漏。
         // ⚠ 别跟上面那条【定期报告预约披露】搞混：这条是**正式财报前的简要说明**（预增/预亏多少），
         //   那条是**正式财报哪天发**。两张表、两回事。
-        (WatchKind.EventRecent,   "EarningsForecast",  7, "业绩预告", "A"),
-        (WatchKind.EventRecent,   "HolderChange",      7, "股东增减持", "B"),
-        // 龙虎榜是 C 档（只落库不推送），窗口收到 3 天——它天天有，窗口一宽就成刷屏。
-        (WatchKind.EventRecent,   "Lhb",               3, "龙虎榜上榜", "C"),
+        (WatchKind.EventRecent,   "EarningsForecast",  7, "业绩预告"),
+        (WatchKind.EventRecent,   "HolderChange",      7, "股东增减持"),
+        // 龙虎榜窗口收到 3 天——它天天有，窗口一宽就成刷屏。
+        (WatchKind.EventRecent,   "Lhb",               3, "龙虎榜上榜"),
     ];
 }

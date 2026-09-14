@@ -52,12 +52,10 @@ public static class WatchCategory
 }
 
 /// <summary>一只票的全部事件，给主表一行用。</summary>
-/// <param name="Priority">这只票所有事件里最高的那个档（A&lt;B&lt;C）。</param>
 /// <param name="Opinion">个人观点，来自 <c>notes/{code}.md</c>。</param>
 public sealed record StockWatchEvents(
     string Code,
     string Name,
-    string Priority,
     IReadOnlyList<WatchEvent> Events,
     string Opinion = "");
 

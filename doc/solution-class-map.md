@@ -253,6 +253,46 @@ PlanWatchTask --|> FetchTaskBase
 WatchIndicatorRuleTask --|> FetchTaskBase
 MoneyFlowSnapshotTask --|> FetchTaskBase
 MoneyFlowBackfillTask --|> FetchTaskBase
+TotalSharesTask --|> FetchTaskBase
+class ITotalSharesProvider {
+  <<Logic.Abstractions>>
+  全市场总股本(股)
+  ⚠ 不是财报 share_capital
+  那是实收资本·金额·元
+}
+class EastMoneyTotalSharesProvider {
+  <<Data.Remote>>
+  东财条件选股接口
+  一个请求拿全市场 5562 只
+}
+class TotalSharesTask {
+  <<Tasks>>
+  日更·写 FundamentalMetric.total_shares
+  护栏:北交所专项 + 半截名单
+}
+EastMoneyTotalSharesProvider ..|> ITotalSharesProvider
+TotalSharesTask --> ITotalSharesProvider : 抓
+TotalSharesTask --> ITradingDayRepository : 值归到交易日
+FinancialAnalyzer ..> TotalSharesTask : PE/PB 的股数(缺则回退 share_capital 并标识)
+class SqliteMarketPeSource {
+  <<Data.Sqlite>>
+  一次读全市场 PE 的四份输入
+  日线只捞45天:全表GROUP BY要4秒
+}
+class IndustryPeStatsBuilder {
+  <<Logic.Services>>
+  二级样本>=30带档/>=10只中位/否则退一级
+  PE口径必须与个股行一致
+}
+class IndustryPeStats {
+  <<Logic.Models>>
+  行业名·级别·样本数·五分位
+  措辞只说高低不说便宜贵
+}
+IndustryPeStatsBuilder --> IndustryPeStats : 产出
+IndustryPeStatsBuilder ..> SqliteMarketPeSource : 输入由调用方取
+FinancialAnalyzer ..> IndustryPeStats : PE行参考值(行业+全市场两段)
+SqliteMarketPeSource ..> FinancialAnalyzer : 复用 TtmFromCumulative 保口径
 class IMoneyFlowDetailFetcher {
   <<Logic.Abstractions>>
   逐股分档资金流的取数通道

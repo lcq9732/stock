@@ -435,6 +435,14 @@ public partial class App : Application
         var taskRegistry = new FetchTaskRegistry();
         taskRegistry.Register(FetchActionId.StepTradingCalendar,
             () => new TradingCalendarTask(tradingDayRepository, tradingCalendarProvider, localTradingDays));
+        // 【总股本】2026-09-14。一个请求拿全市场，修的是 PE/PB 拿财报 share_capital（实收资本，
+        // 金额）当股数用这个老问题——面值不是 1 元的票全算错，两个方向都有（详见 MetricKeys.TotalShares）。
+        // 限流器给 1 并发：本来就只发一个请求，配置在这儿只是为了走统一的重试/退避。
+        taskRegistry.Register(FetchActionId.FetchTotalShares,
+            () => new TotalSharesTask(paths, fundamentalRepository,
+                new EastMoneyTotalSharesProvider(
+                    new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                tradingDayRepository));
         taskRegistry.Register(FetchActionId.StepCompanyProfile,
             () => new CompanyProfileTask(companyProfileRepository, companyProfileProvider));
         taskRegistry.Register(FetchActionId.StepCustomerSupplier,

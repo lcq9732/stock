@@ -766,6 +766,13 @@
                     <DockPanel Grid.Row="0" Grid.ColumnSpan="3" Margin="0,0,0,8" LastChildFill="True">
                         <Button DockPanel.Dock="Left" Content="重算并求值" Command="{Binding RunCommand}" Width="100"
                                 ToolTip="重算派生项（条件没了的自动摘掉）→ 逐条求值 → 记录新触发 → 重读叙述。&#10;手写项一行都不会动。" />
+                        <!-- 范围：默认只看**持仓**（有钱在里面的）。
+                             实测三个清单里真正有钱在里面的只有 9 只，而原来一律盯 67 只。
+                             没建仓的票，建仓前用【分析详情】查一次就够——建仓前是"查"，建仓后才是"盯"。
+                             ⚠ 自选股里没进主动仓的那些两个范围都不含：它们是算法验证样本，不代表要买。 -->
+                        <CheckBox DockPanel.Dock="Left" Content="全部跟踪" IsChecked="{Binding TrackedScope}"
+                                  VerticalAlignment="Center" Margin="16,0,0,0"
+                                  ToolTip="不勾：只看**持仓**——主动仓里买了还没卖完的 ＋ 底仓全部。&#10;勾上：主动仓全部 ＋ 底仓全部，包括打算买还没买的。&#10;&#10;自选股里没进主动仓的不在其中（那是算法验证样本）。" />
                         <!-- 找票：输入即筛，不用回车——这是"找"的动作，不是"提交"的动作。
                              只认代码和名称，不搜叙述正文（那是全文检索，跟找票是两种意图）。 -->
                         <TextBlock DockPanel.Dock="Left" Text="找票" VerticalAlignment="Center" Margin="16,0,4,0"
@@ -793,7 +800,6 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="66" />
                                 <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="92" />
-                                <DataGridTextColumn Header="档" Binding="{Binding Priority}" Width="32" />
                                 <!-- 叙述：一行事件一条，缩进表示"这是上一条的后续进展"。
                                      日期单独一列而不是拼进句子——竖着对齐才能一眼扫出时间顺序。 -->
                                 <DataGridTemplateColumn Header="发生了什么" Width="*" CanUserSort="False">

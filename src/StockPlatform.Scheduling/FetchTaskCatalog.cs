@@ -77,6 +77,13 @@ public enum FetchActionId
     FetchMarketEvents,
     FetchStockBoardMap,
 
+    /// <summary>
+    /// 【拉取总股本】（2026-09-14）——走东财条件选股接口，一个请求拿全市场。
+    /// 修的是 PE/PB 拿财报 <c>share_capital</c>（实收资本，金额）当股数用这个老问题，
+    /// 详见 <c>MetricKeys.TotalShares</c>。
+    /// </summary>
+    FetchTotalShares,
+
     // ───── 本地维护（2026-09-07）─────
     StepFillProbeFloor,
 
@@ -1040,6 +1047,24 @@ public static class FetchTaskCatalog
             SupportsPartialRun: false,
             Sources: [DataSourceId.EmPush2Delay]),
 
+        new(FetchActionId.FetchTotalShares, "总股本", "东财", QuotaGroup.Mixed,
+            TimeSpan.FromSeconds(10), "每日",
+            "全市场当前总股本（单位股），一个请求、一两秒——东财条件选股接口 ps=10000 一页装得下 5562 只。\n"
+            + "⚠ **这是 PE/PB 的股数来源**，此前一直用财报的 share_capital（「实收资本(或股本)」）代替。"
+            + "那是**金额、单位元**，等于 总股本 × 每股面值；A 股绝大多数面值 1.00 元，两个数恰好相等，"
+            + "于是这个巧合被当成了定义。\n"
+            + "2026-09-14 逐只比对，5561 只里 373 只对不上，两个方向都有：报表偏小的 269 只"
+            + "（面值 <1 元，紫金矿业差 10 倍、诺诚健华差 7.5 万倍），报表偏大的 104 只"
+            + "（H 股会计口径含股本溢价，中国移动 4703.59 亿元 vs 216.91 亿股）。"
+            + "重算后 277 只（7.1%）的 PE 变了：中国移动 348.8 → 16.1、分众传媒 0.5 → 20.1。\n"
+            + "⚠ 偏大那一类**没有本地判据能发现**——「流通市值÷收盘价 > 报表股本」只抓得出偏小的，"
+            + "所以这份数据只能取，不能靠本地校验兜住。\n"
+            + "拿不到的票（退市/停牌居多）库里就是没有这一行，PE/PB 回退用报表股本并在界面上标识。\n"
+            + "两道护栏：比库里在市个股少 5% 以上整轮不写库；一只北交所股票都没拿到也不写"
+            + "（前缀规则漏掉 920 曾让 342 只票静默抓不到，而 6% 的缺口进不了 5% 的门槛）。",
+            SupportsPartialRun: false,
+            Sources: [DataSourceId.EmDataCenter]),
+
         new(FetchActionId.FetchMoneyFlowDetail, "分档资金流·补历史", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(6), "季度定期组·空闲时补（每轮 30 只）",
             "抓**分档**资金流：超大单/大单/中单/小单各自的净额和净占比，共 10 个维度。\n"
@@ -1344,6 +1369,11 @@ public static class FetchTaskCatalog
         // 事后只能靠逐股那条通道 5500 个请求换回一天。59 个请求、一两分钟，放日更毫无负担。
         FetchActionId.FetchMoneyFlowSnapshot => PlanGroupKind.Daily,
 
+        // 【总股本】归日更：股本本身不常动（增发/回购/送转才变），但一动就直接改 PE/PB，
+        // 而一个请求一两秒，放日更毫无负担。不放季度组是因为"季度才跑一次"意味着
+        // 送转之后最长两三个月里 PE 都是错的，代价和收益完全不成比例。
+        FetchActionId.FetchTotalShares => PlanGroupKind.Daily,
+
         // 【行业景气指标】（2026-09-07）归日更：116 个指标里 45 个是日频，每天都变。
         // 增量很轻——每个指标只拉水位线之后的那几行。
         FetchActionId.StepIndustryIndicator => PlanGroupKind.Daily,
@@ -1496,6 +1526,10 @@ public static class FetchTaskCatalog
     [
         // ── K线族 ──
         FetchActionId.StepRoster,
+        // 【总股本】紧跟名册（2026-09-14）：两者都是"全市场当前是什么样"的截面，而且它一两秒就完。
+        // 排在名册之后是因为覆盖护栏要拿库里在市名册当基准——名册先刷新，护栏才不会因为
+        // "接口有新股、本地名册还没有"而误报。
+        FetchActionId.FetchTotalShares,
         FetchActionId.StepStockDayBars,
         FetchActionId.StepStockRawBars,
         FetchActionId.StepStockHfqBars,

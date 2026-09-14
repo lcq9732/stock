@@ -13,7 +13,7 @@ public class WatchEvaluatorTests
     private static WatchItem Item(string kind, string op, double? threshold = null) => new()
     {
         Code = "300750", Name = "宁德时代", Kind = kind, Op = op,
-        Threshold = threshold, Reason = "测试项", Priority = "A",
+        Threshold = threshold, Reason = "测试项",
     };
 
     // ── stage 跃迁 ──

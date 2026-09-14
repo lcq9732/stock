@@ -104,7 +104,7 @@ public static class BankHealthCheckBuilder
     public static AnalysisSection Build(
         FinancialSnapshot cur, FinancialSnapshot? prior, List<FinancialSnapshot> history,
         BankPeerStats peers, double? price, double? dps,
-        List<BankRegulatoryMetric>? regulatory = null)
+        List<BankRegulatoryMetric>? regulatory = null, double? totalShares = null)
     {
         var lines = new List<AnalysisLine>();
         double? G(FinancialSnapshot? s, string k) => s?.Get(k);
@@ -394,17 +394,21 @@ public static class BankHealthCheckBuilder
         }
 
         // ── 07 PB × ROE：便宜必须有质量 ──
-        double? share = G(cur, FinancialKeys.ShareCapital);
+        // 股数：优先总股本，拿不到才回退报表实收资本并标识（口径差异见 MetricKeys.TotalShares）。
+        double? share = totalShares is > 0 ? totalShares : G(cur, FinancialKeys.ShareCapital);
+        bool shareIsFallback = totalShares is not > 0;
         if (price is > 0 && share is > 0 && eq is > 0)
         {
             double pb = price.Value / (eq.Value / share.Value);
             lines.Add(new AnalysisLine
             {
                 ClauseNo = 7, Label = "PB", Value = $"{pb:F2}",
-                Change = $"每股净资产 {eq.Value / share.Value:F2} 元",
+                Change = $"每股净资产 {eq.Value / share.Value:F2} 元"
+                       + (shareIsFallback ? "　⚠ 没有总股本，按报表实收资本算" : ""),
                 Reference = "全行业普遍破净（中位约 0.54）",
                 Verdict = Verdict.Neutral,
-                Note = "股本用报表实收资本（含 H 股），A 股价格乘全部股本会略高估有 H 股的银行",
+                Note = "股本含 H 股，A 股价格乘全部股本会略高估有 H 股的银行"
+                     + (shareIsFallback ? "。⚠ 这里用的是报表实收资本（金额），面值不是 1 元的银行会算错" : ""),
             });
             if (roe is > 0)
                 lines.Add(new AnalysisLine

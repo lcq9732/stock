@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:oxy="http://oxyplot.org/wpf"
         xmlns:local="clr-namespace:StockPlatform.Analyzer"
-        Title="财务分析" MinHeight="500" MinWidth="900"
+        Title="分析详情" MinHeight="500" MinWidth="900"
         WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei"
         Background="{DynamicResource Theme.Window.Background}"
         Foreground="{DynamicResource Theme.Foreground}">

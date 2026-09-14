@@ -1,5 +1,16 @@
 namespace StockPlatform.Logic.Models;
 
+// ⚠ 「档」（Priority，A=推送/B=进日报/C=只落库）于 2026-09-14 整套删除，
+//   连同 WatchPriority、WatchReading.Magnitude、界面上的「档」列。
+//
+//   它本来是**路由键**：一个字母决定这条消息走推送、走日报、还是只落库。
+//   那三个出口一个都没做过，所以它一直是个没有下游的路由键。
+//   而观察项页改成事件叙述之后，「解禁 789 股，占流通 0.02%」这种句子把量写在脸上了——
+//   档是把量压成一个字母，在已经显示原始数字的地方，压缩只会丢信息（康辰药业解禁 74 股
+//   曾被标成 A 档，跟"占流通 30%"同一个字母，就是压错的证据）。
+//
+//   哪天要做日报/推送，档该在**推的那一刻现算**，不必存进观察项、更不必显示。
+
 /// <summary>
 /// 一条观察项——"这只票的这件事要盯着"。见 doc/watch-item-design.md §4.2。
 ///
@@ -35,15 +46,6 @@ public sealed class WatchItem
     public string Op { get; set; } = WatchOp.Lt;
 
     public double? Threshold { get; set; }
-
-    /// <summary>
-    /// A=推送 / B=进日报 / C=只落库。
-    ///
-    /// ⚠ 有些事项的轻重**要看数**，不能在挂的时候一口价定死：解禁 74 股（两千块）
-    /// 跟解禁占流通 30% 同为 A 档是荒唐的。这类由 <see cref="WatchPriority"/> 在求值时
-    /// 按实际量重算，这里存的是**兜底档**（2026-09-12）。
-    /// </summary>
-    public string Priority { get; set; } = "B";
 
     public bool Enabled { get; set; } = true;
 
@@ -179,7 +181,6 @@ public sealed class WatchHit
     /// </summary>
     public string Message { get; set; } = "";
 
-    public string Priority { get; set; } = "B";
     public DateTime CreatedAt { get; set; } = DateTime.Now;
 
     // 「已处理」标记于 2026-09-14 整套删除（Handled / HandledAt / MarkHandled / 详情窗的勾选）。

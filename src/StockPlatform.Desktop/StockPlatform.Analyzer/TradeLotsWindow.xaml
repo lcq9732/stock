@@ -18,7 +18,7 @@
         <TextBlock x:Name="TitleText" Grid.Row="0" FontSize="15" FontWeight="Bold" Margin="0,0,0,4" />
         <StackPanel Grid.Row="1" Margin="0,0,0,8">
             <TextBlock Foreground="{DynamicResource Theme.Foreground.Muted}" TextWrapping="Wrap"
-                       Text="买入、卖出都可以录多笔（金字塔式建仓 / 分批止盈）。表格里双击即可修改；日期填 2026-08-11 这种格式，价格和股数都必须大于0。保存后，&quot;主动仓&quot;列表显示的是这些笔汇总出来的总股数和加权平均价。" />
+                       Text="买入、卖出都可以录多笔（金字塔式建仓 / 分批止盈）。表格里双击即可修改；日期填 2026-08-11 这种格式，价格和股数都必须大于0。保存后，&quot;主动仓&quot;列表显示的是这些笔汇总出来的总股数和加权平均价。&#10;「原因」建议每笔都填——它是**事后没法补的**：过几个月就想不起来那笔到底是到点止盈走的、还是看着不对提前跑的，而这两者正是判断「纪律有没有用」的关键。留空也能存。" />
 
             <!-- 费率设置——各家券商佣金不一样，做成可填的。全程序共用一份（存 data\trade-fees.json），
                  在这里改完立刻生效并落盘，下面的费用/汇总跟着重算。单位统一用"万分之"（券商就是这么
@@ -76,8 +76,25 @@
                                     Binding="{Binding SharesText, UpdateSourceTrigger=PropertyChanged}" />
                 <DataGridTextColumn Header="金额" Width="110" IsReadOnly="True"
                                     Binding="{Binding AmountText}" />
-                <DataGridTextColumn Header="费用" Width="*" IsReadOnly="True"
+                <DataGridTextColumn Header="费用" Width="120" IsReadOnly="True"
                                     Binding="{Binding FeeText}" />
+                <!-- 原因：选项跟着"方向"变（买入 4 个 / 卖出 7 个），所以 ItemsSource 绑到行上
+                     而不是用 x:Static 绑一份静态列表。留空表示"未填"，不强制。 -->
+                <DataGridComboBoxColumn Header="原因" Width="170"
+                                        SelectedItemBinding="{Binding ReasonLabel, UpdateSourceTrigger=PropertyChanged}">
+                    <DataGridComboBoxColumn.ElementStyle>
+                        <Style TargetType="ComboBox">
+                            <Setter Property="ItemsSource" Value="{Binding ReasonOptions}" />
+                        </Style>
+                    </DataGridComboBoxColumn.ElementStyle>
+                    <DataGridComboBoxColumn.EditingElementStyle>
+                        <Style TargetType="ComboBox">
+                            <Setter Property="ItemsSource" Value="{Binding ReasonOptions}" />
+                        </Style>
+                    </DataGridComboBoxColumn.EditingElementStyle>
+                </DataGridComboBoxColumn>
+                <DataGridTextColumn Header="备注" Width="*"
+                                    Binding="{Binding Note, UpdateSourceTrigger=PropertyChanged}" />
             </DataGrid.Columns>
         </DataGrid>
 

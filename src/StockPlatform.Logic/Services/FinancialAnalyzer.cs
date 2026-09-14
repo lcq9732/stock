@@ -88,6 +88,19 @@ public class FinancialAnalyzer
     private const double Yi = 1e8;
 
     /// <summary>
+    /// 没拿到总股本、PE/PB 回退用报表实收资本时挂在那两行上的标识（2026-09-14）。
+    ///
+    /// 为什么必须标而不是静默回退：这两个口径**只有面值 1.00 元时才相等**，而错的时候
+    /// 错得离谱且看不出来——中国移动回退值算出 PE 348.8（真值 16.1）、分众传媒 0.5（真值 20.1）。
+    /// 用户看到的是一个正常格式的数字，没有任何迹象表明它不可信。
+    ///
+    /// ⚠ 不能改成"自动判断对不对"：偏大那一类（H 股会计口径）**没有本地判据能发现**，
+    /// 「流通市值÷收盘价 &gt; 报表股本」只抓得出偏小的那些。所以只要没有总股本就一律标，
+    /// 不去猜这一只到底准不准。
+    /// </summary>
+    private const string ShareCountFallbackNote = "　⚠ 没有总股本，按报表实收资本算";
+
+    /// <summary>
     /// 银行体检表的行业参考分位（2026-08-29）。为 null 时用 <see cref="BankPeerStats.Builtin"/>
     /// 那份带日期的实测快照。调用方拿得到全行业数据时应该注入实算值——ROE/ROA/净息差这些
     /// 相对性指标钉死阈值就会随时代失效（见 <see cref="BankPeerStats"/> 的类注释）。
@@ -108,9 +121,25 @@ public class FinancialAnalyzer
     /// 全市场 PE 分位，给「PE (TTM)」那行当参考值。传 null 用
     /// <see cref="MarketPeStats.Builtin"/> 内置快照——现有调用点不用改。
     /// </param>
+    /// <param name="industryPe">
+    /// 这只票所属行业的 PE 分位（2026-09-14）。传 null 就只显示全市场那半句——
+    /// 没有行业归属的票（退市股、个别新股，实测 41 只）本来就该是这个行为。
+    /// 取数在调用方，本类零 IO。
+    /// </param>
+    /// <param name="priceDate">
+    /// <paramref name="latestClose"/> 是哪一天的收盘价（2026-09-14 新增）。只用于显示——
+    /// 本地库未必抓到了今天，估值三行算的是"那一天的估值"，不标出来会被当成现价。
+    /// </param>
+    /// <param name="totalShares">
+    /// 总股本（**股**），PE/PB 的股数（2026-09-14 新增）。传 null 或非正数就回退用财报的
+    /// <c>share_capital</c> 并在那两行上标识——那是「实收资本」，是**金额**，
+    /// 等于 总股本 × 每股面值，只有面值 1.00 元时才碰巧等于股数。
+    /// 取数在调用方（<c>MetricKeys.TotalShares</c>，日更），本类零 IO。
+    /// </param>
     public FinancialAnalysisReport Analyze(string code, string name, List<FinancialSnapshot> history,
         double? latestClose = null, double? dividendPerShare = null,
-        List<BankRegulatoryMetric>? regulatory = null, MarketPeStats? peStats = null)
+        List<BankRegulatoryMetric>? regulatory = null, MarketPeStats? peStats = null,
+        double? totalShares = null, DateTime? priceDate = null, IndustryPeStats? industryPe = null)
     {
         if (history == null || history.Count == 0)
             return new FinancialAnalysisReport
@@ -159,17 +188,17 @@ public class FinancialAnalyzer
         // 三类金融机构各一张表——银行看资产质量、券商看净资本、保险看偿付能力，互不通用。
         if (kind == FinancialInstitutionKind.Bank)
             Collect(BankHealthCheckBuilder.Build(cur, prior, history, _bankPeers ?? BankPeerStats.Builtin,
-                latestClose, dividendPerShare, regulatory));
+                latestClose, dividendPerShare, regulatory, totalShares));
         else if (kind == FinancialInstitutionKind.Broker)
-            Collect(BrokerInsurerHealthCheckBuilder.BuildBroker(cur, prior, history, latestClose, regulatory));
+            Collect(BrokerInsurerHealthCheckBuilder.BuildBroker(cur, prior, history, latestClose, regulatory, totalShares));
         else if (kind == FinancialInstitutionKind.Insurer)
-            Collect(BrokerInsurerHealthCheckBuilder.BuildInsurer(cur, prior, history, latestClose, regulatory));
+            Collect(BrokerInsurerHealthCheckBuilder.BuildInsurer(cur, prior, history, latestClose, regulatory, totalShares));
 
         Collect(BuildScaleVsEfficiency(cur, prior, prevInYear, priorPrevInYear, isFin));
         if (!isFin) Collect(BuildMarginAttribution(cur, prior));
         Collect(BuildCashQuality(cur, prior, history, isFin));
         Collect(BuildFundingSource(cur, prior, prevPeriod, isFin));
-        Collect(BuildReturnAndValuation(cur, prior, history, latestClose, dividendPerShare, isFin, peStats));
+        Collect(BuildReturnAndValuation(cur, prior, history, latestClose, dividendPerShare, isFin, peStats, totalShares, industryPe));
 
         return new FinancialAnalysisReport
         {
@@ -178,6 +207,8 @@ public class FinancialAnalyzer
             ReportDate = cur.ReportDate,
             PriorYearDate = prior?.ReportDate,
             PeriodName = PeriodName(cur.ReportDate),
+            Price = latestClose,
+            PriceDate = priceDate,
             Kind = kind,
             Headline = BuildHeadline(cur, prior, isFin),
             Sections = sections,
@@ -733,7 +764,7 @@ public class FinancialAnalyzer
 
     private AnalysisSection BuildReturnAndValuation(FinancialSnapshot cur, FinancialSnapshot? prior,
         List<FinancialSnapshot> history, double? price, double? dps, bool isFin,
-        MarketPeStats? peStats)
+        MarketPeStats? peStats, double? totalShares, IndustryPeStats? industryPe)
     {
         var lines = new List<AnalysisLine>();
         double? npp = cur.Get(FinancialKeys.NetProfitParent);
@@ -758,7 +789,10 @@ public class FinancialAnalyzer
             });
         }
 
-        double? share = cur.Get(FinancialKeys.ShareCapital);
+        // 股数：优先用抓来的总股本，拿不到才回退报表的实收资本并标识（见 ShareCountFallbackNote）。
+        double? share = totalShares is > 0 ? totalShares : cur.Get(FinancialKeys.ShareCapital);
+        bool shareIsFallback = totalShares is not > 0;
+        string shareNote = shareIsFallback ? ShareCountFallbackNote : "";
         if (price is > 0 && share is > 0)
         {
             if (eq is > 0)
@@ -767,9 +801,11 @@ public class FinancialAnalyzer
                 lines.Add(new AnalysisLine
                 {
                     Label = "PB", Value = $"{price.Value / bps:F2}",
-                    Change = $"每股净资产 {bps:F2} 元",
+                    Change = $"每股净资产 {bps:F2} 元" + shareNote,
                     Verdict = Verdict.Neutral,
-                    Note = "股本用报表的实收资本，不是流通市值倒推",
+                    Note = shareIsFallback
+                        ? "股本用报表的实收资本，不是流通市值倒推"
+                        : "总股本含限售股和 H/B 股，不是流通市值倒推",
                 });
             }
             // TTM：年报直接用；中间期用"上年年报 − 上年同期 + 本期"
@@ -785,12 +821,18 @@ public class FinancialAnalyzer
                 lines.Add(new AnalysisLine
                 {
                     Label = "PE (TTM)", Value = $"{pe:F1}",
-                    Change = $"TTM 归母净利 {ttm.Value / Yi:F2} 亿",
+                    Change = $"TTM 归母净利 {ttm.Value / Yi:F2} 亿" + shareNote,
                     // ⚠ 只能是 Neutral。FactorLab 十分组实测 D1（最贵那组）年化 +10.6%、
                     //   是十组里最高的，曲线呈 U 型不单调 —— "贵"并不预示跌。
                     //   界面按 Verdict 上色，标黄标红就是在暗示一个数据不支持的结论。
                     Verdict = Verdict.Neutral,
-                    Reference = $"全市场中位 {mkt.Median:F1} 倍　{mkt.DescribePosition(pe)}",
+                    // 行业在前、全市场在后（2026-09-14）。两句答的不是一个问题：
+                    // 行业分位答"同行里高不高"，全市场分位答"绝对位置在哪"。
+                    // 只留行业的话会丢掉"银行整体就便宜"这个信息——银行 6.3 的行业中位
+                    // 本身就是市场对整个行业的定价。
+                    Reference = industryPe is { } ind
+                        ? $"{ind.Describe(pe)}　·　全市场中位 {mkt.Median:F1} 倍"
+                        : $"全市场中位 {mkt.Median:F1} 倍　{mkt.DescribePosition(pe)}",
                     Note = earnedPct >= 100
                         ? $"已赚到的利润按 {BaseValuationPe:F0} 倍能撑 {supported / Yi:F0} 亿，"
                           + $"超过市值 {cap / Yi:F0} 亿 —— 现价没有为未来付钱"
@@ -815,14 +857,35 @@ public class FinancialAnalyzer
 
     private static double? TtmProfit(FinancialSnapshot cur, FinancialSnapshot? prior, List<FinancialSnapshot> history)
     {
-        double? npp = cur.Get(FinancialKeys.NetProfitParent);
-        if (npp == null) return null;
-        if (cur.ReportDate.Month == 12) return npp;
         var lastAnnual = history.FirstOrDefault(h => h.ReportDate.Month == 12 && h.ReportDate.Year == cur.ReportDate.Year - 1);
-        double? annual = lastAnnual?.Get(FinancialKeys.NetProfitParent);
-        double? priorSame = prior?.Get(FinancialKeys.NetProfitParent);
-        if (annual == null || priorSame == null) return null;
-        return annual.Value - priorSame.Value + npp.Value;
+        return TtmFromCumulative(
+            cur.ReportDate,
+            cur.Get(FinancialKeys.NetProfitParent),
+            lastAnnual?.Get(FinancialKeys.NetProfitParent),
+            prior?.Get(FinancialKeys.NetProfitParent));
+    }
+
+    /// <summary>
+    /// TTM 归母净利：年报直接用，中间期用「上年年报 − 上年同期 + 本期」。
+    /// A股定期报告是**年内累计**口径，所以这个减法才成立。
+    ///
+    /// ⚠ **算行业/全市场 PE 分位的一方必须调这个函数**（2026-09-14 抽出来就是为了这个）。
+    /// 参考分位跟个股值口径不同的话，比了等于没比——银行体检表那边踩过同样的坑：
+    /// ROE 分母一边用期末、一边用期初期末均值，个股一比就系统性地"优于行业"，全是假的。
+    /// 分位那侧数据形状不一样（不会为 3900 只票各建一份 FinancialSnapshot 列表），
+    /// 所以口径只能靠这个共用的纯函数保证，不能靠"两边各写一遍小心点"。
+    /// </summary>
+    /// <param name="period">本期报告期。</param>
+    /// <param name="current">本期归母净利（年内累计）。</param>
+    /// <param name="lastAnnual">上年年报的归母净利。</param>
+    /// <param name="priorSamePeriod">去年同期（同月份）的归母净利。</param>
+    public static double? TtmFromCumulative(DateTime period, double? current,
+                                            double? lastAnnual, double? priorSamePeriod)
+    {
+        if (current == null) return null;
+        if (period.Month == 12) return current;
+        if (lastAnnual == null || priorSamePeriod == null) return null;
+        return lastAnnual.Value - priorSamePeriod.Value + current.Value;
     }
 
     // ══════════ 趋势 ══════════

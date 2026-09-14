@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using StockPlatform.Analyzer.Watchlist;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Analyzer;
 
@@ -37,7 +38,20 @@ public class TradeLotEditRow : INotifyPropertyChanged
     public void RefreshFees() => Raise(nameof(FeeText));
 
     private string _sideText = "买入";
-    public string SideText { get => _sideText; set { _sideText = value; Raise(); } }
+    public string SideText
+    {
+        get => _sideText;
+        set
+        {
+            _sideText = value;
+            Raise();
+            // 买卖切换后原因的可选项整套变了，原来选的那个多半也不适用了 —— 清掉重选，
+            // 留着会出现「卖出笔挂着『方法给出信号』」这种自相矛盾的记录。
+            Reason = "";
+            Raise(nameof(ReasonOptions));
+            Raise(nameof(ReasonLabel));
+        }
+    }
 
     private string _dateText = "";
     public string DateText { get => _dateText; set { _dateText = value; Raise(); } }
@@ -74,6 +88,34 @@ public class TradeLotEditRow : INotifyPropertyChanged
 
     public bool IsBuy => SideText == SideOptions[0];
 
+    /// <summary>
+    /// 原因下拉的选项，**跟着方向变**（买入 4 个 / 卖出 7 个，见 TradeReasons.For）。
+    /// 绑在行上而不是用 x:Static 绑静态列表，就是为了这个 —— 列级的 ItemsSource 没法按行变。
+    /// </summary>
+    public IReadOnlyList<string> ReasonOptions =>
+        TradeReasons.For(!IsBuy)
+                    .Select(x => x.Label).ToList();
+
+    /// <summary>归因码（落库的值），空串=未填。</summary>
+    public string Reason { get; set; } = "";
+
+    /// <summary>界面上选的那行文字。读写都转成/自 <see cref="Reason"/> 的码。</summary>
+    public string? ReasonLabel
+    {
+        get => TradeReasons.For(!IsBuy)
+                           .FirstOrDefault(x => x.Code == Reason).Label;
+        set
+        {
+            Reason = TradeReasons.For(!IsBuy)
+                                 .FirstOrDefault(x => x.Label == value).Code ?? "";
+            Raise();
+        }
+    }
+
+    private string _note = "";
+    /// <summary>自由备注。</summary>
+    public string Note { get => _note; set { _note = value; Raise(); } }
+
     public static TradeLotEditRow From(TradeLot lot, TradeFeeSettings fees) => new()
     {
         Id = lot.Id,
@@ -82,6 +124,8 @@ public class TradeLotEditRow : INotifyPropertyChanged
         DateText = lot.Date.ToString("yyyy-MM-dd"),
         PriceText = lot.Price > 0 ? lot.Price.ToString("F2") : "",
         SharesText = lot.Shares > 0 ? lot.Shares.ToString() : "",
+        Reason = lot.Reason ?? "",
+        Note = lot.Note ?? "",
     };
 }
 
@@ -301,6 +345,9 @@ public partial class TradeLotsWindow : Window
                 Date = date.Date,
                 Price = price,
                 Shares = shares,
+                // 留空是允许的 —— 强制填只会让人瞎选一个，那比空着更坏
+                Reason = r.Reason ?? "",
+                Note = (r.Note ?? "").Trim(),
             });
         }
         return result;
