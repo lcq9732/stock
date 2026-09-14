@@ -24,6 +24,12 @@ namespace StockPlatform.Tasks;
 /// 合在一项里时整项被"耗时长、没时效压力"归进了季度组，快照跟着遭殃——2026-09-09 全市场
 /// 整天缺失就是这么丢的。两条通道的数据**逐条比对过、零差异**，写同一张表是安全的。
 ///
+/// ════ 走哪条通道由配置定（2026-09-14）════
+/// 两条通道打的 URL 一模一样，差别只在请求由谁发出去，见 <see cref="IMoneyFlowDetailFetcher"/>：
+/// 本机网关把 push2his 按域名拦了，HttpClient 那条发不出去，默认走**真浏览器**那条。
+/// 所以这个任务里**不该再出现通道细节**——阈值、收尾措辞、节奏一律由通道自报。
+/// （2026-09-12 那版把「每 15 个请求歇 2 分钟」写死在判据和注释里，换通道时两头都得改。）
+///
 /// ════ 一批＝一只票（2026-09-11 迁成新式任务时定的）════
 /// 老实现每 100 只才报一句进度。那轮待办只剩 72 只——一句都报不出来，而 push2his 是 5 秒间隔、
 /// 每 15 个请求歇 2 分钟、单只失败还要静默重试 2s+10s，于是**必然**哑过 5 分钟，被静默看门狗
@@ -33,8 +39,9 @@ namespace StockPlatform.Tasks;
 public sealed class MoneyFlowBackfillTask(
     FetchPaths paths,
     INetInflowDetailRepository repository,
-    EastMoneyMoneyFlowProvider perStock,
-    TimeSpan? progressInterval = null) : FetchTaskBase<NetInflowDetail>
+    IMoneyFlowDetailFetcher perStock,
+    TimeSpan? progressInterval = null,
+    int? maxPerRun = null) : FetchTaskBase<NetInflowDetail>
 {
     public override FetchActionId Id => FetchActionId.FetchMoneyFlowDetail;
 
@@ -50,6 +57,10 @@ public sealed class MoneyFlowBackfillTask(
     private string? _skipped;
 
     private int _ok, _failed, _empty, _rows, _consecutiveFail, _todoCount;
+
+    /// <summary>本轮的每轮上限。收尾那句要照实说「每轮只做 N 只」——
+    /// 拿默认常量顶的话，换了通道（上限不一样）之后那句话就是错的。</summary>
+    private int _capThisRun;
 
     /// <summary>整个队列还有多少只（不是本轮抓的那几只）——有每轮上限在，
     /// "完成"很容易被读成"补齐了"，所以收尾时必须把还欠多少报出来。</summary>
@@ -77,7 +88,8 @@ public sealed class MoneyFlowBackfillTask(
         if (perStock.PausedUntil is { } until)
         {
             var mins = Math.Max(1, (int)Math.Ceiling((until - DateTime.Now).TotalMinutes));
-            var reason = $"东财 push2his 限流熔断中，预计 {until:HH:mm} 恢复（还有约 {mins} 分钟）";
+            var reason = $"分档资金流通道（{perStock.ChannelName}）熔断中，"
+                       + $"预计 {until:HH:mm} 恢复（还有约 {mins} 分钟）";
             Report($"{reason}，本轮不补历史。已抓到的都在库里，恢复后接着来。");
             _skipped ??= reason;
             yield break;
@@ -113,7 +125,10 @@ public sealed class MoneyFlowBackfillTask(
         // 每轮上限：调度给了就听调度的，没给就按 MaxPerRun 兜底（跟财务报表同一个形状）。
         // 截在**问几只**上、不是"成功几只"：限流限的是请求数，失败的那几只照样花掉了配额，
         // 骨架的 MaxItems 只数成功批次，单靠它会在一轮里把 5000 只全问一遍。
-        int cap = args.MaxItems is > 0 ? args.MaxItems.Value : MoneyFlowBackfillPlan.MaxPerRun;
+        int cap = args.MaxItems is > 0 ? args.MaxItems.Value
+                : maxPerRun is > 0 ? maxPerRun.Value
+                : MoneyFlowBackfillPlan.MaxPerRun;
+        _capThisRun = cap;
         var todo = pending.Count > cap ? pending.Take(cap).ToList() : pending;
         _pendingCount = pending.Count;
         if (todo.Count == 0)
@@ -159,17 +174,13 @@ public sealed class MoneyFlowBackfillTask(
                     _failed++; _consecutiveFail++;
                     _lastFailure = ex.Message;
                     if (_failed <= 5) _errors.Add($"{code} 分档资金流失败：{ex.Message}");
-                    // 连续失败＝已被限流，继续打只会让封禁更久；抓到的都落库了，下轮接着来。
-                    if (_consecutiveFail >= 15)
+                    // 连续失败＝这条通道已经被切，继续打只会让封禁更久；抓到的都落库了，下轮接着来。
+                    // 阈值和这句话都**由通道自报**（见 IMoneyFlowDetailFetcher）：
+                    // 「连不上」（换通道，等多久都不会好）跟「被限流」（等着就行）的处置完全相反，
+                    // 2026-09-11 把网关拦截报成限流，就把人往「等一会儿就好了」的方向带了一整天。
+                    if (_consecutiveFail >= perStock.GiveUpAfterConsecutiveFailures)
                     {
-                        // ⚠ 别一口咬定"被限流"（2026-09-12 改）：2026-09-11 公司网关按域名把
-                        //   push2his 整个拦了（TCP/TLS 都通，一发请求就被切、收到 0 字节），
-                        //   日志却写着"判定被限流"——把人往"等一会儿就好了"的方向带，
-                        //   实际等多久都不会好，得换网络。两者的处置完全不同，不能混为一谈。
-                        bool unreachable = _lastFailure?.Contains("无法连接") == true;
-                        var verdict = unreachable
-                            ? "这条链路连不上 push2his（多半是网关按域名拦了：TCP 通、一发请求就被切）"
-                            : "判定被限流（等一段时间会自己恢复）";
+                        var verdict = perStock.ExhaustedVerdict(_lastFailure);
                         Report($"⚠ 连续 {_consecutiveFail} 只失败，{verdict}，补历史提前收尾。"
                              + $"最后一次的原因：{_lastFailure}。"
                              + $"已成功 {_ok} 只，剩余 {todo.Count - i - 1} 只下轮继续。");
@@ -242,7 +253,7 @@ public sealed class MoneyFlowBackfillTask(
             Report($"分档资金流补历史：本轮成功 {_ok} 只、失败 {_failed} 只、接口没数据 {_empty} 只、"
                  + $"写入 {_rows} 行，用时 {Fmt(_sw.Elapsed)}。"
                  + (left > 0 ? $"⚠ 还有 {left} 只没补——这一项每轮只做 "
-                             + $"{MoneyFlowBackfillPlan.MaxPerRun} 只（push2his 限流太凶），"
+                             + $"{_capThisRun} 只（这个接口限流太凶：累计十几个请求就被切），"
                              + "勾上【空闲时自动补】让它一轮一轮补完，或者再点几次执行。"
                              : ""));
 

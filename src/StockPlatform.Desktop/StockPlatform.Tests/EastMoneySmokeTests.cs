@@ -89,6 +89,37 @@ public class EastMoneySmokeTests
         _out.WriteLine("  ✅ F10 漏掉的 4 只全部到位");
     }
 
+    /// <summary>
+    /// 浏览器通道跑通没有（2026-09-14）。**这条是这次改造的唯一端到端验证**：
+    /// 单元测试测不出"CDP 起得来、页面里的 JSONP 真能把数据带回来"这条链路。
+    ///
+    /// 跑它会**弹一个浏览器窗口**、发 1 个请求，几秒后自己关掉。
+    /// 用的端口和 profile 目录都跟生产那套分开，不会跟正在跑的抓取打架。
+    /// </summary>
+    [Fact]
+    public async Task 分档资金流_浏览器通道能取到数据()
+    {
+        if (!Enabled) { _out.WriteLine("跳过（设 EM_SMOKE=1 才联网跑）"); return; }
+
+        await using var fetcher = new ChromeCdpMoneyFlowFetcher(
+            userDataDir: Path.Combine(Path.GetTempPath(), "mf-cdp-smoke"),
+            port: 19334);
+        fetcher.OnStatus += s => _out.WriteLine("  " + s);
+
+        var list = await fetcher.FetchAsync("600875");   // 东方电气，跟上面那条用同一只票
+        _out.WriteLine($"600875 取到 {list.Count} 天");
+        Assert.NotEmpty(list);
+        Assert.InRange(list.Count, 60, 200);
+
+        var d = list[^1];
+        _out.WriteLine($"最新一天 {d.TradeDate:yyyy-MM-dd}：主力={d.MainNet:N0} 超大单={d.SuperNet:N0} "
+                     + $"大单={d.BigNet:N0} 中单={d.MidNet:N0} 小单={d.SmallNet:N0}");
+
+        // 五档拆分是这份数据的全部意义，缺哪档都白搭
+        Assert.NotNull(d.MainNet); Assert.NotNull(d.SuperNet); Assert.NotNull(d.BigNet);
+        Assert.NotNull(d.MidNet); Assert.NotNull(d.SmallNet); Assert.NotNull(d.ClosePrice);
+    }
+
     [Fact]
     public async Task 分档资金流_五档都有值且能对上主力净额()
     {

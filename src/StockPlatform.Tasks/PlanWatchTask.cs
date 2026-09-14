@@ -26,9 +26,10 @@ namespace StockPlatform.Tasks;
 /// ② 正文：<see cref="IAnnouncementDetailFetcher"/> 东财直接给纯文本，绕开 PDF 解析。
 /// 两条都是 <c>OrderWinAnnouncement</c> 那条管线在用的，已验证。
 ///
-/// ════ 一批＝一天的命中 ════
-/// 水位线是库里的 <c>MAX(announce_date)</c>，批的粒度是「一个搜索日窗」——
-/// 水位线粒度（日）不粗于截断粒度（日窗），所以不需要额外的完成度表
+/// ════ 一批 ≤ 一天的命中 ════
+/// 水位线是库里的 <c>MAX(announce_date)</c>，批的粒度不粗于「一个搜索日窗」——
+/// 量大的日子（每月前三个交易日是法定进展披露窗口，两三百条）会拆成几批交，见 <c>YieldChunk</c>。
+/// 水位线粒度（日）不粗于截断粒度，所以不需要额外的完成度表
 /// （对比【客户与供应商】：那边一批 2000 行、水位线是「年」，粗两个数量级才必须加表）。
 ///
 /// ════ 失败语义＝累积 ════
@@ -66,6 +67,41 @@ public sealed class PlanWatchTask(
 
     /// <summary>巨潮每页大致条数，只用来估"是不是撞到翻页上限了"，不必精确。</summary>
     private const int PageSizeGuess = 10;
+
+    /// <summary>
+    /// 取正文取到第几条报一次进度（2026-09-14 补，这是被误杀出来的）。
+    ///
+    /// 原来内层这个 foreach 整段一句话不说：先报「命中 N 条，开始取正文…」，等全天取完才报
+    /// 「解析 N 条」。单条正文要两个请求（先在该股最近 100 条公告里匹配 art_code、再取正文），
+    /// 限流 1 秒一个，实测 1.3 秒/条——**241 条就是 5 分 13 秒的静默**，刚好越过
+    /// <see cref="QuietWatchdog"/> 的 5 分钟线，于是一个正在正常前进的任务被判成卡死掐断
+    /// （2026-09-14 08:25，停在 09-02）。
+    ///
+    /// ⚠ 而且这不是偶发：法定节奏是「回购期间**每月前三个交易日**披露上月进展」，月初那几天
+    ///   的量是平日十几倍（09-02 有 241 条，09-04 只有 2 条）——**每个月初都会撞一次**。
+    ///
+    /// 20 条≈26 秒，比 5 分钟阈值密一个数量级，够。
+    /// </summary>
+    private const int ProgressEvery = 20;
+
+    /// <summary>
+    /// 一天的命中攒到这么多条就先交出去落库（2026-09-14）。
+    ///
+    /// ════ 为什么不整天一批 ════
+    /// <c>yield return</c> 原来在内层循环之外，所以被掐断时**这一天已经抓到的全部丢弃**、一行不落。
+    /// 水位线（<c>MAX(announce_date)</c>）停在 09-02 之前，下一次算出来的起点还是同一段，
+    /// 跑到 09-02 再死一次——今天失败当天不重试，明天来照样撞。这就是 <see cref="QuietWatchdog"/>
+    /// 类注释里龙虎榜那种**自锁死**换了个地方：掐断走失败分支、什么都没留下，所以永远过不去。
+    ///
+    /// 分段之后，就算被掐（网络真挂了之类），已抓的那几十条也进了库，水位线能往前挪。
+    ///
+    /// ⚠ 代价是「一天可能只写了一半」变得更常见——这本来就是回看 14 天要兜的情况
+    /// （见 <see cref="ResolveSearchWindow"/>「为什么还要往回多退 14 天」），主键 upsert 去重，
+    /// 重抓只多花请求、不会写脏。
+    ///
+    /// 60 是 <see cref="ProgressEvery"/> 的整数倍，这样每次交批之前刚好有一条进度。
+    /// </summary>
+    private const int YieldChunk = 60;
 
     /// <summary>
     /// 定本轮要搜的起点。**纯函数，所以能单独测**（见 PlanWatchResumeTests）。
@@ -157,6 +193,7 @@ public sealed class PlanWatchTask(
             Report($"{day:yyyy-MM-dd} 命中 {dayHits.Count} 条，真回购公告 {group.Count} 条，开始取正文…");
 
             var batch = new List<PlanAnnouncement>();
+            var doneToday = 0;
             foreach (var hit in group)
             {
                 ct.ThrowIfCancellationRequested();
@@ -180,10 +217,23 @@ public sealed class PlanWatchTask(
                 batch.Add(PlanAnnouncementExtractor.Extract(
                     hit.Code, hit.Name, hit.Title, hit.PublishDate, content, artCode, hit.PdfUrl ?? ""));
                 _parsed++;
+                doneToday++;
+
+                // 心跳。这一段是全任务最慢的地方（1.3 秒/条），不出声就会被看门狗当成卡死，
+                // 见 ProgressEvery 的注释。
+                if (doneToday % ProgressEvery == 0 && doneToday < group.Count)
+                    Report($"{day:yyyy-MM-dd} 取正文 {doneToday}/{group.Count}…", _parsed, _hits);
+
+                // 攒够一段就先落库，别把一天的成果全押在"能跑到最后"上，见 YieldChunk 的注释。
+                if (batch.Count >= YieldChunk)
+                {
+                    yield return batch;
+                    batch = [];
+                }
             }
 
-            Report($"{day:yyyy-MM-dd} 解析 {batch.Count} 条", _parsed, _hits);
-            yield return batch;
+            Report($"{day:yyyy-MM-dd} 解析 {doneToday} 条", _parsed, _hits);
+            if (batch.Count > 0) yield return batch;
         }
     }
 

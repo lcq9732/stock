@@ -346,10 +346,21 @@ public partial class App : Application
         //    请求数不是速率，所以每 15 个主动歇 2 分钟。摊下来约 11 秒/只——补历史本来就是
         //    "空闲时慢慢补"的活，不赶时间。
         // 两条是不同域名、独立计数，谁被切都不影响另一条。
+        //
+        // 逐股那条**请求由谁发**又是一个维度（2026-09-14，MoneyFlowBackfillTransport）：
+        // 本机公司网关按域名把 push2his 整个拦了——HttpClient 那条 TCP/TLS 都通、一发请求
+        // 就被切、收到 0 字节，等多久、换哪块网卡都不会好。同一时刻真浏览器能稳定取到，
+        // 所以默认起一个 Chrome/Edge 在东财页面里做 JSONP（打的 URL 跟直连那条一模一样）。
         var moneyFlowChannel = FetcherSettings.ReadMoneyFlowChannel(paths.SettingsPath);
-        var moneyFlowProvider = moneyFlowChannel == "snapshot" ? null : new EastMoneyMoneyFlowProvider(
-            new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(5),
-                            batchSize: 15, restDuration: TimeSpan.FromMinutes(2)));
+        var moneyFlowTransport = FetcherSettings.ReadMoneyFlowBackfillTransport(paths.SettingsPath);
+        IMoneyFlowDetailFetcher? moneyFlowProvider =
+            moneyFlowChannel == "snapshot" ? null
+            : moneyFlowTransport == "http" ? new EastMoneyMoneyFlowProvider(
+                new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(5),
+                                batchSize: 15, restDuration: TimeSpan.FromMinutes(2)))
+            // ⚠ 端口和 profile 目录都跟板块通道**分开**（用户 2026-09-14 定：各起各的，
+            //   不去动板块那份已经在生产上跑着的启动路径）。共用出口 IP，配额是共享的。
+            : MoneyFlowBrowserFetcher();
         var moneyFlowSnapshotProvider = moneyFlowChannel == "perstock" ? null
             : new EastMoneyMoneyFlowSnapshotProvider(
                 new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1),
@@ -481,7 +492,12 @@ public partial class App : Application
                 () => new MoneyFlowSnapshotTask(moneyFlowRepository, moneyFlowSnapshotProvider));
         if (moneyFlowProvider != null)
             taskRegistry.Register(FetchActionId.FetchMoneyFlowDetail,
-                () => new MoneyFlowBackfillTask(paths, moneyFlowRepository, moneyFlowProvider));
+                // 每轮上限按通道给：浏览器那条约 17~20 秒/只（间隔 2 秒＋每 10~15 只歇 2~5 分钟），
+                // 20 只≈6~7 分钟，正好贴着目录里那个"估时 6 分钟"——空闲调度拿它判断空档塞不塞
+                // 得下，写大了它会永远排不上。HttpClient 那条沿用老的 30 只（约 5 分钟）。
+                () => new MoneyFlowBackfillTask(
+                    paths, moneyFlowRepository, moneyFlowProvider,
+                    maxPerRun: moneyFlowProvider is ChromeCdpMoneyFlowFetcher ? 20 : null));
 
         var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
 
@@ -557,6 +573,20 @@ public partial class App : Application
     /// 【重新读取配置】会重造 fetcher，但重造浏览器等于把攒下的"熟面孔"身份丢掉、
     /// 还会多出一个孤儿浏览器进程。
     /// </summary>
+    /// <summary>
+    /// 分档资金流的浏览器通道（2026-09-14）。跟 <see cref="_pageScraper"/> 一样要缓存：
+    /// 它拉着一个浏览器进程和落盘的 profile，重造等于多一个孤儿浏览器进程。
+    /// ⚠ 端口 9334、profile 目录也各是各的——**别跟板块那条（9333）共用**，
+    /// 同一个 user-data-dir 被两个进程开会直接启动失败。
+    /// </summary>
+    private static ChromeCdpMoneyFlowFetcher? _moneyFlowBrowser;
+
+    private static ChromeCdpMoneyFlowFetcher MoneyFlowBrowserFetcher() =>
+        _moneyFlowBrowser ??= new ChromeCdpMoneyFlowFetcher(
+            userDataDir: System.IO.Path.Combine(
+                AppContext.BaseDirectory, "data", "local", "chrome-cdp-moneyflow"),
+            port: 9334);
+
     private static ChromeCdpBoardPageScraper? _pageScraper;
 
     private static ChromeCdpBoardPageScraper PageScraper(FetchPaths paths) =>

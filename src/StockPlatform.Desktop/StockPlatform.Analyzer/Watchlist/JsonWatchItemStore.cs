@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using StockPlatform.Logic.Models;
 
@@ -110,47 +110,6 @@ public class JsonWatchItemStore
                 }
             }
             return added;
-        }
-    }
-
-    /// <summary>
-    /// 把一条触发标成"已处理/未处理"（2026-09-12）。
-    ///
-    /// ⚠ 这是**人的状态**，跟数据分开：重算随时会重新求值、重新落触发，
-    /// 但"我看过了"不该被任何重算抹掉。所以它存在触发记录本身上，
-    /// 而 <see cref="AppendHits"/> 是"同项同日已存在就跳过"，天然不会覆盖已有的标记。
-    /// </summary>
-    /// <returns>改动了几条（找不到就是 0）。</returns>
-    public int MarkHandled(IEnumerable<Guid> hitIds, bool handled)
-    {
-        var ids = hitIds.ToHashSet();
-        if (ids.Count == 0) return 0;
-
-        lock (_fileLock)
-        {
-            int changed = 0;
-            // 标记可能跨年（比如翻到去年的记录去标），所以按年份逐个文件找
-            foreach (var year in Enumerable.Range(DateTime.Today.Year - 5, 7))
-            {
-                var list = LoadHitsUnlocked(year);
-                if (list.Count == 0) continue;
-
-                int n = 0;
-                foreach (var h in list.Where(h => ids.Contains(h.HitId)))
-                {
-                    if (h.Handled == handled) continue;
-                    h.Handled = handled;
-                    h.HandledAt = handled ? DateTime.Now : null;
-                    n++;
-                }
-                if (n == 0) continue;
-
-                var p = _hitsPath(year);
-                Directory.CreateDirectory(Path.GetDirectoryName(p)!);
-                File.WriteAllText(p, JsonSerializer.Serialize(list, JsonOptions));
-                changed += n;
-            }
-            return changed;
         }
     }
 

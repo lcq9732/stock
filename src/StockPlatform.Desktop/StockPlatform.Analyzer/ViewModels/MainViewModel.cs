@@ -74,6 +74,9 @@ public class MainViewModel : INotifyPropertyChanged
     /// <summary>【观察项】页（2026-09-11）——L0/L1/L2 三层观察项的清单和触发，见 doc/watch-item-design.md。</summary>
     public WatchTabViewModel WatchTab { get; }
 
+    /// <summary>观察项服务。各列表页的【观察项】按钮直接拿它开单票详情窗。</summary>
+    public WatchService WatchService { get; }
+
     /// <summary>【仓位计算器】的账户级参数（可投资总资金/凯利折扣/单票上限）——窗口由 MainWindow
     /// 打开，参数在这里持有，两个入口共用同一份（见 PositionSizingWindow）。</summary>
     public Watchlist.PositionSizingStore SizingStore { get; }
@@ -129,8 +132,10 @@ public class MainViewModel : INotifyPropertyChanged
         // 所以它两个 store 都要，也因此它自己的状态放在 watch/ 目录而不是塞进任一个 json。
         // NoteStore 传进去是为了读「个人观点」——它写在 notes/{code}.md 里以"观点："开头的那行，
         // 不在观察项数据里（判断归笔记、数据归库，见 AnalyzerPaths.NotesDir）。
-        WatchTab = new WatchTabViewModel(
-            new WatchService(paths, watchlistStore, corePositionStore), NoteStore);
+        // 服务单独留一份引用：各列表页的【观察项】按钮要用它开单票详情窗，
+        // 那条路径不经过页签的 ViewModel。
+        WatchService = new WatchService(paths, watchlistStore, corePositionStore);
+        WatchTab = new WatchTabViewModel(WatchService, NoteStore);
         BottomReboundTab = new BottomReboundTabViewModel(paths, barRepository, netInflowRepository, watchlistStore);
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, shareholderRepository, marginRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);

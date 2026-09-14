@@ -35,8 +35,38 @@ public class FinancialAnalyzer
     private const double CashRatioBenchmark = 1.13;
     private const double CashRatioWarn = 1.05;
 
+    /// <summary>应收账款增速超过营收增速多少个百分点算异常。收入靠赊账撑出来时这两条线必然分叉——
+    /// 15pct 还能用"个别大客户账期放宽"解释，30pct 基本只剩"放宽信用政策换收入"一个解释。
+    /// 绝对水平（应收/营收）不设阈值：工程类天生就高，钉死一个数是在筛行业不是在筛公司。</summary>
+    private const double ArGrowthGapWarnPct = 15;
+    private const double ArGrowthGapBadPct = 30;
+
+    /// <summary>应收+票据占营收低于这个比例，整组应收行就不显示。预收款生意（白酒、部分消费品）
+    /// 的应收接近 0，小基数下同比动辄 ±90%，摆出来全是噪音——茅台 2026H1 应收 0.01 亿、
+    /// 占营收 0.0%、周转 0.0 天，三行都是废话。</summary>
+    private const double ArTrivialShare = 0.02;
+
+    /// <summary>应收账款周转天数同比拉长的警戒线：相对拉长 20% 或绝对多 10 天，满足一条就算。
+    /// 只看相对会让本来账期就只有 20 天的公司动辄报警，只看绝对会漏掉长账期行业的恶化。</summary>
+    private const double ArDaysRiseWarnRatio = 0.20;
+    private const double ArDaysRiseWarnAbs = 10;
+
     /// <summary>经营活动贡献的资金占（经营+筹资）的比例。低于 20% 说明扩张主要靠借钱/融资。</summary>
     private const double SelfFundingWarn = 0.20;
+
+    /// <summary>
+    /// 算"市值里有多少是已赚到的利润撑的"时用的合理估值倍数（≈8.3% 盈利收益率）。
+    ///
+    /// ⚠ **不是市场中位数**。用当期全市场中位（总股本口径 38.6 倍）算出来，东方电气会是
+    ///   261%、思泉新材 24.3%，跟人工口径差 2.6 倍；反推 12.3×1.00 和 131.8×0.09
+    ///   都指向 12。两者回答的问题不同：
+    ///     市场中位数 → "比同侪贵不贵"（相对）
+    ///     12 倍      → "市值里有多少是已赚的钱撑的"（绝对）
+    ///   这里要的是后者。
+    ///
+    /// 顺带：12 倍只落在全市场第 7 百分位 —— 能做到"已赚的利润撑起全部市值"的票很少。
+    /// </summary>
+    private const double BaseValuationPe = 12.0;
 
     /// <summary>归母净利同比跌幅的警戒线。</summary>
     private const double ProfitDropWarn = -0.15;
@@ -74,9 +104,13 @@ public class FinancialAnalyzer
     /// </summary>
     /// <param name="regulatory">银行监管指标（从财报 PDF 解析，见 BankReportParser）。只有银行用得上，
     /// 传 null 时体检表的 01/02/03/08 显示"待接入"。</param>
+    /// <param name="peStats">
+    /// 全市场 PE 分位，给「PE (TTM)」那行当参考值。传 null 用
+    /// <see cref="MarketPeStats.Builtin"/> 内置快照——现有调用点不用改。
+    /// </param>
     public FinancialAnalysisReport Analyze(string code, string name, List<FinancialSnapshot> history,
         double? latestClose = null, double? dividendPerShare = null,
-        List<BankRegulatoryMetric>? regulatory = null)
+        List<BankRegulatoryMetric>? regulatory = null, MarketPeStats? peStats = null)
     {
         if (history == null || history.Count == 0)
             return new FinancialAnalysisReport
@@ -133,9 +167,9 @@ public class FinancialAnalyzer
 
         Collect(BuildScaleVsEfficiency(cur, prior, prevInYear, priorPrevInYear, isFin));
         if (!isFin) Collect(BuildMarginAttribution(cur, prior));
-        Collect(BuildCashQuality(cur, prior, isFin));
+        Collect(BuildCashQuality(cur, prior, history, isFin));
         Collect(BuildFundingSource(cur, prior, prevPeriod, isFin));
-        Collect(BuildReturnAndValuation(cur, prior, history, latestClose, dividendPerShare, isFin));
+        Collect(BuildReturnAndValuation(cur, prior, history, latestClose, dividendPerShare, isFin, peStats));
 
         return new FinancialAnalysisReport
         {
@@ -196,9 +230,10 @@ public class FinancialAnalyzer
             var qYoY = Ratio(q, qPrior);
             string trend = "";
             if (qYoY.HasValue && profitYoY.HasValue)
-                trend = qYoY < profitYoY - 0.03 ? "单季降幅比累计更大 —— 恶化在加速"
-                    : qYoY > profitYoY + 0.03 ? "单季降幅小于累计 —— 降幅在收窄"
-                    : "跟累计降幅基本一致";
+                // ⚠ **"降幅"这个词只在真的负增长时才能用**。
+                //   原来只比相对大小，华鲁恒升单季 +43.4%、累计 +50.0% 也被说成
+                //   "单季降幅比累计更大 —— 恶化在加速"，而两个都是增长。
+                trend = DescribeQuarterTrend(qYoY!.Value, profitYoY!.Value);
             lines.Add(new AnalysisLine
             {
                 Label = "  └ 本季单季",
@@ -372,9 +407,12 @@ public class FinancialAnalyzer
 
     // ══════════ 三、现金流质量 ══════════
 
-    private AnalysisSection BuildCashQuality(FinancialSnapshot cur, FinancialSnapshot? prior, bool isFin)
+    private AnalysisSection BuildCashQuality(FinancialSnapshot cur, FinancialSnapshot? prior,
+        List<FinancialSnapshot> history, bool isFin)
     {
         var lines = new List<AnalysisLine>();
+        // 应收账款的存量判定——声明在方法作用域，因为本节的结论句也要用
+        double? arYoY = null, revYoY = null, arGap = null;
         double? ocf = cur.Get(FinancialKeys.Ocf), ocfP = prior?.Get(FinancialKeys.Ocf);
         double? npp = cur.Get(FinancialKeys.NetProfitParent), nppP = prior?.Get(FinancialKeys.NetProfitParent);
 
@@ -383,9 +421,7 @@ public class FinancialAnalyzer
         lines.Add(Money("经营现金流", ocf, ocfP,
             ocf is < 0 ? Verdict.Bad : ocfYoY is < -0.5 ? Verdict.Bad : ocfYoY is < -0.2 ? Verdict.Warn : Verdict.Good,
             ocf is < 0 ? "**经营活动净流出** —— 主营业务在烧钱"
-            : ocfYoY.HasValue && profYoY.HasValue && ocfYoY < profYoY - 0.15
-                ? $"跌得比利润还狠（{ocfYoY * 100:F1}% vs {profYoY * 100:F1}%）—— 这不是账面项目造成的"
-                : ""));
+            : DescribeCashVsProfit(ocfYoY, profYoY, Ratio2(ocf, npp))));
 
         double? cov = Ratio2(ocf, npp);
         double? covP = Ratio2(ocfP, nppP);
@@ -420,6 +456,40 @@ public class FinancialAnalyzer
             // 营运资金占用：用现金流量表**附注**的口径，不用资产负债表两个时点相减。
             // 附注含合并范围变动，且"经营性应收项目"覆盖应收账款+票据+预付+其他应收；
             // 实测两种口径能差近一倍（603501 2026H1：存货 5.89 vs 9.25、应收 7.12 vs 13.72）。
+            // ── 应收账款（存量口径）──
+            // 上面那组是**流量**口径，只回答"本期被占走多少现金"，而且是应收账款+票据+预付+
+            // 其他应收的合计，分不清是客户欠钱还是预付给了供应商。存量口径回答的是另一个问题：
+            // 欠款在不在逐年累积、账期有没有在变长。两者缺一不可——600285 2026H1 流量口径只占用
+            // 1.61 亿、看着平平无奇，存量是应收 +23.2% 对营收 +2.3%、周转 34.8→43.5 天，
+            // 两年间应收从 3.11 亿涨到 6.07 亿而营收只涨 12.7%。
+            // 判定要先于流量行算出来：下面"营运资金净占用"用它避免两行报同一件事。
+            double? ar = cur.Get(FinancialKeys.AccountsReceivable);
+            arYoY = Ratio(ar, prior?.Get(FinancialKeys.AccountsReceivable));
+            revYoY = Ratio(rev, prior?.Get(FinancialKeys.Revenue));
+            arGap = arYoY.HasValue && revYoY.HasValue ? (arYoY.Value - revYoY.Value) * 100 : null;
+            var arVerdict = arGap switch
+            {
+                null => Verdict.Neutral,
+                > ArGrowthGapBadPct => Verdict.Bad,
+                > ArGrowthGapWarnPct => Verdict.Warn,
+                _ => Verdict.Good,
+            };
+
+            // 周转天数的期初取**上年末**（半年报的期初是上年 12-31，不是上年 6-30）
+            var yearEnd = history.FirstOrDefault(h => h.ReportDate == new DateTime(cur.ReportDate.Year - 1, 12, 31));
+            var priorYearEnd = history.FirstOrDefault(h => h.ReportDate == new DateTime(cur.ReportDate.Year - 2, 12, 31));
+            double? arDays = ReceivableDays(cur, yearEnd);
+            double? arDaysPrior = ReceivableDays(prior, priorYearEnd);
+            bool arDaysRise = arDays.HasValue && arDaysPrior is > 0
+                              && (arDays.Value - arDaysPrior.Value > ArDaysRiseWarnAbs
+                                  || arDays.Value / arDaysPrior.Value - 1 > ArDaysRiseWarnRatio);
+            // 应收本身就无足轻重的（预收款生意），整组不显示，也不拿它去降级流量行——
+            // 小基数上的"同比 +200%"是噪音，不是信号。
+            double noteRecv = cur.Get(FinancialKeys.NoteReceivable) ?? 0;
+            double? arShare = ar.HasValue ? Ratio2(ar.Value + noteRecv, rev) : null;
+            bool arTrivial = arShare is < ArTrivialShare;
+            bool arFlagged = !arTrivial && (arVerdict is Verdict.Warn or Verdict.Bad || arDaysRise);
+
             double? invDec = cur.Get(FinancialKeys.InventoryDecrease);
             double? recvDec = cur.Get(FinancialKeys.ReceivableDecrease);
             double? payInc = cur.Get(FinancialKeys.PayableIncrease);
@@ -430,8 +500,12 @@ public class FinancialAnalyzer
                 {
                     Label = "营运资金净占用",
                     Value = $"{occupied / Yi:+0.00;-0.00} 亿",
+                    // 占用额超过当期净利是量级问题，跟应收那行说的不是一回事，该 Bad 还是 Bad；
+                    // 单纯"占用了现金"的 Warn 在应收行已经点名时降成陈述，免得异常汇总里两条重样。
                     Verdict = occupied > 0 && npp is > 0 && occupied > npp.Value ? Verdict.Bad
-                        : occupied > 0 ? Verdict.Warn : Verdict.Good,
+                        : occupied <= 0 ? Verdict.Good
+                        : arFlagged ? Verdict.Neutral
+                        : Verdict.Warn,
                     Note = occupied > 0 && npp is > 0 && occupied > npp.Value
                         ? "占用金额超过了当期归母净利 —— 赚的钱全被营运资金吃掉了"
                         : "正数=占用现金，负数=释放现金",
@@ -445,28 +519,82 @@ public class FinancialAnalyzer
                     lines.Add(Sub(payInc > 0 ? "└ 经营性应付释放" : "└ 经营性应付占用",
                         Math.Abs(payInc.Value), payInc > 0 ? "占用上游资金 = 释放自己的现金" : "提前付款给上游"));
             }
+
+            if (arTrivial) arGap = null;   // 结论句也不提它
+            if (ar.HasValue && !arTrivial)
+            {
+                var arChange = new List<string>();
+                if (arYoY.HasValue) arChange.Add($"同比 {arYoY * 100:+0.0;-0.0}%");
+                double? yearEndAr = yearEnd?.Get(FinancialKeys.AccountsReceivable);
+                // 年报的"上年末"就是同比基准，再显示一遍是重复
+                if (cur.ReportDate.Month != 12 && yearEndAr is > 0)
+                    arChange.Add($"较上年末 {(ar.Value / yearEndAr.Value - 1) * 100:+0.0;-0.0}%");
+                lines.Add(new AnalysisLine
+                {
+                    Label = "应收账款",
+                    Value = $"{ar.Value / Yi:F2} 亿",
+                    Change = string.Join("　", arChange),
+                    Verdict = arVerdict,
+                    Note = arGap > ArGrowthGapWarnPct
+                        ? $"**增速比营收（{revYoY * 100:+0.0;-0.0}%）快 {arGap:F1} pct** —— 这部分收入是赊出去的，"
+                          + "不是卖出去的，回不回得来另说"
+                        : "要跟营收增速比着看：涨得比营收快才是问题，单看金额涨没有意义",
+                });
+
+                if (arDays.HasValue)
+                    lines.Add(new AnalysisLine
+                    {
+                        Label = "  └ 应收账款周转天数",
+                        Value = $"{arDays.Value:F1} 天",
+                        Change = arDaysPrior.HasValue ? $"去年同期 {arDaysPrior.Value:F1} 天" : "",
+                        Verdict = arDaysRise ? Verdict.Warn : Verdict.Neutral,
+                        Note = arDaysRise
+                            ? "账期在变长 —— 要么客户在变差，要么是为了保收入主动放宽了信用"
+                            : "平均应收 ÷ 累计营收 × 期间天数；期初取上年末余额",
+                    });
+
+                if (arShare is { } share)
+                    lines.Add(new AnalysisLine
+                    {
+                        Label = "  └ 应收+票据 占营收",
+                        Value = $"{share * 100:F1}%",
+                        Verdict = Verdict.Neutral,
+                        Note = $"其中应收票据 {noteRecv / Yi:F2} 亿。绝对水平**不设阈值**——账期长的行业（工程、设备）天生就高，"
+                               + "钉死一个数是在筛行业；只看它自己一年年怎么变"
+                               + (cur.ReportDate.Month != 12 ? "。非年报口径的营收只有大半年，比例天然比年报高" : ""),
+                    });
+            }
         }
 
         return new AnalysisSection
         {
             Title = "三、利润有没有变成现金（最该看的一块）",
             Lines = lines,
-            Conclusion = CashConclusion(cur, ocfYoY, profYoY, cov, isFin),
+            Conclusion = CashConclusion(cur, ocfYoY, profYoY, cov, arGap, arYoY, revYoY, isFin),
         };
     }
 
     private static string CashConclusion(FinancialSnapshot cur, double? ocfYoY, double? profYoY,
-        double? cov, bool isFin)
+        double? cov, double? arGap, double? arYoY, double? revYoY, bool isFin)
     {
         if (isFin) return "金融机构的经营现金流受同业往来和存贷款影响很大，跟工商企业不是一个含义，别直接对比。";
         var parts = new List<string>();
-        if (ocfYoY.HasValue && profYoY.HasValue && ocfYoY < profYoY - 0.15)
+        // ⚠ 只有**两个都在跌**时才是"失血"。都在涨、只是现金流涨得慢，那是转化效率问题，
+        //   不是失血——而且 cov 健康时第三节自己已经说了"利润基本都收成了现金"，再提一遍自相矛盾。
+        if (ocfYoY is < 0 && profYoY is < 0 && ocfYoY < profYoY - 0.15)
             parts.Add("**现金流比利润跌得更狠**，说明失血是经营性的 —— 汇兑损失和公允价值浮亏根本不走经营现金流，"
                       + "所以不能用“一次性因素”解释掉");
+        else if (ocfYoY is < 0 && profYoY is >= 0)
+            parts.Add("**利润在增长但现金流在往下走**，增长没有同步变成现金");
         double? invDec = cur.Get(FinancialKeys.InventoryDecrease);
         double? recvDec = cur.Get(FinancialKeys.ReceivableDecrease);
         double? advance = cur.Get(FinancialKeys.AdvanceReceipts);
-        if (recvDec is < 0 && invDec is < 0)
+        // 存量背离比流量口径说得准，有它就不再说流量那句——流量只说明"这期被占了钱"，
+        // 存量说明的是"欠款在累积"，后者才是该写进结论的那条。
+        if (arGap > ArGrowthGapWarnPct)
+            parts.Add($"**应收账款同比 {arYoY * 100:+0.0;-0.0}%、营收只有 {revYoY * 100:+0.0;-0.0}%**，"
+                      + "收入是赊出去的 —— 这是最该盯的一条");
+        else if (recvDec is < 0 && invDec is < 0)
             parts.Add("应收和存货**同时**增加，是下游走弱的典型组合（卖得慢了、客户付款也慢了）");
         if (cov is < OcfCoverageWarn)
             parts.Add($"现金流覆盖率只有 {cov:F2}");
@@ -604,7 +732,8 @@ public class FinancialAnalyzer
     // ══════════ 五、回报与估值 ══════════
 
     private AnalysisSection BuildReturnAndValuation(FinancialSnapshot cur, FinancialSnapshot? prior,
-        List<FinancialSnapshot> history, double? price, double? dps, bool isFin)
+        List<FinancialSnapshot> history, double? price, double? dps, bool isFin,
+        MarketPeStats? peStats)
     {
         var lines = new List<AnalysisLine>();
         double? npp = cur.Get(FinancialKeys.NetProfitParent);
@@ -646,12 +775,29 @@ public class FinancialAnalyzer
             // TTM：年报直接用；中间期用"上年年报 − 上年同期 + 本期"
             double? ttm = TtmProfit(cur, prior, history);
             if (ttm is > 0)
+            {
+                double cap = price.Value * share.Value;
+                double pe = cap / ttm.Value;
+                // 已赚到的利润按合理估值能撑起多少市值。剩下的部分是纯粹对未来的定价。
+                double supported = BaseValuationPe * ttm.Value;
+                double earnedPct = supported / cap * 100;
+                var mkt = peStats ?? MarketPeStats.Builtin;
                 lines.Add(new AnalysisLine
                 {
-                    Label = "PE (TTM)", Value = $"{price.Value * share.Value / ttm.Value:F1}",
+                    Label = "PE (TTM)", Value = $"{pe:F1}",
                     Change = $"TTM 归母净利 {ttm.Value / Yi:F2} 亿",
+                    // ⚠ 只能是 Neutral。FactorLab 十分组实测 D1（最贵那组）年化 +10.6%、
+                    //   是十组里最高的，曲线呈 U 型不单调 —— "贵"并不预示跌。
+                    //   界面按 Verdict 上色，标黄标红就是在暗示一个数据不支持的结论。
                     Verdict = Verdict.Neutral,
+                    Reference = $"全市场中位 {mkt.Median:F1} 倍　{mkt.DescribePosition(pe)}",
+                    Note = earnedPct >= 100
+                        ? $"已赚到的利润按 {BaseValuationPe:F0} 倍能撑 {supported / Yi:F0} 亿，"
+                          + $"超过市值 {cap / Yi:F0} 亿 —— 现价没有为未来付钱"
+                        : $"市值 {cap / Yi:F0} 亿里，已赚到的利润按 {BaseValuationPe:F0} 倍能撑 "
+                          + $"{supported / Yi:F0} 亿，其余 {100 - earnedPct:F0}% 是对未来的定价",
                 });
+            }
             if (dps is > 0)
             {
                 double dy = dps.Value / price.Value * 100;
@@ -741,8 +887,11 @@ public class FinancialAnalyzer
             : profYoY > -0.30 ? "利润下滑" : "利润大幅下滑");
         // 带上具体数字（2026-08-27 用户要求）——原来这句只有结论没有数，用户还得去底部异常项
         // 里找那个 "-78.4% vs -39.9%"，两处说同一件事。合并到这一句里，标题行就自足了。
-        if (ocfYoY.HasValue && profYoY.HasValue && ocfYoY < profYoY - 0.15)
+        // ⚠ "失血"只能用在真的负增长上，见 DescribeCashVsProfit 的说明。
+        if (ocfYoY is < 0 && profYoY is < 0 && ocfYoY < profYoY - 0.15)
             parts.Add($"**现金流失血比利润更严重**（{ocfYoY * 100:F1}% vs {profYoY * 100:F1}%）");
+        else if (ocfYoY is < 0 && profYoY is >= 0)
+            parts.Add($"**利润在增长但现金流在往下走**（{ocfYoY * 100:F1}% vs +{profYoY * 100:F1}%）");
         else if (cov is < OcfCoverageWarn)
             parts.Add($"利润的现金含量偏低（现金流/净利 {cov:F2}）");
         return string.Join("、", parts) + "。";
@@ -762,6 +911,22 @@ public class FinancialAnalyzer
         Label = $"  {label}", Value = $"{value / Yi:F2} 亿", Verdict = Verdict.Neutral, Note = note,
     };
 
+    /// <summary>
+    /// 应收账款周转天数 = 平均应收 ÷ 累计营收 × 期间天数。
+    /// 期初取**上年末**余额（半年报的期初是上年 12-31，不是上年 6-30），这是标准口径。
+    /// 期初缺失直接返回 null 而不退化成期末余额：退化会低估天数，且跟同比那侧口径不一致
+    /// （一个用平均一个用期末），对比出来的"变化"是假的，宁可整行不显示。
+    /// </summary>
+    private static double? ReceivableDays(FinancialSnapshot? s, FinancialSnapshot? yearEnd)
+    {
+        double? ar = s?.Get(FinancialKeys.AccountsReceivable);
+        double? rev = s?.Get(FinancialKeys.Revenue);
+        double? begin = yearEnd?.Get(FinancialKeys.AccountsReceivable);
+        if (ar == null || rev is not > 0 || begin == null) return null;
+        int days = s!.ReportDate.Month switch { 3 => 90, 6 => 180, 9 => 270, _ => 360 };
+        return (ar.Value + begin.Value) / 2 / rev.Value * days;
+    }
+
     private static double? GrossMargin(FinancialSnapshot? s)
     {
         double? rev = s?.Get(FinancialKeys.Revenue), cost = s?.Get(FinancialKeys.OperCost);
@@ -777,6 +942,47 @@ public class FinancialAnalyzer
     }
 
     /// <summary>同比变化率；分母非正或缺失时返回 null（负基数算出来的百分比没有意义）。</summary>
+    /// <summary>
+    /// 单季相对累计的趋势措辞。**按正负号选词**——"降幅"只能用在负增长上。
+    ///
+    /// 踩过的坑：原来只比相对大小（<c>qYoY &lt; profitYoY - 0.03</c>），华鲁恒升
+    /// 单季 +43.4%、累计 +50.0% 两个都在涨，却被说成"单季降幅比累计更大 —— 恶化在加速"。
+    /// </summary>
+    private static string DescribeQuarterTrend(double qYoY, double cumYoY)
+    {
+        const double Eps = 0.03;
+        bool bothDown = qYoY < 0 && cumYoY < 0;
+        if (qYoY < cumYoY - Eps)
+            return bothDown ? "单季降幅比累计更大 —— 恶化在加速"
+                 : qYoY < 0 ? "累计还是增长，但单季已经转负"
+                 : "单季增速低于累计 —— 增长在放缓";
+        if (qYoY > cumYoY + Eps)
+            return bothDown ? "单季降幅小于累计 —— 降幅在收窄"
+                 : cumYoY < 0 ? "累计仍是负的，但单季已经转正"
+                 : "单季增速高于累计 —— 增长在提速";
+        return bothDown ? "跟累计降幅基本一致" : "跟累计增速基本一致";
+    }
+
+    /// <summary>
+    /// 经营现金流相对净利的措辞。**同样按正负号分档**，而且两个都在涨时看
+    /// <paramref name="cov"/>（现金流/净利）决定要不要提示——cov 健康的话，
+    /// 同一节里已经有"利润基本都收成了现金"那一行，再提示增速差就是自相矛盾。
+    /// </summary>
+    private static string DescribeCashVsProfit(double? ocfYoY, double? profYoY, double? cov)
+    {
+        if (ocfYoY is not { } o || profYoY is not { } p) return "";
+        if (o >= p - 0.15) return "";
+
+        if (o < 0 && p < 0)
+            return $"跌得比利润还狠（{o * 100:F1}% vs {p * 100:F1}%）—— 这不是账面项目造成的";
+        if (o < 0)
+            return $"利润在增长（+{p * 100:F1}%）但现金流在往下走（{o * 100:F1}%）";
+        // 两个都在涨：只有现金含量确实偏低时才值得说一句
+        return cov is < OcfCoverageWarn
+            ? $"现金流增速慢于利润（+{o * 100:F1}% vs +{p * 100:F1}%），现金含量只有 {cov:F2}"
+            : "";
+    }
+
     private static double? Ratio(double? cur, double? prior) =>
         cur.HasValue && prior is > 0 ? cur.Value / prior.Value - 1 : null;
 

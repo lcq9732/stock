@@ -253,6 +253,26 @@ PlanWatchTask --|> FetchTaskBase
 WatchIndicatorRuleTask --|> FetchTaskBase
 MoneyFlowSnapshotTask --|> FetchTaskBase
 MoneyFlowBackfillTask --|> FetchTaskBase
+class IMoneyFlowDetailFetcher {
+  <<Logic.Abstractions>>
+  逐股分档资金流的取数通道
+  URL/解析共用 MoneyFlowKlineParser
+  阈值·收尾措辞由通道自报
+}
+class EastMoneyMoneyFlowProvider {
+  <<Data.Remote>>
+  HttpClient 直连
+  本机被网关按域名拦死
+}
+class ChromeCdpMoneyFlowFetcher {
+  <<Data.Remote>>
+  真 Chrome/Edge 里做 JSONP
+  已验证可用·默认
+}
+EastMoneyMoneyFlowProvider ..|> IMoneyFlowDetailFetcher
+ChromeCdpMoneyFlowFetcher ..|> IMoneyFlowDetailFetcher
+ChromeCdpMoneyFlowFetcher --> ChromeCdpLauncher : 起浏览器·连 CDP
+MoneyFlowBackfillTask --> IMoneyFlowDetailFetcher : 二选一(MoneyFlowBackfillTransport)
 FetchTaskRegistry --> IFetchTask : 按动作号造
 IFetchTask ..> TaskRunResult : 返回
 ```
@@ -281,18 +301,36 @@ flowchart LR
     RS["SqliteWatchReadingSource<br/>按 Kind 取值（只读）"]
     IT[("watch/items.json<br/>待办 · 有挂有摘")]
     HT[("watch/hits-yyyy.json<br/>事实 · 只增")]
+    ES["SqliteStockEventSource<br/>各表 → 事件（只读）"]
+    BT["BuybackTimeline<br/>按轮拆 · 叙述 · 折叠"]
+    CP["WatchEventComposer<br/>组间排序"]
+    MK["SqliteMarketWatchSource<br/>全市场广度 · 行业指标"]
+    UI["WatchTab（一股一行）<br/>StockWatchPanel（嵌进分析详情窗右上）"]
     WS --> WRE --> IT
     WS --> RS --> WEV --> HT
+    WS --> ES --> BT --> CP --> UI
+    WS --> MK --> UI
   end
   PA -.OpenPlans.-> WRE
   SWI -.该盯哪些指标.-> WRE
   PA -.stage 现状.-> RS
+  PA -.全部公告.-> ES
 ```
 
 **三个关键不变量**（每一条都防一类静默事故）：
 `StockWatchIndicator` 只重建 `origin='rule'`（手挂的不动）·
 `WatchItem.Origin=手写` 任何规则不碰 ·
 `PlanAnnouncement` 只增不删（方案结束摘的是待办，不是事实）。
+
+**单票视图 2026-09-14 合并进【分析详情】**：观察项不再是独立窗口，
+而是 `FinancialAnalysisWindow` 右栏上半部分的 `StockWatchPanel`——
+左边财务、右上事件、右下趋势，同屏可对照。13 个列表页与行情详情窗的入口收敛成一颗【分析详情】。
+⚠ 只是**布局**合并，两边内容各自不变（用户 2026-09-14 明确：不是要合并财务分析和观察项）。
+
+**两条取值路径故意不合并**（2026-09-14 叙述式改版，见设计文档 §8.1）：
+`SqliteWatchReadingSource` 是给**求值**用的——取一个数、判要不要触发、要不要提醒；
+`SqliteStockEventSource` 是给**阅读**用的——把来龙去脉讲成人话。
+两者取同一批表但形状完全不同，合成一个会互相将就。
 
 ### 图 F3 · 编排层 → 数据源与存储
 

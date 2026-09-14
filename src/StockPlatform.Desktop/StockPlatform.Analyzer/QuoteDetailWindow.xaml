@@ -1,4 +1,4 @@
-<Window x:Class="StockPlatform.Analyzer.QuoteDetailWindow"
+﻿<Window x:Class="StockPlatform.Analyzer.QuoteDetailWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:oxy="http://oxyplot.org/wpf"
@@ -79,7 +79,7 @@
                  摊开看，见 StockDossierWindow。放在粒度按钮右边、隔开一段距离——它不是粒度切换。 -->
             <!-- 财务分析：把 52 个财务科目翻译成人能一眼看懂的判断（见 FinancialAnalyzer）。
                  放在最左边——它是这三个按钮里最常用的，看完 K线接着看财务是自然动线。 -->
-            <Button x:Name="FinancialButton" Content="财务分析" Width="90" Margin="24,0,4,0"
+            <Button x:Name="FinancialButton" Content="分析详情" Width="90" Margin="24,0,4,0"
                     Click="FinancialButton_Click"
                     ToolTip="把本地库里这只票的财务科目算成看得懂的结论：营收/利润/毛利率的同比与单季拆解、净利率掉在哪（毛利率 vs 四费/公允价值）、利润有没有变成现金（覆盖率/收现比/营运资金占用）、扩张的钱从哪来（经营造血占比/有息负债）、ROE与估值。&#10;&#10;每一行都带&quot;这意味着什么&quot;，每节末尾给结论，最后汇总需要留意的项，右侧配同期趋势图。&#10;&#10;前置：需要本地已抓到该股财务数据（Fetcher 的【拉取财务报表】或【空闲时自动补财务】）。" />
 

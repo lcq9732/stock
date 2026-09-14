@@ -1978,6 +1978,13 @@ public class MainViewModel : INotifyPropertyChanged
             if (result?.Errors is { Count: > 0 } errs)
                 foreach (var err in errs) Log($"错误：{err}");
 
+            // 错误数也得跟着本轮走（2026-09-14 补）：这条路径原来只写 LastOutcome 和 LastMessage，
+            // **漏了 LastErrorCount**——上一次失败留下的数字就一直挂在那一行上，手动重跑成功之后
+            // 界面照样显示「完成（1 条错误）」，而这一轮明明一条错都没有。
+            // 踩到的场景：【回购公告进展】09-14 08:25 被误判卡死记了 1 条错，09:58 手动跑通、
+            // 结果是 Ok，那个 1 还在。计划自动跑那条路（PlanRunner.Finish）一直是写的，只有这里没写。
+            vm.Model.LastErrorCount = result?.Errors.Count ?? 0;
+
             // 「根本没开工」不能记成完成（2026-09-04）：原来这里无条件写 Ok、连返回值都没看，
             // 结果数据源还在限流熔断里、一行都没抓，界面上照样是绿勾"09:25 完成"。
             // 更要命的是 FetchPlanItem.AlreadyRanOn 只认 Ok——记成完成的话今天就不会再跑了。
@@ -1994,10 +2001,16 @@ public class MainViewModel : INotifyPropertyChanged
                 vm.Model.LastMessage = result?.Progress;
             }
         }
-        catch (OperationCanceledException) { vm.Model.LastOutcome = RunOutcome.Cancelled; }
+        // 这两支的错误数跟 PlanRunner.Finish 对齐：停止＝0（人自己停的不算错），失败＝1。
+        catch (OperationCanceledException)
+        {
+            vm.Model.LastOutcome = RunOutcome.Cancelled;
+            vm.Model.LastErrorCount = 0;
+        }
         catch (Exception ex)
         {
             vm.Model.LastOutcome = RunOutcome.Failed;
+            vm.Model.LastErrorCount = 1;
             vm.Model.LastMessage = ex.Message;
             Log($"【{vm.Name}】失败：{ex.Message}");
         }

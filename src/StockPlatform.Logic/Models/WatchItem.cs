@@ -182,17 +182,10 @@ public sealed class WatchHit
     public string Priority { get; set; } = "B";
     public DateTime CreatedAt { get; set; } = DateTime.Now;
 
-    /// <summary>
-    /// 人已经看过/处理过这条了（2026-09-12）。
-    ///
-    /// 为什么需要：A 档一轮能报十几条，没有这个标记就没法区分"还没看"和"看过了不用管"，
-    /// 几天之后整张表都是历史，真正要处理的那两条淹在里面。
-    ///
-    /// ⚠ 它是**人的状态**，重算时必须原样保留——观察项可以被规则摘掉重挂，
-    /// 但"我看过了"这件事不该被任何重算抹掉。
-    /// </summary>
-    public bool Handled { get; set; }
-
-    /// <summary>标记为已处理的时刻。<see cref="Handled"/> 为 false 时无意义。</summary>
-    public DateTime? HandledAt { get; set; }
+    // 「已处理」标记于 2026-09-14 整套删除（Handled / HandledAt / MarkHandled / 详情窗的勾选）。
+    // 它是 09-12 加的，用来把看过的触发折叠掉；观察项页改成一股一行的事件叙述之后，
+    // 触发记录**跟叙述高度重复**——宁德那 4 条全是"回购进展""碳酸锂变动"的另一种说法，
+    // 唯一的增量信息只是"哪天报的警"。既然那张表不再显示，标记也就没有对象了。
+    //
+    // ⚠ 历史 hits-yyyy.json 里仍然留着这两个字段，反序列化时被忽略（不报错）。
 }

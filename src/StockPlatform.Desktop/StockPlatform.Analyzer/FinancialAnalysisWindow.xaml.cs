@@ -75,8 +75,9 @@ public partial class FinancialAnalysisWindow : Window
             // SetResourceReference 等于代码里的 DynamicResource：换主题时这块底色会自己跟着变
             HeadlineBorder.SetResourceReference(BackgroundProperty, "Theme.Danger.Background");
             FooterText.Text = "";
-            // 出错时只是一句提示，不最大化——一屏小窗口就够，最大化反而突兀
-            TextFitter.SizeToScreen(this, 0.5);
+            // 没有财务数据时左边只有一句提示，但**右边的观察项照常有内容**（2026-09-14），
+            // 所以不能再缩成半屏——那会把事件叙述挤成一团。给 0.75。
+            TextFitter.SizeToScreen(this, 0.75);
             return;
         }
 
@@ -283,7 +284,12 @@ public partial class FinancialAnalysisWindow : Window
 
             var report = new StockPlatform.Logic.Services.FinancialAnalyzer(peers)
                 .Analyze(code, name, history, price, dps, regulatory);
-            new FinancialAnalysisWindow(report) { Owner = owner }.ShowDialog();
+
+            var w = new FinancialAnalysisWindow(report) { Owner = owner };
+            // 右上角的观察项。**在构造之后单独装**：构造函数在 report.Error 时会提前 return，
+            // 写在里面的话"没有财务数据"的票就看不到事件了——而那恰恰是最该看事件的时候。
+            w.WatchPanel.Load(vm.WatchService, vm.NoteStore, code, name);
+            w.ShowDialog();
         }
         catch (Exception ex)
         {

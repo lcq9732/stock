@@ -126,7 +126,9 @@ public partial class FetchOrchestrator
     private readonly Remote.EastMoneyLhbSeatProvider? _lhbSeatProvider;
     private readonly ILhbSeatRepository? _lhbSeatRepository;
     /// <summary>分档资金流（2026-09-03，东财 push2his）。跟 NetInflow 是同一件事的不同精度。</summary>
-    private readonly Remote.EastMoneyMoneyFlowProvider? _moneyFlowProvider;
+    // 类型是接口而不是那个具体的 provider（2026-09-14）：逐股补历史现在有两条通道
+    // （HttpClient／真浏览器），这里只用它报熔断状态，谁在跑都一样。
+    private readonly Logic.Abstractions.IMoneyFlowDetailFetcher? _moneyFlowProvider;
     /// <summary>分档资金流的全市场当日快照（2026-09-06，push2delay）。跟上面那个是同一份数据的两种切法。</summary>
     private readonly Remote.EastMoneyMoneyFlowSnapshotProvider? _moneyFlowSnapshotProvider;
     private readonly INetInflowDetailRepository? _moneyFlowRepository;
@@ -253,7 +255,7 @@ public partial class FetchOrchestrator
         IEarningsForecastRepository? forecastRepository = null,
         Remote.EastMoneyLhbSeatProvider? lhbSeatProvider = null,
         ILhbSeatRepository? lhbSeatRepository = null,
-        Remote.EastMoneyMoneyFlowProvider? moneyFlowProvider = null,
+        Logic.Abstractions.IMoneyFlowDetailFetcher? moneyFlowProvider = null,
         INetInflowDetailRepository? moneyFlowRepository = null,
         Remote.EastMoneyMarketEventProvider? marketEventProvider = null,
         IMarketEventRepository? marketEventRepository = null,

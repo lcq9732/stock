@@ -1,7 +1,6 @@
-﻿using System.Globalization;
-using System.Net;
+﻿using System.Net;
 using System.Net.Http;
-using System.Text.Json;
+using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
 
@@ -20,9 +19,10 @@ namespace StockPlatform.Data.Remote;
 ///   2. <b>只能按股票查</b>，没有"某天全市场"的入口。全市场一轮就是 5500+ 个请求，
 ///      按 1 秒间隔约 1.5 小时——所以调用方应该支持"只抓关注的股票"。
 /// </summary>
-public class EastMoneyMoneyFlowProvider
+public class EastMoneyMoneyFlowProvider : IMoneyFlowDetailFetcher
 {
-    private const string BaseUrl = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get";
+    /// <summary>域名。URL 的其余部分跟浏览器通道共用一份（见 <see cref="MoneyFlowKlineParser.BuildUrl"/>）。</summary>
+    public const string Host = "push2his.eastmoney.com";
 
     private readonly HttpClient _http;
     private readonly RateLimiter _rateLimiter;
@@ -57,8 +57,7 @@ public class EastMoneyMoneyFlowProvider
     /// <summary>抓一只股票的分档资金流（最近约 120 个交易日）。</summary>
     public async Task<List<NetInflowDetail>> FetchAsync(string code, CancellationToken ct = default)
     {
-        var url = $"{BaseUrl}?lmt=0&klt=101&secid={SecId(code)}&fields1=f1,f2,f3,f7" +
-                  "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65";
+        var url = MoneyFlowKlineParser.BuildUrl(Host, code);
 
         string body;
         try
@@ -72,42 +71,7 @@ public class EastMoneyMoneyFlowProvider
                 $"无法连接东财资金流接口（{code}）：{ex.InnerException?.Message ?? ex.Message}", ex);
         }
 
-        var result = new List<NetInflowDetail>();
-        using var doc = JsonDocument.Parse(body);
-        if (!doc.RootElement.TryGetProperty("data", out var data) ||
-            data.ValueKind != JsonValueKind.Object) return result;      // 停牌/退市/无数据
-        if (!data.TryGetProperty("klines", out var klines) ||
-            klines.ValueKind != JsonValueKind.Array) return result;
-
-        var now = DateTime.Now;
-        foreach (var line in klines.EnumerateArray())
-        {
-            var parts = (line.GetString() ?? "").Split(',');
-            // f51..f63 共 13 个是有意义的（f64/f65 未用），少于 13 段的行直接跳过
-            if (parts.Length < 13) continue;
-            if (!DateTime.TryParseExact(parts[0], "yyyy-MM-dd", CultureInfo.InvariantCulture,
-                                        DateTimeStyles.None, out var day)) continue;
-
-            result.Add(new NetInflowDetail
-            {
-                Code = code,
-                TradeDate = day,
-                MainNet = D(parts[1]),
-                SmallNet = D(parts[2]),
-                MidNet = D(parts[3]),
-                BigNet = D(parts[4]),
-                SuperNet = D(parts[5]),
-                MainRatio = D(parts[6]),
-                SmallRatio = D(parts[7]),
-                MidRatio = D(parts[8]),
-                BigRatio = D(parts[9]),
-                SuperRatio = D(parts[10]),
-                ClosePrice = D(parts[11]),
-                ChangeRate = D(parts[12]),
-                FetchedAt = now,
-            });
-        }
-        return result;
+        return MoneyFlowKlineParser.Parse(code, body, DateTime.Now);
     }
 
     /// <summary>
@@ -122,6 +86,21 @@ public class EastMoneyMoneyFlowProvider
     /// </summary>
     public static string SecId(string code) => MarketClassifier.EastMoneySecIdPrefix(code) + code;
 
-    private static double? D(string s) =>
-        double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
+    // ─────────────── IMoneyFlowDetailFetcher 的通道自述 ───────────────
+
+    public string ChannelName => "HttpClient 直连 push2his";
+
+    /// <summary>连续 15 只失败就收尾（这条通道的老阈值，2026-09-12 起一直是它）。</summary>
+    public int GiveUpAfterConsecutiveFailures => 15;
+
+    /// <summary>
+    /// ⚠ 别一口咬定"被限流"：2026-09-11 公司网关按域名把 push2his 整个拦了
+    /// （TCP/TLS 都通、一发请求就被切、收到 0 字节），日志却写着"判定被限流"——
+    /// 把人往"等一会儿就好了"的方向带，实际等多久都不会好。两者处置完全相反。
+    /// </summary>
+    public string ExhaustedVerdict(string? lastError) =>
+        lastError?.Contains("无法连接") == true
+            ? "这条链路连不上 push2his（多半是网关按域名拦了：TCP 通、一发请求就被切）。"
+              + "这台机器上该把 MoneyFlowBackfillTransport 切成 browser——换网络也解决不了域名拦截"
+            : "判定被限流（等一段时间会自己恢复）";
 }

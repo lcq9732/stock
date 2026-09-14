@@ -5,28 +5,23 @@ using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Analyzer.Watchlist;
 
-/// <summary>跑一轮的结果，给界面报告用。</summary>
-/// <param name="Detail">
-/// 每条观察项**当前已知的内容**（观察项 Id → 人话），给左表显示。
+/// <summary>
+/// 跑一轮的结果，给界面报告用。
 ///
-/// ⚠ 只收"**不随时间变**"的那类：解禁多少股、预告预增多少——公告发布时就写明了，
-/// 属于"要跟踪的是什么事"。像"已回购 80.2 亿元"这种会变的是**进展**，归右表，不进这里
-/// （2026-09-11 为这条分界线返工过两次）。
-/// </param>
-/// <param name="Progress">
-/// **每个事项的最近一次进展**，给右表显示。按事项发生日期倒序。
-///
-/// ⚠ 它不受触发窗口限制（2026-09-11 改）。原来右表直接显示 <c>Hits</c>，
-/// 而 Hits 只收窗口内的（业绩预告 7 天、龙虎榜 3 天）——业绩预告一年才 4 次，
-/// 于是右表一年里大部分时间是空的。**窗口该只决定"要不要提醒"，
-/// 不该决定"右表显示什么"**：进展就是进展，三个月前公布的也是进展。
+/// ⚠ 2026-09-14 瘦身：原来还带 <c>Detail</c>（左表"预计要发生"）、<c>Progress</c>（右表
+/// "已经发生"）、<c>Priority</c>（逐条观察项的档）三项。观察项页改成一股一行的事件叙述之后
+/// 那两张表没了，这三项一直算着却没人读——连同填它们的那段 SQL 回填一起删掉。
+/// 叙述走的是另一条路（<see cref="WatchService.BuildEvents"/> → SqliteStockEventSource）。
+/// </summary>
+/// <param name="CodePriority">
+/// 每只票**最紧要的那个档**（A&lt;B&lt;C）。一股一行的叙述视图要给整行定个档，
+/// 而档位是按量算出来的（解禁 74 股不是 A 档），只有求值过程知道——
+/// 所以在这里顺手攒出来，别让界面再算一遍。
 /// </param>
 public sealed record WatchRunResult(
     int ItemCount, int Added, int Expired, int Evaluated, int Hits, int NewHits,
     IReadOnlyList<WatchHit> TopHits,
-    IReadOnlyDictionary<Guid, string> Detail,
-    IReadOnlyList<WatchHit> Progress,
-    IReadOnlyDictionary<Guid, string> Priority);
+    IReadOnlyDictionary<string, string> CodePriority);
 
 /// <summary>
 /// 观察项的协调服务（2026-09-11），见 doc/watch-item-design.md M3。
@@ -60,9 +55,6 @@ public class WatchService
 
     public List<WatchItem> LoadItems() => _store.LoadItems();
     public List<WatchHit> LoadHits(int year) => _store.LoadHits(year);
-
-    /// <summary>把若干条触发标成已处理/未处理。见 <see cref="JsonWatchItemStore.MarkHandled"/>。</summary>
-    public int MarkHandled(IEnumerable<Guid> hitIds, bool handled) => _store.MarkHandled(hitIds, handled);
 
     /// <summary>重算派生项 + 求值 + 记录触发。返回给界面报告的统计。</summary>
     public WatchRunResult Run()
@@ -103,9 +95,7 @@ public class WatchService
         var lastStages = BuildLastStages(rebuilt.Items);
         var source = new SqliteWatchReadingSource(db);
         var hits = new List<WatchHit>();
-        var detail = new Dictionary<Guid, string>();
-        var priority = new Dictionary<Guid, string>();
-        var progress = new List<WatchHit>();
+        var codePriority = new Dictionary<string, string>();
         int evaluated = 0;
 
         foreach (var item in rebuilt.Items.Where(i => i.Enabled))
@@ -113,35 +103,14 @@ public class WatchService
             evaluated++;
             var reading = source.Read(item, lastStages);
 
-            // ════ 两张表的分界线：**左＝预计要发生，右＝已经发生**（2026-09-11 定的）════
-            // 这条线比"会不会随时间变"清楚，而且**天然不重复**：同一件事要么还没发生、
-            // 要么已经发生，不会两边都出现。
-            //
-            // 左表（预计要发生）：解禁哪天多少股、这期财报哪天披露——都还没到，正等着。
-            if (IsUpcoming(item.Kind) && !string.IsNullOrEmpty(reading.StageText))
+            // 整只票的代表档＝它身上所有观察项里最高的那个
+            if (reading.TradeDate is not null)
             {
-                detail[item.ItemId] = reading.StageText!;
-                // 左表的档也按量重算——解禁 74 股在左表也不该标 A
-                priority[item.ItemId] = WatchPriority.Resolve(item, reading.Magnitude);
+                var p = WatchPriority.Resolve(item, reading.Magnitude);
+                codePriority[item.Code] = codePriority.TryGetValue(item.Code, out var cur)
+                    ? WatchEventComposer.TopPriority([cur, p])
+                    : p;
             }
-
-            // 右表（已经发生）：业绩预告发了、增减持做了、回购买了多少。
-            // ⚠ **不看触发窗口**——窗口是决定"要不要提醒"的，不该决定"右表显示什么"：
-            // 三个月前公布的业绩预告，依然是这个事项已经发生过的最新一件事。
-            if (!IsUpcoming(item.Kind)
-                && reading.TradeDate is { } td && !string.IsNullOrEmpty(reading.StageText))
-                progress.Add(new WatchHit
-                {
-                    ItemId = item.ItemId,
-                    Code = item.Code,
-                    Name = item.Name,
-                    ItemName = item.Reason,
-                    TriggerTradeDate = td,
-                    ObservedValue = reading.Value,
-                    Message = reading.StageText!,
-                    // 跟触发记录用同一套档位算法，否则同一件事在左右两表会显示不同的档
-                    Priority = WatchPriority.Resolve(item, reading.Magnitude),
-                });
 
             if (WatchEvaluator.Evaluate(item, reading) is { } hit) hits.Add(hit);
         }
@@ -154,41 +123,95 @@ public class WatchService
             .ThenByDescending(h => h.TriggerTradeDate)
             .Take(20).ToList();
 
-        // 右表按"事项发生的日期"倒序——最近的/最快要发生的排最前，
-        // 未来的日程（解禁）自然排在已发生的事情之上，正好是待办的读法。
-        progress.Sort((a, b) => b.TriggerTradeDate.CompareTo(a.TriggerTradeDate));
-
-        // 进展是**每次重算实时生成**的，自带的 HitId 每轮都不一样；而"已处理"标记记在
-        // **落库的触发记录**上。所以按 (观察项, 事项日期) 把两者对上，让界面上的进展行
-        // 带回真正的 HitId 和标记状态——否则标了也白标，下次重算就回到未处理。
-        var stored = _store.LoadHits(DateTime.Today.Year)
-            .Concat(_store.LoadHits(DateTime.Today.Year - 1))
-            .GroupBy(h => (h.ItemId, h.TriggerTradeDate.Date))
-            .ToDictionary(g => g.Key, g => g.First());
-        foreach (var p in progress)
-            if (stored.TryGetValue((p.ItemId, p.TriggerTradeDate.Date), out var s))
-            {
-                p.HitId = s.HitId;
-                p.Handled = s.Handled;
-                p.HandledAt = s.HandledAt;
-            }
-
         return new WatchRunResult(
             rebuilt.Items.Count, rebuilt.Added.Count, rebuilt.Expired.Count,
-            evaluated, hits.Count, newHits, top, detail, progress, priority);
+            evaluated, hits.Count, newHits, top, codePriority);
     }
 
     /// <summary>
-    /// 这件事是**还没发生**（进左表）还是**已经发生**（进右表）？
+    /// 这只票离今天最近的那件事有多远（天）。行序按它排。
     ///
-    /// 只有 <see cref="WatchKind.ScheduleAhead"/> 是未来：它查的就是
-    /// <c>MIN(日期) WHERE 日期 &gt;= 今天</c>——下次解禁、下次预约披露。
-    /// 其余都是已经发生的事：业绩预告发了、增减持做了、龙虎榜上了、回购买了、股价跌破了。
-    ///
-    /// 这条线把"重复显示"从根上消掉了：同一件事要么在左要么在右，不会两边都有。
-    /// 解禁发生之后就不在"未来"里了，左表那条自然只剩名字。
+    /// ⚠ **行业指标不算**（2026-09-14）：碳酸锂指数天天更新，把它算进来的话，
+    /// 全部 107 只锂电池股每天都是"距今 0 天"，整页行序就被一条外部指标决定了。
+    /// 它是影响这只票的环境，不是这只票出的事。
+    /// 一只票要是**只有**指标事件，那就只能拿它当依据——总比没有次序强。
     /// </summary>
-    private static bool IsUpcoming(string kind) => kind is WatchKind.ScheduleAhead;
+    private static double Proximity(StockWatchEvents s, DateTime today)
+    {
+        var own = s.Events.Where(e => e.Category != WatchCategory.Indicator).ToList();
+        var pool = own.Count > 0 ? own : s.Events;
+        return pool.Min(e => Math.Abs((e.Date.Date - today).TotalDays));
+    }
+
+    /// <summary>
+    /// 读**单只票**的事件叙述，给详情窗用。
+    ///
+    /// ⚠ 不挂观察项、不写任何文件（2026-09-14 定的）：没跟踪的票也能点开看一眼，
+    /// 但"想长期盯"该走加入自选那条正门。点一下详情就悄悄多出一堆观察项，
+    /// 那清单很快就没人信了。
+    /// </summary>
+    public IReadOnlyList<WatchEvent> ReadEvents(string code)
+    {
+        try { return new SqliteStockEventSource(_paths.CurrentDb).Read(code); }
+        catch { return []; }
+    }
+
+    /// <summary>
+    /// 把一轮的结果摊成**一股一行的事件叙述**（2026-09-14 重构）。
+    ///
+    /// ════ 为什么不复用 Run() 里那两张表 ════
+    /// 那两张表是**按事项**组织的：左边"要发生什么"、右边"发生了什么"。
+    /// 用户的反馈是：从左边看到事件，还得去右边找它成没成事实——一件事被拆在两处。
+    /// 所以叙述这条线**直接从库里重读**（<see cref="SqliteStockEventSource"/>），
+    /// 一只票身上发生过什么按时间连成一条线，回购那种跨几个月的过程尤其需要。
+    ///
+    /// 两条线共用的只有**档位**：档是按量算出来的，那个算法在求值里，不重复实现。
+    /// </summary>
+    /// <param name="run">刚跑完的那一轮，用它的 <see cref="WatchRunResult.CodePriority"/> 定行档。</param>
+    public (IReadOnlyList<StockWatchEvents> Stocks, IReadOnlyList<MarketWatchItem> Market)
+        BuildEvents(WatchRunResult run)
+    {
+        var names = new Dictionary<string, string>();
+        foreach (var e in _watchlist.Load())
+            if (!string.IsNullOrWhiteSpace(e.Code)) names[e.Code] = e.Name ?? "";
+        foreach (var e in _corePositions.Load())
+            if (!string.IsNullOrWhiteSpace(e.Code)) names[e.Code] = e.Name ?? "";
+
+        var source = new SqliteStockEventSource(_paths.CurrentDb);
+        var notes = new StockNoteStore(_paths.NotesDir);
+
+        var stocks = new List<StockWatchEvents>();
+        foreach (var (code, name) in names)
+        {
+            var events = source.Read(code);
+            // 一件事都没有的票不占一行——面板是用来看"有什么动静"的，不是持仓清单
+            if (events.Count == 0) continue;
+
+            run.CodePriority.TryGetValue(code, out var priority);
+            stocks.Add(new StockWatchEvents(
+                code, name, priority ?? WatchPriority.LogOnly, events,
+                notes.ReadOpinion(code) ?? ""));
+        }
+
+        // ⚠ 行序按"**离今天最近**"排，不是按最新日期排（那样会翻车）：
+        // 解禁是日程表，库里躺着 2030 年的解禁计划。按 MAX(日期) 排的话，
+        // 一只五年后才解禁、眼下什么都没发生的票会稳居第一页——它恰恰是最不用管的。
+        // 取"到今天的距离"，明天解禁和昨天出的公告都排前面，2030 年和三年前都沉底，
+        // 这才是"最近有什么动静"该有的读法。
+        //
+        // 档位只在同样近的时候才做次序——不能让 C 档的今天沉到 A 档的三个月前下面。
+        var today = DateTime.Today;
+        var ordered = stocks
+            .OrderBy(s => Proximity(s, today))
+            .ThenBy(s => s.Priority)
+            .ToList();
+
+        IReadOnlyList<MarketWatchItem> market;
+        try { market = new SqliteMarketWatchSource(_paths.CurrentDb).Read(); }
+        catch { market = []; }
+
+        return (ordered, market);
+    }
 
     private static Dictionary<string, PlanAnnouncement> SafeOpenPlans(SqlitePlanAnnouncementRepository repo)
     {

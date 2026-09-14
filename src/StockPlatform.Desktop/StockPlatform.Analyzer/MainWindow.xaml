@@ -7,18 +7,23 @@
         Background="{DynamicResource Theme.Window.Background}"
         Foreground="{DynamicResource Theme.Foreground}">
     <Window.Resources>
-        <!-- 分裂按钮【财务分析 ▾】（2026-08-27 按用户要求）——13 个个股列表页的"操作"列共用。
-             主按钮打开财务分析（列表里最常做的动作），K线收进下拉。
+        <!-- 分裂按钮【分析详情 ▾】（2026-08-27 建，2026-09-14 改名）——13 个个股列表页的"操作"列共用。
+             主按钮打开分析详情，K线收进下拉。
              WPF 没有内置 SplitButton（WinUI 才有），这里用"主按钮 + 窄箭头按钮弹 ContextMenu"拼。
-             板块页那两处不用它：板块指数没有财务数据。 -->
+             板块页那两处不用它：板块指数没有财务数据。
+
+             ⚠ 原来这里是【财务分析】+【观察项】两个按钮（2026-09-14 上午加的）。
+             同一天下午合并了：那两个窗口现在是**同一个窗口的左右两半**——左边财务、
+             右上观察项、右下趋势，所以按钮也只剩一个。名字用泛称「分析详情」而不是
+             「财务分析」，是因为窗口里确实两样都有，泛称反而诚实。 -->
         <DataTemplate x:Key="DetailSplitButtonCell">
             <Grid Margin="2,1">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <Button Grid.Column="0" Content="财务分析" Width="72" Click="FinancialAnalysisButton_Click"
-                        ToolTip="把这只票的财务科目算成看得懂的结论：营收/利润/毛利率的同比与单季拆解、净利率掉在哪、利润有没有变成现金、扩张的钱从哪来、ROE与估值。每行都带&quot;这意味着什么&quot;，最上面汇总需要留意的项。&#10;&#10;需要本地已抓到该股财务数据（Fetcher 的【拉取财务报表】或【空闲时自动补财务】）。" />
+                <Button Grid.Column="0" Content="分析详情" Width="72" Click="FinancialAnalysisButton_Click"
+                        ToolTip="一个窗口看完这只票：&#10;· 左边 —— 财务科目翻译成看得懂的结论（营收/利润拆解、净利率掉在哪、利润有没有变成现金、扩张的钱哪来、ROE与估值），最上面汇总需要留意的项&#10;· 右上 —— 观察项：回购买到哪一步、什么时候解禁多少、业绩预告、股东增减持、跌破均线&#10;· 右下 —— 同期趋势小图&#10;&#10;财务部分需要本地已抓到该股财务数据（Fetcher 的【拉取财务报表】）；没有也能开，观察项照常显示。" />
                 <Button Grid.Column="1" Content="▾" Width="20" Click="DetailDropdown_Click"
                         ToolTip="更多：行情详情（K线）">
                     <Button.ContextMenu>
@@ -744,55 +749,96 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
-                    <!-- 左右排：左＝在盯什么（待办），右＝已经报过什么（流水）。
-                         右边给得宽一些——"发生了什么"那列是整句话，窄了要换行。 -->
+                    <!-- 左＝个股（一股一行的事件叙述），右＝市场普遍现象。
+                         左边给得宽——叙述是整句话，窄了处处换行。 -->
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="4*" MinWidth="320" />
+                        <ColumnDefinition Width="7*" MinWidth="420" />
                         <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="6*" MinWidth="360" />
+                        <ColumnDefinition Width="3*" MinWidth="240" />
                     </Grid.ColumnDefinitions>
 
-                    <StackPanel Grid.Row="0" Grid.ColumnSpan="3" Margin="0,0,0,8">
-                        <StackPanel Orientation="Horizontal">
-                            <Button Content="重算并求值" Command="{Binding RunCommand}" Width="100"
-                                    ToolTip="重算派生项（条件没了的自动摘掉）→ 逐条求值 → 记录新触发。&#10;手写项一行都不会动。" />
-                            <Button Content="刷新" Command="{Binding RefreshCommand}" Width="70" Margin="8,0,0,0"
-                                    ToolTip="只读当前状态，不重算" />
-                            <TextBlock Text="{Binding Status}" VerticalAlignment="Center" Margin="16,0,0,0"
-                                       Foreground="{DynamicResource Theme.Accent}" FontWeight="SemiBold" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <TextBlock Text="{Binding Summary}" Margin="0,6,0,0" TextWrapping="Wrap"
-                                   Foreground="{DynamicResource Theme.Foreground.Muted}" />
-                    </StackPanel>
+                    <!-- 工具条一行说完（2026-09-14 按用户要求从两行并成一行）：按钮 · 找票 · 状态。
+                         原来状态和统计分两行，而两行里有一半是同一个数换了个说法。
 
-                    <!-- 左：在盯什么。
-                         ⚠ 这里**故意不显示**取值器/参数/来源/仓位（2026-09-11 按用户反馈去掉）：
-                         它们是实现细节，而且信息本来就已经在「为什么盯」那句话里了
-                         （"L0：限售解禁"＝取值器+参数，"主动仓：跌破 MA20"＝仓位，
-                          "回购方案进行中（价格上限 573 元）"一看就是系统算出来的）。
-                         重复一遍只会挤掉真正要读的那列。 -->
+                         ⚠ 用 DockPanel 不用横向 StackPanel：StackPanel 给子元素**无限宽**，
+                         状态句子长了会直接顶出窗口而不是省略号。这里状态是最后一个子元素、
+                         自动填满剩下的宽度，TextTrimming 才生效（完整内容挂在 ToolTip 上）。 -->
+                    <DockPanel Grid.Row="0" Grid.ColumnSpan="3" Margin="0,0,0,8" LastChildFill="True">
+                        <Button DockPanel.Dock="Left" Content="重算并求值" Command="{Binding RunCommand}" Width="100"
+                                ToolTip="重算派生项（条件没了的自动摘掉）→ 逐条求值 → 记录新触发 → 重读叙述。&#10;手写项一行都不会动。" />
+                        <!-- 找票：输入即筛，不用回车——这是"找"的动作，不是"提交"的动作。
+                             只认代码和名称，不搜叙述正文（那是全文检索，跟找票是两种意图）。 -->
+                        <TextBlock DockPanel.Dock="Left" Text="找票" VerticalAlignment="Center" Margin="16,0,4,0"
+                                   Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                        <TextBox DockPanel.Dock="Left" Text="{Binding Filter, UpdateSourceTrigger=PropertyChanged}"
+                                 Width="120" VerticalContentAlignment="Center"
+                                 ToolTip="输入代码或名称的一部分，边打边筛。&#10;清空回到全部。" />
+                        <TextBlock DockPanel.Dock="Left" Text="{Binding FilterHint}" VerticalAlignment="Center"
+                                   Margin="6,0,0,0" Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                        <TextBlock Text="{Binding Status}" VerticalAlignment="Center" Margin="16,0,0,0"
+                                   Foreground="{DynamicResource Theme.Accent}" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding Status}" />
+                    </DockPanel>
+
+                    <!-- 左：一股一行的事件叙述（2026-09-14 重构）。
+                         以前是左右两表按事项组织，从左边看到事件还得去右边找它成没成事实——
+                         一件事被拆在两处。现在一只票一行，身上发生过什么按时间连成一条线。 -->
                     <DockPanel Grid.Row="1" Grid.Column="0">
-                        <TextBlock DockPanel.Dock="Top" Text="预计要发生" FontWeight="SemiBold" Margin="0,0,0,4"
-                                   ToolTip="还没发生、正等着的事：下次解禁、下次财报披露、进行中的回购方案、等着跌破的均线。&#10;挂上/摘掉由规则自动维护，手写的那几条规则不碰。" />
-                        <DataGrid x:Name="WatchItemsGrid" ItemsSource="{Binding Items}" AutoGenerateColumns="False"
+                        <TextBlock DockPanel.Dock="Top" Text="个股观察项" FontWeight="SemiBold" Margin="0,0,0,4"
+                                   ToolTip="一只票一行，按&quot;离今天最近&quot;排。&#10;事项之间按日期倒序，同一件事内部按时间正序、缩进显示进展。" />
+                        <DataGrid x:Name="WatchStocksGrid" ItemsSource="{Binding Stocks}" AutoGenerateColumns="False"
                                   IsReadOnly="True" CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                                  VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
                                   AlternatingRowBackground="{DynamicResource Theme.Grid.Row.Alternate}">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="66" />
                                 <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="92" />
                                 <DataGridTextColumn Header="档" Binding="{Binding Priority}" Width="32" />
-                                <!-- 事项 + 预计发生的时间和量（解禁 2026-11-08 100万股）。
-                                     ⚠ 已经发生的事归右表，这条线返工过三次，判据见 WatchService.IsUpcoming。 -->
-                                <DataGridTextColumn Header="跟踪事项" Binding="{Binding Display}" Width="*" />
+                                <!-- 叙述：一行事件一条，缩进表示"这是上一条的后续进展"。
+                                     日期单独一列而不是拼进句子——竖着对齐才能一眼扫出时间顺序。 -->
+                                <DataGridTemplateColumn Header="发生了什么" Width="*" CanUserSort="False">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <ItemsControl ItemsSource="{Binding Lines}" Margin="0,3">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <StackPanel Orientation="Horizontal" Margin="{Binding Margin}">
+                                                            <TextBlock Text="{Binding Date}" Width="82"
+                                                                       Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                                                            <TextBlock Text="{Binding Text}" TextWrapping="Wrap"
+                                                                       ToolTip="{Binding Tip}">
+                                                                <TextBlock.Style>
+                                                                    <Style TargetType="TextBlock">
+                                                                        <Style.Triggers>
+                                                                            <!-- 还没发生的（解禁）淡一点，跟已成事实的分开 -->
+                                                                            <DataTrigger Binding="{Binding IsFuture}" Value="True">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Muted}" />
+                                                                                <Setter Property="FontStyle" Value="Italic" />
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </TextBlock.Style>
+                                                            </TextBlock>
+                                                        </StackPanel>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
                                 <!-- 个人观点写在个股笔记里（notes/{code}.md），不在这儿直接编辑：
                                      笔记本来就是"数据能重算、判断不能"那类东西的去处，
                                      而且写进文件这件事本身就是个门槛，能拦住随手许愿。 -->
-                                <DataGridTextColumn Header="个人观点" Binding="{Binding Thesis}" Width="140" />
-                                <DataGridTemplateColumn Header="笔记" Width="54" CanUserSort="False">
+                                <DataGridTextColumn Header="个人观点" Binding="{Binding Opinion}" Width="150" />
+                                <DataGridTemplateColumn Header="操作" Width="106" CanUserSort="False">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
-                                            <Button Content="📝" Click="WatchNote_Click" Padding="2,0" Margin="1"
-                                                    ToolTip="打开这只票的分析笔记——论点写在这里" />
+                                            <StackPanel Orientation="Horizontal">
+                                                <Button Content="详情" Click="WatchDetail_Click" Padding="6,0" Margin="1"
+                                                        ToolTip="打开这只票的【分析详情】——左边财务、右上观察项、右下趋势" />
+                                                <Button Content="📝" Click="WatchNote_Click" Padding="4,0" Margin="1"
+                                                        ToolTip="打开这只票的分析笔记——论点写在这里" />
+                                            </StackPanel>
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
@@ -803,34 +849,20 @@
                     <GridSplitter Grid.Row="1" Grid.Column="1" Width="6" HorizontalAlignment="Stretch"
                                   Background="Transparent" ShowsPreview="True" />
 
-                    <!-- 右：已经报过什么。只增不删——它是"当时确实报过"的证据，
-                         所以观察项被摘掉之后（比如回购实施完毕），这边的历史记录仍然留着。 -->
+                    <!-- 右：市场普遍现象。
+                         "跌破 MA20"每只票都会有，熊市里几千只同时触发，逐票列在左边只会把真正
+                         个股独有的事（回购买了没、解禁多少）淹掉。而"今天 4127 只跌破，占 68%"
+                         本身有用——今天是几千只一起跌还是就它一只跌，含义完全不同。
+                         ⚠ 个股行里仍然保留自己那条 MA20，这里给的是广度背景不是替代。 -->
                     <DockPanel Grid.Row="1" Grid.Column="2">
-                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,4">
-                            <TextBlock Text="已经发生" FontWeight="SemiBold" VerticalAlignment="Center"
-                                       ToolTip="已经发生的事，按日期倒序：业绩预告发了、增减持做了、回购买了多少。&#10;跟左表不重复——同一件事要么还没发生、要么已经发生。" />
-                            <Button Content="标为已处理" Command="{Binding MarkHandledCommand}" Margin="12,0,0,0" Padding="6,1"
-                                    ToolTip="把勾选的行标成已处理，默认就不再显示了。&#10;只对进过触发窗口、已落库的那些行有效。" />
-                            <Button Content="取消" Command="{Binding UnmarkHandledCommand}" Margin="4,0,0,0" Padding="6,1"
-                                    ToolTip="标错了撤回来" />
-                            <CheckBox Content="只看未处理" IsChecked="{Binding HideHandled}" Margin="12,0,0,0"
-                                      VerticalAlignment="Center"
-                                      ToolTip="右表的意义是&quot;还有什么要管&quot;，不是历史档案。&#10;取消勾选可以看全部。" />
-                        </StackPanel>
-                        <DataGrid x:Name="WatchHitsGrid" ItemsSource="{Binding Hits}" AutoGenerateColumns="False"
-                                  IsReadOnly="False" CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                        <TextBlock DockPanel.Dock="Top" Text="市场观察项" FontWeight="SemiBold" Margin="0,0,0,4"
+                                   ToolTip="非个股独有的现象：全市场均线广度、行业指标。&#10;个股自己那条数仍然显示在左边。" />
+                        <DataGrid x:Name="WatchMarketGrid" ItemsSource="{Binding Market}" AutoGenerateColumns="False"
+                                  IsReadOnly="True" CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
                                   AlternatingRowBackground="{DynamicResource Theme.Grid.Row.Alternate}">
                             <DataGrid.Columns>
-                                <DataGridCheckBoxColumn Binding="{Binding Handled, UpdateSourceTrigger=PropertyChanged}"
-                                                        Width="30" CanUserSort="False" />
-                                <DataGridTextColumn Header="日期" IsReadOnly="True" Binding="{Binding Date}" Width="86" />
-                                <DataGridTextColumn Header="代码" IsReadOnly="True" Binding="{Binding Code}" Width="66" />
-                                <DataGridTextColumn Header="名称" IsReadOnly="True" Binding="{Binding Name}" Width="92" />
-                                <DataGridTextColumn Header="档" IsReadOnly="True" Binding="{Binding Priority}" Width="32" />
-                                <DataGridTextColumn Header="事项" IsReadOnly="True" Binding="{Binding ItemName}" Width="150" />
-                                <!-- 进展用数据说话：多少股、多少钱、从什么变成什么。
-                                     事项名在左边那列，这里不重复。 -->
-                                <DataGridTextColumn Header="进展情况" IsReadOnly="True" Binding="{Binding Message}" Width="*" />
+                                <DataGridTextColumn Header="日期" Binding="{Binding Date}" Width="86" />
+                                <DataGridTextColumn Header="市场现象" Binding="{Binding Text}" Width="*" />
                             </DataGrid.Columns>
                         </DataGrid>
                     </DockPanel>

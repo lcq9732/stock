@@ -131,6 +131,25 @@ public static class FetcherSettings
         (ReadString(settingsPath, "MoneyFlowChannel") ?? "both").Trim().ToLowerInvariant();
 
     /// <summary>
+    /// 逐股补历史那条通道的**请求由谁发**，规范化成 <c>"browser"</c>／<c>"http"</c>，
+    /// 没配就是 <c>"browser"</c>（2026-09-14 起的默认）。
+    ///
+    ///   browser ＝ 真 Chrome/Edge 里做 JSONP（ChromeCdpMoneyFlowFetcher）。
+    ///   http    ＝ 程序里的 HttpClient 直连（EastMoneyMoneyFlowProvider）。
+    ///
+    /// ⚠ 这跟 <see cref="ReadMoneyFlowChannel"/> 是**两个维度**：那个决定"抓不抓逐股这一段"，
+    /// 这个决定"这一段的请求由谁发出去"。两条的 URL、fields、解析完全一样
+    /// （见 <c>MoneyFlowKlineParser</c>），怎么切都不会写出不一致的数据。
+    ///
+    /// 默认为什么是 browser：本机公司网关按域名把 push2his 整个拦了——HttpClient 那条
+    /// TCP/TLS 都通、一发请求就被切、收到 0 字节，**等多久都不会好**；同一时刻真浏览器
+    /// 能稳定取到（2026-09-13 实跑验证过一整份清单）。留着 http 这个值是因为别的机器／
+    /// 别的网络出口未必有这道拦截，那边直连更省事（不用起浏览器）。
+    /// </summary>
+    public static string ReadMoneyFlowBackfillTransport(string settingsPath) =>
+        (ReadString(settingsPath, "MoneyFlowBackfillTransport") ?? "browser").Trim().ToLowerInvariant();
+
+    /// <summary>
     /// 分档资金流快照打哪个域名；没配返回 null，由
     /// <c>EastMoneyMoneyFlowSnapshotProvider.DefaultHost</c>（push2delay）兜底。
     ///
@@ -349,6 +368,25 @@ public static class FetcherSettings
           //"MoneyFlowChannel": "both",
           //"MoneyFlowChannel": "snapshot",
           //"MoneyFlowChannel": "perstock",
+
+          // ── 逐股补历史的请求由谁发 ──────────────────────────────────────
+          //  browser ＝ 起一个真 Chrome/Edge，在东财页面里用 JSONP 取。【默认】
+          //  http    ＝ 程序里的 HttpClient 直连。
+          //
+          //  两条打的**是同一个 URL、同一组 fields**，解析也是同一份代码，差别只有
+          //  「请求由谁发出去」——所以随便切，写进库的数据不会有差异。
+          //
+          //  ⚠ 这台机器上只能用 browser：公司网关按域名把 push2his 整个拦了，HttpClient
+          //  那条 TCP/TLS 都通、一发请求就被切、收到 0 字节，等多久、换哪块网卡都不会好；
+          //  同一时刻真浏览器能稳定取到（2026-09-13 拿 moneyflow-fetch.html 实跑验证过）。
+          //  别的机器／别的网络出口未必有这道拦截，那边用 http 更省事（不用起浏览器）。
+          //
+          //  ⚠ browser 会**弹出一个浏览器窗口**并一直开着（非 headless 是有意的：无头更
+          //  容易被认出来）。它用自己的 profile 目录，不碰你日常那个 Chrome。
+          //  ⚠ 限流是按**出口 IP** 算的，板块那两项也走浏览器、共用同一个出口——
+          //  别让它们跟这一项同时跑。
+          //"MoneyFlowBackfillTransport": "browser",
+          //"MoneyFlowBackfillTransport": "http",
 
           // ── 分档资金流快照打哪个域名 ────────────────────────────────────
           //  不配（保持注释）＝ push2delay.eastmoney.com【默认】

@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using StockPlatform.Analyzer.ViewModels;
 using StockPlatform.Logic.Models;
@@ -366,24 +366,17 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>分裂按钮的主体：直接打开财务分析。</summary>
+    /// <summary>
+    /// 分裂按钮的主体：打开【分析详情】（左财务 / 右上观察项 / 右下趋势）。
+    ///
+    /// ⚠ **不再拦非个股**（2026-09-14）：以前指数/ETF 点了会弹框说"没有财务报表"。
+    /// 现在窗口右边还有观察项，"没有财务但有事件"是个正常状态——左栏如实写一句没数据就行，
+    /// 弹个框挡在前面纯属添堵。
+    /// </summary>
     private void FinancialAnalysisButton_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not MainViewModel vm) return;
-        if (!TryGetCodeName(sender, out var code, out var name))
-        {
-            MessageBox.Show(this, "这一行不是个股，没有财务数据。", "财务分析",
-                MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-        // 查询页能搜到指数/ETF/板块，它们没有财务报表——说清楚是哪一类，并指一下K线还是能看的，
-        // 比笼统一句"不是个股"有用。
-        if ((sender as FrameworkElement)?.DataContext is QueryRowViewModel { IsStock: false } notStock)
-        {
-            MessageBox.Show(this, $"{notStock.Name} 是{notStock.Type}，没有财务报表。\n（下拉里的【行情详情】可以看它的K线）",
-                "财务分析", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
+        if (!TryGetCodeName(sender, out var code, out var name)) return;
         FinancialAnalysisWindow.Open(this, vm, code, name);
     }
 
@@ -545,10 +538,22 @@ public partial class MainWindow : Window
     private void WatchNote_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not MainViewModel vm) return;
-        if ((sender as FrameworkElement)?.DataContext is not WatchItemRow row) return;
+        if ((sender as FrameworkElement)?.DataContext is not StockEventRow row) return;
         if (string.IsNullOrWhiteSpace(row.Code)) return;
 
         new StockNoteWindow(vm.NoteStore, row.Code, row.Name) { Owner = this }.ShowDialog();
+    }
+
+    /// <summary>
+    /// 【观察项】页那列【详情】——打开这只票的【分析详情】。
+    /// 跟列表页操作列那颗是同一个窗口（2026-09-14 合并后）。
+    /// </summary>
+    private void WatchDetail_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm) return;
+        if ((sender as FrameworkElement)?.DataContext is not StockEventRow row) return;
+        if (string.IsNullOrWhiteSpace(row.Code)) return;
+        FinancialAnalysisWindow.Open(this, vm, row.Code, row.Name);
     }
 
     /// <param name="cutoffDate">非空时把K线截到这一天(含)——阶梯低点法的"按历史截止日期验证"
