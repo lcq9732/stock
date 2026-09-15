@@ -134,12 +134,14 @@ public class CompanyProfileRepositoryTests : IDisposable
     public void 取名字时不带长文本()
     {
         // GetAllNames 会被消歧那一步全表读。经营评述平均 4186 字、最长 4.6 万字，
-        // 捎上它每次要多读 3 倍数据——所以长文本本来就在另一张表，这里只取两列。
+        // 捎上它每次要多读 3 倍数据——所以长文本本来就在另一张表，这里只取三列
+        // （2026-09-15 加了 abbr：简称精确档要用，它短，不违反这条）。
         _repo.Upsert([Make("300750", "宁德时代新能源科技股份有限公司", new string('评', 5000))]);
 
         var names = _repo.GetAllNames();
         Assert.Single(names);
-        Assert.Equal(("300750", "宁德时代新能源科技股份有限公司"), names[0]);
+        Assert.Equal("300750", names[0].Code);
+        Assert.Equal("宁德时代新能源科技股份有限公司", names[0].FullName);
     }
 
     [Fact]

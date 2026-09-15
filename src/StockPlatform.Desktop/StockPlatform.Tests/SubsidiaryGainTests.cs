@@ -96,7 +96,7 @@ public class SubsidiaryGainTests
             nameToParent.Select(kv => (Name: kv.Key, ParentCode: kv.Value)));
         _out.WriteLine($"  去歧义后 {nameToParent.Count} 个名字 → 索引 {bySub.Count} 个 key");
 
-        var (byFull, byNorm) = PartnerNameMatcher.BuildIndex(
+        var idx = PartnerNameMatcher.BuildIndex(
             fullNames.Select(kv => (kv.Key, kv.Value)));
 
         // ── ③ 拿去匹配还没还原的对手名 ──────────────────────────────────────
@@ -116,7 +116,7 @@ public class SubsidiaryGainTests
         var hits = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var name in todo)
         {
-            var (code, type) = PartnerNameMatcher.Match(name, byFull, byNorm, bySub);
+            var (code, type) = PartnerNameMatcher.Match(name, idx, bySub);
             // 只数第三档的——前两档本来就能连上，不是这次的增量
             if (code != null && type == PartnerNameMatcher.Subsidiary) hits[name] = code;
         }

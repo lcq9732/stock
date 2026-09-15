@@ -54,7 +54,30 @@ public interface ICustomerSupplierRepository
     /// 回填匹配结果：把 partner_name 等于 key 的行统一写上代码和档次。
     /// <b>空字典是空操作</b>——档案库没拉到时保留上次的匹配结果，绝不抹成 NULL。
     /// </summary>
-    int ApplyMatches(IReadOnlyDictionary<string, (string Code, string MatchType)> matches);
+    /// <param name="evaluated">
+    /// 本轮**评估过的全部名字**（含没命中的）。给了就把"评估过但不在 <paramref name="matches"/>
+    /// 里"的那些清成 NULL，也就是允许改判和撤销。
+    ///
+    /// ⚠ **判据改版时缺了它，修复就落不了地**（2026-09-15 的坑）：原来这个方法只遍历命中的名字，
+    ///   于是「中国铝业集团有限公司」在新规则下不再命中、压根不在字典里，它那条旧的错值
+    ///   <c>601600</c> 就原封不动留着。加了 MatcherVersion 触发全量重匹也一样清不掉。
+    ///
+    /// 传 null＝老行为（只写不清），增量模式用这个：增量本来就只评估 partner_code 为 NULL 的，
+    /// 没有可清的东西，多跑一遍 UPDATE 纯属浪费。
+    /// </param>
+    int ApplyMatches(IReadOnlyDictionary<string, (string Code, string MatchType)> matches,
+                     IReadOnlyCollection<string>? evaluated = null);
+
+    /// <summary>
+    /// 上一次匹配用的规则版本。<b>0 = 从没记过</b>（老库，或从没跑过消歧）。
+    /// 跟 <see cref="StockPlatform.Logic.Services.PartnerNameMatcher.MatcherVersion"/> 比对，
+    /// 不相等就说明判据改过，要全量重匹一次。
+    /// </summary>
+    int GetMatcherVersion();
+
+    /// <summary>记下本轮用的规则版本。**必须在 ApplyMatches 成功之后才写**——
+    /// 先写版本再匹配的话，中途失败就会留下"版本已是新的、数据还是旧的"这种修不回来的状态。</summary>
+    void SetMatcherVersion(int version);
 
     /// <summary>(已匹配行数, 有名字但没匹配上的行数, 匿名行数)，给收尾报告用。</summary>
     (int Matched, int Unmatched, int Anonymous) GetMatchStats();

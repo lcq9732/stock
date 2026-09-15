@@ -120,31 +120,98 @@ public class SqliteCustomerSupplierRepository : ICustomerSupplierRepository
         return list;
     }
 
-    public int ApplyMatches(IReadOnlyDictionary<string, (string Code, string MatchType)> matches)
+    /// <summary>一个事务里最多写多少条 UPDATE。见下面 WAL 那段注释。</summary>
+    private const int ApplyBatchSize = 2000;
+
+    public int ApplyMatches(IReadOnlyDictionary<string, (string Code, string MatchType)> matches,
+                            IReadOnlyCollection<string>? evaluated = null)
     {
-        if (matches.Count == 0) return 0;   // ⚠ 空字典是空操作：档案没拉到时保留上次的匹配
+        // ⚠ 空字典是空操作：档案没拉到时保留上次的匹配。
+        //   但 evaluated 给了就不能这么早退——那是"全量重匹算完了，只是一个都没命中"，
+        //   跟"档案没拉到"是两回事。后者才该保留旧值。
+        if (matches.Count == 0 && evaluated == null) return 0;
 
         using var conn = Open();
-        using var tx = conn.BeginTransaction();
-        using var cmd = conn.CreateCommand();
-        cmd.Transaction = tx;
-        // 按名字整批更新：同一个对手名在多家公司、多个年份的行里重复出现，一条 UPDATE 全覆盖
-        cmd.CommandText = """
-            UPDATE StockCustomerSupplier SET partner_code = $c, match_type = $t
-            WHERE partner_name = $n;
-            """;
-        var pn = cmd.CreateParameter(); pn.ParameterName = "$n"; cmd.Parameters.Add(pn);
-        var pc = cmd.CreateParameter(); pc.ParameterName = "$c"; cmd.Parameters.Add(pc);
-        var pt = cmd.CreateParameter(); pt.ParameterName = "$t"; cmd.Parameters.Add(pt);
 
-        int rows = 0;
-        foreach (var (name, (code, type)) in matches)
+        // 写：只改**真的变了**的行。加上 IS NOT 这两个条件之后，全量重匹 11 万个名字时
+        // 绝大多数名字的结果跟上次一样，一行都不会被重写——WAL 只记真正的改动。
+        // 这个库有过单事务写 468 万行把 WAL 撑到 162GB 的前科（板块指数合成），不能不防。
+        const string SqlWrite = """
+            UPDATE StockCustomerSupplier SET partner_code = $c, match_type = $t
+            WHERE partner_name = $n AND (partner_code IS NOT $c OR match_type IS NOT $t);
+            """;
+        // 清：评估过但没命中的，撤回上一次的结论。判据改版后"不再认识"也是一种结论。
+        const string SqlClear = """
+            UPDATE StockCustomerSupplier SET partner_code = NULL, match_type = NULL
+            WHERE partner_name = $n AND partner_code IS NOT NULL;
+            """;
+
+        int rows = 0, inBatch = 0;
+        var tx = conn.BeginTransaction();
+        try
         {
-            pn.Value = name; pc.Value = code; pt.Value = type;
-            rows += cmd.ExecuteNonQuery();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = SqlWrite;
+                var pn = cmd.CreateParameter(); pn.ParameterName = "$n"; cmd.Parameters.Add(pn);
+                var pc = cmd.CreateParameter(); pc.ParameterName = "$c"; cmd.Parameters.Add(pc);
+                var pt = cmd.CreateParameter(); pt.ParameterName = "$t"; cmd.Parameters.Add(pt);
+
+                // 按名字整批更新：同一个对手名在多家公司、多个年份的行里重复出现，一条 UPDATE 全覆盖
+                foreach (var (name, (code, type)) in matches)
+                {
+                    pn.Value = name; pc.Value = code; pt.Value = type;
+                    rows += cmd.ExecuteNonQuery();
+                    if (++inBatch < ApplyBatchSize) continue;
+                    tx.Commit(); tx.Dispose(); tx = conn.BeginTransaction();
+                    cmd.Transaction = tx; inBatch = 0;
+                }
+            }
+
+            if (evaluated != null)
+            {
+                using var clr = conn.CreateCommand();
+                clr.Transaction = tx;
+                clr.CommandText = SqlClear;
+                var qn = clr.CreateParameter(); qn.ParameterName = "$n"; clr.Parameters.Add(qn);
+
+                foreach (var name in evaluated)
+                {
+                    if (matches.ContainsKey(name)) continue;
+                    qn.Value = name;
+                    rows += clr.ExecuteNonQuery();
+                    if (++inBatch < ApplyBatchSize) continue;
+                    tx.Commit(); tx.Dispose(); tx = conn.BeginTransaction();
+                    clr.Transaction = tx; inBatch = 0;
+                }
+            }
+
+            tx.Commit();
         }
-        tx.Commit();
+        finally { tx.Dispose(); }
         return rows;
+    }
+
+    public int GetMatcherVersion()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT matcher_version FROM CustSuppMatchState WHERE id = 1;";
+        return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
+    }
+
+    public void SetMatcherVersion(int version)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO CustSuppMatchState (id, matcher_version, matched_at) VALUES (1, $v, $t)
+            ON CONFLICT(id) DO UPDATE SET matcher_version = $v, matched_at = $t;
+            """;
+        cmd.Parameters.AddWithValue("$v", version);
+        cmd.Parameters.AddWithValue("$t", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+        cmd.ExecuteNonQuery();
     }
 
     public (int Matched, int Unmatched, int Anonymous) GetMatchStats()

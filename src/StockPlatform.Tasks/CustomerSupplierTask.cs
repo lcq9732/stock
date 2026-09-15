@@ -33,10 +33,14 @@ namespace StockPlatform.Tasks;
 /// 一般原则：<b>任务的水位线粒度必须细于骨架的截断粒度</b>。截断粒度是批（2000 行），
 /// 所以水位线不能是"年（有/无）"，得是"这一年落了多少 / 该有多少"。
 ///
-/// ════ ③ 消歧只做两档 ════
-/// 精确（全称一字不差）和归一化（去空白/括号/公司后缀后相等）。**不做"含简称"的模糊匹配**——
-/// 实测只多 5 个百分点命中率，却会造出"看着像、其实不是"的错边；产业链数据有错边比没有更糟，
-/// 因为你会照着它做判断。实测这两档命中真名的 7.3%，约 1865 条边/年。
+/// ════ ③ 消歧分六档 ════
+/// 全称 / 简称 / 全称+限定词 / 子公司归并 / 非上市母集团 / 写法归一，见
+/// <see cref="PartnerNameMatcher"/>。**仍然不做"含简称"的模糊匹配**——实测只多 5 个百分点
+/// 命中率，却会造出"看着像、其实不是"的错边；产业链数据有错边比没有更糟，因为你会照着它做判断。
+///
+/// ⚠ 判据改了要把 <see cref="PartnerNameMatcher.MatcherVersion"/> 加一，否则**只对新名字生效**：
+///   错配行的 partner_code 不是 NULL 是错值，默认那一支永远捞不到它们。版本比对**只驱动消歧**
+///   （纯本地、零请求），不碰抓取计划——所以改完规则跑一次平时的增量就能纠正，不用重抓 24 年。
 /// </summary>
 public sealed class CustomerSupplierTask(
     ICustomerSupplierRepository repository,
@@ -172,10 +176,13 @@ public sealed class CustomerSupplierTask(
     }
 
     /// <summary>
-    /// 把对手名还原成股票代码。只做精确和归一化两档，理由见类注释。
+    /// 把对手名还原成股票代码。六档，见 <see cref="PartnerNameMatcher"/> 的类注释。
     ///
     /// <b>档案库空着就直接返回</b>——绝不把已有的 partner_code 抹成 NULL。
     /// 这跟"空集合是空操作"是同一条铁律：拉不到新数据时，库里上一次的结果仍然有效。
+    ///
+    /// ⚠ **这一步纯本地、零请求**。判据改版后要修已有的错值，靠的就是它——
+    ///   下面那个版本比对只驱动消歧，不碰抓取计划（抓取该抓几页还是几页）。
     /// </summary>
     private void MatchPartners(List<string> errors)
     {
@@ -187,8 +194,17 @@ public sealed class CustomerSupplierTask(
             return;
         }
 
-        // 规则改过就得全量重算，否则只补新抓进来的那些
-        var names = repository.GetPartnerNamesToMatch(all: _rebuild);
+        // 判据改版也要全量重算，不只是首次回补的时候。
+        // 不这么做的话新规则只对"还没匹配过"的名字生效——错配行的 partner_code 不是 NULL、
+        // 是错值，GetPartnerNamesToMatch 默认那一支永远捞不到它们。
+        int wasVersion = repository.GetMatcherVersion();
+        bool ruleChanged = wasVersion != PartnerNameMatcher.MatcherVersion;
+        bool full = _rebuild || ruleChanged;
+        if (ruleChanged)
+            Report($"消歧规则从 v{wasVersion} 升到 v{PartnerNameMatcher.MatcherVersion}，"
+                 + "本轮全量重匹（纯本地计算，不发请求）。", phase: "消歧");
+
+        var names = repository.GetPartnerNamesToMatch(all: full);
         if (names.Count == 0)
         {
             Report("没有待还原的对手名。", phase: "消歧");
@@ -197,7 +213,7 @@ public sealed class CustomerSupplierTask(
 
         Report($"对手方还原：{names.Count} 个不同的名字，比对 {companies.Count} 家上市公司...", phase: "消歧");
 
-        var (byFull, byNorm) = PartnerNameMatcher.BuildIndex(companies);
+        var index = PartnerNameMatcher.BuildIndex(companies);
 
         // 第三档：年报里披露的子公司名单，归并到母公司（2026-09-11）。
         // 没有这份数据（还没跑过【年报子公司名单】）就是 null，退回原来的两档，行为不变。
@@ -221,15 +237,36 @@ public sealed class CustomerSupplierTask(
         var hits = new Dictionary<string, (string Code, string MatchType)>(StringComparer.Ordinal);
         foreach (var name in names)
         {
-            var (code, type) = PartnerNameMatcher.Match(name, byFull, byNorm, bySub);
+            var (code, type) = PartnerNameMatcher.Match(name, index, bySub);
             if (code != null && type != null) hits[name] = (code, type);
         }
 
-        int rows = repository.ApplyMatches(hits);
-        // 分档报出来——第三档是假设，混在总数里看不出这次回填有多少是"推断的"
-        int bySubCount = hits.Count(h => h.Value.MatchType == PartnerNameMatcher.Subsidiary);
+        // ⚠ 全量重匹必须把**评估过的全部名字**一起传下去，否则改判落不了地：
+        //   「中国铝业集团有限公司」在新规则下不再命中，压根不在 hits 里，
+        //   它那条旧的错值 601600 会原封不动留着。增量模式传 null（没有可清的）。
+        int rows = repository.ApplyMatches(hits, full ? names : null);
+
+        // 分档报出来——各档的置信度差得远，混在一个总数里看不出这次回填有多少是"推断的"
+        var byTier = hits.GroupBy(h => h.Value.MatchType)
+                         .OrderByDescending(g => g.Count())
+                         .Select(g => $"{TierName(g.Key)} {g.Count()}");
         Report($"对手方还原完成：{hits.Count}/{names.Count} 个名字对上了上市公司"
-             + (bySubCount > 0 ? $"（其中 {bySubCount} 个是经子公司归并的）" : "")
-             + $"，回填 {rows} 行。", phase: "消歧");
+             + $"（{string.Join(" · ", byTier)}），回填 {rows} 行。", phase: "消歧");
+
+        // ⚠ 必须等 ApplyMatches 回来了才记版本。反过来的话中途失败就会留下
+        //   "版本已是新的、数据还是旧的"——下一轮不会再重匹，这个状态修不回来。
+        if (full) repository.SetMatcherVersion(PartnerNameMatcher.MatcherVersion);
     }
+
+    /// <summary>档次的中文名，只用于日志。</summary>
+    private static string TierName(string tier) => tier switch
+    {
+        PartnerNameMatcher.Exact => "全称",
+        PartnerNameMatcher.Short => "简称",
+        PartnerNameMatcher.Qualified => "全称+限定词",
+        PartnerNameMatcher.Subsidiary => "子公司归并",
+        PartnerNameMatcher.ParentGroup => "母集团(非上市)",
+        PartnerNameMatcher.Normalized => "写法归一",
+        _ => tier,
+    };
 }

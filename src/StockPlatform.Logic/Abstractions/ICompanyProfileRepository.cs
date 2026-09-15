@@ -17,10 +17,14 @@ public interface ICompanyProfileRepository
     int Upsert(IEnumerable<(CompanyProfile Profile, CompanyNarrative Narrative)> items);
 
     /// <summary>
-    /// (代码, 全称) 全量，给实体消歧建索引用。
-    /// 只返回这两列——这张表会被匹配步骤全表读，别把长文本捎上。
+    /// (代码, 全称, 简称) 全量，给实体消歧建索引用。
+    /// 只返回这三列——这张表会被匹配步骤全表读，别把长文本捎上。
+    ///
+    /// 简称（<c>abbr</c>）是 2026-09-15 加的：5561 个 A 股简称实测**零重名**，
+    /// 所以"对手名 == 简称"跟全称精确一样没有歧义空间，实测多认出 651 个名字。
+    /// 取不到就是 null，<see cref="StockPlatform.Logic.Services.PartnerNameMatcher"/> 会跳过。
     /// </summary>
-    List<(string Code, string FullName)> GetAllNames();
+    List<(string Code, string FullName, string? Abbr)> GetAllNames();
 
     /// <summary>(档案条数, 长文本条数)。两者应该相等，不等就是有半拉记录。</summary>
     (int Profiles, int Narratives) GetCounts();

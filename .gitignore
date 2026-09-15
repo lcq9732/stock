@@ -1,6 +1,7 @@
 bin/
 obj/
 publish/
+tools/
 .claude/
 
 # 移动端签名 keystore——绝不提交，但务必自己备份好，发新版必须用同一个（见 scripts/build-apk.ps1）

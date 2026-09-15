@@ -143,15 +143,16 @@ public class SqliteCompanyProfileRepository : ICompanyProfileRepository
         return list.Count;
     }
 
-    public List<(string Code, string FullName)> GetAllNames()
+    public List<(string Code, string FullName, string? Abbr)> GetAllNames()
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        // 只取两列：这张表会被匹配步骤全表读，别把长文本捎上（长文本本来就在另一张表）
-        cmd.CommandText = "SELECT code, full_name FROM CompanyProfile WHERE full_name IS NOT NULL AND full_name <> '';";
-        var list = new List<(string, string)>(6000);
+        // 只取三列：这张表会被匹配步骤全表读，别把长文本捎上（长文本本来就在另一张表）。
+        // abbr 是证券简称（"宁德时代"），2026-09-15 加进来给简称精确档用。
+        cmd.CommandText = "SELECT code, full_name, abbr FROM CompanyProfile WHERE full_name IS NOT NULL AND full_name <> '';";
+        var list = new List<(string, string, string?)>(6000);
         using var r = cmd.ExecuteReader();
-        while (r.Read()) list.Add((r.GetString(0), r.GetString(1)));
+        while (r.Read()) list.Add((r.GetString(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2)));
         return list;
     }
 

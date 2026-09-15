@@ -945,6 +945,22 @@ public static class SqliteSchema
                 updated_at TEXT
             );
 
+            -- ══ 实体消歧的水位线（2026-09-15）══
+            -- 单行表（id 恒为 1），只记"上一次是用哪个版本的规则匹配的"。
+            --
+            -- ⚠ **没有它，判据改了也修不了已有的错值**。GetPartnerNamesToMatch 默认只捞
+            --   partner_code IS NULL 的名字，而错配行的 partner_code 不是 NULL、是错值，
+            --   永远轮不到重新评估。而走「首次整段回补」倒是能全量重匹，代价却是把 2002 年
+            --   至今 24 年、约 3000 个请求重抓一遍——为几个字符串比对重抓 76 万行，不合算。
+            --
+            -- 所以版本比对只驱动**消歧**那一步（纯本地、零请求），不碰抓取计划：
+            -- 平时那个增量任务照跑，抓取该抓几页还是几页，收尾时发现版本变了就全量重匹一次。
+            CREATE TABLE IF NOT EXISTS CustSuppMatchState (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                matcher_version INTEGER NOT NULL,
+                matched_at      TEXT
+            );
+
             -- ══ 公司档案（2026-09-08）══
             -- 数据源：东财 RPT_HSF9_BASIC_ORGINFO（走 datacenter），5634 家 A 股、14 页。
             -- 每股一行的**快照**（接口无时间维度）。
