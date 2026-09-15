@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using OxyPlot;
 using OxyPlot.Annotations;
 using OxyPlot.Axes;
@@ -12,9 +12,13 @@ namespace StockPlatform.Analyzer;
 /// 让 OxyPlot 图表跟着界面主题走（2026-08-29 新增）。
 ///
 /// 图表跟别的控件不一样：颜色不是 WPF 画刷、拿不到 DynamicResource，全是 PlotModel/Axis/Series 上的
-/// OxyColor 属性，换主题时得逐个改。PlotView 控件本身的底色已经在各 XAML 上写成
-/// <c>{DynamicResource Theme.Chart.Background}</c> 自动跟随了，这里管的是画布**里面**——坐标轴文字、
+/// OxyColor 属性，换主题时得逐个改。PlotView 控件本身的底色靠各 XAML 上的
+/// <c>{DynamicResource Theme.Chart.Background}</c> 跟随，这里管的是画布**里面**——坐标轴文字、
 /// 网格线、图上直接标的数值、零轴/十字线这些标注，以及个别深到在黑底上看不见的线（MACD 零轴是纯黑）。
+///
+/// ⚠ **新加 PlotView 时别忘了那句 Background**：漏了它画布就是 OxyPlot 的默认白底，而这里已经把
+/// 里面的文字刷成了浅灰——白底浅灰字，等于看不见。六个判断依据窗口从做主题起就一直漏着，
+/// 2026-09-15 才补上（表现是"这些图没随主题"，很容易误判成 ChartTheme 没生效）。
 ///
 /// 怎么挂上去的：建图的地方（各 ChartBuilder）把 model 交给 <see cref="Track"/> 登记，这里订阅
 /// <see cref="PlotModel.Updated"/>——OxyPlot 每次绘制前都会 Update 一遍，那一刻坐标轴和序列都已经
@@ -34,6 +38,14 @@ namespace StockPlatform.Analyzer;
 /// </summary>
 internal static class ChartTheme
 {
+    // ===== 涨跌配色（全程序唯一一份）=====
+    //   通达信口径：涨红、跌青。跌**不用绿**——绿在黑底上跟"MA20 线""摆动低点"这些非涨跌语义的绿
+    //   撞色，青才是看盘软件的惯例。原来只有行情详情图是红/青、其余判断依据图是红/绿，两边对不上
+    //   （2026-09-15 按用户要求统一）。
+    //   只给"涨跌"这一种语义用：MA 均线、标记点那些绿色是别的意思，不要往这儿并。
+    public static readonly OxyColor Up = OxyColors.Red;
+    public static readonly OxyColor Down = OxyColor.FromRgb(0, 210, 210);
+
     private static readonly List<WeakReference<PlotModel>> Models = new();
     private static readonly ConditionalWeakTable<PlotModel, Snapshot> Snapshots = new();
 

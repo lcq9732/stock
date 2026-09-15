@@ -188,9 +188,10 @@ public static class ChartBuilder
         {
             Title = "K线",
             XAxisKey = mainDayAxis.Key,
-            // 国内看盘习惯：涨红跌绿——不设置的话 OxyPlot 默认是美股习惯（涨绿跌红），正好反过来。
-            IncreasingColor = OxyColors.Red,
-            DecreasingColor = OxyColors.Green,
+            // 国内看盘习惯：涨红跌青（口径见 ChartTheme.Up/Down）——不设置的话 OxyPlot 默认是
+            // 美股习惯（涨绿跌红），正好反过来。
+            IncreasingColor = ChartTheme.Up,
+            DecreasingColor = ChartTheme.Down,
             // 默认宽度是相邻两根K线间距的0.8倍，看起来偏胖；调窄一些更接近常见炒股软件的样子。
             CandleWidth = 0.5,
             TrackerFormatString = "日期: {2}\n开盘: {3:F2}\n最高: {4:F2}\n最低: {5:F2}\n收盘: {6:F2}",

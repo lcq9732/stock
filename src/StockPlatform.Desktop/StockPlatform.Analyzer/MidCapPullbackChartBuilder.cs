@@ -125,8 +125,8 @@ public static class MidCapPullbackChartBuilder
         {
             Title = "K线",
             XAxisKey = dayAxis.Key,
-            IncreasingColor = OxyColors.Red,
-            DecreasingColor = OxyColors.Green,
+            IncreasingColor = ChartTheme.Up,
+            DecreasingColor = ChartTheme.Down,
             CandleWidth = 0.5,
             TrackerFormatString = "日期: {2}\n开盘: {3:F2}\n最高: {4:F2}\n最低: {5:F2}\n收盘: {6:F2}",
         };

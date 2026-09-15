@@ -143,10 +143,11 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     // ── 持仓信息（2026-08-11起支持多笔买入/卖出，见 TradeLot）——买卖明细在"主动仓"Tab点
     //    【交易记录】录入，这里只显示汇总：总股数 + 加权均价。一笔都没有=观察中、还没买。 ──
 
-    /// <summary>买入汇总："3笔 1,500股 均12.34"；没买过显示"—"。老数据没填股数时只显示均价。</summary>
+    /// <summary>买入汇总："3笔 1,500股 均12.34"；没买过显示一支笔（见 <see cref="LotSummary"/>）。
+    /// 老数据没填股数时只显示均价。</summary>
     public string BuySummaryText => LotSummary(Entry.BuyLots.Count, Entry.TotalBuyShares, Entry.AvgBuyPrice);
 
-    /// <summary>卖出汇总，格式同 <see cref="BuySummaryText"/>；一笔没卖显示"—"。</summary>
+    /// <summary>卖出汇总，格式同 <see cref="BuySummaryText"/>；一笔没卖同样显示那支笔。</summary>
     public string SellSummaryText => LotSummary(Entry.SellLots.Count, Entry.TotalSellShares, Entry.AvgSellPrice);
 
     /// <summary>还拿着多少股（部分卖出后就是剩下的那部分）——已全部卖出显示"已清仓"。</summary>
@@ -291,9 +292,16 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// 买入/卖出那两格的显示文字。没有成交记录时不显示"—"而是一支笔 ✎（2026-09-15 按用户要求改）：
+    /// 这两格是**可点的**（列上写了 CellAction.Kind="Lots"，点开【交易记录】录入），而同一行里
+    /// "持仓股数""止亏价"那几格没数据时也是"—"、却不可点——全是横杠的话，哪几格能点完全看不出来。
+    /// 笔＝"在这儿填"，一眼能从一排横杠里认出来。
+    /// 用 ✎(U+270E) 而不是 ✏️(U+270F+VS16)：后者会被渲染成彩色 emoji，跟表里其它文字格格不入。
+    /// </summary>
     private static string LotSummary(int count, int shares, double? avgPrice)
     {
-        if (count == 0 || avgPrice is not (> 0)) return "—";
+        if (count == 0 || avgPrice is not (> 0)) return "✎";
         return shares > 0
             ? $"{count}笔 {shares:N0}股 均{avgPrice.Value:F2}"
             : $"{count}笔 均{avgPrice.Value:F2}（股数未填）";

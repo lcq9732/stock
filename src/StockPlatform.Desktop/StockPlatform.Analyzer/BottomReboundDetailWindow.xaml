@@ -43,7 +43,7 @@
                         </StackPanel>
                     </Grid>
                 </Border>
-                <oxy:PlotView Grid.Row="1" x:Name="MainPlot" Model="{Binding MainPlotModel}" />
+                <oxy:PlotView Grid.Row="1" x:Name="MainPlot" Model="{Binding MainPlotModel}" Background="{DynamicResource Theme.Chart.Background}" />
             </Grid>
 
             <Grid Grid.Row="1" Margin="0,8,0,0">
@@ -72,7 +72,7 @@
                         </StackPanel>
                     </Grid>
                 </Border>
-                <oxy:PlotView Grid.Row="1" x:Name="MacdPlot" Model="{Binding MacdPlotModel}" />
+                <oxy:PlotView Grid.Row="1" x:Name="MacdPlot" Model="{Binding MacdPlotModel}" Background="{DynamicResource Theme.Chart.Background}" />
             </Grid>
         </Grid>
 

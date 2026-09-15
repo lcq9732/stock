@@ -65,9 +65,23 @@
                   GridLinesVisibility="Horizontal" HeadersVisibility="Column" AlternatingRowBackground="{DynamicResource Theme.Grid.Row.Alternate}"
                   SelectionMode="Extended" SelectionUnit="FullRow">
             <DataGrid.Columns>
-                <DataGridComboBoxColumn Header="方向" Width="80"
-                                        SelectedItemBinding="{Binding SideText, UpdateSourceTrigger=PropertyChanged}"
-                                        ItemsSource="{x:Static local:TradeLotEditRow.SideOptions}" />
+                <!-- 方向/原因两列都用 DataGridTemplateColumn，不用 DataGridComboBoxColumn——
+                     后者的 ElementStyle/EditingElementStyle 是一个**显式** Style（要么 DataGrid 内建的
+                     默认值，要么像原因列那样自己写一个来设行级 ItemsSource），而 WPF 里显式 Style 会
+                     整个顶掉隐式样式：深色主题的 ComboBox 模板（Controls.Dark.xaml）就此失效，下拉弹出
+                     退回系统默认模板的**白底**，文字前景却还是从窗口继承来的浅灰——白底浅灰字，选项
+                     基本看不清（2026-09-15 修）。用 TemplateColumn 放一个普通 ComboBox 就没这问题：
+                     它是可视树里的正常控件，隐式样式照常套上。
+                     注意别改成给 Style 加 BasedOn="{StaticResource {x:Type ComboBox}}"——Controls.Dark.xaml
+                     是运行时才合并进去的，浅色主题下这个资源根本不存在，XAML 解析会直接抛异常。 -->
+                <DataGridTemplateColumn Header="方向" Width="80" SortMemberPath="SideText">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <ComboBox ItemsSource="{x:Static local:TradeLotEditRow.SideOptions}"
+                                      SelectedItem="{Binding SideText, UpdateSourceTrigger=PropertyChanged}" />
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
                 <DataGridTextColumn Header="日期" Width="110"
                                     Binding="{Binding DateText, UpdateSourceTrigger=PropertyChanged}" />
                 <DataGridTextColumn Header="价格" Width="90"
@@ -79,20 +93,16 @@
                 <DataGridTextColumn Header="费用" Width="120" IsReadOnly="True"
                                     Binding="{Binding FeeText}" />
                 <!-- 原因：选项跟着"方向"变（买入 4 个 / 卖出 7 个），所以 ItemsSource 绑到行上
-                     而不是用 x:Static 绑一份静态列表。留空表示"未填"，不强制。 -->
-                <DataGridComboBoxColumn Header="原因" Width="170"
-                                        SelectedItemBinding="{Binding ReasonLabel, UpdateSourceTrigger=PropertyChanged}">
-                    <DataGridComboBoxColumn.ElementStyle>
-                        <Style TargetType="ComboBox">
-                            <Setter Property="ItemsSource" Value="{Binding ReasonOptions}" />
-                        </Style>
-                    </DataGridComboBoxColumn.ElementStyle>
-                    <DataGridComboBoxColumn.EditingElementStyle>
-                        <Style TargetType="ComboBox">
-                            <Setter Property="ItemsSource" Value="{Binding ReasonOptions}" />
-                        </Style>
-                    </DataGridComboBoxColumn.EditingElementStyle>
-                </DataGridComboBoxColumn>
+                     而不是用 x:Static 绑一份静态列表。留空表示"未填"，不强制。
+                     为什么是 TemplateColumn 而不是 ComboBoxColumn，见上面「方向」列的说明。 -->
+                <DataGridTemplateColumn Header="原因" Width="170" SortMemberPath="ReasonLabel">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <ComboBox ItemsSource="{Binding ReasonOptions}"
+                                      SelectedItem="{Binding ReasonLabel, UpdateSourceTrigger=PropertyChanged}" />
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
                 <DataGridTextColumn Header="备注" Width="*"
                                     Binding="{Binding Note, UpdateSourceTrigger=PropertyChanged}" />
             </DataGrid.Columns>

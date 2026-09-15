@@ -85,8 +85,8 @@ public static class RisingLowsChartBuilder
         {
             Title = "K线",
             XAxisKey = mainDay.Key,
-            IncreasingColor = OxyColors.Red,
-            DecreasingColor = OxyColors.Green,
+            IncreasingColor = ChartTheme.Up,
+            DecreasingColor = ChartTheme.Down,
             CandleWidth = 0.5,
             TrackerFormatString = "日期: {2}\n开盘: {3:F2}\n最高: {4:F2}\n最低: {5:F2}\n收盘: {6:F2}",
         };
@@ -251,8 +251,8 @@ public static class RisingLowsChartBuilder
 
     private static void AddVolumeBars(PlotModel model, string xAxisKey, List<Bar> bars, List<double> volumes)
     {
-        var up = new StemSeries { Title = "成交量(涨)", Color = OxyColors.Red, StrokeThickness = 3, XAxisKey = xAxisKey };
-        var down = new StemSeries { Title = "成交量(跌)", Color = OxyColors.Green, StrokeThickness = 3, XAxisKey = xAxisKey };
+        var up = new StemSeries { Title = "成交量(涨)", Color = ChartTheme.Up, StrokeThickness = 3, XAxisKey = xAxisKey };
+        var down = new StemSeries { Title = "成交量(跌)", Color = ChartTheme.Down, StrokeThickness = 3, XAxisKey = xAxisKey };
         for (int i = 0; i < bars.Count; i++)
             (bars[i].Close >= bars[i].Open ? up : down).Points.Add(new DataPoint(i, volumes[i]));
         model.Series.Add(up);

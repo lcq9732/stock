@@ -90,8 +90,10 @@ public static class QuoteChartBuilder
     private static readonly OxyColor GridColor = OxyColor.FromRgb(45, 45, 45);
     private static readonly OxyColor AxisTextColor = OxyColor.FromRgb(190, 190, 190);
     private static readonly OxyColor CrosshairColor = OxyColor.FromRgb(200, 200, 200);
-    private static readonly OxyColor UpColor = OxyColors.Red;                    // 涨红
-    private static readonly OxyColor DownColor = OxyColor.FromRgb(0, 210, 210);  // 跌青（通达信风格）
+    // 涨跌色现在是全程序共用的一份（ChartTheme.Up/Down）——判断依据那几张图原来是红/绿，
+    // 2026-09-15 统一成跟这张看盘图一样的红/青。这里留两个短别名，下面几十处引用不用改。
+    private static readonly OxyColor UpColor = ChartTheme.Up;                    // 涨红
+    private static readonly OxyColor DownColor = ChartTheme.Down;                // 跌青（通达信风格）
 
     // 均线颜色（通达信默认）：MA5 白、MA10 黄、MA20 品红、MA60 绿。公开给 QuoteDetailWindow 的表头
     // 数值上色用，图和文字对得上。

@@ -46,7 +46,7 @@
                         </StackPanel>
                     </Grid>
                 </Border>
-                <oxy:PlotView Grid.Row="1" x:Name="MainPlot" Model="{Binding MainPlotModel}" />
+                <oxy:PlotView Grid.Row="1" x:Name="MainPlot" Model="{Binding MainPlotModel}" Background="{DynamicResource Theme.Chart.Background}" />
             </Grid>
 
             <Grid Grid.Row="1" Margin="0,6,0,0">
@@ -75,7 +75,7 @@
                         </StackPanel>
                     </Grid>
                 </Border>
-                <oxy:PlotView Grid.Row="1" x:Name="MacdPlot" Model="{Binding MacdPlotModel}" />
+                <oxy:PlotView Grid.Row="1" x:Name="MacdPlot" Model="{Binding MacdPlotModel}" Background="{DynamicResource Theme.Chart.Background}" />
             </Grid>
 
             <Grid Grid.Row="2" Margin="0,6,0,0">
@@ -100,7 +100,7 @@
                         </StackPanel>
                     </Grid>
                 </Border>
-                <oxy:PlotView Grid.Row="1" x:Name="KdjPlot" Model="{Binding KdjPlotModel}" />
+                <oxy:PlotView Grid.Row="1" x:Name="KdjPlot" Model="{Binding KdjPlotModel}" Background="{DynamicResource Theme.Chart.Background}" />
             </Grid>
 
             <Grid Grid.Row="3" Margin="0,6,0,0">
@@ -123,7 +123,7 @@
                         </StackPanel>
                     </Grid>
                 </Border>
-                <oxy:PlotView Grid.Row="1" x:Name="RsiPlot" Model="{Binding RsiPlotModel}" />
+                <oxy:PlotView Grid.Row="1" x:Name="RsiPlot" Model="{Binding RsiPlotModel}" Background="{DynamicResource Theme.Chart.Background}" />
             </Grid>
 
             <Grid Grid.Row="4" Margin="0,6,0,0">
@@ -150,7 +150,7 @@
                         </StackPanel>
                     </Grid>
                 </Border>
-                <oxy:PlotView Grid.Row="1" x:Name="VolumePlot" Model="{Binding VolumePlotModel}" />
+                <oxy:PlotView Grid.Row="1" x:Name="VolumePlot" Model="{Binding VolumePlotModel}" Background="{DynamicResource Theme.Chart.Background}" />
             </Grid>
         </Grid>
 

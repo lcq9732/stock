@@ -1,4 +1,4 @@
-namespace StockPlatform.Logic.Services;
+﻿namespace StockPlatform.Logic.Services;
 
 /// <summary>
 /// 一笔成交的**归因码**（2026-09-14）。落在交易记录的 <c>Reason</c> 字段上。
@@ -48,6 +48,13 @@ public static class TradeReasons
     /// <summary>基本面变了（业绩爆雷、逻辑证伪）。</summary>
     public const string Fundamental = "fundamental";
 
+    /// <summary>行情不稳，落袋为安 —— 票本身没毛病，是大盘/板块看着要出事，先把利润揣回兜里
+    /// （2026-09-15 按用户要求加）。
+    /// 跟 <see cref="Judgment"/> 分开记而不是并成一条：那条是"**这只票**看着不对"，这条是
+    /// "**行情**看着不对"。归因时这个差别是要紧的——前者错了说明选股或跟踪有问题，后者错了
+    /// 说明是在做择时（而且多半是被大盘吓出来的）。并成一条就永远拆不开这两种失误。</summary>
+    public const string Market = "market";
+
     // ── 卖出 · 外部 ──────────────────────────────────────────────────────
     /// <summary>要用钱，跟这只票本身无关。**归因时剔除**。</summary>
     public const string Cash = "cash";
@@ -69,7 +76,7 @@ public static class TradeReasons
     public static string? GroupOf(string? reason) => reason switch
     {
         Target or Stop or Timeout or Signal => Discipline,
-        Judgment or Switch or Fundamental or Manual or Dip or Add => Judgement,
+        Judgment or Switch or Fundamental or Market or Manual or Dip or Add => Judgement,
         Cash => External,
         _ => null,
     };
@@ -93,6 +100,7 @@ public static class TradeReasons
                 (Judgment, "看着不对，提前跑（判断）"),
                 (Switch, "换更好的标的（判断）"),
                 (Fundamental, "基本面变了（判断）"),
+                (Market, "行情不稳，落袋为安（判断）"),
                 (Cash, "要用钱（外部，归因时剔除）"),
             }
             : new[]
