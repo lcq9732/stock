@@ -94,20 +94,179 @@ public partial class MainWindow : Window
             vm.WatchlistTab.Reload(); // picks up anything added from another tab this session
         if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "主动仓" })
             vm.TradePoolTab.Reload(); // 同上——刚从"自选股"/"查询"页加进主动仓的票，切过来就能看到
+        // 观察项**只在第一次切进来时自动读**（见 EnsureLoaded）：读一轮要扫每只票 7 张表 +
+        // 算一次全市场均线广度，每次切页都跑会顿一下。要最新的点那页的【刷新】。
+        if (e.AddedItems.Count > 0 && e.AddedItems[0] is TabItem { Header: "观察项" })
+            vm.WatchTab.EnsureLoaded();
         // 每日晨检不在切Tab时自动体检（读全库+逐只算、会顿一下）——改成纯手动，用户点该Tab里的"刷新"按钮才算，
         // 这样开程序秒开、切Tab也不卡（2026-07-31 按用户要求从"启动/切Tab自动跑"改为全手动）。
         // 同理：主动仓成员变动也不自动触发晨检重算（见 MainViewModel 里 TradePoolChanged 的接线）。
     }
 
-    // 让单元格在鼠标按下的 Tunneling 阶段就获得焦点。原本是为了解决"勾选框要点两下"，但那条路走不通
-    // （DataGridCheckBoxColumn 显示态的复选框 IsHitTestVisible=false，只让单元格获得焦点并不会进入
-    // 编辑态）——2026-08-12 改成用模板列里的普通 CheckBox 才真正一点即勾，见 MainWindow.xaml 里的
-    // SelectCheckBoxCell。这个处理器保留下来仍有用：可编辑的文本单元格（"主动仓"页录买卖信息那几列）
-    // 也受益于"一下点进去就能改"，不用先点一次选中行。隐式 DataGridCell 样式，本窗口所有表通用。
+    // ── 表格里点一格 = 开一个窗口（2026-09-15）──
+    //
+    // 原来每个列表页最右边都有一条"操作"列，里面一排按钮（分析详情▾ / 条件详情 / 交易记录 / 仓位…），
+    // 而且每页塞的还不一样。现在改成**点数据本身**：列上写一句 local:CellAction.Kind（见 CellAction.cs），
+    // 这里按 Kind 分发。操作列整条撤掉，只剩观察项的 📝 和因子清单的【说明】——那两样没有对应的
+    // 数据列可点。
+    //
+    // 两个细节：
+    // · 打开窗口推迟到本轮输入处理完之后（BeginInvoke）。在 Preview 阶段直接弹模态窗，会把
+    //   DataGrid 自己的选中逻辑堵在后面，而板块页正是靠"选中某行"刷新右边的成分股列表。
+    // · _cellActionRunning 防重入：ShowDialog 会起一个嵌套消息泵，双击时排在队列里的第二次点击
+    //   会在那里面被执行，不拦就叠出第二个窗口。
+    //
+    // 不是可点列时行为照旧：让单元格在鼠标按下的 Tunneling 阶段就获得焦点，可编辑的文本单元格
+    // （主动仓页那几列 ✎）一下点进去就能改，不用先点一次选中行。隐式 DataGridCell 样式，本窗口所有表通用。
+    private bool _cellActionRunning;
+
     private void DataGridCell_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (sender is DataGridCell { IsFocused: false, IsEditing: false } cell)
-            cell.Focus();
+        if (sender is not DataGridCell cell) return;
+
+        var kind = cell.Column is { } column ? CellAction.GetKind(column) : CellActionKind.None;
+        if (kind != CellActionKind.None)
+        {
+            var row = cell.DataContext;
+            // 八个筛选页的行都是 ResultRowViewModel，光看类型分不出是哪一页的条件详情，
+            // 靠所在 DataGrid 的 x:Name 区分（见 OpenCriteria）。
+            var gridName = FindVisualAncestor<DataGrid>(cell)?.Name ?? "";
+            Dispatcher.BeginInvoke(new Action(() => RunCellAction(kind, row, gridName)),
+                                   System.Windows.Threading.DispatcherPriority.Input);
+            return;
+        }
+
+        if (cell is { IsFocused: false, IsEditing: false }) cell.Focus();
+    }
+
+    private void RunCellAction(CellActionKind kind, object? row, string gridName)
+    {
+        if (_cellActionRunning) return;
+        if (DataContext is not MainViewModel vm) return;
+
+        _cellActionRunning = true;
+        try
+        {
+            switch (kind)
+            {
+                // 【代码】列：分析详情（左财务 / 右上观察项 / 右下趋势）。
+                // 不拦非个股——指数/ETF 没有财务报表，但观察项和趋势照常有，左栏如实写一句没数据就行。
+                case CellActionKind.Detail:
+                    if (TryGetCodeName(row, out var code, out var name)) FinancialAnalysisWindow.Open(this, vm, code, name);
+                    break;
+
+                // 【名称】列：行情详情（K线）。
+                case CellActionKind.Quote:
+                    if (TryGetCodeName(row, out var quoteCode, out var quoteName)) OpenQuoteDetail(quoteCode, quoteName);
+                    break;
+
+                // 板块榜的【板块】列：那一行不是个股，看的是本地按成分股等权合成的板块指数
+                // （code = gn_xxx / new_xxx，见 BoardIndexSynthesizer）。
+                case CellActionKind.BoardQuote:
+                    if (row is BoardRowViewModel board) OpenQuoteDetail(board.BoardCode, board.Name);
+                    break;
+
+                case CellActionKind.Criteria:
+                    OpenCriteria(vm, row, gridName);
+                    break;
+
+                // 【买入】【卖出】列（主动仓）和【建仓进度】列（底仓）——同一个成交录入窗口，
+                // 两页各写各的文件（watchlist.json / core-positions.json）。
+                case CellActionKind.Lots:
+                    if (row is WatchlistRowViewModel lotsRow) OpenTradeLots(vm, lotsRow);
+                    else if (row is CorePositionRowViewModel coreRow) OpenCorePositionLots(vm, coreRow);
+                    break;
+
+                // 【持仓股数】列：仓位计算器，现价和当前持仓自动带进去。
+                case CellActionKind.Sizing:
+                    if (row is WatchlistRowViewModel sizingRow) OpenPositionSizing(vm, sizingRow);
+                    break;
+
+                // 底仓页【连续分红】列：历年每股派息柱状图——底仓没有价格止损，分红中断就是退出信号。
+                case CellActionKind.Dividend:
+                    if (row is CorePositionRowViewModel dividendRow) OpenDividendHistory(dividendRow);
+                    break;
+            }
+        }
+        finally
+        {
+            _cellActionRunning = false;
+        }
+    }
+
+    /// <summary>
+    /// 条件详情——"这只票当初为什么被选出来"。八个筛选页各有各的图（图上的指标跟判断依据必须对得上，
+    /// 不能互相借用，见 <see cref="OpenGoldenCrossCriteria"/> 里那段教训），行类型又都是
+    /// <see cref="ResultRowViewModel"/>，所以靠所在 DataGrid 的 x:Name 区分是哪一页。
+    /// 自选股 / 主动仓 / 每日晨检三页看的是**加入自选那一刻的条件快照**，走另一条路。
+    /// </summary>
+    private void OpenCriteria(MainViewModel vm, object? row, string gridName)
+    {
+        switch (row)
+        {
+            case WatchlistRowViewModel watchRow:          // 自选股页的【方法】列 + 主动仓页的【来源方法】列
+                OpenWatchlistCriteria(vm, watchRow);
+                return;
+
+            case MorningStockRowViewModel morningRow:      // 每日晨检页的【方法】列
+                OpenMorningCriteria(vm, morningRow);
+                return;
+
+            case ResultRowViewModel result:
+                switch (gridName)
+                {
+                    case "ShortTermGrid": OpenShortTermCriteria(result); break;
+                    case "CorePositionGrid": OpenCorePositionScreenCriteria(result); break;
+                    case "TriangleConvergenceGrid": OpenTriangleConvergenceCriteria(vm, result); break;
+                    case "FoundationGrid": OpenFoundationCriteria(vm, result); break;
+                    case "BottomReboundGrid": OpenBottomReboundCriteria(vm, result); break;
+                    case "MidCapPullbackGrid": OpenMidCapPullbackCriteria(vm, result); break;
+                    case "GoldenCrossGrid": OpenGoldenCrossCriteria(vm, result); break;
+                    case "RisingLowsGrid": OpenRisingLowsCriteria(vm, result); break;
+                    // 新加了筛选页却忘了在这里接一行的话会走到这——说出来，别让它静静地点不动。
+                    default:
+                        MessageBox.Show(this, $"这一页（{gridName}）还没有接条件详情。", "无法显示详情",
+                                        MessageBoxButton.OK, MessageBoxImage.Information);
+                        break;
+                }
+                return;
+        }
+    }
+
+    /// <summary>
+    /// 【每日晨检】页点【方法】那一格。晨检的行是拿主动仓记录现算出来的、自己不带条件快照，
+    /// 所以回主动仓那张表里按代码找回原始记录。一只票被多个方法同时选中时（方法列显示成
+    /// "金叉法、短线法"），弹个菜单让人挑看哪一个，而不是替他选第一个。
+    /// </summary>
+    private void OpenMorningCriteria(MainViewModel vm, MorningStockRowViewModel row)
+    {
+        var entries = vm.TradePoolTab.Entries.Where(r => r.Code == row.Code).ToList();
+        if (entries.Count == 0)
+        {
+            MessageBox.Show(this, "主动仓里找不到这只票的自选记录，没有可显示的条件快照。", "无法显示详情",
+                            MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (entries.Count == 1)
+        {
+            OpenWatchlistCriteria(vm, entries[0]);
+            return;
+        }
+
+        var menu = new ContextMenu
+        {
+            PlacementTarget = this,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint,
+        };
+        foreach (var entry in entries)
+        {
+            var item = new MenuItem { Header = entry.Method };
+            var target = entry;
+            item.Click += (_, _) => OpenWatchlistCriteria(vm, target);
+            menu.Items.Add(item);
+        }
+        menu.IsOpen = true;
     }
 
     // 点"选"列表头的复选框 = 对整列全选/全不选。IsSelected 是普通可变属性、没有变更通知（见
@@ -133,37 +292,29 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private void FoundationCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void OpenFoundationCriteria(MainViewModel vm, ResultRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
-        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
         if (!TryGetBars(vm, row, out var bars)) return;
         new DetailWindow(row.Result, bars, vm.FoundationTab.Lookback) { Owner = this }.ShowDialog();
     }
 
-    private void GoldenCrossCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void OpenGoldenCrossCriteria(MainViewModel vm, ResultRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
         // 金叉法的详情图（GoldenCrossChartBuilder）画的是它自己7条规则用到的指标（MA5/MA10/MACD/
         // KDJ/RSI/成交量），跟峰哥法那套K线+BOLL+MACD的DetailWindow是两回事，不能共用——共用会导致
         // 图上的指标和判断依据文字对不上（例如峰哥法那条参考线用收盘价，金叉法条件7用的是最高价）。
-        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
         if (!TryGetBars(vm, row, out var bars)) return;
         new GoldenCrossDetailWindow(row.Result, bars) { Owner = this }.ShowDialog();
     }
 
-    private void BottomReboundCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void OpenBottomReboundCriteria(MainViewModel vm, ResultRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
-        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
         if (!TryGetBars(vm, row, out var bars)) return;
         new BottomReboundDetailWindow(row.Result, bars, vm.BottomReboundTab.DifThreshold) { Owner = this }.ShowDialog();
     }
 
-    private void MidCapPullbackCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void OpenMidCapPullbackCriteria(MainViewModel vm, ResultRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
-        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
 
         if (row.Error != null)
         {
@@ -186,11 +337,10 @@ public partial class MainWindow : Window
 
     // 回调法的"条件详情"故意用纯文字，不复用任何一张详情图：它的6个条件里有两条是财务
     // （净利润/经营现金流），两条是可操作性（成交额/一手金额），现有的详情图都画不出来；
-    // 硬套一张图会让"图上指标"和"判断依据文字"对不上（见 GoldenCrossCriteriaButton_Click 的教训）。
+    // 硬套一张图会让"图上指标"和"判断依据文字"对不上（见 OpenGoldenCrossCriteria 的教训）。
     // 想看K线走势点旁边的"行情详情"即可。
-    private void CorePositionCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void OpenCorePositionScreenCriteria(ResultRowViewModel row)
     {
-        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
 
         if (row.Error != null)
         {
@@ -203,18 +353,14 @@ public partial class MainWindow : Window
         new CorePositionCriteriaWindow(row.Result) { Owner = this }.ShowDialog();
     }
 
-    private void TriangleConvergenceCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void OpenTriangleConvergenceCriteria(MainViewModel vm, ResultRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
-        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
         if (!TryGetBars(vm, row, out var bars)) return;
         new TriangleConvergenceDetailWindow(row.Result, bars, vm.TriangleConvergenceTab.Lookback, vm.TriangleConvergenceTab.SwingWindow) { Owner = this }.ShowDialog();
     }
 
-    private void RisingLowsCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void OpenRisingLowsCriteria(MainViewModel vm, ResultRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
-        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
         // 手工验证模式下图表数据也截到分析用的截止日期，否则图上画的锚点（用全量数据重新定位）
         // 会和当时的判定结果对不上
         if (!TryGetBars(vm, row, out var bars, vm.RisingLowsTab.AppliedCutoffDate)) return;
@@ -224,9 +370,8 @@ public partial class MainWindow : Window
     // 短线法的"条件详情"——2026-08-07 规则替换后改用纯文字，不再复用金叉法的详情图。
     // 旧版9条正好是那张图画的指标子集，所以能共用；新版加了两条财务条件（净利/经营现金流）和
     // MA20位置，那张图都画不出来，硬套会让"图上指标"和"判断依据文字"对不上。想看走势点"行情详情"。
-    private void ShortTermCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void OpenShortTermCriteria(ResultRowViewModel row)
     {
-        if (((FrameworkElement)sender).DataContext is not ResultRowViewModel row) return;
 
         if (row.Error != null)
         {
@@ -242,10 +387,8 @@ public partial class MainWindow : Window
         TextDetailWindow.Show("短线法 — 条件详情", header, text, this);
     }
 
-    private void WatchlistCriteriaButton_Click(object sender, RoutedEventArgs e)
+    private void OpenWatchlistCriteria(MainViewModel vm, WatchlistRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
-        if (((FrameworkElement)sender).DataContext is not WatchlistRowViewModel row) return;
         var entry = row.Entry;
 
         // 图表用最新数据重新画（这样能看出加入自选之后走势怎么样），文字依据用加入自选那一刻的
@@ -279,7 +422,7 @@ public partial class MainWindow : Window
                     break;
                 }
                 case "金叉法":
-                case "短线法": // 短线法复用金叉法的详情图，理由见 ShortTermCriteriaButton_Click
+                case "短线法": // 短线法复用金叉法的详情图，理由见 OpenShortTermCriteria
                 {
                     var bars = vm.BarRepository.Query(entry.Code, Granularity.Day);
                     if (bars.Count == 0) throw new InvalidOperationException("没有找到该股票的K线数据。");
@@ -326,7 +469,9 @@ public partial class MainWindow : Window
                     break;
 
                 default:
-                    MessageBox.Show(this, $"未知方法：{entry.Method}", "无法显示详情", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    // 因子法/底仓法，以及以后新加的方法——它们的判据不是K线指标，画不出条件图。
+                    // 跟上面"查询"一个处理：打开纯行情图。弹一句"未知方法"对人没有任何用处。
+                    OpenQuoteDetail(entry.Code, entry.Name);
                     break;
             }
         }
@@ -336,53 +481,36 @@ public partial class MainWindow : Window
         }
     }
 
-    // "行情详情"——典型股票APP样式的纯行情图（见QuoteDetailWindow），跟方法/条件无关，固定看
-    // 日线，四个方法的结果表共用同一个处理逻辑。
-    // ── 分裂按钮【财务分析 ▾】（2026-08-27 按用户要求加到各列表页）──
-    //
-    // 阅读动线：列表里看到一只票，最常做的是看它的财务，其次才是看 K线。所以主按钮给财务分析、
-    // K线收进下拉。WPF 没有内置 SplitButton（那是 WinUI 的控件），用"主按钮 + 窄箭头按钮弹
-    // ContextMenu"拼出来，定义在 MainWindow.xaml 的 DetailSplitButtonCell 模板里，13 个列表页共用。
-
     /// <summary>
-    /// 从按钮的 DataContext 取出股票代码和名称。各列表页的行类型不同
-    /// （ResultRowViewModel / WatchlistRowViewModel / CorePositionRowViewModel），
-    /// 但都有 Code/Name，所以在这里统一拆一次，省得每个页各写一个 handler。
+    /// 从一行的 DataContext 里取出股票代码和名称。各列表页的行类型都不一样，但都有 Code/Name，
+    /// 所以在这里统一拆一次，省得每页各写一个处理器。
+    ///
+    /// 一律返回 true（只要拿得到非空代码）：指数/ETF/板块的 K线是能看的，"有没有财务数据"
+    /// 由【分析详情】窗口自己如实写，不在这儿拦。
     /// </summary>
-    private static bool TryGetCodeName(object sender, out string code, out string name)
+    private static bool TryGetCodeName(object? row, out string code, out string name)
     {
         code = name = "";
-        var ctx = (sender as FrameworkElement)?.DataContext;
-        switch (ctx)
+        switch (row)
         {
-            case ResultRowViewModel r: code = r.Code; name = r.Name; return true;
-            case WatchlistRowViewModel w: code = w.Code; name = w.Name; return true;
-            case CorePositionRowViewModel c: code = c.Code; name = c.Name; return true;
-            // 查询页的行（2026-09-01 补）——这一类在 2026-08-27 加分裂按钮时漏了，点【财务分析】
-            // 一直报"这一行不是个股"。这里一律返回 true（指数/ETF/板块的K线是能看的），
-            // "有没有财务数据"交给 FinancialAnalysisButton_Click 按 IsStock 单独判。
-            case QueryRowViewModel q: code = q.Code; name = q.Name; return true;
+            case ResultRowViewModel r: code = r.Code; name = r.Name; break;            // 八个筛选页
+            case WatchlistRowViewModel w: code = w.Code; name = w.Name; break;         // 自选股 / 主动仓
+            case CorePositionRowViewModel c: code = c.Code; name = c.Name; break;      // 底仓
+            case QueryRowViewModel q: code = q.Code; name = q.Name; break;             // 查询（可能是指数/ETF/板块）
+            case MorningStockRowViewModel m: code = m.Code; name = m.Name; break;      // 每日晨检
+            case FactorPickRowViewModel f: code = f.Code; name = f.Name; break;        // 因子法名单
+            case BoardMemberRowViewModel b: code = b.Code; name = b.Name; break;       // 板块热度·成分股
+            case StockEventRow s: code = s.Code; name = s.Name; break;                 // 观察项
             default: return false;
         }
-    }
-
-    /// <summary>
-    /// 分裂按钮的主体：打开【分析详情】（左财务 / 右上观察项 / 右下趋势）。
-    ///
-    /// ⚠ **不再拦非个股**（2026-09-14）：以前指数/ETF 点了会弹框说"没有财务报表"。
-    /// 现在窗口右边还有观察项，"没有财务但有事件"是个正常状态——左栏如实写一句没数据就行，
-    /// 弹个框挡在前面纯属添堵。
-    /// </summary>
-    private void FinancialAnalysisButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (DataContext is not MainViewModel vm) return;
-        if (!TryGetCodeName(sender, out var code, out var name)) return;
-        FinancialAnalysisWindow.Open(this, vm, code, name);
+        return !string.IsNullOrWhiteSpace(code);
     }
 
     /// <summary>分裂按钮的箭头：弹出下拉菜单。
+    /// 2026-09-15 起全窗口只剩【查询】页那个【加入主动仓 ▾】在用它（各列表页的分裂详情按钮
+    /// 已经改成点代码/点名称）。
     /// ContextMenu 是独立的 popup，DataContext 不会自动跟着 PlacementTarget，必须手动传，
-    /// 否则菜单项里 TryGetCodeName 拿不到行。</summary>
+    /// 否则菜单项里取不到行。</summary>
     private void DetailDropdown_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button b || b.ContextMenu == null) return;
@@ -392,20 +520,12 @@ public partial class MainWindow : Window
         b.ContextMenu.IsOpen = true;
     }
 
-    /// <summary>下拉里的【行情详情】。</summary>
-    private void QuoteDetailMenuItem_Click(object sender, RoutedEventArgs e)
-    {
-        if (TryGetCodeName(sender, out var code, out var name)) OpenQuoteDetail(code, name);
-    }
-
-    // "主动仓"Tab的【交易记录】——录这只票的每一笔买入/卖出（金字塔式建仓、分批止盈）。窗口里改的是
+    // "主动仓"Tab点【买入】或【卖出】那一格——录这只票的每一笔买入/卖出（金字塔式建仓、分批止盈）。窗口里改的是
     // 拷贝，点保存才整份写回 watchlist.json；取消什么都不动。存完刷新两个列表：持仓状态变了会影响
     // "主动仓"的排序（持仓优先）和"自选股"页的"在主动仓"标记。晨检不在这里自动重算——跟主动仓成员
     // 变动一样，要等用户主动点【刷新】（见本文件上方的接线说明）。
-    private void TradeLotsButton_Click(object sender, RoutedEventArgs e)
+    private void OpenTradeLots(MainViewModel vm, WatchlistRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
-        if (((FrameworkElement)sender).DataContext is not WatchlistRowViewModel row) return;
 
         var dialog = new TradeLotsWindow($"{row.Name}（{row.Code}）交易记录", row.Entry.Lots, vm.TradePoolTab.FeeStore) { Owner = this };
         bool saved = dialog.ShowDialog() == true;
@@ -418,13 +538,11 @@ public partial class MainWindow : Window
         vm.WatchlistTab.Reload();
     }
 
-    // 【底仓】页的【录成交】——逐档录入这只票的买入/卖出。窗口和费率跟"主动仓"页完全共用
+    // 【底仓】页点【建仓进度】那一格——逐档录入这只票的买入/卖出。窗口和费率跟"主动仓"页完全共用
     // （TradeLotsWindow 本来就只接 IEnumerable<TradeLot>，不绑定具体哪种记录）。存完写回的是
     // core-positions.json 而不是 watchlist.json——两套持仓分开存，理由见 AnalyzerPaths.CorePositionPath。
-    private void CorePositionLotsButton_Click(object sender, RoutedEventArgs e)
+    private void OpenCorePositionLots(MainViewModel vm, CorePositionRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
-        if (((FrameworkElement)sender).DataContext is not CorePositionRowViewModel row) return;
 
         // 多传两个参数就会多出"目标年化股息 → 目标股数"那一行（2026-08-20 从底仓页表格挪进来的，
         // 见 TradeLotsWindow 构造函数的注释）。主动仓那边不传，那一行不出现。
@@ -445,12 +563,11 @@ public partial class MainWindow : Window
         vm.CorePositionTab.Reload();
     }
 
-    // 【底仓】页的【分红历史】——这只票的历年每股派息柱状图（全部历史）。持仓页没有"条件详情"
+    // 【底仓】页点【连续分红】那一格——这只票的历年每股派息柱状图（全部历史）。持仓页没有"条件详情"
     // （它不是筛选结果），但"这家公司分红是一贯的还是最近才开始的"对底仓同样是核心判断，
-    // 所以单独给一个按钮，复用筛选页那张图。
-    private void CorePositionDividendChartButton_Click(object sender, RoutedEventArgs e)
+    // 所以给它留了这个入口，复用筛选页那张图。
+    private void OpenDividendHistory(CorePositionRowViewModel row)
     {
-        if (((FrameworkElement)sender).DataContext is not CorePositionRowViewModel row) return;
         new DividendHistoryWindow(row.Code, row.Name, row.AnnualDividends) { Owner = this }.ShowDialog();
     }
 
@@ -459,18 +576,17 @@ public partial class MainWindow : Window
         => new CodeRuleWindow { Owner = this }.ShowDialog();
 
     // 【仓位计算器】——"主动仓"页顶部那个按钮：不针对具体某只票，纯算"这样一笔机会该下多少注"。
+    // 针对某一只的入口是点那行的【持仓股数】格，见 OpenPositionSizing。
     private void PositionSizingButton_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not MainViewModel vm) return;
         new PositionSizingWindow(vm.SizingStore) { Owner = this }.ShowDialog();
     }
 
-    // 【仓位计算器】——行上那个【仓位】按钮：把这只票的现价（最新收盘）和当前持仓股数带进去，
+    // 【仓位计算器】——点行上的【持仓股数】那一格：把这只票的现价（最新收盘）和当前持仓股数带进去，
     // 直接算出"该减多少股/还能加多少股"。窗口只做计算不改数据，所以关掉后不用刷新列表。
-    private void TradePoolSizingButton_Click(object sender, RoutedEventArgs e)
+    private void OpenPositionSizing(MainViewModel vm, WatchlistRowViewModel row)
     {
-        if (DataContext is not MainViewModel vm) return;
-        if (((FrameworkElement)sender).DataContext is not WatchlistRowViewModel row) return;
 
         new PositionSizingWindow(vm.SizingStore, $"{row.Name}（{row.Code}）",
             row.LatestClose, row.Entry.RemainingShares,
@@ -479,26 +595,11 @@ public partial class MainWindow : Window
             vm.TradePoolTab.FeeStore.Current) { Owner = this }.ShowDialog();
     }
 
-    // 板块热度Tab里成分股的"K线详情"——同一个纯行情窗口。
-    private void BoardMemberQuoteDetailButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (((FrameworkElement)sender).DataContext is BoardMemberRowViewModel row)
-            OpenQuoteDetail(row.Code, row.Name);
-    }
-
     // 因子法Tab因子清单的"说明"——弹窗显示该因子的构造/方向/作用/逐年IC（见 FactorDetailWindow）。
     private void FactorExplainButton_Click(object sender, RoutedEventArgs e)
     {
         if (((FrameworkElement)sender).DataContext is not FactorRowViewModel row) return;
         new FactorDetailWindow($"{row.Name}（{row.Category} / {row.Role}）", row.DetailText) { Owner = this }.ShowDialog();
-    }
-
-    // 板块热度Tab里板块自身的"板块K线"——看本地合成的板块指数（code=板块代码 gn_xxx/new_xxx，
-    // 见 BoardIndexSynthesizer）。没合成过/没拷数据库时会提示没有日线数据。
-    private void BoardIndexQuoteDetailButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (((FrameworkElement)sender).DataContext is BoardRowViewModel row)
-            OpenQuoteDetail(row.BoardCode, row.Name);
     }
 
     // 晨检页"大盘总开关"里双击某个指数 → 看它自己的K线（2026-09-01 新增）。表里只给了收盘和
@@ -542,18 +643,6 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(row.Code)) return;
 
         new StockNoteWindow(vm.NoteStore, row.Code, row.Name) { Owner = this }.ShowDialog();
-    }
-
-    /// <summary>
-    /// 【观察项】页那列【详情】——打开这只票的【分析详情】。
-    /// 跟列表页操作列那颗是同一个窗口（2026-09-14 合并后）。
-    /// </summary>
-    private void WatchDetail_Click(object sender, RoutedEventArgs e)
-    {
-        if (DataContext is not MainViewModel vm) return;
-        if ((sender as FrameworkElement)?.DataContext is not StockEventRow row) return;
-        if (string.IsNullOrWhiteSpace(row.Code)) return;
-        FinancialAnalysisWindow.Open(this, vm, row.Code, row.Name);
     }
 
     /// <param name="cutoffDate">非空时把K线截到这一天(含)——阶梯低点法的"按历史截止日期验证"

@@ -290,7 +290,7 @@ public class FactorTabViewModel : INotifyPropertyChanged
             return;
         }
 
-        var entries = selected.Select(r => new Watchlist.WatchlistEntry
+        var entries = selected.Select(r => new WatchlistEntry
         {
             Code = r.Code,
             Name = r.Name,

@@ -1,4 +1,4 @@
-namespace StockPlatform.Analyzer.Watchlist;
+namespace StockPlatform.Logic.Models;
 
 /// <summary>Frozen snapshot of one CriterionResult at pick time — kept alongside the entry so the
 /// original "为什么选中"依据 doesn't change if the analysis logic changes later (StockScreenResult

@@ -335,27 +335,24 @@ flowchart LR
     WI --> RE --> SWI
   end
   subgraph A["Analyzer 侧 · 关于我"]
-    WS["WatchService<br/>串四个零件"]
-    WRE["WatchRuleEngine<br/>挂 / 自动摘"]
-    WEV["WatchEvaluator<br/>判触发"]
-    RS["SqliteWatchReadingSource<br/>按 Kind 取值（只读）"]
-    IT[("watch/items.json<br/>待办 · 有挂有摘")]
-    HT[("watch/hits-yyyy.json<br/>事实 · 只增")]
+    WS["WatchService<br/>只读：按范围取票"]
     ES["SqliteStockEventSource<br/>各表 → 事件（只读）"]
     BT["BuybackTimeline<br/>按轮拆 · 叙述 · 折叠"]
     CP["WatchEventComposer<br/>组间排序"]
     MK["SqliteMarketWatchSource<br/>全市场广度 · 行业指标"]
     UI["WatchTab（一股一行）<br/>StockWatchPanel（嵌进分析详情窗右上）"]
-    WS --> WRE --> IT
-    WS --> RS --> WEV --> HT
     WS --> ES --> BT --> CP --> UI
     WS --> MK --> UI
   end
-  PA -.OpenPlans.-> WRE
-  SWI -.该盯哪些指标.-> WRE
-  PA -.stage 现状.-> RS
   PA -.全部公告.-> ES
+  SWI -.该挂哪些指标.-> ES
 ```
+
+⚠ **2026-09-15：规则引擎 / 求值器 / 触发落库整套退休**（见设计文档）。
+它服务的推送/日报出口从来没做过；观察项页改成事件叙述后，那两份 json 也没了界面。
+现在 Analyzer 这侧只剩一条路：`WatchService` 按范围取票 → `SqliteStockEventSource` 读事件。
+**`WatchIndicatorRuleEngine`（Fetcher 侧，名字像但不是同一条线）保留**——
+碳酸锂能出现在宁德行里全靠它。
 
 **三个关键不变量**（每一条都防一类静默事故）：
 `StockWatchIndicator` 只重建 `origin='rule'`（手挂的不动）·
@@ -712,6 +709,15 @@ DetailWindow --> XxxChartBuilder
 classDiagram
 direction TB
 
+> **分层边界（2026-09-15 重构）**：自选/持仓这条线原先整个长在 Analyzer 项目里，
+> 想给它写单元测试就得让测试项目引用一个 WPF 项目。现已按**碰不碰文件 IO**拆开——
+> 模型与纯计算（`WatchlistEntry` / `TradeLot` / `TradeCostSummary` / `CorePosition` /
+> `TradeFeeSettings` / `PositionSizingSettings`）进 `Logic.Models`，
+> 落盘的 `Json*Store` / `*Store` 留在 Analyzer。
+> ⚠ **Logic 层零文件 IO 是硬纪律**，别把带 `File.ReadAll/WriteAll` 的类挪进去。
+> JSON 兼容性不受影响：`JsonSerializerOptions` 只设了 `WriteIndented`，不写类型名，
+> 换命名空间老数据照样读（已拿真实的 62 条自选 / 6 条底仓实机验证过）。
+
 class AnalyzerPaths {
   <<Data>>
   库 自选 底仓 费率 仓位 笔记的位置
@@ -721,25 +727,29 @@ class JsonWatchlistStore {
   自选股整体读改写
 }
 class WatchlistEntry {
-  <<Analyzer>>
+  <<Logic.Models>>
   一只自选股
   是否进主动仓
 }
 class CriterionSnapshot {
-  <<Analyzer>>
+  <<Logic.Models>>
   加入当时的条件快照
 }
 class TradeLot {
-  <<Analyzer>>
+  <<Logic.Models>>
   一笔买卖
+}
+class TradeFeeSettings {
+  <<Logic.Models>>
+  佣金过户费印花税的费率
 }
 class TradeFeeStore {
   <<Analyzer>>
-  佣金过户费印花税
-  全程序一份
+  费率落盘 全程序一份
 }
+TradeFeeStore --> TradeFeeSettings : 读写
 class TradeCostSummary {
-  <<Analyzer>>
+  <<Logic.Models>>
   成本与盈亏汇总
 }
 class JsonCorePositionStore {
@@ -747,13 +757,18 @@ class JsonCorePositionStore {
   底仓文件
 }
 class CorePosition {
-  <<Analyzer>>
+  <<Logic.Models>>
   一只底仓持仓
+}
+class PositionSizingSettings {
+  <<Logic.Models>>
+  可投资金 凯利折扣 单票上限
 }
 class PositionSizingStore {
   <<Analyzer>>
-  可投资金 凯利折扣 单票上限
+  仓位参数落盘
 }
+PositionSizingStore --> PositionSizingSettings : 读写
 class KellyPositionSizer {
   <<Logic>>
   凯利仓位计算

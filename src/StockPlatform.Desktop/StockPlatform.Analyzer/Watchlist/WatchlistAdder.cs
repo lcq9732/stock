@@ -1,4 +1,5 @@
 using StockPlatform.Analyzer.ViewModels;
+using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Analyzer.Watchlist;
 

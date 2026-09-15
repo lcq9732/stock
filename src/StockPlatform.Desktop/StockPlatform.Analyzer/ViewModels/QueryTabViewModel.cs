@@ -53,7 +53,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
     private readonly IBarRepository _barRepository;
     private readonly Watchlist.JsonWatchlistStore _watchlistStore;
     /// <summary>底仓是**另一份存储**（core-positions.json），不是带标记的 WatchlistEntry——
-    /// 见 <see cref="Watchlist.CorePosition"/>：字段不重叠，混一份会让晨检的短线纪律误伤底仓。</summary>
+    /// 见 <see cref="CorePosition"/>：字段不重叠，混一份会让晨检的短线纪律误伤底仓。</summary>
     private readonly Watchlist.JsonCorePositionStore _corePositionStore;
 
     public ObservableCollection<QueryRowViewModel> Results { get; } = new();
@@ -141,7 +141,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
         if (NothingSelected()) return;
         var picked = TakeSelectedStocks(out int skippedType, out int skippedNoBar);
 
-        var entries = picked.Select(p => new Watchlist.WatchlistEntry
+        var entries = picked.Select(p => new WatchlistEntry
         {
             Code = p.Row.Code,
             Name = p.Row.Name,
@@ -199,7 +199,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
         if (NothingSelected()) return;
         var picked = TakeSelectedStocks(out int skippedType, out int skippedNoBar);
 
-        int added = _corePositionStore.Add(picked.Select(p => new Watchlist.CorePosition
+        int added = _corePositionStore.Add(picked.Select(p => new CorePosition
         {
             Code = p.Row.Code,
             Name = p.Row.Name,

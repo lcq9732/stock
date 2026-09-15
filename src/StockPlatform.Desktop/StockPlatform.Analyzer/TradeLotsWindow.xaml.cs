@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using StockPlatform.Analyzer.Watchlist;
+using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Analyzer;

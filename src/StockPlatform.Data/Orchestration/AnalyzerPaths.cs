@@ -73,11 +73,10 @@ public class AnalyzerPaths
     /// </summary>
     public string WatchDir => Path.Combine(BaseDir, "watch");
 
-    /// <summary>观察项定义（L0/L1/L2 全在这一个文件里，靠 Origin 区分）。</summary>
-    public string WatchItemsPath => Path.Combine(WatchDir, "items.json");
-
-    /// <summary>触发记录，按年切——只增不删，它是"当时确实报过"的证据。</summary>
-    public string WatchHitsPath(int year) => Path.Combine(WatchDir, $"hits-{year}.json");
+    // ⚠ WatchItemsPath / WatchHitsPath 于 2026-09-15 删除——写它们的那套
+    //   （规则引擎 + 求值器 + 触发落库）整体退休了，见 WatchService 类注释。
+    //   目录本身留着：**旧的 items.json / hits-yyyy.json 不删**，它们是历史，
+    //   而且哪天真做晨间提醒时，那份流水还能拿来对照"当初这套报过什么"。
 
     /// <summary>某只票的笔记文件路径。</summary>
     public string NotePath(string code) => Path.Combine(NotesDir, $"{code}.md");

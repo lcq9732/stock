@@ -61,9 +61,11 @@ public class MarketWatchRow
 /// <summary>
 /// 【观察项】页（2026-09-11 建，2026-09-14 改成叙述式），见 doc/watch-item-design.md M3。
 ///
-/// 这一页的产出是**触发**，不是清单——清单只是让人看见"现在在盯什么、为什么盯"。
-/// 点【重算并求值】＝跑一遍 <see cref="WatchService.Run"/>：
-/// 重算派生项（挂/摘）→ 逐条求值 → 记录新触发；然后把结果摊成一股一行的叙述。
+/// 这一页回答的是"**我持有的票身上，最近发生了什么**"。
+///
+/// ⚠ 内容**现读库**（<see cref="WatchService.BuildEvents"/>），没有"先重算再看"这一步：
+/// 抓取程序刚落库的新公告，下次打开就看得到。所以按钮叫【刷新】而不是【重算并求值】
+/// ——那套重算（规则引擎 + 求值器 + 触发落库）于 2026-09-15 整体退休，见 WatchService 类注释。
 ///
 /// ════ 左边个股、右边市场 ════
 /// "跌破 MA20"每只票都会有，熊市里几千只同时触发，逐票列在个股行里只会把真正个股独有的事
@@ -89,7 +91,9 @@ public class WatchTabViewModel : INotifyPropertyChanged
     /// <summary>市场普遍现象——不属于任何一只票的那些。</summary>
     public ObservableCollection<MarketWatchRow> Market { get; } = [];
 
-    private string _status = "点【重算并求值】开始。";
+    private bool _loaded;
+
+    private string _status = "还没读取。";
     public string Status
     {
         get => _status;
@@ -140,20 +144,27 @@ public class WatchTabViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 切页/启动时调。
+    /// 切到这一页时调：**只在第一次自动读**，之后保持上次结果。
     ///
-    /// ⚠ 这里**没有**"只读不算"的轻量模式了（2026-09-14 改）：叙述是从库里现读的，
-    /// 不像以前的清单有一份 items.json 可以直接摊开显示。读库本来就是这一页的全部工作量，
-    /// 单独留个半吊子的刷新只会让人看到一页空表还以为没数据。
+    /// ⚠ 不是每次切页都读（2026-09-15）：读一轮要扫 9 只票各 7 张表、再算一次全市场均线广度
+    /// （实测那一项单独就 630ms），切来切去都顿一下很烦。这跟【每日晨检】当初改成全手动
+    /// 是同一个理由，只是这页轻得多，首次自动读还担得起。要最新的点【刷新】。
     /// </summary>
+    public void EnsureLoaded()
+    {
+        if (_loaded) return;
+        _loaded = true;
+        Run();
+    }
+
+    /// <summary>重读一遍库。</summary>
     public void Refresh() => Run();
 
     private void Run()
     {
         try
         {
-            Status = "重算中…";
-            var r = _service.Run();
+            Status = "读取中…";
             var (stocks, market) = _service.BuildEvents(
                 _trackedScope ? WatchScope.Tracked : WatchScope.Holding);
 
@@ -164,19 +175,16 @@ public class WatchTabViewModel : INotifyPropertyChanged
             foreach (var m in market)
                 Market.Add(new MarketWatchRow { Date = m.Date.ToString("yyyy-MM-dd"), Text = m.Text });
 
-            // 一行说完（2026-09-14 按用户要求从两行并成一行）。
-            // 并的时候顺手去掉了重复——原来上行说"2 条触发"、下行说"命中 2 条"，
-            // 是同一个数换了个说法，两行并排时那种重复格外刺眼。
+            // 一行说完。原来后面还跟着一长串"观察项 N 条（新挂/摘掉）、求值 N 条、命中 N 条"，
+            // 那是已退休的重算机器的计数——它没有任何界面下游，报出来的数没人能据此做任何事。
             var scopeName = _trackedScope ? "全部跟踪" : "持仓";
+            var events = _allStocks.Sum(x => x.Lines.Count);
             Status = _allStocks.Count == 0
                 // 全清仓时这页会空。**得说清是"没持仓"而不是"坏了"**，并指一下出口。
                 ? (_trackedScope
                     ? "主动仓和底仓里都没有票。"
                     : "当前没有持仓——勾上【全部跟踪】可以看主动仓里还没买的那些。")
-                : $"{scopeName} {_allStocks.Count} 只有动静；观察项 {r.ItemCount} 条"
-                  + $"（新挂 {r.Added}、摘掉 {r.Expired}），求值 {r.Evaluated} 条，"
-                  + (r.Hits == 0 ? "没有触发。" : $"命中 {r.Hits} 条，新记录 {r.NewHits} 条。")
-                  + FilterNote();
+                : $"{scopeName} {_allStocks.Count} 只有动静，共 {events} 条事件。" + FilterNote();
         }
         catch (Exception ex)
         {

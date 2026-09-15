@@ -218,7 +218,7 @@ public static class PlanAnnouncementExtractor
         // 日期是别的语境——股本基准日、董事会决议日、前 30 个交易日均价的起算日…
         // 硬抽的后果是拿一个不相干的日期当"值所属日期"：实测宁德 07-25 那份方案被抽成 06-30、
         // 山东高速 08-26 那份被抽成 03-31，观察项的触发记录就按这个错日期归档了。
-        // 抽不到就让它是 null，下游（SqliteWatchReadingSource.ReadPlanStage）会退回用公告日。
+        // 抽不到就让它是 null，下游自己退回用公告日（见 SqliteStockEventSource.Buyback）。
         if (rec.Stage != PlanStage.Proposal)
         {
             // 三种写法按优先级试：「截至X日」最准 → 区间取末尾 → 单日的「X日，公司…」

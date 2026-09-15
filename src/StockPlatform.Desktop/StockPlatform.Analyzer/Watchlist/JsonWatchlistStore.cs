@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Analyzer.Watchlist;
 

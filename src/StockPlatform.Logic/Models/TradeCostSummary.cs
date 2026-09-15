@@ -1,4 +1,4 @@
-namespace StockPlatform.Analyzer.Watchlist;
+namespace StockPlatform.Logic.Models;
 
 /// <summary>
 /// 一只票全部成交笔的汇总（2026-08-11新增）——把多笔买入/卖出按股数加权成"总股数 + 均价"，

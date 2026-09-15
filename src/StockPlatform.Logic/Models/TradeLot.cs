@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace StockPlatform.Analyzer.Watchlist;
+namespace StockPlatform.Logic.Models;
 
 /// <summary>一笔成交的方向。用字符串序列化（"Buy"/"Sell"）——watchlist.json 是人可以直接打开看的
 /// 本地文件，存数字看不出是买还是卖。</summary>

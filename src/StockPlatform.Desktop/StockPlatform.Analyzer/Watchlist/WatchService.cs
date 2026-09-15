@@ -1,21 +1,8 @@
-﻿using StockPlatform.Data.Orchestration;
+using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Models;
-using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Analyzer.Watchlist;
-
-/// <summary>
-/// 跑一轮的结果，给界面报告用——现在**只剩计数**。
-///
-/// ⚠ 两轮瘦身都记在这儿，免得以后有人以为是漏写的：
-/// · 2026-09-14 上午删 <c>Detail</c> / <c>Progress</c> / <c>Priority</c>——左右两表时代的产物，
-///   观察项页改成事件叙述之后一直算着却没人读。
-/// · 2026-09-14 下午删 <c>TopHits</c> / <c>CodePriority</c>——「档」整套取消了（见
-///   <see cref="WatchItem"/> 文件头）。TopHits 唯一的用途就是数"A 档几条"。
-/// </summary>
-public sealed record WatchRunResult(
-    int ItemCount, int Added, int Expired, int Evaluated, int Hits, int NewHits);
 
 /// <summary>
 /// 观察项页看哪些票（2026-09-14）。
@@ -42,24 +29,30 @@ public enum WatchScope
 }
 
 /// <summary>
-/// 观察项的协调服务（2026-09-11），见 doc/watch-item-design.md M3。
-/// 把四个零件按顺序串起来，自己不做判断也不写 SQL：
+/// 观察项的数据服务（2026-09-11 建，2026-09-15 瘦成只读）。
 ///
-/// <code>
-/// ① 组装输入  自选/底仓 json + current.sqlite（OpenPlans、StockWatchIndicator）
-/// ② 重算规则  WatchRuleEngine.Rebuild —— 派生项整组重建，手写项一行不碰
-/// ③ 逐条求值  SqliteWatchReadingSource → WatchEvaluator
-/// ④ 记录触发  JsonWatchItemStore.AppendHits（同项同交易日去重）
-/// </code>
+/// 现在只做一件事：**把一只票身上发生过什么，从 <c>current.sqlite</c> 读成事件叙述**。
 ///
-/// ⚠ 只读 current.sqlite（Fetcher 的产出），自己的状态写在 <c>watch/</c> 下。
-/// 这条分界线见设计文档 §2.3：**关于标的的知识**归 current.sqlite，
-/// **关于我的仓位和判断**归 Analyzer。
+/// ════ 曾经的那台机器已经拆了（2026-09-15）════
+/// 原设计（doc/watch-item-design.md M1/M3）在这里跑一整套：规则引擎重算派生观察项（自动挂/摘）
+/// → 取值器逐条求值 → 判触发 → 落 <c>watch/items.json</c> 和 <c>watch/hits-yyyy.json</c>。
+/// 那套是为**推送 / 日报**造的：档位 A=推送、B=进日报、C=只落库，一个字母决定走哪个出口。
+///
+/// **那三个出口一个都没做过。** 而观察项页改成事件叙述之后，"在盯什么"和"报过什么"
+/// 这两份清单也都没了界面——叙述本身已经把内容摆出来了，中间那层只剩下没人读的 json。
+/// 所以整套删掉：`WatchRuleEngine` / `WatchEvaluator` / `SqliteWatchReadingSource` /
+/// `JsonWatchItemStore` / `WatchItem` / `WatchHit` / `WatchItemDisplay`。
+///
+/// 哪天真要做晨间提醒，按 doc/watch-item-design.md 里记下的 `first_seen` 方案重做——
+/// 那条路比恢复这套旧机器更直：**"这行第一次进库是什么时候"是数据的事实，
+/// 而旧机器把事实和"我看过什么"混在一起存，重抓/补历史/中断续抓三件事上都会骗人。**
+///
+/// ⚠ **只读 <c>current.sqlite</c>**（Fetcher 的产出），自己不写任何文件。
+/// 唯一会写的是【分析笔记】，那是人主动写的，走 <see cref="StockNoteStore"/>。
 /// </summary>
 public class WatchService
 {
     private readonly AnalyzerPaths _paths;
-    private readonly JsonWatchItemStore _store;
     private readonly JsonWatchlistStore _watchlist;
     private readonly JsonCorePositionStore _corePositions;
 
@@ -68,118 +61,13 @@ public class WatchService
         _paths = paths;
         _watchlist = watchlist;
         _corePositions = corePositions;
-        _store = new JsonWatchItemStore(paths.WatchItemsPath, paths.WatchHitsPath);
-    }
-
-    public List<WatchItem> LoadItems() => _store.LoadItems();
-    public List<WatchHit> LoadHits(int year) => _store.LoadHits(year);
-
-    /// <summary>重算派生项 + 求值 + 记录触发。返回给界面报告的统计。</summary>
-    public WatchRunResult Run()
-    {
-        var db = _paths.CurrentDb;
-
-        // ── ① 组装输入 ──
-        // ⚠ **只取主动仓**（2026-09-14 修）。原来这里取的是整份 watchlist.json，
-        // 于是 61 只自选股全被当成主动仓——而规则引擎给主动仓挂的是**短线纪律**（跌破 MA20）。
-        // 等于拿短线止损口径盯着一堆"只用来统计准确率、本来就不打算买"的验证样本。
-        var active = new Dictionary<string, string>();
-        foreach (var e in _watchlist.Load().Where(e => e.IsInTradePool))
-            if (!string.IsNullOrWhiteSpace(e.Code)) active[e.Code] = e.Name ?? "";
-
-        var core = new Dictionary<string, string>();
-        foreach (var e in _corePositions.Load())
-            if (!string.IsNullOrWhiteSpace(e.Code)) core[e.Code] = e.Name ?? "";
-
-        var planRepo = new SqlitePlanAnnouncementRepository(db);
-        var openPlans = SafeOpenPlans(planRepo);
-
-        var indRepo = new SqliteWatchIndicatorRepository(db);
-        var indicators = new Dictionary<string, List<WatchIndicatorLink>>();
-        foreach (var code in active.Keys.Concat(core.Keys).Distinct())
-        {
-            try
-            {
-                var links = indRepo.GetLinks(code);
-                if (links.Count > 0) indicators[code] = links;
-            }
-            catch { /* 表还没建（M1 没跑过）时跳过，不影响其余规则 */ }
-        }
-
-        // ── ② 重算 ──
-        var existing = _store.LoadItems();
-        var rebuilt = WatchRuleEngine.Rebuild(existing, new WatchRuleInput(active, core, openPlans, indicators));
-        _store.SaveItems(rebuilt.Items.ToList());
-
-        // ── ③ 求值 ──
-        // 上次记录到的 stage：用来判"跃迁"。取每条观察项最近一次触发时记下的状态文字。
-        var lastStages = BuildLastStages(rebuilt.Items);
-        var source = new SqliteWatchReadingSource(db);
-        var hits = new List<WatchHit>();
-        int evaluated = 0;
-
-        foreach (var item in rebuilt.Items.Where(i => i.Enabled))
-        {
-            evaluated++;
-            var reading = source.Read(item, lastStages);
-
-            if (WatchEvaluator.Evaluate(item, reading) is { } hit) hits.Add(hit);
-        }
-
-        // ── ④ 记录 ──
-        var newHits = _store.AppendHits(hits);
-
-        return new WatchRunResult(
-            rebuilt.Items.Count, rebuilt.Added.Count, rebuilt.Expired.Count,
-            evaluated, hits.Count, newHits);
     }
 
     /// <summary>
-    /// 范围内的票（代码 → 名称）。
+    /// 读**单只票**的事件叙述，给【分析详情】右上角那块用。
     ///
-    /// ⚠ 「持仓」复用 <see cref="WatchlistEntry.IsHoldingPosition"/>——晨检用的就是它，
-    /// 语义是"买过且没平完，**部分卖出仍然算持仓**"。这种判据只该有一份，
-    /// 在这儿另写一个 <c>Shares &gt; 0 &amp;&amp; SellDate == null</c> 迟早会跟晨检说法不一。
-    ///
-    /// ⚠ 底仓**一律算持仓**：进了底仓清单就是打算长期拿的，哪怕还没录买入记录
-    /// （实测 6 只底仓里 5 只 Lots 是空的）。
-    /// </summary>
-    private Dictionary<string, string> CodesInScope(WatchScope scope)
-    {
-        var names = new Dictionary<string, string>();
-
-        var pool = _watchlist.Load().Where(e => e.IsInTradePool);
-        if (scope == WatchScope.Holding) pool = pool.Where(e => e.IsHoldingPosition);
-        foreach (var e in pool)
-            if (!string.IsNullOrWhiteSpace(e.Code)) names[e.Code] = e.Name ?? "";
-
-        foreach (var e in _corePositions.Load())
-            if (!string.IsNullOrWhiteSpace(e.Code)) names[e.Code] = e.Name ?? "";
-
-        return names;
-    }
-
-    /// <summary>
-    /// 这只票离今天最近的那件事有多远（天）。行序按它排。
-    ///
-    /// ⚠ **行业指标不算**（2026-09-14）：碳酸锂指数天天更新，把它算进来的话，
-    /// 全部 107 只锂电池股每天都是"距今 0 天"，整页行序就被一条外部指标决定了。
-    /// 它是影响这只票的环境，不是这只票出的事。
-    /// 一只票要是**只有**指标事件，那就只能拿它当依据——总比没有次序强。
-    /// </summary>
-    private static double Proximity(StockWatchEvents s, DateTime today)
-    {
-        var own = s.Events.Where(e => e.Category != WatchCategory.Indicator).ToList();
-        var pool = own.Count > 0 ? own : s.Events;
-        return pool.Min(e => Math.Abs((e.Date.Date - today).TotalDays));
-    }
-
-    /// <summary>
-    /// 读**单只票**的事件叙述，给详情窗用。
-    ///
-    /// ⚠ 不挂观察项、不写任何文件（2026-09-14 定的）：没跟踪的票也能点开看一眼，
-    /// 但"想长期盯"该走加入自选那条正门。点一下详情就悄悄多出一堆观察项，
-    /// 那清单很快就没人信了。
+    /// ⚠ 不挂观察项、不写任何文件：没跟踪的票也能点开看一眼，
+    /// 但"想长期盯"该走加入主动仓那条正门。
     /// </summary>
     public IReadOnlyList<WatchEvent> ReadEvents(string code)
     {
@@ -188,16 +76,9 @@ public class WatchService
     }
 
     /// <summary>
-    /// 把一轮的结果摊成**一股一行的事件叙述**（2026-09-14 重构）。
+    /// 范围内每只票的事件叙述 ＋ 市场普遍现象。
     ///
-    /// ════ 为什么不复用 Run() 里那两张表 ════
-    /// 那两张表是**按事项**组织的：左边"要发生什么"、右边"发生了什么"。
-    /// 用户的反馈是：从左边看到事件，还得去右边找它成没成事实——一件事被拆在两处。
-    /// 所以叙述这条线**直接从库里重读**（<see cref="SqliteStockEventSource"/>），
-    /// 一只票身上发生过什么按时间连成一条线，回购那种跨几个月的过程尤其需要。
-    ///
-    /// ⚠ 它**不依赖 <see cref="Run"/> 的结果**（2026-09-14 「档」取消后彻底独立）：
-    /// 事件是现读库的，抓取程序刚落库的新公告，下一次打开就能看到，不用先重算。
+    /// 事件是**现读库**的，抓取程序刚落库的新公告，下一次打开就看得到，不需要先"重算"。
     /// </summary>
     /// <param name="scope">看哪些票，见 <see cref="WatchScope"/>。默认只看有钱在里面的。</param>
     public (IReadOnlyList<StockWatchEvents> Stocks, IReadOnlyList<MarketWatchItem> Market)
@@ -238,32 +119,43 @@ public class WatchService
         return (ordered, market);
     }
 
-    private static Dictionary<string, PlanAnnouncement> SafeOpenPlans(SqlitePlanAnnouncementRepository repo)
+    /// <summary>
+    /// 范围内的票（代码 → 名称）。
+    ///
+    /// ⚠ 「持仓」复用 <see cref="WatchlistEntry.IsHoldingPosition"/>——晨检用的就是它，
+    /// 语义是"买过且没平完，**部分卖出仍然算持仓**"。这种判据只该有一份，
+    /// 在这儿另写一个 <c>Shares &gt; 0 &amp;&amp; SellDate == null</c> 迟早会跟晨检说法不一。
+    ///
+    /// ⚠ 底仓**一律算持仓**：进了底仓清单就是打算长期拿的，哪怕还没录买入记录
+    /// （实测 6 只底仓里 5 只 Lots 是空的）。
+    /// </summary>
+    private Dictionary<string, string> CodesInScope(WatchScope scope)
     {
-        try { return repo.GetOpenPlans(PlanKind.Buyback); }
-        catch { return []; }   // 表还没建（M2 没跑过）——不该让整轮挂掉
+        var names = new Dictionary<string, string>();
+
+        var pool = _watchlist.Load().Where(e => e.IsInTradePool);
+        if (scope == WatchScope.Holding) pool = pool.Where(e => e.IsHoldingPosition);
+        foreach (var e in pool)
+            if (!string.IsNullOrWhiteSpace(e.Code)) names[e.Code] = e.Name ?? "";
+
+        foreach (var e in _corePositions.Load())
+            if (!string.IsNullOrWhiteSpace(e.Code)) names[e.Code] = e.Name ?? "";
+
+        return names;
     }
 
     /// <summary>
-    /// 每条观察项"上次报到的状态"。从历史触发记录里还原，这样 stage 跃迁只在**真的变了**
-    /// 的时候报一次，而不是每天报一次现状。
+    /// 这只票离今天最近的那件事有多远（天）。行序按它排。
+    ///
+    /// ⚠ **行业指标不算**（2026-09-14）：碳酸锂指数天天更新，把它算进来的话，
+    /// 全部 107 只锂电池股每天都是"距今 0 天"，整页行序就被一条外部指标决定了。
+    /// 它是影响这只票的环境，不是这只票出的事。
+    /// 一只票要是**只有**指标事件，那就只能拿它当依据——总比没有次序强。
     /// </summary>
-    private Dictionary<Guid, string> BuildLastStages(IReadOnlyList<WatchItem> items)
+    private static double Proximity(StockWatchEvents s, DateTime today)
     {
-        var map = new Dictionary<Guid, string>();
-        var year = DateTime.Today.Year;
-        var hits = _store.LoadHits(year).Concat(_store.LoadHits(year - 1))
-            .OrderByDescending(h => h.TriggerTradeDate);
-
-        foreach (var h in hits)
-        {
-            if (map.ContainsKey(h.ItemId)) continue;
-            // 消息里 "→ **新状态**" 或 "→ 现状：X" 的那一段就是上次报的状态
-            var idx = h.Message.LastIndexOf('→');
-            if (idx < 0) continue;
-            var tail = h.Message[(idx + 1)..].Trim().TrimStart('现', '状', '：').Trim('*', ' ');
-            if (tail.Length > 0) map[h.ItemId] = tail;
-        }
-        return map;
+        var own = s.Events.Where(e => e.Category != WatchCategory.Indicator).ToList();
+        var pool = own.Count > 0 ? own : s.Events;
+        return pool.Min(e => Math.Abs((e.Date.Date - today).TotalDays));
     }
 }
