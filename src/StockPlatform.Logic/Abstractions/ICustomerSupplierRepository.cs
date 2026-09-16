@@ -69,6 +69,14 @@ public interface ICustomerSupplierRepository
                      IReadOnlyCollection<string>? evaluated = null);
 
     /// <summary>
+    /// 最该补子公司名单的公司：按**被别人写进前五大客户/供应商的次数**降序取前 N 个。
+    ///
+    /// 只数 exact/short/qualified 三个可信档——normalized 和 parent_group 都可能指错主体，
+    /// 拿它们排序会让下载清单跑偏。
+    /// </summary>
+    List<string> GetMostReferencedPartners(int top);
+
+    /// <summary>
     /// 上一次匹配用的规则版本。<b>0 = 从没记过</b>（老库，或从没跑过消歧）。
     /// 跟 <see cref="StockPlatform.Logic.Services.PartnerNameMatcher.MatcherVersion"/> 比对，
     /// 不相等就说明判据改过，要全量重匹一次。

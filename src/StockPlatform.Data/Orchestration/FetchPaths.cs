@@ -31,6 +31,9 @@ public class FetchPaths
     ///   图片，撞不上 → 判成下错文件 → **把 PDF 删了**。实测一轮删掉 14 份。
     ///   两种用途的数据共用一个目录，迟早还会互相踩，所以分开。
     /// </summary>
+    [Obsolete("2026-09-15 起年报和金融报告统一放 ReportsDir。这个属性只留给一次性迁移用，"
+            + "新代码别再引用——两个目录并存的唯一理由（怕误删）已经由 "
+            + "FinancialInstitutionRoster.OwnsPdfOf 那道护栏接管，那边有用例钉着。")]
     public string AnnualReportsDir => Path.Combine(BaseDir, "annual-reports");
 
     /// <summary>抓取程序自己的界面设置（2026-08-27新增）——目前只有"空闲时自动补财务数据"这个

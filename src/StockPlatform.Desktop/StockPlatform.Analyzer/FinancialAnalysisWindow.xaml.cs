@@ -61,6 +61,10 @@ public partial class FinancialAnalysisWindow : Window
 {
     private readonly FinancialAnalysisReport _report;
 
+    /// <summary>资金面诊断（2026-09-16，第①列下半部分）。在 <see cref="Open"/> 里装进来，
+    /// 跟观察项一样**在构造之后**——没有财务数据的票照样要看得到它。</summary>
+    private CapitalDiagnosis? _diagnosis;
+
     public FinancialAnalysisWindow(FinancialAnalysisReport report)
     {
         InitializeComponent();
@@ -74,13 +78,15 @@ public partial class FinancialAnalysisWindow : Window
         if (report.Error != null)
         {
             HeaderText.Text = $"{report.Code} {report.Name}".TrimEnd();
+            PeriodTitleText.Text = "财报分析";
             HeadlineText.Text = report.Error;
             // SetResourceReference 等于代码里的 DynamicResource：换主题时这块底色会自己跟着变
             HeadlineBorder.SetResourceReference(BackgroundProperty, "Theme.Danger.Background");
             FooterText.Text = "";
-            // 没有财务数据时左边只有一句提示，但**右边的观察项照常有内容**（2026-09-14），
-            // 所以不能再缩成半屏——那会把事件叙述挤成一团。给 0.75。
-            TextFitter.SizeToScreen(this, 0.75);
+            // 没有财务数据时第②列只有一句提示，但**第①列的事件和资金面诊断照常有内容**
+            // （2026-09-14 起如此；2026-09-16 三列重排后更是如此），所以不能缩成半屏——
+            // 那会把事件叙述和六个维度挤成一团。给 0.92，跟正常情况一样。
+            TextFitter.SizeToScreen(this);
             return;
         }
 
@@ -101,9 +107,22 @@ public partial class FinancialAnalysisWindow : Window
             priceRun.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Theme.Foreground.Muted");
             HeaderText.Inlines.Add(priceRun);
         }
-        if (report.ReportDate != default)
-            HeaderText.Inlines.Add(new System.Windows.Documents.Run($"　·　{report.PeriodName}")
-                { FontSize = 14 });
+        // 第②列的列标题 = 报告期 + 总体判断（2026-09-16）。
+        // 两样都从通栏标题挪过来：那一列讲的就是这一期的财报，期别写在列头比混在通栏更好找；
+        // 总体判断同理，而且通栏右边被「复制全文」占着、给不出多少横向空间，这一列标题右边
+        // 本来就空着一大片（用户指着那片空白说"放这儿"）。
+        PeriodTitleText.Inlines.Add(new System.Windows.Documents.Run(
+            report.ReportDate != default ? report.PeriodName : "财报分析"));
+        if (report.Headline.Length > 0)
+        {
+            var headlineRun = new System.Windows.Documents.Run($"　·　{report.Headline}")
+            {
+                FontSize = 13,
+                FontWeight = FontWeights.Normal,
+            };
+            headlineRun.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Theme.Accent.Warm");
+            PeriodTitleText.Inlines.Add(headlineRun);
+        }
         // 机构类型标注（2026-08-29 细分）：三类金融机构各有一张体检表——银行看资产质量与资本，
         // 券商看净资本与自营敞口，保险看偿付能力与承保盈利，指标体系互不通用。
         // 认不出类型的（老数据缺 v4 特征科目）退回通用简版。
@@ -121,16 +140,6 @@ public partial class FinancialAnalysisWindow : Window
             kindRun.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Theme.Foreground.Muted");
             HeaderText.Inlines.Add(kindRun);
         }
-        if (report.Headline.Length > 0)
-        {
-            var headlineRun = new System.Windows.Documents.Run($"　·　{report.Headline}")
-            {
-                FontSize = 13,
-                FontWeight = FontWeights.Normal,
-            };
-            headlineRun.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "Theme.Accent.Warm");
-            HeaderText.Inlines.Add(headlineRun);
-        }
 
         SectionList.ItemsSource = report.Sections.Select(ToVm).ToList();
 
@@ -147,10 +156,25 @@ public partial class FinancialAnalysisWindow : Window
             };
         }).ToList();
 
-        TrendHintText.Text = report.Trends.Count > 0
-            ? "只取跟本期同月份的报告期（A股报表是年内累计口径，混着比会画成锯齿）。几张图共用最下面" +
-              "那条横坐标，同一列必是同一期。"
-            : "报告期不足，画不出趋势。";
+        // 口径说明进标题的 Tooltip（2026-09-16 用户要求），不再常驻占行——它解释的是
+        // "为什么只取同月份的报告期"，看两次就不用再看了，而在这一列里它要占掉四五行。
+        // 跟资金面诊断六个维度的做法一致。"报告期不足"不是口径而是**本次的实际状态**，
+        // 所以那种情况仍然写在标题上（同样的理由见 CapitalDiagnosis 的告警 vs Tooltip 之分）。
+        if (report.Trends.Count > 0)
+        {
+            TrendTitleText.ToolTip = new System.Windows.Controls.TextBlock
+            {
+                Text = "只取跟本期同月份的报告期（A股报表是年内累计口径，混着比会画成锯齿）。"
+                       + "几张图共用最下面那条横坐标，同一列必是同一期。",
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 380,
+            };
+        }
+        else
+        {
+            TrendTitleText.Text = "趋势 —— 报告期不足，画不出";
+            TrendTitleText.ToolTip = null;
+        }
 
         if (report.Alerts.Count > 0)
         {
@@ -171,6 +195,23 @@ public partial class FinancialAnalysisWindow : Window
         // 的做法，那边注释也记了这一点）。
         TextFitter.SizeToScreen(this);
         Loaded += (_, _) => WindowState = WindowState.Maximized;
+    }
+
+    /// <summary>
+    /// 装资金面诊断（第①列下半部分）。跟观察项一样由 <see cref="Open"/> 在构造之后调用：
+    /// 构造函数在 report.Error 时会提前 return，写在里面的话"没有财务数据"的票就看不到诊断了
+    /// ——而那种票恰恰更需要从资金面看它在发生什么。
+    /// </summary>
+    public void LoadDiagnosis(CapitalDiagnosis diagnosis)
+    {
+        _diagnosis = diagnosis;
+        if (diagnosis.Error != null)
+        {
+            DiagnosisNoteText.Text = diagnosis.Error;
+            return;
+        }
+        DiagnosisPanel.Load(diagnosis);
+        DiagnosisNoteText.Text = diagnosis.GlobalNote;
     }
 
     private static AnalysisSectionVm ToVm(AnalysisSection sec) => new()
@@ -217,7 +258,7 @@ public partial class FinancialAnalysisWindow : Window
     private string ToPlainText()
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"{_report.Code} {_report.Name}　财务分析　{_report.PeriodName}".TrimEnd());
+        sb.AppendLine($"{_report.Code} {_report.Name}　分析详情　{_report.PeriodName}".TrimEnd());
         if (_report.Error != null) { sb.AppendLine(_report.Error); return sb.ToString(); }
         sb.AppendLine($"【总体】{_report.Headline}");
         sb.AppendLine();
@@ -240,6 +281,24 @@ public partial class FinancialAnalysisWindow : Window
         foreach (var t in _report.Trends)
             sb.AppendLine($"{t.Name}（{t.Unit}）：" + string.Join("  ",
                 t.Points.Select(p => $"{p.Period:yy/MM}={p.Value:F2}")));
+
+        // 资金面诊断（2026-09-16 用户要求一并带上）。只导**结论**不导证据表：
+        // 贴进分析笔记的是判断，几十行区间对照数字贴过去没人会再读一遍，
+        // 要查证据回窗口里看即可。告警照导——它决定结论可不可信。
+        if (_diagnosis is { Error: null } d)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"【资金面诊断】锚点 {d.Windows.AnchorDate:yyyy-MM-dd} @ {d.AnchorClose:F2}"
+                          + $"　截止 {d.AsOf:yyyy-MM-dd}　累计 {d.AnchorChangePct:+0.00;-0.00}%");
+            foreach (var dim in d.Dimensions)
+            {
+                sb.AppendLine($"{dim.Index}. {dim.Title}");
+                foreach (var w in dim.Warnings) sb.AppendLine($"   ⚠ {w}");
+                if (dim.Unavailable != null) sb.AppendLine($"   （不可用）{dim.Unavailable}");
+                foreach (var c in dim.Conclusions) sb.AppendLine($"   {c}");
+            }
+            sb.AppendLine(d.GlobalNote);
+        }
         return sb.ToString();
     }
 
@@ -248,8 +307,6 @@ public partial class FinancialAnalysisWindow : Window
         try { Clipboard.SetText(ToPlainText()); }
         catch (Exception) { /* 剪贴板被占用，静默 */ }
     }
-
-    private void Close_Click(object sender, RoutedEventArgs e) => Close();
 
     /// <summary>
     /// 打开某只票的财务分析——**唯一入口**，列表页的按钮和【行情详情】窗口里的按钮都走这里。
@@ -310,15 +367,48 @@ public partial class FinancialAnalysisWindow : Window
                 .Analyze(code, name, history, price, dps, regulatory, null, totalShares, priceDate, industryPe);
 
             var w = new FinancialAnalysisWindow(report) { Owner = owner };
-            // 右上角的观察项。**在构造之后单独装**：构造函数在 report.Error 时会提前 return，
+            // 第①列的事件。**在构造之后单独装**：构造函数在 report.Error 时会提前 return，
             // 写在里面的话"没有财务数据"的票就看不到事件了——而那恰恰是最该看事件的时候。
             w.WatchPanel.Load(vm.WatchService, vm.NoteStore, code, name);
+
+            // 第①列的资金面诊断。跟财务分析不同，这个**必须推到后台线程**：
+            // MarginDetail / BlockTrade / Lhb 的主键最左列都不是股票代码，按代码查是全表扫；
+            // 同业中位数还要扫同行业几百只票在三个区间的首尾K线。在几 GB 的库上合计可能一两秒，
+            // 卡在 UI 线程上会让窗口先白一片再出来（"其他数据"按钮当初就是为此推的后台）。
+            // 窗口先开，诊断算完再填——用户可以先看财报，不用干等。
+            _ = LoadDiagnosisAsync(w, vm.CurrentDbPath, code, name);
+
             w.ShowDialog();
         }
         catch (Exception ex)
         {
             MessageBox.Show(owner, $"财务分析失败：{ex.Message}", "财务分析",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    /// <summary>
+    /// 后台读库 + 算诊断，回到 UI 线程填进窗口。
+    ///
+    /// 失败不弹框、只在那块位置写一行原因：资金面诊断是这个窗口的**附加**内容，
+    /// 库里缺哪张表（老版本库没有 BlockTrade / NetInflowDetail）都不该拦住财务分析。
+    /// </summary>
+    private static async Task LoadDiagnosisAsync(
+        FinancialAnalysisWindow w, string dbPath, string code, string name)
+    {
+        try
+        {
+            var diagnosis = await Task.Run(() =>
+            {
+                var reader = new StockPlatform.Data.Sqlite.SqliteCapitalDiagnosisReader(dbPath);
+                var (input, windows) = reader.Read(code, name);
+                return new StockPlatform.Logic.Services.CapitalDiagnosisAnalyzer().Analyze(input, windows);
+            });
+            w.LoadDiagnosis(diagnosis);
+        }
+        catch (Exception ex)
+        {
+            w.DiagnosisNoteText.Text = $"资金面诊断读取失败：{ex.Message}";
         }
     }
 

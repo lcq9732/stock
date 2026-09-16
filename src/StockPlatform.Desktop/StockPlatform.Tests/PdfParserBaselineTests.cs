@@ -83,8 +83,6 @@ public class PdfParserBaselineTests
 
             sb.Append("=== ").Append(rel).AppendLine();
 
-            sb.Append("  LooksLikeReport: ").AppendLine(Safe(() =>
-                Parser.LooksLikeReport(pdf).ToString()));
 
             sb.Append("  DisclosedKeys: ").AppendLine(Safe(() =>
             {

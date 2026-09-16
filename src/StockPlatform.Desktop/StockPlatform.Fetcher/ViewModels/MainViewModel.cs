@@ -1969,7 +1969,6 @@ public class MainViewModel : INotifyPropertyChanged
             //    任务自己的取消源在 ExecutePlanItemAsync 里建（itemCts，登记进占用表），
             //    也就是右上角「正在执行」里那一行的【停止】——单项停止只有那一个入口。
             var result = await ExecutePlanItemAsync(vm.Model, null, new Progress<string>(Log), CancellationToken.None);
-            vm.Model.LastEnd = DateTime.Now;
 
             // 失败原因必须落到日志里（2026-09-12 补）。以前只有**计划自动跑**的那条路打这些
             // （PlanRunner.FinishRunAsync），手动点【执行】压根不看 result.Errors——于是界面上
@@ -2006,6 +2005,10 @@ public class MainViewModel : INotifyPropertyChanged
         {
             vm.Model.LastOutcome = RunOutcome.Cancelled;
             vm.Model.LastErrorCount = 0;
+            // ⚠ LastEnd 在 finally 里统一写，别只在成功那一支写——这是这个方法的老毛病
+            //   （漏 LastErrorCount、无条件写 Ok 都是同一类），2026-09-15 又栽一次：
+            //   【年报子公司名单】18:28 被计划抢占停止，界面显示的却是「9/14 10:07 被停止」，
+            //   因为取消这一支没更新时刻，界面拿的是上一次的旧值。
         }
         catch (Exception ex)
         {
@@ -2016,6 +2019,9 @@ public class MainViewModel : INotifyPropertyChanged
         }
         finally
         {
+            // **无论成功、被停、还是失败都要写**，跟计划自动跑那条路（PlanRunner.Finish）对齐。
+            // 界面那一行的时刻取的就是它，不写就会一直显示上一次的。
+            vm.Model.LastEnd = DateTime.Now;
             SavePlan();
             if (vm.StatusLevel == 3) vm.StatusLevel = 0;   // 让 RecalcTimeline 能接管这一行
             vm.RefreshStatus();
@@ -2256,11 +2262,8 @@ public class MainViewModel : INotifyPropertyChanged
             case FetchActionId.FetchDividend:
                 return _orchestrator.RunFetchDividendAsync(progress, ct);
 
-            case FetchActionId.BankRegulatory:
-                // ⚠ 必须推到线程池：这个方法 await 之后紧跟着两段同步重活（重读全市场财务快照、
-                // 重解析上百份 PDF），留在 UI 线程会让界面假死。理由同 RunFetchBankRegulatoryAsync。
-                return Task.Run(
-                    () => _orchestrator.RunFetchBankRegulatoryAsync(progress, refetchAll: false, ct), ct);
+            // 【金融监管指标】2026-09-15 迁到新任务框架，走上面那条 _taskRegistry 总分支，
+            // 这里的 case 已经不可能命中，删掉。老方法 RunFetchBankRegulatoryAsync 同时移除。
 
             case FetchActionId.ImportManual:
                 return _orchestrator.RunImportManualMetricsAsync(progress, ct);

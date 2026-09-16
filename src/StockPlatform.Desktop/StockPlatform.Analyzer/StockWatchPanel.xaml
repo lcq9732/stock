@@ -3,8 +3,12 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              FontFamily="Microsoft YaHei"
              Foreground="{DynamicResource Theme.Foreground}">
-    <!-- 单只票的观察项，嵌在【分析详情】窗口右上角（2026-09-14）。
-         左边财务、右上事件、右下趋势——三样同屏，不用再开第二个窗口去对照。
+    <!-- 单只票的事件叙述，嵌在【分析详情】窗口第①列上半部分（2026-09-14 加，2026-09-16 三列重排后挪位）。
+         ①事件+资金面诊断、②财报、③趋势——三列同屏，不用再开第二个窗口去对照。
+
+         标题 2026-09-16 从「观察项」改叫「事件」：这块内容早就只剩事件叙述了（见下面那段
+         ⚠ 注释），DataGrid 的列头本来也叫「事件」，叫「观察项」纯属历史遗留。
+         **跟 AnalyzerPaths 里那套观察项定义（items.json / hits-{yyyy}.json）无关**，那是另一回事。
 
          ⚠ 这里**只有事件叙述**，另外两块都是想过之后砍掉的：
          · 「个人观点」内容区 —— 全库 62 只票只有 1 只写了笔记，那块地方是白占的。
@@ -20,7 +24,7 @@
 
         <!-- 标题行跟左栏的标题行对齐，左右两边看着是一对 -->
         <Grid Grid.Row="0" Margin="0,0,0,4">
-            <TextBlock Text="观察项" FontSize="13" FontWeight="Bold" VerticalAlignment="Center"
+            <TextBlock Text="事件" FontSize="13" FontWeight="Bold" VerticalAlignment="Center"
                        Foreground="{DynamicResource Theme.Accent.Deep}"
                        ToolTip="这只票身上发生了什么：回购买到哪一步、什么时候解禁多少、业绩预告、股东增减持、跌破均线。&#10;事项之间按日期倒序，同一件事内部按时间正序、缩进显示进展。" />
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">

@@ -2613,6 +2613,144 @@ public partial class FetchOrchestrator
         done.Add($"资金净流入缺失 {days.Count} 天");
     }
 
+    /// <summary>
+    /// **按天重抓**的入口表（2026-09-16）——残缺日和整段回补共用同一份，避免两处重抓逻辑漂移。
+    ///
+    /// 各 provider 都是区间接口，补一天就是 <c>(d, d)</c>。写入一律走 InsertOrIgnore/Upsert：
+    /// 已有的行不动、只补缺的那部分，所以反复跑无害——这正是残缺日能被修好的前提。
+    /// </summary>
+    private Func<DateOnly, Task<int>>? DailyRefetcherFor(string taskId, IProgress<string>? progress, CancellationToken ct)
+        => taskId switch
+        {
+            RetryTaskIds.Margin when _marginRepository != null => async d =>
+            {
+                var rows = await _marginProvider.GetDetailAsync(d, ct);
+                if (rows.Count > 0) { lock (_dbLock) { _marginRepository.InsertOrIgnore(rows); } }
+                return rows.Count;
+            },
+            RetryTaskIds.Lhb when _lhbRepository != null => async d =>
+            {
+                var rows = await _lhbProvider.GetDailyAsync(d, ct);
+                if (rows.Count > 0) { lock (_dbLock) { _lhbRepository.InsertOrIgnore(rows); } }
+                return rows.Count;
+            },
+            RetryTaskIds.LhbSeat when _lhbSeatProvider != null && _lhbSeatRepository != null => async d =>
+                await _lhbSeatProvider.FetchAsync(
+                    d.ToDateTime(TimeOnly.MinValue), d.ToDateTime(TimeOnly.MinValue),
+                    batch => { lock (_dbLock) { return _lhbSeatRepository.Upsert(batch); } }, progress, ct),
+            // ⚠ 【拉取市场事件】是复合任务（大宗/调研/解禁/增减持四张表），但只有大宗进了日频体检，
+            //    所以这里**只重抓大宗**，不要把另外三张一起拖下水。
+            RetryTaskIds.MarketEvents when _marketEventProvider != null && _marketEventRepository != null => async d =>
+                await _marketEventProvider.FetchBlockTradesAsync(
+                    d.ToDateTime(TimeOnly.MinValue), d.ToDateTime(TimeOnly.MinValue),
+                    b => { lock (_dbLock) { return _marketEventRepository.UpsertBlockTrades(b); } }, progress, ct),
+            _ => null,
+        };
+
+    /// <summary>
+    /// 补**残缺日**：那天有行、但不全（某个交易所整天没有，或行数明显偏少）。
+    /// 见 doc/partial-day-repair-design.md。
+    ///
+    /// ⚠ **复查绝对不能用 <c>COUNT > 0</c>**，这是这个方法跟
+    /// <see cref="FillMissingNetInflowDaysAsync"/> 最关键的差别：残缺日本来就有行
+    /// （2026-08-21 有 1,998 行沪市），拿"有没有行"去复查，深市补没补上都会被判成"已补齐"、
+    /// 从待办里静默划掉。所以复查走 <see cref="SqliteDailyTableAuditor.CheckDays"/>——
+    /// 跟体检**同一套判据**，补齐了才划掉。
+    /// </summary>
+    private async Task FillPartialDaysAsync(
+        string taskId, List<string> done, IProgress<string>? progress, CancellationToken ct)
+    {
+        var spec = SqliteDailyTableAuditor.DailyTables.FirstOrDefault(s => s.OwnerTaskId == taskId);
+        if (spec == null) return;
+
+        List<RetryTarget> pending;
+        lock (_dbLock)
+            pending = _manifestStore.Load().Todo(taskId, RetryTodoKind.PartialDay)?.Targets.ToList() ?? new();
+        var days = pending.Where(p => p.Day.HasValue).Select(p => p.Day!.Value.Date)
+                          .Distinct().OrderBy(d => d).ToList();
+        if (days.Count == 0) return;
+
+        var refetch = DailyRefetcherFor(taskId, progress, ct);
+        if (refetch == null)
+        {
+            progress?.Report($"⚠ {spec.Label}：有 {days.Count} 天残缺，但这一项没有\"按天重抓\"的入口，只能人工处理。");
+            return;
+        }
+
+        var sw = Stopwatch.StartNew();
+        progress?.Report($"补{spec.Label}残缺日：{days.Count} 天"
+            + $"（{string.Join("、", days.Select(d => d.ToString("yyyy-MM-dd")))}）"
+            + "——这些天本地有数据但不全，重抓整天、按主键去重合并，已有的行不受影响。");
+
+        int rows = 0, failCount = 0;
+        foreach (var d in days)
+        {
+            ct.ThrowIfCancellationRequested();
+            try { rows += await refetch(DateOnly.FromDateTime(d)); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                failCount++;
+                progress?.Report($"⚠ {spec.Label} {d:yyyy-MM-dd} 重抓失败：{ex.Message}");
+            }
+        }
+
+        // 整批都失败多半是被限流/断网，不是"数据源没有"——名单和计数原样留着，别白耗一轮 Tries。
+        if (failCount == days.Count)
+        {
+            progress?.Report($"{spec.Label}残缺日：{failCount} 天全部重抓失败，判定是连不上而不是数据源没有，"
+                           + "名单和重试计数原样留着，等会儿再跑一次。");
+            done.Add($"{spec.Label}残缺 {days.Count} 天（未计数）");
+            return;
+        }
+
+        // 复查：跟体检同一套判据（不是 COUNT>0，理由见方法注释）
+        var auditor = new SqliteDailyTableAuditor(_paths.CurrentDb);
+        var stillBad = auditor.CheckDays(spec, MarketIndexCatalog.ShanghaiCompositeSymbol, days)
+                              .Select(p => p.Day.Date).ToHashSet();
+        int fixedDays = days.Count - stillBad.Count;
+
+        int confirmedNow = 0;
+        lock (_dbLock)
+        {
+            var manifest = _manifestStore.Load();
+            var confirmed = manifest.ConfirmedPartialDays.TryGetValue(taskId, out var cd)
+                ? cd.Select(x => x.Date).ToHashSet() : new HashSet<DateTime>();
+            var triesByDay = pending.Where(p => p.Day.HasValue)
+                                    .GroupBy(p => p.Day!.Value.Date)
+                                    .ToDictionary(g => g.Key, g => g.Max(p => p.Tries));
+            var next = new List<RetryTarget>();
+            foreach (var d in stillBad.OrderBy(x => x))
+            {
+                int tries = triesByDay.GetValueOrDefault(d) + 1;
+                if (tries >= AuditMaxTries) { confirmed.Add(d); confirmedNow++; }
+                else next.Add(new RetryTarget { Day = d, Tries = tries });
+            }
+            manifest.SetTodo(taskId, RetryTodoKind.PartialDay, next);
+            manifest.ConfirmedPartialDays[taskId] = confirmed.OrderBy(x => x).ToList();
+            _manifestStore.Save(manifest);
+        }
+
+        progress?.Report($"{spec.Label}残缺日补齐完成：补上 {fixedDays}/{days.Count} 天、写入 {rows} 行"
+            + (failCount > 0 ? $"，{failCount} 天重抓失败" : "")
+            + (confirmedNow > 0
+                ? $"；{confirmedNow} 天补满 {AuditMaxTries} 轮仍不齐，已判定数据源那天就是只有这些、以后体检不再报"
+                : "")
+            + $"，用时 {FormatElapsed(sw.Elapsed)}。");
+        done.Add($"{spec.Label}残缺 {days.Count} 天");
+    }
+
+    /// <summary>某一项已知的残缺日——整段回补要拿它从 have 里扣掉（见
+    /// <see cref="RunStepBackfillDailyOneAsync"/>），否则那些天会被当成"已有"永远跳过。</summary>
+    private HashSet<DateOnly> PartialDaysOf(string taskId)
+    {
+        lock (_dbLock)
+            return (_manifestStore.Load().Todo(taskId, RetryTodoKind.PartialDay)?.Targets ?? [])
+                .Where(t => t.Day.HasValue)
+                .Select(t => DateOnly.FromDateTime(t.Day!.Value.Date))
+                .ToHashSet();
+    }
+
     private async Task FetchNetInflowRangeAsync(
         IReadOnlyList<string> codes, DateTime rangeStart, DateTime rangeEnd, IProgress<string>? progress, CancellationToken ct)
     {
@@ -2954,6 +3092,11 @@ public partial class FetchOrchestrator
         // ── 整天缺失的日子（资金净流入）──
         if (manifest.Todo(taskId, RetryTodoKind.MissingDays) is { Targets.Count: > 0 })
             await FillMissingNetInflowDaysAsync(done, progress, ct);
+
+        // ── 残缺日：那天有行但不全（2026-09-16）。跟上面那条是两码事——复查判据不同，
+        //    详见 FillPartialDaysAsync 的注释。
+        if (manifest.Todo(taskId, RetryTodoKind.PartialDay) is { Targets.Count: > 0 })
+            await FillPartialDaysAsync(taskId, done, progress, ct);
 
         return attempted;
     }
@@ -4012,92 +4155,8 @@ public partial class FetchOrchestrator
         SqliteBankRegulatoryRepository repo,
         Dictionary<string, FinancialSnapshot> latest,
         IProgress<string>? progress, CancellationToken ct)
-    {
-        if (!Directory.Exists(_paths.ReportsDir)) return;
-
-        int reparsed = 0, reparseFixed = 0, skippedNonFinancial = 0;
-        progress?.Report("正在用当前解析规则重跑本地已缓存的 PDF（不联网）...");
-        foreach (var dir in Directory.GetDirectories(_paths.ReportsDir))
-        {
-            ct.ThrowIfCancellationRequested();
-            var code = Path.GetFileName(dir);
-
-            // ⚠ **只碰金融股**（2026-09-11 补）。下面那段判定失败时会 File.Delete，
-            //   而删文件这种事，判据必须收紧到"我确定这是我该管的文件"。
-            //
-            //   踩过的坑：为子公司解析下载的 32 份非金融年报也放在这个目录里，被这里扫到，
-            //   LooksLikeReport（判据是前 3 页有没有年报的结构关键词，为拦截问询函而写）
-            //   对它们一律返回 false —— 非金融年报前几页是封面和图片 —— 于是当成"下错的
-            //   文件"删掉，一轮删了 14 份（比亚迪 4 期全没）。
-            //   年报现在有自己的目录（FetchPaths.AnnualReportsDir），但这道防护照样要有：
-            //   目录分开只是让它们不再相遇，这里才是"不该删的别删"。
-            if (!latest.TryGetValue(code, out var snapshot)
-                || Logic.Services.BankHealthCheckBuilder.ClassifyInstitution(snapshot)
-                   is not (Logic.Models.FinancialInstitutionKind.Bank
-                        or Logic.Models.FinancialInstitutionKind.Broker
-                        or Logic.Models.FinancialInstitutionKind.Insurer))
-            {
-                skippedNonFinancial++;
-                continue;
-            }
-            // 这家已经存下的指标，用来判断哪几期不用再 OCR（见下面 fullyApproved）。
-            List<Logic.Models.BankRegulatoryMetric> existing;
-            lock (_dbLock) existing = repo.GetByCode(code);
-            foreach (var pdf in Directory.GetFiles(dir, "*.pdf"))
-            {
-                if (!DateTime.TryParse(Path.GetFileNameWithoutExtension(pdf), out var d)) continue;
-
-                if (!BankReportParser.Default.LooksLikeReport(pdf))
-                {
-                    progress?.Report($"  {code} {d:yyyy-MM-dd} 下载到的不是报告正文"
-                                   + "（多半是问询函/专项报告），已删除，稍后重新下载");
-                    try { File.Delete(pdf); } catch { }
-                    lock (_dbLock)
-                    {
-                        repo.UpsertState(new Logic.Models.BankReportFetchState
-                        {
-                            Code = code, ReportDate = d, Status = "wrong_file",
-                            MetricCount = 0, Message = "下载到的不是报告正文，已删除待重下",
-                        });
-                    }
-                    continue;
-                }
-
-                try
-                {
-                    // 重解析也要按机构类型选标签集，否则会拿银行的标签去解析券商的报表。
-                    var kind = latest.TryGetValue(code, out var snap)
-                        ? Logic.Services.BankHealthCheckBuilder.ClassifyInstitution(snap)
-                        : Logic.Models.FinancialInstitutionKind.Bank;
-                    // 这一期的核心指标要是全都被人核对/回填过了，就别再跑 OCR 了——
-                    // 一份要一分钟，而跑出来的值按 Upsert 的规则本来也覆盖不了人拍板的。
-                    var expected = Logic.Models.RegulatoryMetricCatalog.ExpectedFor(kind);
-                    bool fullyApproved = expected.Length > 0 && expected.All(k =>
-                        existing.Any(m => m.ReportDate == d && m.MetricKey == k
-                                          && Logic.Models.MetricSources.HumanApproved.Contains(m.Source)));
-                    var ms = BankReportParser.Default.Parse(pdf, code, d, kind,
-                        s => progress?.Report(s), ct, allowOcr: !fullyApproved);
-                    if (ms.Count == 0) continue;
-                    lock (_dbLock)
-                    {
-                        repo.Upsert(ms);
-                        repo.UpsertState(new Logic.Models.BankReportFetchState
-                        {
-                            Code = code, ReportDate = d, Status = "ok",
-                            MetricCount = ms.Count, PdfPath = pdf,
-                        });
-                    }
-                    reparsed++; reparseFixed += ms.Count;
-                }
-                catch { /* 解析不了的交给下载流程当成没抓过重新处理 */ }
-            }
-        }
-        if (reparsed > 0)
-            progress?.Report($"  本地重解析完成：{reparsed} 份报告、{reparseFixed} 个指标已按新规则刷新。");
-        // 跳过了多少要说出来。不报的话，目录里躺着一批它压根没碰的东西，而没人知道。
-        if (skippedNonFinancial > 0)
-            progress?.Report($"  跳过 {skippedNonFinancial} 个非金融股目录（这一项只管银行/券商/保险）。");
-    }
+        => new BankReportReparser(repo, _paths.ReportsDir, _dbLock)
+            .Run(latest, s => progress?.Report(s), ct);
 
     /// <summary>ETF→指数 名称匹配（尽力）——ETF 名称几乎都含指数名（"沪深300ETF华泰"→沪深300），用它在
     /// 指数清单里找。exact=名称完全等于某指数名，contains=互相包含，都找不到=unmatched（未匹配的绝大多数
@@ -4829,8 +4888,10 @@ public partial class FetchOrchestrator
     ///
     /// 同样**必须顺序处理**，原因见 FinancialTask 类注释里那段关于信号量 FIFO 的坑。
     /// </summary>
-    private async Task FetchFinancialsForCodesAsync(
-        List<string> codes, IProgress<string>? progress, CancellationToken ct)
+    /// ⚠ 2026-09-15 从 private 放开：【金融监管指标】迁到新任务框架后，那个任务要拿它
+    ///   做前置补数。**以委托的形式注进去**（见 App 里的注册），不让任务反向依赖编排层。
+    public async Task FetchFinancialsForCodesAsync(
+        IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct)
     {
         if (_financialProvider == null || codes.Count == 0) return;
 
@@ -4856,210 +4917,14 @@ public partial class FetchOrchestrator
         }
     }
 
-    /// <summary>
-    /// 抓银行监管指标（2026-08-29 新增）——不良率、拨备覆盖率、核心一级资本充足率、客户集中度、
-    /// 迁徙率。这些**三张报表里一个都没有**，只在财报正文的"会计数据和财务指标摘要"那两三页，
-    /// 所以是下载 PDF + 解析，见 <see cref="BankReportFetcher"/> / <see cref="BankReportParser"/>。
-    ///
-    /// 银行名单靠**科目特征**认（利息净收入占营业收入四成以上），不查行业表——行业表覆盖率不满。
-    /// 前置：银行得先按 v3 科目集抓过财务报表，否则库里没有 interest_net，一家都认不出来。
-    ///
-    /// 只抓年报和中报：一季报/三季报是简版，没有那几张监管指标表。
-    /// </summary>
-    public async Task<FetchResult> RunFetchBankRegulatoryAsync(
-        IProgress<string>? progress, bool refetchAll = false, CancellationToken ct = default)
-    {
-        var result = new FetchResult();
-        var repo = new SqliteBankRegulatoryRepository(_paths.CurrentDb);
-        repo.EnsureSchema();
-
-        var finRepo = new SqliteFinancialRepository(_paths.CurrentDb);
-        var latest = finRepo.GetLatestSnapshotByCode();
-
-        // ── 前置：自己把需要的财务数据补齐，不必等全市场 ──────────────────────────────
-        // 银行是靠"利息净收入占营收四成以上"认出来的，而那个科目是 v3 才加的。如果要求用户先跑完
-        // 全市场【拉取财务报表】（5000+ 只 × 3 张报表）才能用这个按钮，等待时间完全不成比例——
-        // 真正需要的只有 40 来家银行。
-        //
-        // 鸡生蛋的地方在于：没抓 v3 之前认不出谁是银行。解法是用**老数据也判得出**的特征先粗筛：
-        // 银行/券商/保险的利润表都没有"营业成本"。金融机构总共一百来只，全抓一遍也就几分钟，
-        // 之后再用 interest_net 精确挑出银行。
-        // ⚠ 判据必须是**科目集版本号**，不能是"某个科目在不在"。
-        //   踩过的坑：原来写的是"缺 interest_net 就补抓"，可库里有 562 只已经抓到 v3（有
-        //   interest_net、但没有 v4 才加的已赚保费/代理买卖证券业务净收入），于是券商和保险
-        //   全部被跳过、永远识别不出来。版本号才是"科目齐不齐"的唯一可靠依据。
-        var fetchState = finRepo.GetFetchStateByCode();
-        var needFinancial = latest
-            .Where(kv => kv.Value.Get(FinancialKeys.OperCost) is null or 0)       // 金融机构
-            .Where(kv => !fetchState.TryGetValue(kv.Key, out var st)
-                         || st.KeysVersion < FinancialKeys.Version)               // 科目集落后
-            .Select(kv => kv.Key)
-            .OrderBy(c => c, StringComparer.Ordinal)
-            .ToList();
-
-        if (needFinancial.Count > 0)
-        {
-            progress?.Report($"检测到 {needFinancial.Count} 只金融股的科目集低于 v{FinancialKeys.Version}"
-                           + "（缺银行/券商/保险的特征科目，认不出机构类型），"
-                           + "先补抓它们的财务报表——只抓这一批，不用等全市场。");
-            await FetchFinancialsForCodesAsync(needFinancial, progress, ct);
-            latest = finRepo.GetLatestSnapshotByCode();   // 重新读，这次才认得出银行
-        }
-
-        // 三类金融机构各有一套监管指标，解析时按类型选标签集（见 BankReportParser.LabelsFor）。
-        var targets = latest
-            .Select(kv => (Code: kv.Key,
-                           Kind: Logic.Services.BankHealthCheckBuilder.ClassifyInstitution(kv.Value)))
-            .Where(x => x.Kind is Logic.Models.FinancialInstitutionKind.Bank
-                             or Logic.Models.FinancialInstitutionKind.Broker
-                             or Logic.Models.FinancialInstitutionKind.Insurer)
-            .OrderBy(x => x.Code, StringComparer.Ordinal)
-            .ToList();
-
-        if (targets.Count == 0)
-        {
-            var msg = "没有识别出任何银行/券商/保险。若本地库从没抓过财务报表，请先跑一次"
-                    + "【拉取财务报表】再回来点这个。";
-            progress?.Report("⚠ " + msg);
-            result.Errors.Add(msg);
-            return result;
-        }
-        int nBank = targets.Count(t => t.Kind == Logic.Models.FinancialInstitutionKind.Bank);
-        int nBroker = targets.Count(t => t.Kind == Logic.Models.FinancialInstitutionKind.Broker);
-        int nInsurer = targets.Count(t => t.Kind == Logic.Models.FinancialInstitutionKind.Insurer);
-        progress?.Report($"识别出 银行 {nBank} 家、券商 {nBroker} 家、保险 {nInsurer} 家，"
-                       + "开始抓取监管指标（只抓年报和中报）...");
-
-        // ── 先把本地已有的 PDF 全部重新解析一遍（不联网、几分钟）──────────────────────
-        // 这一步是幂等自愈：解析规则改进后（各行版式差异会不断暴露新问题），已经下载过的报告
-        // 不需要重新下载就能用新规则重跑，旧的错值被 INSERT OR REPLACE 覆盖掉。
-        // 这正是"PDF 要留在本地"的意义所在——真实修过的坑：注释角标「（注3）」没清干净，
-        // 平安银行的拨备覆盖率被存成了 3.0；目录页"七、资本充足率分析 42"的页码被当成资本充足率。
-        ReparseCachedBankReports(repo, latest, progress, ct);
-
-        var done = refetchAll ? new HashSet<(string, DateTime)>() : repo.GetSucceeded();
-
-        // 「这家这一期披露了没有」——没披露就别去翻公告列表了。
-        // 原来是无条件为每一家发请求查列表，而这一段限流很紧（约 17 请求/分钟，见下面的
-        // RateLimiter 参数），87 家跑一轮要个把小时。披露季前期（比如 10 月上旬找三季报）
-        // 绝大多数机构根本还没出报告，那一小时全是空转（2026-09-03 用户提出用预约日表来判断）。
-        //
-        // ⚠ 查不到披露记录的照常查——兜底方向只能是"多查"，不能因为查不到就漏掉一家。
-        var disclosed = refetchAll
-            ? new Dictionary<string, DateTime>(StringComparer.Ordinal)
-            : new SqliteEarningsScheduleRepository(_paths.CurrentDb)
-                .GetLatestDisclosedPeriodByCode(DateTime.Today);
-        // 限流分两套，理由见 BankReportFetcher 的构造函数注释。
-        // 页面侧参数参照 App.xaml.cs 里 financialProvider 那段血泪教训（3并发/1秒 → HTTP 456、
-        // 整轮零成功）取保守值：单并发 + 3 秒 + 每 40 个歇 45 秒 ≈ 17 请求/分钟。
-        // 文件侧打的是静态服务器、配额独立，但单个 PDF 几 MB，也不并发。
-        var fetcher = new BankReportFetcher(
-            pageLimiter: new RateLimiter(
-                maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(3),
-                batchSize: 40, restDuration: TimeSpan.FromSeconds(45)),
-            fileLimiter: new RateLimiter(
-                maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
-                batchSize: 30, restDuration: TimeSpan.FromSeconds(30)),
-            cacheDir: _paths.ReportsDir);
-        void Forward(string s) => progress?.Report(s);
-        fetcher.OnStatus += Forward;
-
-        var sw = Stopwatch.StartNew();
-        int okCount = 0, failCount = 0, skipCount = 0, metricTotal = 0;
-        try
-        {
-            for (int i = 0; i < targets.Count; i++)
-            {
-                ct.ThrowIfCancellationRequested();
-                var (code, kind) = targets[i];
-                string kindName = kind switch
-                {
-                    Logic.Models.FinancialInstitutionKind.Bank => "银行",
-                    Logic.Models.FinancialInstitutionKind.Broker => "券商",
-                    _ => "保险",
-                };
-                // 已披露的最新一期本地已经拿到了 → 这一轮它没有新东西，一个请求都不用发。
-                if (disclosed.TryGetValue(code, out var latestDisclosed)
-                    && done.Contains((code, latestDisclosed)))
-                {
-                    skipCount++;
-                    continue;
-                }
-
-                progress?.Report($"[{i + 1}/{targets.Count}] {code}（{kindName}）查找年报/中报...");
-
-                // 每一期拿**全部候选**（标题只做粗筛+排序，见 TitleRank），下面逐个试到解析出指标为止
-                SortedDictionary<DateTime, List<BankReportFetcher.ReportRef>> byDate;
-                try { byDate = await fetcher.ListCandidatesAsync(code, maxPerKind: 2, ct); }
-                catch (Exception ex)
-                {
-                    failCount++;
-                    result.Errors.Add($"{code} 取公告列表失败：{ex.Message}");
-                    continue;
-                }
-
-                foreach (var (period, candidates) in byDate)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    if (done.Contains((code, period))) { skipCount++; continue; }
-                    var r = candidates[0];
-
-                    var (state, metrics) = await fetcher.FetchBestAsync(
-                        candidates, kind, s => progress?.Report(s), ct);
-                    // 成功失败都写状态——静默跳过会让界面分不清"没抓"和"抓失败"。
-                    lock (_dbLock)
-                    {
-                        if (metrics.Count > 0) repo.Upsert(metrics);
-                        repo.UpsertState(state);
-                    }
-                    if (state.Status == "ok")
-                    {
-                        okCount++; metricTotal += state.MetricCount;
-                        progress?.Report($"    {r.ReportDate:yyyy-MM-dd} {r.Title} → {state.MetricCount} 个指标");
-                    }
-                    else
-                    {
-                        failCount++;
-                        progress?.Report($"    ⚠ {r.ReportDate:yyyy-MM-dd} {state.Status}：{state.Message}");
-                    }
-                }
-            }
-        }
-        finally { fetcher.OnStatus -= Forward; }
-
-        progress?.Report($"金融监管指标完成：成功 {okCount} 份（共 {metricTotal} 个指标）、"
-                       + $"失败 {failCount} 份、跳过已有 {skipCount} 份，用时 {FormatElapsed(sw.Elapsed)}。"
-                       + $"PDF 缓存在 {_paths.ReportsDir}。");
-
-        // ── 生成「待手工回填清单」 ──────────────────────────────────────────────
-        // PDF 解析做不到 100%（个别年报的字体 PdfPig 和 pdftotext 都读不动），与其让体检表
-        // 一直显示"待接入"、让人对着三个字发呆，不如直接给一份能照着干活的表：
-        // 哪家、哪一期、缺哪几个数、翻年报的哪一章能找到。填完用【导入手工数据】写回来，
-        // 之后重解析也不会覆盖（来源标 manual）。
-        try
-        {
-            progress?.Report("正在生成待手工回填清单（要逐份核对财报里到底披露了哪些指标，请稍候）...");
-            var listPath = ManualFillWorklist.Generate(
-                _paths.CurrentDb, _paths.ReportsDir, _paths.ReportsDir, targets,
-                s => progress?.Report(s));
-            if (listPath != null)
-            {
-                var missing = File.ReadAllLines(listPath).Length - 1;
-                progress?.Report($"⚠ 有 {missing} 项指标需要你过一遍，已生成清单：{listPath}"
-                               + "（用 Excel 打开，看倒数第二列「OCR识别值」："
-                               + "**有值的**是数字被转曲、只能靠 OCR 认出来的，对着 PDF 核一眼——"
-                               + "认对了就别动，认错了才在最后一列填正确值；"
-                               + "**空着的**是压根没解析出来的，请在最后一列填上。"
-                               + "填完点【导入手工数据】写回，之后重新解析不会覆盖你确认过的值）。"
-                               + "清单里**只列财报确实披露的项**——公司本身没有的指标"
-                               + "（比如纯寿险公司没有综合成本率）不会让你去找。");
-            }
-            else progress?.Report("所有机构的核心监管指标都已齐全，也没有待核对的 OCR 值。");
-        }
-        catch (Exception ex) { result.Errors.Add($"生成手工回填清单失败：{ex.Message}"); }
-
-        return result;
-    }
+    // 【金融监管指标】的 RunFetchBankRegulatoryAsync 2026-09-15 整体迁到
+    // StockPlatform.Tasks.BankRegulatoryTask（新任务框架），这里删除。
+    // 拆分后的落点：
+    //   · 列公告 / 下载 PDF  → SinaReportIndex（通用数据源，【子公司名单】也用）
+    //   · 逐候选试到解析出指标 → BankReportFetcher
+    //   · 本地已有 PDF 重解析  → BankReportReparser（【重解析已有PDF】跟它共用同一份）
+    //   · 认金融机构 / 删文件护栏 → FinancialInstitutionRoster（有用例钉着）
+    // FetchFinancialsForCodesAsync 留在这里，以委托形式注给那个任务做前置补数。
 
     /// <summary>
     /// 导入人工回填的监管指标（2026-08-29 新增）。读 <see cref="ManualFillWorklist.FileName"/>，

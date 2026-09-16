@@ -156,6 +156,16 @@ public class Manifest
     public List<DateTime> ConfirmedNetInflowDays { get; set; } = new();
 
     /// <summary>
+    /// 补满两轮仍然补不齐、判定"数据源那天就是只有这些"的**残缺日**（2026-09-16 新增）。
+    /// 键是任务 id（<see cref="RetryTaskIds"/> 的取值），值是那一项已定案的日子。
+    ///
+    /// 为什么按任务分开存、不复用 <see cref="ConfirmedNetInflowDays"/>：那张是资金净流入专用的，
+    /// 两融的残缺日塞进去会互相污染——一边定案了另一边就不查了。
+    /// 「彻底体检」会连这份一起清空重查，跟上面那张一致。
+    /// </summary>
+    public Dictionary<string, List<DateTime>> ConfirmedPartialDays { get; set; } = new();
+
+    /// <summary>
     /// 统一的待办清单（2026-09-13）——**这是"还有什么没补上"的唯一权威**，
     /// 上面那九个名单是它的历史前身，只在 <see cref="MigrateLegacyTodos"/> 里读一次就清空。
     ///

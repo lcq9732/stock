@@ -193,6 +193,25 @@ public class SqliteCustomerSupplierRepository : ICustomerSupplierRepository
         return rows;
     }
 
+    public List<string> GetMostReferencedPartners(int top)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        // 只数可信档：normalized 可能只是写法像，parent_group 指的是非上市母集团——
+        // 拿它们排序会把下载清单带偏。
+        cmd.CommandText = """
+            SELECT partner_code FROM StockCustomerSupplier
+            WHERE rank <= 5 AND partner_code IS NOT NULL
+              AND match_type IN ('exact', 'short', 'qualified')
+            GROUP BY partner_code ORDER BY COUNT(*) DESC LIMIT $n;
+            """;
+        cmd.Parameters.AddWithValue("$n", top);
+        var list = new List<string>(top);
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) list.Add(r.GetString(0));
+        return list;
+    }
+
     public int GetMatcherVersion()
     {
         using var conn = Open();

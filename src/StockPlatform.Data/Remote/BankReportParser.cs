@@ -42,9 +42,6 @@ public sealed class BankReportParser
     /// <summary>兜底链：PdfPig 读不动就退 pdftotext。顺序由装配时决定，本类不关心。</summary>
     private readonly PdfLineExtractor _lines;
 
-    /// <summary>只要页面原始文字、不要版面结构时用（LooksLikeReport）。</summary>
-    private readonly IPdfTextReader _textReader;
-
     /// <summary>
     /// OCR。**不在兜底链上**——它的触发条件是"文本层拿到了、但数字被转成了矢量图形"，
     /// 那是这里的业务判断（LooksLikeDigitsStripped），该 OCR 哪几页也由这里算（CandidatePages）。
@@ -52,11 +49,9 @@ public sealed class BankReportParser
     /// </summary>
     private readonly IPdfLineSource? _ocr;
 
-    public BankReportParser(PdfLineExtractor lines, IPdfTextReader textReader,
-                            IPdfLineSource? ocr = null)
+    public BankReportParser(PdfLineExtractor lines, IPdfLineSource? ocr = null)
     {
         _lines = lines;
-        _textReader = textReader;
         _ocr = ocr;
     }
 
@@ -74,7 +69,6 @@ public sealed class BankReportParser
         var poppler = new PopplerToolset();
         return new BankReportParser(
             new PdfLineExtractor(new PdfPigLineSource(), new PopplerLineSource(poppler)),
-            new PdfPigTextReader(),
             new TesseractLineSource(new TesseractToolset(), poppler));
     }
 
@@ -283,38 +277,14 @@ public sealed class BankReportParser
                   .Select(l => l.Label)
                   .ToArray();
 
-    /// <summary>
-    /// 粗判这份 PDF 是不是**年报/中报正文**。
-    ///
-    /// 用来兜住"标题过滤没拦住、下错了文件"的情况：问询函回复、募集资金专项报告这些同样
-    /// 含"年度报告"四个字，里面却没有任何监管指标表，翻遍也找不到数——实测 353 份里有 9 份
-    /// 是这么下错的，白白进了手工回填清单让人去翻。判据是正文前几页有没有年报的结构特征。
-    ///
-    /// **读不出文本的一律返回 true**——那是字体问题（比如中国人保），跟"下错文件"是两回事，
-    /// 误删了还得重新下 6MB。
-    /// </summary>
-    public bool LooksLikeReport(string pdfPath)
-    {
-        string head;
-        try
-        {
-            // 只要前 3 页的字，不需要版面结构——所以走 IPdfTextReader，不惊动行提取器。
-            // 整份打不开时它返回空列表，下面那条 head.Length < 50 正好兜住（返回 true）。
-            var sb = new StringBuilder();
-            foreach (var p in _textReader.ReadPages(pdfPath, maxPages: 3)) sb.Append(p.Text);
-            head = Normalize(sb.ToString());
-        }
-        catch { return true; }
-
-        if (head.Length < 50) return true;   // 读不出来，交给别的环节判断
-
-        string[] structure =
-        [
-            "目录", "重要提示", "第一节", "第一章", "公司基本情况",
-            "会计数据和财务指标", "释义", "董事会报告", "管理层讨论",
-        ];
-        return structure.Any(k => head.Contains(k, StringComparison.Ordinal));
-    }
+    // ⚠ LooksLikeReport 2026-09-16 删除。它判"这份 PDF 是不是报告正文"（看前 3 页有没有
+    //   年报的结构关键词），原来给重解析那条路当"要不要删文件"的判据用。
+    //   删掉的理由有两条，都有实测：
+    //     · 拿全库 377 份金融报告扫一遍，它判 false 的 13 份**全部**在库里有从它自己
+    //       解析出来的指标（7~15 个）——100% 假阳性，一份真的坏文件都没抓到。
+    //     · 它要拦的问询函/专项报告/H股版，SinaReportIndex.TitleBlockers 已经在**下载前**
+    //       挡掉了，同一件事不必做两遍，而后一遍会误删。
+    //   现在判"这份 PDF 能不能用"的唯一判据是**解析得出指标**，跟下载路径一致。
 
     /// <summary>
     /// 这份 PDF 里**确实披露了数值**的指标 key。读不出文本、或数字被转曲（无从判断）时返回 null。

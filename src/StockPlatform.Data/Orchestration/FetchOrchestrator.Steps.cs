@@ -375,7 +375,9 @@ public partial class FetchOrchestrator
     public async Task<FetchResult> RunStepBackfillMarginAsync(
         IProgress<string>? progress, CancellationToken ct = default) =>
         await RunStepBackfillDailyOneAsync("融资余额", IDailyFetchNoDataRepository.MarginDataset, _marginProvider.EarliestAvailable,
-            ct2 => _marginRepository.GetTradeDates(),
+            // 扣掉已知残缺日（2026-09-16）：GetTradeDates 只看"这天有没有行"，
+            // 2026-08-21 有 1,998 行沪市就被算作"已有"，深市那一半永远补不回来。
+            ct2 => _marginRepository.GetTradeDates().Except(PartialDaysOf(RetryTaskIds.Margin)).ToHashSet(),
             async d =>
             {
                 var rows = await _marginProvider.GetDetailAsync(d, ct);
@@ -389,7 +391,7 @@ public partial class FetchOrchestrator
     public async Task<FetchResult> RunStepBackfillLhbAsync(
         IProgress<string>? progress, CancellationToken ct = default) =>
         await RunStepBackfillDailyOneAsync("龙虎榜", IDailyFetchNoDataRepository.LhbDataset, _lhbProvider.EarliestAvailable,
-            ct2 => _lhbRepository.GetTradeDates(),
+            ct2 => _lhbRepository.GetTradeDates().Except(PartialDaysOf(RetryTaskIds.Lhb)).ToHashSet(),
             async d =>
             {
                 var rows = await _lhbProvider.GetDailyAsync(d, ct);

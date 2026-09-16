@@ -17,6 +17,21 @@ public enum MarketBoard
 }
 
 /// <summary>
+/// 交易所——比 <see cref="MarketBoard"/> 粗一档（2026-09-16 加）。
+///
+/// 日频表的覆盖判据用的是这一档：板块级会误报（某天科创板没大宗、B股没人上榜都正常），
+/// 逐标的更会满屏误报（融资余额只有两融标的有）；"整个交易所一行都没有"才是真漏抓。
+/// 见 doc/partial-day-repair-design.md §3.2。
+/// </summary>
+public enum Exchange
+{
+    Shanghai,
+    Shenzhen,
+    Beijing,
+    Unknown,
+}
+
+/// <summary>
 /// Classifies a 6-digit A-share code into its market board purely from the code prefix.
 ///
 /// 北交所 (Beijing) is the one that's easy to get wrong: since the market's 2024-2025 "920代码"
@@ -67,6 +82,32 @@ public static class MarketClassifier
     };
 
     public static string DisplayName(string code) => DisplayName(Classify(code));
+
+    /// <summary>
+    /// 板块归并到**交易所**（2026-09-16 加，给日频表的"某个市场整天没数据"判据用）。
+    ///
+    /// 为什么不直接用 <see cref="MarketBoard"/>：那是板块级，太细。日频表按板块比对会误报——
+    /// 某天科创板一笔大宗交易都没有、B股没人上龙虎榜，都是常事；而"深市整个交易所一行都没有"
+    /// 才是真出事了（见 doc/partial-day-repair-design.md §3.2）。
+    /// </summary>
+    public static Exchange ToExchange(MarketBoard board) => board switch
+    {
+        MarketBoard.ShanghaiMain or MarketBoard.ShanghaiStar or MarketBoard.ShanghaiB => Exchange.Shanghai,
+        MarketBoard.ShenzhenMain or MarketBoard.ShenzhenChiNext or MarketBoard.ShenzhenB => Exchange.Shenzhen,
+        MarketBoard.Beijing => Exchange.Beijing,
+        _ => Exchange.Unknown,
+    };
+
+    /// <summary>代码 → 交易所。见 <see cref="ToExchange(MarketBoard)"/>。</summary>
+    public static Exchange ExchangeOf(string code) => ToExchange(Classify(code));
+
+    public static string DisplayName(Exchange exchange) => exchange switch
+    {
+        Exchange.Shanghai => "沪市",
+        Exchange.Shenzhen => "深市",
+        Exchange.Beijing => "北交所",
+        _ => "未知",
+    };
 
     /// <summary>EastMoney secid market prefix. Their own stock-list filter (see
     /// EastMoneyStockListProvider's fs parameter) groups 北交所 under market "0" — the same

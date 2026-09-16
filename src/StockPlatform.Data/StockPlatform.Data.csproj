@@ -10,6 +10,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- 列公告/标题排序那套判据踩平过 9 个坑，却一直裸奔。2026-09-15 开放给测试钉住，
+         这是把它抽成独立数据源类之前必须先立的保护。 -->
+    <InternalsVisibleTo Include="StockPlatform.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.8" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
     <!-- 解析中证指数官网的 closeweight.xls（真 OLE2/BIFF）——读取需注册 CodePages（上面已引用） -->

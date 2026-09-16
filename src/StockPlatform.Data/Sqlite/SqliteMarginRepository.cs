@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using Microsoft.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
@@ -38,8 +38,10 @@ public class SqliteMarginRepository : IMarginRepository
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT OR IGNORE INTO MarginDetail (trade_date, code, name, margin_balance, margin_buy, short_balance, short_volume, fetched_at)
-            VALUES ($d, $c, $n, $mb, $bu, $sb, $sv, $at);
+            INSERT OR IGNORE INTO MarginDetail (trade_date, code, name, margin_balance, margin_buy,
+                                                short_balance, short_volume,
+                                                margin_repay, short_sell_volume, short_repay_volume, fetched_at)
+            VALUES ($d, $c, $n, $mb, $bu, $sb, $sv, $rp, $ssv, $srv, $at);
             """;
         var pd = cmd.CreateParameter(); pd.ParameterName = "$d"; cmd.Parameters.Add(pd);
         var pc = cmd.CreateParameter(); pc.ParameterName = "$c"; cmd.Parameters.Add(pc);
@@ -48,6 +50,9 @@ public class SqliteMarginRepository : IMarginRepository
         var pbu = cmd.CreateParameter(); pbu.ParameterName = "$bu"; cmd.Parameters.Add(pbu);
         var psb = cmd.CreateParameter(); psb.ParameterName = "$sb"; cmd.Parameters.Add(psb);
         var psv = cmd.CreateParameter(); psv.ParameterName = "$sv"; cmd.Parameters.Add(psv);
+        var prp = cmd.CreateParameter(); prp.ParameterName = "$rp"; cmd.Parameters.Add(prp);
+        var pssv = cmd.CreateParameter(); pssv.ParameterName = "$ssv"; cmd.Parameters.Add(pssv);
+        var psrv = cmd.CreateParameter(); psrv.ParameterName = "$srv"; cmd.Parameters.Add(psrv);
         var pat = cmd.CreateParameter(); pat.ParameterName = "$at"; cmd.Parameters.Add(pat);
 
         foreach (var r in rows)
@@ -57,8 +62,14 @@ public class SqliteMarginRepository : IMarginRepository
             pn.Value = (object?)r.Name ?? DBNull.Value;
             pmb.Value = r.MarginBalance;
             pbu.Value = r.MarginBuy;
-            psb.Value = r.ShortBalance;
+            // ⚠ 可空的四项必须写 DBNull 而不是 0：源头不提供（沪市没有融券余额、
+            // 深市没有偿还额）跟"当天确实是 0"是两回事，混在一起就是之前那个
+            // "1675 只沪市票融券余额恒 0"的 bug。
+            psb.Value = (object?)r.ShortBalance ?? DBNull.Value;
             psv.Value = r.ShortVolume;
+            prp.Value = (object?)r.MarginRepay ?? DBNull.Value;
+            pssv.Value = (object?)r.ShortSellVolume ?? DBNull.Value;
+            psrv.Value = (object?)r.ShortRepayVolume ?? DBNull.Value;
             pat.Value = r.FetchedAt.ToString(TimeFormat, CultureInfo.InvariantCulture);
             cmd.ExecuteNonQuery();
         }

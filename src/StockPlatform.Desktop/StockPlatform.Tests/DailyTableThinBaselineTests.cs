@@ -88,7 +88,7 @@ public class DailyTableThinBaselineTests : IDisposable
     {
         for (int i = 0; i < Cal.Count; i++) InsertMargin(Cal[i], i < 20 ? 20 : 200);
 
-        Assert.Empty(_auditor.Check(Margin, Anchor, Cutoff)!.ThinDays);
+        Assert.Empty(_auditor.Check(Margin, Anchor, Cutoff)!.PartialDays);
     }
 
     /// <summary>同样的量级变化下，早年那段里真的只抓到零头的那天，照样要报出来。</summary>
@@ -100,8 +100,10 @@ public class DailyTableThinBaselineTests : IDisposable
         for (int i = 0; i < Cal.Count; i++)
             InsertMargin(Cal[i], i == 5 ? 2 : i < 20 ? 20 : 200);   // 第 6 天只抓到 2 行
 
-        var thin = _auditor.Check(Margin, Anchor, Cutoff)!.ThinDays;
+        var partial = _auditor.Check(Margin, Anchor, Cutoff)!.PartialDays;
 
-        Assert.Equal([(Cal[5], 2)], thin);
+        var p = Assert.Single(partial);
+        Assert.Equal(Cal[5], p.Day);
+        Assert.Equal(2, p.Rows);
     }
 }

@@ -473,10 +473,13 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
 
             // 资金净流入的空日进待补名单，交给【重新拉取失败】一轮补掉
             var queued = spec.Table == "NetInflow" ? QueueMissingNetInflowDays(r.EmptyDays, thorough) : 0;
+            // 残缺日（有行但不全）进各自任务的待补名单（2026-09-16）——跟空日是两条线，
+            // 复查判据不一样，不能混（见 doc/partial-day-repair-design.md §4.3）
+            var queuedPartial = QueuePartialDays(spec, r.PartialDays, thorough);
 
             string span = $"{r.From:yyyy-MM-dd}~{r.To:yyyy-MM-dd} 共 {r.TradingDays} 个交易日"
                         + $"（每日约 {r.MedianRows} 行）";
-            if (r.EmptyDays.Count == 0 && r.ThinDays.Count == 0 && r.TailMissingDays.Count == 0)
+            if (r.EmptyDays.Count == 0 && r.PartialDays.Count == 0 && r.TailMissingDays.Count == 0)
             {
                 lines.Add($"　{spec.Label}：{span}，齐");
                 continue;
@@ -490,9 +493,26 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             if (r.EmptyDays.Count > 0)
                 parts.Add($"{r.EmptyDays.Count} 天一行都没有（{FormatDays(r.EmptyDays)}）"
                         + EmptyDaysNote(spec, r.EmptyDays.Count, queued));
-            if (r.ThinDays.Count > 0)
-                parts.Add($"{r.ThinDays.Count} 天行数明显偏少、疑似只抓了一半"
-                        + $"（{FormatDays(r.ThinDays.Select(t => t.Day).ToList())}）");
+            // 残缺日分因由报（2026-09-16）：缺整个交易所是"那一半根本没抓到"，行数偏少可能只是
+            // 源当天就少——两者该不该去查数据源不一样，混成一句话人没法判断。
+            if (r.PartialDays.Count > 0)
+            {
+                var byMarket = r.PartialDays
+                    .Where(d => d.Reason.HasFlag(SqliteDailyTableAuditor.PartialReason.MissingMarket)).ToList();
+                var thinOnly = r.PartialDays
+                    .Where(d => d.Reason == SqliteDailyTableAuditor.PartialReason.ThinRows).ToList();
+                if (byMarket.Count > 0)
+                {
+                    var names = byMarket.SelectMany(d => d.MissingMarkets).Distinct()
+                                        .Select(MarketClassifier.DisplayName);
+                    parts.Add($"**{byMarket.Count} 天整个市场没抓到**（{FormatDays(byMarket.Select(d => d.Day).ToList())}，"
+                            + $"缺 {string.Join("/", names)}）");
+                }
+                if (thinOnly.Count > 0)
+                    parts.Add($"{thinOnly.Count} 天行数明显偏少、疑似只抓了一半"
+                            + $"（{FormatDays(thinOnly.Select(d => d.Day).ToList())}）");
+                if (queuedPartial > 0) parts[^1] += $"，已记入待补名单 {queuedPartial} 天";
+            }
             lines.Add($"　{spec.Label}：{span}——{string.Join("；", parts)}。"
                     + $"补法：{HowToFill(spec, r.EmptyDays.Count, queued)}");
         }
@@ -594,6 +614,45 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             .ToList());
         _manifestStore.Save(manifest);
         return manifest.Todo(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays)?.Targets.Count ?? 0;
+    }
+
+    /// <summary>
+    /// 把**残缺日**（有行但不全）写进对应任务的待补名单（2026-09-16）。
+    ///
+    /// 跟上面那个 <see cref="QueueMissingNetInflowDays"/> 是两条独立的线，不能合：
+    /// 空日和残缺日的**复查判据不一样**（空日看 COUNT>0，残缺日要重跑体检那两条判据），
+    /// 混进一条 Kind 的话残缺日一复查就被判"已补齐"静默划掉——那正是本功能要修的 bug。
+    /// 详见 doc/partial-day-repair-design.md §4.3。
+    ///
+    /// 已经在名单里的保留原有 Tries，否则永远收敛不到"数据源那天就是只有这些"。
+    /// </summary>
+    /// <returns>写完之后名单里还剩几天（已扣掉定案的）。</returns>
+    private int QueuePartialDays(
+        SqliteDailyTableAuditor.Spec spec, List<SqliteDailyTableAuditor.PartialDay> partialDays, bool thorough)
+    {
+        // 没配归属任务的表只报不补（跟原来"这些表补法各异、只报"的处理一致）
+        if (string.IsNullOrEmpty(spec.OwnerTaskId)) return 0;
+
+        var manifest = _manifestStore.Load();
+        if (thorough) manifest.ConfirmedPartialDays.Remove(spec.OwnerTaskId);
+
+        var confirmed = manifest.ConfirmedPartialDays.TryGetValue(spec.OwnerTaskId, out var cd)
+            ? cd.Select(d => d.Date).ToHashSet()
+            : new HashSet<DateTime>();
+        var triesByDay = (manifest.Todo(spec.OwnerTaskId, RetryTodoKind.PartialDay)?.Targets ?? [])
+            .Where(t => t.Day.HasValue)
+            .GroupBy(t => t.Day!.Value.Date)
+            .ToDictionary(g => g.Key, g => g.Max(t => t.Tries));
+
+        manifest.SetTodo(spec.OwnerTaskId, RetryTodoKind.PartialDay, partialDays
+            .Select(d => d.Day.Date)
+            .Where(d => !confirmed.Contains(d))
+            .Distinct()
+            .OrderBy(d => d)
+            .Select(d => new RetryTarget { Day = d, Tries = triesByDay.GetValueOrDefault(d) })
+            .ToList());
+        _manifestStore.Save(manifest);
+        return manifest.Todo(spec.OwnerTaskId, RetryTodoKind.PartialDay)?.Targets.Count ?? 0;
     }
 
 

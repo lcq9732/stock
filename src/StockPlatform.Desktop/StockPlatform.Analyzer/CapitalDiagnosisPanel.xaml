@@ -1,0 +1,113 @@
+﻿<UserControl x:Class="StockPlatform.Analyzer.CapitalDiagnosisPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             FontFamily="Microsoft YaHei"
+             Foreground="{DynamicResource Theme.Foreground}">
+    <!-- 资金面诊断（2026-09-16，设计见 doc/capital-diagnosis-design.md）——【分析详情】窗口第①列
+         的全部内容（事件已挪到第③列趋势图上面）。
+
+         每个维度是**四段式**：标题(带 Tooltip) → 本次异常 → 结论 → 证据。
+         标题不带"维度 N/6"编号（2026-09-16 用户："这些都不要了，多余"）——维度名本身就够认，
+         编号既不用来引用也不用来排序，白占一段视觉噪音。
+         · 口径说明进标题的 Tooltip，**不占行**（用户 2026-09-16："口径这个说明只是早期有用，
+           后面熟悉了就不用看了"）。标题后缀 ⓘ 提示有东西可看。
+         · ⚠ 异常行**只在异常时出现**，正常时零占位。不能一起塞进 Tooltip：那会出现
+           "结论看着正常、其实数据是降级的"，这类信息一旦藏起来结论就不可信了。
+         · 结论是重点，字号比证据表大、颜色用正文色；证据表是次要的，小一号、淡一点。
+
+         ⚠ 六个维度**全部展开不折叠**（用户 2026-09-16 定：先全排上去，超出就滚动，
+         看了实际效果再决定要不要折叠）。所以这个控件本身不滚，由外层那一列整体滚——
+         六个维度约 900px、可用高度约 860，仍要滚一点，但事件挪走后已经少滚半屏。 -->
+    <ItemsControl x:Name="DimensionList">
+        <ItemsControl.ItemTemplate>
+            <DataTemplate>
+                <StackPanel Margin="0,0,0,14">
+                    <!-- 标题行：维度名 ⓘ -->
+                    <TextBlock Margin="0,0,0,3" TextWrapping="Wrap" ToolTipService.ShowDuration="60000">
+                        <TextBlock.ToolTip>
+                            <!-- Tooltip 里是整段口径说明，要能换行读 -->
+                            <TextBlock Text="{Binding Tooltip}" TextWrapping="Wrap" MaxWidth="420" />
+                        </TextBlock.ToolTip>
+                        <Run Text="{Binding Title, Mode=OneWay}" FontSize="13.5" FontWeight="Bold"
+                             Foreground="{DynamicResource Theme.Accent.Deep}" />
+                        <Run Text="ⓘ" FontSize="11" Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                    </TextBlock>
+
+                    <!-- 本次异常。Collapsed 时整块不占位 -->
+                    <ItemsControl ItemsSource="{Binding Warnings}" Visibility="{Binding WarningVisibility}"
+                                  Margin="0,0,0,4">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="{DynamicResource Theme.Warn.Background}"
+                                        BorderBrush="{DynamicResource Theme.Warn.Border.Deep}"
+                                        BorderThickness="1" Padding="7,3" Margin="0,0,0,3">
+                                    <TextBlock Text="{Binding}" TextWrapping="Wrap" FontSize="11.5" />
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- 整个维度不可用（非两融标的、没有分档数据）：只显示这一句，不画空表 -->
+                    <Border Visibility="{Binding UnavailableVisibility}"
+                            Background="{DynamicResource Theme.Info.Background}"
+                            BorderBrush="{DynamicResource Theme.Info.Border}"
+                            BorderThickness="1" Padding="8,5">
+                        <TextBlock Text="{Binding Unavailable}" TextWrapping="Wrap" FontSize="12"
+                                   Foreground="{DynamicResource Theme.Foreground.Subtle}" />
+                    </Border>
+
+                    <!-- 结论——这个功能的主角。没有它六个维度就退化成原始数据表 -->
+                    <ItemsControl ItemsSource="{Binding Conclusions}" Visibility="{Binding ConclusionVisibility}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="12.5"
+                                           Margin="0,0,0,2" Foreground="{Binding Brush}"
+                                           FontWeight="{Binding Weight}" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- 证据：一个或多个表 -->
+                    <ItemsControl ItemsSource="{Binding Tables}" Margin="0,5,0,0">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="0,0,0,6">
+                                    <TextBlock Text="{Binding Caption}" Visibility="{Binding CaptionVisibility}"
+                                               FontSize="11.5" Margin="0,2,0,2"
+                                               Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                                    <!-- 表用 Grid + ItemsControl 手搭而不是 DataGrid：这些表只有
+                                         三五行、不需要排序/选中/编辑，DataGrid 那一套在这里只会
+                                         带来行高不齐和多余的表头边框。列宽在 VM 里算好。 -->
+                                    <ItemsControl ItemsSource="{Binding Rows}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <ItemsControl ItemsSource="{Binding Cells}">
+                                                    <ItemsControl.ItemsPanel>
+                                                        <ItemsPanelTemplate>
+                                                            <StackPanel Orientation="Horizontal" />
+                                                        </ItemsPanelTemplate>
+                                                    </ItemsControl.ItemsPanel>
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <TextBlock Text="{Binding Text}" Width="{Binding Width}"
+                                                                       TextAlignment="{Binding Align}"
+                                                                       FontFamily="{Binding Font}" FontSize="11.5"
+                                                                       Foreground="{Binding Brush}"
+                                                                       FontWeight="{Binding Weight}"
+                                                                       TextTrimming="CharacterEllipsis"
+                                                                       Margin="0,1,6,1" />
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </DataTemplate>
+        </ItemsControl.ItemTemplate>
+    </ItemsControl>
+</UserControl>

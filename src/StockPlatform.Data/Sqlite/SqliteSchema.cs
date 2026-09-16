@@ -322,8 +322,18 @@ public static class SqliteSchema
                 name TEXT,
                 margin_balance REAL,        -- 融资余额(元)
                 margin_buy REAL,            -- 融资买入额(元)
-                short_balance REAL,         -- 融券余额(元)
+                short_balance REAL,         -- 融券余额(元)。⚠ 沪市数据源**不提供**这一列
+                                            --   (rqylje 恒为 null)，由本地按交易所官方公式
+                                            --   「融券余量 × 当日收盘价」补算，见 MarginShortBalanceFiller。
+                                            --   算不出来(没有当日收盘价)时留 NULL，**不写 0**。
                 short_volume REAL,          -- 融券余量(股/份)
+                -- ─── 2026-09-16 新增三列。都是数据源**原本就返回、我们之前没解析**的 ───
+                -- 只有沪市给偿还额；深市那张表压根没这两列，所以深市行这里是 NULL 而不是 0
+                -- ——必须区分"这个市场不提供"和"当天确实是 0"。沪市融券余额恒 0 那个 bug
+                -- （1675 只票、历史上从没有过非 0 值）就是 GetNum 把 null 读成 0 造成的。
+                margin_repay REAL,          -- 融资偿还额(元)。沪市 rzche；深市无 → NULL
+                short_sell_volume REAL,     -- 融券卖出量(股)。沪市 rqmcl；深市 xlsx 第4列
+                short_repay_volume REAL,    -- 融券偿还量(股)。沪市 rqchl；深市无 → NULL
                 fetched_at TEXT,
                 PRIMARY KEY (trade_date, code)
             );
@@ -1073,6 +1083,17 @@ public static class SqliteSchema
         // （见 SqliteBankRegulatoryRepository.Upsert 的 ON CONFLICT … WHERE），
         // 也才能把"这个数是 OCR 认的、还没核对"如实告诉看的人。老行为 NULL，按 'pdf' 处理。
         AddColumnIfMissing(conn, "BankRegulatoryMetric", "source", "TEXT");
+        // 2026-09-16：两融明细补三列。这三个字段**数据源一直都在返回**，只是解析时没取
+        //（跟东财 columns=ALL 那次一个毛病，见 project_em_columns_all_dropped）：
+        //   · margin_repay       沪市 rzche —— 有了它才能按官方口径算「融资净买入 = 买入 − 偿还」
+        //   · short_sell_volume  沪市 rqmcl / 深市 xlsx 第4列（原来被跳过了）
+        //   · short_repay_volume 沪市 rqchl
+        // 深市那张表没有偿还额，所以深市行的 margin_repay / short_repay_volume 是 NULL。
+        // 老行全是 NULL，等重抓那一天才会有值——**不回填**：偿还额只能从源头拿，
+        // 而两所都不提供历史查询（只能按交易日逐日抓，抓一遍 2010 年至今不值当）。
+        AddColumnIfMissing(conn, "MarginDetail", "margin_repay", "REAL");
+        AddColumnIfMissing(conn, "MarginDetail", "short_sell_volume", "REAL");
+        AddColumnIfMissing(conn, "MarginDetail", "short_repay_volume", "REAL");
         // 2026-09-10：行业分类换源（新浪大类 → 东财两级），加一列记"整表现在是哪一版"。
         // 它不只是溯源标记：两个源的大类名分属证监会分类的不同修订版，新旧名并存会把同一个
         // 行业裂成两个中性化分组，所以这张表只能整表替换（SqliteIndustryRepository.ReplaceAll），

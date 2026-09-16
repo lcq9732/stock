@@ -46,7 +46,8 @@ public sealed class CustomerSupplierTask(
     ICustomerSupplierRepository repository,
     ICompanyProfileRepository profiles,
     EastMoneyCustomerSupplierProvider provider,
-    ICompanySubsidiaryRepository? subsidiaries = null) : FetchTaskBase<CustomerSupplier>
+    ICompanySubsidiaryRepository? subsidiaries = null,
+    Func<IReadOnlySet<string>>? currentStockCodes = null) : FetchTaskBase<CustomerSupplier>
 {
     public override FetchActionId Id => FetchActionId.StepCustomerSupplier;
 
@@ -213,7 +214,11 @@ public sealed class CustomerSupplierTask(
 
         Report($"对手方还原：{names.Count} 个不同的名字，比对 {companies.Count} 家上市公司...", phase: "消歧");
 
-        var index = PartnerNameMatcher.BuildIndex(companies);
+        // ⚠ 名册是用来解同全称冲突的：CompanyProfile 里有 479 行不是当前个股
+        //   （退市、B股、转换证券、换过代码的老主体），而它们的 full_name 恰恰是
+        //   真实上市主体的全称。不给名册的话「上海医药集团股份有限公司」会判给
+        //   600849 上药转换而不是 601607，实测这类错配 465 行。
+        var index = PartnerNameMatcher.BuildIndex(companies, currentStockCodes?.Invoke());
 
         // 第三档：年报里披露的子公司名单，归并到母公司（2026-09-11）。
         // 没有这份数据（还没跑过【年报子公司名单】）就是 null，退回原来的两档，行为不变。

@@ -102,6 +102,9 @@ public enum FetchActionId
 
     /// <summary>把 Bar.volume 里按"股"存的历史行改成"手"（2026-09-10）。纯本地、幂等。</summary>
     StepFixVolumeUnit,
+
+    /// <summary>按「融券余量 × 当日收盘价」补算沪市缺失的融券余额（2026-09-16）。纯本地、幂等。</summary>
+    StepFillShortBalance,
 }
 
 /// <summary>
@@ -607,7 +610,8 @@ public static class FetchTaskCatalog
             + "非交易日由【交易日历】挡掉、\"确认没有数据\"的日子由空日名单挡掉，都不再白发请求。",
             FetchActionParams.Date,
             SoftDependsOn: [FetchActionId.StepTradingCalendar],
-            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay
+                          | FetchMode.FirstBackfill | FetchMode.FillBacklog),
 
         new(FetchActionId.StepLhb, "龙虎榜", "东财", QuotaGroup.Mixed,
             TimeSpan.FromSeconds(30), "每工作日",
@@ -631,7 +635,8 @@ public static class FetchTaskCatalog
             + "量能信息用成交额、换手率、龙虎榜买卖额那几列。",
             FetchActionParams.Date,
             SoftDependsOn: [FetchActionId.StepTradingCalendar],
-            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay
+                          | FetchMode.FirstBackfill | FetchMode.FillBacklog),
 
         new(FetchActionId.StepLhbMigrate, "龙虎榜·换源重抓", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(20), "已退役",
@@ -667,6 +672,27 @@ public static class FetchTaskCatalog
             + "**幂等**：改完的行比值变成 ≈100，再跑不会被选中。中断了直接重跑，不用记断点。\n"
             + "指数、板块合成、ETF **不动**：它们的\"成交量\"是汇总值或按份计，量额比没有物理意义。\n"
             + "⚠ 跑完**要再跑一次【板块指数合成】**——它存的成交量是按旧单位加总出来的。",
+            FetchActionParams.None),
+
+        new(FetchActionId.StepFillShortBalance, "融券余额补算", "本地查库·不联网", QuotaGroup.Local,
+            TimeSpan.FromMinutes(6), "每日（并入拉取全部/当天）",
+            "按交易所官方公式「**融券余量 × 当日收盘价**」补算**沪市**缺失的融券余额。一个请求都不发。\n"
+            + "**修的是什么**：上交所接口的 rqylje（融券余额）**恒为 null**，而解析用的 GetNum 把 null 读成 0"
+            + "——于是 1675 只沪市票的融券余额**历史上从来没有过非 0 值**（3,139,554 行沪市数据里 "
+            + "short_balance>0 的有 0 行）。深市那张 xlsx 第 6 列直接给了余额，所以只有沪市这一半瞎。"
+            + "后果是静默的：资金面诊断的「融券余额变化」对沪市票算不出来，界面上还显示成「融券余额 0」。\n"
+            + "**凭什么能算**：这条公式是深交所报表页脚自己写的（本日融券余额=本日融券余量×本日收盘价）。"
+            + "实测两市都精确成立——深市 1603 只（对它自己给的余额）误差中位 0.0000%、99.7% 在 0.01% 以内；"
+            + "沪市 456 只（对东财公布值）误差中位 0.0000%。\n"
+            + "**只动沪市**：深市 31% 的行 short_balance 本来就是 0（当天确实没融券余量），那是真值。"
+            + "判据不能只看「是不是 0」，必须先按 MarketClassifier 分市场。\n"
+            + "**ETF 要按带前缀的代码找收盘价**：两融标的里有 465 只 ETF，它们的K线在 Bar 里存成 sh510050，"
+            + "两融表里却是裸码 510050——只按裸码找会让 323 只本来有数据的 ETF 也算成补不上。\n"
+            + "**幂等**：补过的行不再满足缺值判据，重跑是空转；按交易日分批提交，中断最多丢当天那一批"
+            + "（单事务写几百万行曾把 WAL 撑到 162GB，这里不重蹈）。\n"
+            + "**补不上的留 NULL 不写 0**：实测 2.46% 的行没有当日收盘价（基本是从未抓到过K线的 ETF 和"
+            + "退市股），留 NULL 下次还有机会补，写 0 就永久变成「确实没有融券」了。\n"
+            + "⚠ 排在【融资余额】和【个股日K】**之后**——两样都落库了才算得出来。",
             FetchActionParams.None),
 
         new(FetchActionId.StepFillProbeFloor, "回填\"无更早数据\"水位", "本地查库·不联网", QuotaGroup.Local,
@@ -833,9 +859,14 @@ public static class FetchTaskCatalog
             // 下轮档案有了会自动补上。所以不是硬前置。
             SoftDependsOn: [FetchActionId.StepCompanyProfile]),
 
-        new(FetchActionId.StepSubsidiaryExtract, "年报子公司名单", "本地计算·不联网", QuotaGroup.Local,
-            TimeSpan.FromMinutes(10), "下载了新年报之后",
-            "解析本地已下载的年报 PDF，提出「合并财务报表范围」那张表里的**子公司名单**。\n"
+        new(FetchActionId.StepSubsidiaryExtract, "年报子公司名单", "新浪(公告页 + PDF文件)", QuotaGroup.Sina,
+            TimeSpan.FromMinutes(40), "季度",
+            "解析年报 PDF，提出「合并财务报表范围」那张表里的**子公司名单**。\n"
+            + "⚠ **2026-09-15 起会联网**：本地缺年报时，按「被别人写进前五大客户/供应商的次数」"
+            + "排出前 50 家自己去下（只下年报——半年报附注是简版，没有完整名单）。"
+            + "改版前它是纯本地零请求的。\n"
+            + "**零请求自愈仍然成立**：目标报告期从日历算（4 月 30 日是年报法定披露截止），"
+            + "文件都在就一个请求都不发——ParserVersion 改版触发的全量重跑照样不联网。\n"
             + "**干什么用**：给【客户与供应商】的对手方还原补第三档。年报里的客户写的是"
             + "「中国建筑第六工程局有限公司」，本地股票池里只有母公司「中国建筑 601668」，直接对不上——"
             + "库里 10.9 万个未还原的对手名里有相当一部分是上市公司的子公司。\n"
@@ -845,10 +876,20 @@ public static class FetchTaskCatalog
             + "没线框的按坐标聚类成行。\n"
             + "**实测**（32 家非金融样本）：可用率 81%、提出 773 家子公司，"
             + "拿去还原对手名命中 148 个、回填 920 行、多连出 **328 条全新产业链边**（现有 6632 条，+4.9%）。\n"
-            + "读 publish/data/annual-reports（**不是** reports/，那是【金融监管指标】的 PDF 缓存，"
-            + "把年报放进去会被【重解析已有PDF】当成下错的文件删掉）。\n"
+            + "读 publish/data/reports —— 2026-09-15 起跟【金融监管指标】的 PDF 共用一个目录。"
+            + "合并之前分开放是怕误删（非金融年报混进去会被当成下错的文件），现在那道护栏收在"
+            + "FinancialInstitutionRoster.OwnsPdfOf，有一组用例钉着。"
+            + "**只吃 *-12-31.pdf**：金融股的半年报也躺在这个目录里，但半年报没有完整名单。\n"
             + "解析规则改了就把 SubsidiaryParser.ParserVersion +1，下轮自动重跑已处理过的。",
-            SoftDependsOn: [FetchActionId.StepCompanyProfile]),
+            // ⚠ **不能软依赖【客户与供应商】**，虽然优先下载清单确实来自它的「被点名次数」：
+            //   那一项反过来要用本项产出的子公司名单做消歧第④档，两者互为依赖、会成环。
+            //   既有顺序（档案 → 子公司名单 → 客户与供应商）是对的，让步的该是下载清单——
+            //   它**用上一轮的数据完全没问题**：被点名次数是按年报累积的，一轮之间几乎不动，
+            //   而且它只决定"先下谁的年报"，下错顺序最多是晚一轮拿到，不会产出错数据。
+            //   清单为空（从没跑过客户与供应商）时退化成纯本地解析，跟改版前行为一致。
+            SoftDependsOn: [FetchActionId.StepCompanyProfile],
+            // PDF 几 MB，下载和解析都慢，5 分钟的默认静默阈值太贴脸。
+            MaxQuiet: TimeSpan.FromMinutes(10)),
 
         new(FetchActionId.StepBoardMembers, "板块成分股", "东财 push2", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(20), "每周·空闲时补",
@@ -1007,6 +1048,7 @@ public static class FetchTaskCatalog
             + "最新交易日接着走，不会从头再来。\n"
             + "之后增量每次只有 40 页出头，几分钟。\n"
             + "⚠ 没有回退源——新浪/交易所都不提供结构化的营业部明细。",
+            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
             SupportsPartialRun: false,
             Sources: [DataSourceId.EmDataCenter]),
 
@@ -1028,6 +1070,7 @@ public static class FetchTaskCatalog
             + "四项各自独立失败：一项挂了不影响其余（覆盖面和重要性本来就不一样）。\n"
             + "首次全量约 110 万行、25 分钟；之后增量每次几十页。\n"
             + "⚠ 没有回退源——这四份数据新浪/腾讯/交易所/巨潮都不提供结构化版本。",
+            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
             SupportsPartialRun: false,
             Sources: [DataSourceId.EmDataCenter]),
 
@@ -1099,7 +1142,7 @@ public static class FetchTaskCatalog
             + "会提前收尾并自动暂停一段时间。\n"
             + "⚠ 限流是按**出口 IP** 算的，板块那两项走的也是浏览器、共用同一个出口——"
             + "调度上两边声明的数据源不同、不会互相挡，所以别把它们排在同一个时段。",
-            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill | FetchMode.FillBacklog,
             SupportsPartialRun: true,
             // 10 分钟而不是默认 5 分钟：push2his 每 15 个请求主动歇 2 分钟，单只失败还要静默重试
             // （2s+10s，三次 25 秒超时摊下来近 90 秒）。5 分钟余量太紧，2026-09-11 就是这么被

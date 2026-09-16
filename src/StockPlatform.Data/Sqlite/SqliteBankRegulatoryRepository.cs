@@ -180,6 +180,25 @@ public class SqliteBankRegulatoryRepository
     }
 
     /// <summary>某只银行的全部监管指标，按报告期降序。给体检表用。</summary>
+    /// <summary>
+    /// 所有**没成功**的期次 (代码, 报告期)。调用方拿它去比对本地文件在不在——
+    /// 仓储不碰文件系统，两件事分开。
+    ///
+    /// 用途：下载循环那道"最新一期已有就整只票跳过"的优化会把**缺文件的老期次**挡在门外。
+    /// 实测 11 个期次就是这么永久缺失的（最早挂了半个月），见 BankRegulatoryTask 的跳过判据。
+    /// </summary>
+    public List<(string Code, DateTime ReportDate)> GetUnsuccessful()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, report_date FROM BankReportFetchState WHERE status <> 'ok';";
+        var list = new List<(string, DateTime)>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            if (DateTime.TryParse(r.GetString(1), out var d)) list.Add((r.GetString(0), d));
+        return list;
+    }
+
     public List<BankRegulatoryMetric> GetByCode(string code)
     {
         using var conn = Open();

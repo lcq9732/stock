@@ -8,6 +8,9 @@ public enum RetryKind
     BarCodes, MissingDay, MarketCap, NetInflow,
     IndexCons, IndexWeight, Shareholder, Dividend,
     Gaps, NetInflowDays, ValueIssues,
+    /// <summary>残缺日：那天有行但不全（2026-09-16）。跟 <see cref="NetInflowDays"/>
+    /// （整天一行都没有）是两回事，复查判据不同，不能合。</summary>
+    PartialDays,
 }
 
 /// <summary>
@@ -177,6 +180,14 @@ public sealed class RetryBacklog
             (RetryTodoKind.MissingDay, _) =>
                 (RetryKind.MissingDay, t.Day is { } d ? $"{d:MM-dd}日线" : "当天日线", "只", true),
             (RetryTodoKind.MissingDays, _) => (RetryKind.NetInflowDays, "资金流缺失日", "天", true),
+            // 残缺日按**任务**分标签：MissingDays 那条把名字写死成"资金流缺失日"了，
+            // 照抄的话两融的残缺日会顶着资金流的名字显示出来。
+            (RetryTodoKind.PartialDay, RetryTaskIds.Margin) => (RetryKind.PartialDays, "两融残缺日", "天", true),
+            (RetryTodoKind.PartialDay, RetryTaskIds.Lhb) => (RetryKind.PartialDays, "龙虎榜残缺日", "天", true),
+            (RetryTodoKind.PartialDay, RetryTaskIds.LhbSeat) => (RetryKind.PartialDays, "席位残缺日", "天", true),
+            (RetryTodoKind.PartialDay, RetryTaskIds.MarketEvents) => (RetryKind.PartialDays, "大宗残缺日", "天", true),
+            (RetryTodoKind.PartialDay, RetryTaskIds.MoneyFlowDetail) => (RetryKind.PartialDays, "资金流残缺日", "天", true),
+            (RetryTodoKind.PartialDay, _) => (RetryKind.PartialDays, "残缺日", "天", true),
             (RetryTodoKind.Round, _) => (RetryKind.MarketCap, "市值", "轮", true),
             (_, RetryTaskIds.NetInflow) => (RetryKind.NetInflow, "净流入", "只", true),
             (_, RetryTaskIds.IndexCons) => (RetryKind.IndexCons, "指数成分", "个", true),

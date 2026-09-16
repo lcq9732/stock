@@ -22,6 +22,18 @@ public static class RetryTaskIds
     public const string Shareholder = "FetchShareholder";
     public const string Dividend = "FetchDividend";
 
+    // ── 日频表（2026-09-16 加，残缺日待办要按任务归属）──
+    // 取值必须等于 FetchActionId 的枚举名：【只补待办】就是拿 item.Action.ToString() 当 taskId
+    // 分派的（见 MainViewModel.DispatchPlanActionAsync），对不上就永远认领不到自己的待办。
+    public const string Margin = "StepMargin";
+    public const string Lhb = "StepLhb";
+    public const string LhbSeat = "FetchLhbSeat";            // ⚠ Fetch 前缀，不是 Step
+    public const string MarketEvents = "FetchMarketEvents";  // 大宗交易归这一项（复合任务）
+
+    /// <summary>分档资金流·逐股补历史（push2his）。NetInflowDetail 的残缺日归它——
+    /// 另一条通道【分档资金流快照】走 push2delay，接口**只给最近一个交易日**，补不了历史。</summary>
+    public const string MoneyFlowDetail = "FetchMoneyFlowDetail";
+
     /// <summary>口径 → 该补它的个股日K任务。三个口径是三个独立任务（2026-09-02 拆的），
     /// 各自的水位线、历史起点、能不能抓都不一样。</summary>
     public static string ForGranularity(string? gran) => gran switch
@@ -52,6 +64,20 @@ public static class RetryTodoKind
 
     /// <summary>整天缺失的日子（资金净流入那种按天补的）。</summary>
     public const string MissingDays = "missing_days";
+
+    /// <summary>
+    /// **残缺日**（2026-09-16）：这天有行、但不全——某个交易所整天没有，或行数明显偏少。
+    ///
+    /// ⚠ **为什么不并进 <see cref="MissingDays"/>**：那条的复查判据是
+    /// <c>CountRowsByDay(d) == 0</c>（见 FetchOrchestrator.FillMissingNetInflowDaysAsync）。
+    /// 残缺日本来就有行——2026-08-21 有 1,998 行沪市——拿"有没有行"去复查，
+    /// 深市补没补上都会被判成"已补齐"、从待办里**静默划掉**，深市数据永远补不回来。
+    ///
+    /// 这跟 <see cref="Gap"/> / <see cref="ValueIssue"/> 必须分开是同一个道理：
+    /// 行都在但不对，复查就不能看"在不在"，要看"够不够、齐不齐"
+    /// （复查走 SqliteDailyTableAuditor.CheckDays，跟体检用同一套判据）。
+    /// </summary>
+    public const string PartialDay = "partial_day";
 }
 
 /// <summary>

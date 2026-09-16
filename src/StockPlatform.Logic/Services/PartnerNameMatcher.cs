@@ -49,8 +49,9 @@ public static class PartnerNameMatcher
     ///   partner_code 不是 NULL、是错值，永远不会被重新评估。
     ///
     /// v1 → v2（2026-09-15）：后缀正则删「集团」两项、新增 Short/Qualified/ParentGroup 三档。
+    /// v2 → v3（2026-09-16）：同全称冲突时当前个股优先——实测 465 行指到了退市股/转换证券。
     /// </summary>
-    public const int MatcherVersion = 2;
+    public const int MatcherVersion = 3;
 
     /// <summary>匹配结果的档次，落库进 <c>match_type</c>。</summary>
     public const string Exact = "exact";
@@ -249,8 +250,13 @@ public static class PartnerNameMatcher
     ///   实测："京东方科技集团股份有限公司"同时对应 000725(A) 和 200725(B)。
     ///   不处理的话结果取决于哪条后写入，而我们要的永远是 A 股那个。
     /// </summary>
+    /// <param name="currentStocks">
+    /// 当前还在市的个股代码（<c>StockMeta.type = 'stock'</c>）。给了它，同全称冲突时
+    /// 就不会把全称判给退市股/转换证券——见 <see cref="Preferred"/>。为 null 时退回老行为。
+    /// </param>
     public static CompanyIndex BuildIndex(
-        IEnumerable<(string Code, string FullName, string? Abbr)> companies)
+        IEnumerable<(string Code, string FullName, string? Abbr)> companies,
+        IReadOnlySet<string>? currentStocks = null)
     {
         var byFull = new Dictionary<string, string>(StringComparer.Ordinal);
         var byNorm = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -272,24 +278,45 @@ public static class PartnerNameMatcher
         }
         return new CompanyIndex(byFull, byNorm, byShort, byGroup, selfGroup);
 
-        static void Put(Dictionary<string, string> map, string key, string code)
+        void Put(Dictionary<string, string> map, string key, string code)
         {
             if (key.Length == 0) return;
             if (!map.TryGetValue(key, out var existing)) { map[key] = code; return; }
-            map[key] = Preferred(existing, code);
+            map[key] = Preferred(existing, code, currentStocks);
         }
     }
 
     /// <summary>只有 (代码, 全称) 的重载——没有简称就没有简称档，其余照常。</summary>
-    public static CompanyIndex BuildIndex(IEnumerable<(string Code, string FullName)> companies)
-        => BuildIndex(companies.Select(c => (c.Code, c.FullName, (string?)null)));
+    public static CompanyIndex BuildIndex(IEnumerable<(string Code, string FullName)> companies,
+                                          IReadOnlySet<string>? currentStocks = null)
+        => BuildIndex(companies.Select(c => (c.Code, c.FullName, (string?)null)), currentStocks);
 
     /// <summary>
-    /// 同一全称的两个代码，选哪个。B 股（<c>200</c>/<c>900</c> 开头）让位给 A 股。
-    /// 都不是 B 股就保留先到的——结果必须跟输入顺序无关，否则不可复现。
+    /// 同一全称的两个代码，选哪个。三档判据，顺序不能换：
+    ///   ① **当前个股** 优先于退市股 / 转换证券 / 作废的老代码（2026-09-16 加）
+    ///   ② A 股优先于 B 股（<c>200</c>/<c>900</c> 开头）
+    ///   ③ 还分不出就按代码序——结果必须跟输入顺序无关，否则不可复现
+    ///
+    /// ════ 为什么要 ① ════
+    /// CompanyProfile 里有 479 行不是当前个股（退市、B 股、转换证券、换过代码的老主体），
+    /// 而它们的 full_name 恰恰是真实上市主体的全称。实测 100 组同全称冲突里，
+    /// **24 组的赢家不是当前个股**，波及 465 行 / 110 个对手名：
+    ///   · 「上海医药集团股份有限公司」→ 600849（上药转换）而不是 601607，一家占 104 行
+    ///   · 「招商局港口集团股份有限公司」→ 000022（深赤湾A，已退市）而不是 001872
+    ///   · 「中航成飞股份有限公司」→ 300114 而不是换代码后的 302132
+    /// 只靠 ② 拦不住：000022 和 001872 都不是 B 股，②失效后落到③按字典序取小，正好取错。
+    ///
+    /// <paramref name="currentStocks"/> 为 null 时退回老行为（只有②③）——
+    /// 拿不到个股名册时不该乱猜，跟"空集合是空操作"同一条铁律。
     /// </summary>
-    public static string Preferred(string a, string b)
+    public static string Preferred(string a, string b, IReadOnlySet<string>? currentStocks = null)
     {
+        if (currentStocks != null)
+        {
+            bool ca = currentStocks.Contains(a), cb = currentStocks.Contains(b);
+            if (ca && !cb) return a;
+            if (cb && !ca) return b;
+        }
         bool ba = IsBShare(a), bb = IsBShare(b);
         if (ba && !bb) return b;
         if (bb && !ba) return a;

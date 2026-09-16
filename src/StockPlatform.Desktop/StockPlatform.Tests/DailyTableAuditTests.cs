@@ -70,6 +70,34 @@ public class DailyTableAuditTests : IDisposable
         tx.Commit();
     }
 
+    /// <summary>往 MarginDetail 塞某一天的行，代码前缀可指定（市场判据要用）。
+    /// <paramref name="prefix"/> "60"＝沪市、"00"＝深市、"92"＝北交所。</summary>
+    private void InsertMarginAt(DateTime day, int rows, string prefix)
+    {
+        using var conn = new SqliteConnection($"Data Source={_dbPath}");
+        conn.Open();
+        using var tx = conn.BeginTransaction();
+        for (int i = 0; i < rows; i++)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText =
+                "INSERT OR IGNORE INTO MarginDetail (trade_date, code, margin_balance) VALUES ($d, $c, 1);";
+            cmd.Parameters.AddWithValue("$d", day.ToString("yyyy-MM-dd"));
+            cmd.Parameters.AddWithValue("$c", $"{prefix}{i:D4}");
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
+    private static void AssertPartial(
+        List<SqliteDailyTableAuditor.PartialDay> days, DateTime day, int rows)
+    {
+        var p = Assert.Single(days);
+        Assert.Equal(day, p.Day);
+        Assert.Equal(rows, p.Rows);
+    }
+
     [Fact]
     public void 每天都有数据时_报齐()
     {
@@ -78,7 +106,7 @@ public class DailyTableAuditTests : IDisposable
         var r = _auditor.Check(Margin, Anchor, Cutoff)!;
 
         Assert.Empty(r.EmptyDays);
-        Assert.Empty(r.ThinDays);
+        Assert.Empty(r.PartialDays);
         Assert.Equal(Cal.Length, r.TradingDays);
         Assert.Equal(100, r.MedianRows);
     }
@@ -131,7 +159,7 @@ public class DailyTableAuditTests : IDisposable
         var r = _auditor.Check(Margin, Anchor, Cutoff)!;
 
         Assert.Empty(r.EmptyDays);
-        Assert.Equal([(Cal[2], 5)], r.ThinDays);
+        AssertPartial(r.PartialDays, Cal[2], 5);
     }
 
     [Fact]
@@ -143,7 +171,7 @@ public class DailyTableAuditTests : IDisposable
         InsertMargin(Cal[3], 100);
         InsertMargin(Cal[4], 100);
 
-        Assert.Empty(_auditor.Check(Margin, Anchor, Cutoff)!.ThinDays);
+        Assert.Empty(_auditor.Check(Margin, Anchor, Cutoff)!.PartialDays);
     }
 
     [Fact]
@@ -217,7 +245,7 @@ public class DailyTableAuditTests : IDisposable
         InsertMargin(Cal[3], 100);
         InsertMargin(Cal[4], 100);
 
-        Assert.Empty(_auditor.Check(Margin, Anchor, Cutoff)!.ThinDays);
+        Assert.Empty(_auditor.Check(Margin, Anchor, Cutoff)!.PartialDays);
     }
 
     [Fact]
@@ -232,7 +260,7 @@ public class DailyTableAuditTests : IDisposable
         InsertMargin(Cal[3], 100);
         InsertMargin(Cal[4], 100);
 
-        Assert.Equal([(Cal[2], 5)], _auditor.Check(Margin, Anchor, Cutoff)!.ThinDays);
+        AssertPartial(_auditor.Check(Margin, Anchor, Cutoff)!.PartialDays, Cal[2], 5);
     }
 
     // ───────────────── 滚动窗口（2026-09-06 加）─────────────────
@@ -255,7 +283,46 @@ public class DailyTableAuditTests : IDisposable
         var r = _auditor.Check(windowed, Anchor, Cutoff)!;
 
         Assert.Equal(Cal[2], r.From);
-        Assert.Empty(r.ThinDays);
+        Assert.Empty(r.PartialDays);
         Assert.Empty(r.EmptyDays);      // Cal[1] 也在窗口外，不该算缺
+    }
+
+    // ═══════════ 残缺日：市场缺失判据 + 按表阈值（2026-09-16）═══════════
+    //
+    // 起因：2026-08-21 / 09-02 两融只抓到沪市、深市整天没有，占正常量 49%——
+    // 旧判据（全表统一 ThinRatio=0.2、只看总行数）两条都够不着，静默通过。
+
+    /// <summary>事件型表维持 0.2：龙虎榜的行数天然剧烈波动，用 0.7 实测会从 2 天误报到 420 天。</summary>
+    [Fact]
+    public void 事件型表的阈值不跟着快照型走()
+    {
+        var lhb = SqliteDailyTableAuditor.DailyTables.First(t => t.Table == "Lhb");
+        var margin = SqliteDailyTableAuditor.DailyTables.First(t => t.Table == "MarginDetail");
+
+        Assert.Equal(0.2, lhb.ThinRatio);
+        Assert.Equal(0.7, margin.ThinRatio);
+        Assert.Equal("stock_code", lhb.CodeColumn);   // ⚠ 不是 code
+    }
+
+    // ═══════════ 覆盖率起点 ═══════════
+
+    /// <summary>覆盖未达标那段不参与判定——NetInflowDetail 全表 MIN 那天只有 1 只票，
+    /// 不过滤的话零星期每天都会被判成残缺。</summary>
+    [Fact]
+    public void 覆盖未达标的早期零星行_不参与判定()
+    {
+        var withFloor = Margin with { CoverageFloor = 0.8 };
+
+        InsertMargin(Cal[0], 1);        // 零星期
+        InsertMargin(Cal[1], 2);
+        InsertMargin(Cal[2], 100);
+        InsertMargin(Cal[3], 100);
+        InsertMargin(Cal[4], 100);
+
+        var r = _auditor.Check(withFloor, Anchor, Cutoff)!;
+
+        Assert.Equal(Cal[2], r.From);   // 起点抬到覆盖达标那天
+        Assert.Empty(r.PartialDays);
+        Assert.Empty(r.EmptyDays);
     }
 }

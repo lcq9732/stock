@@ -1,4 +1,6 @@
-﻿using StockPlatform.Scheduling;
+﻿using StockPlatform.Data.Sqlite;
+using StockPlatform.Logic.Models;
+using StockPlatform.Scheduling;
 using Xunit;
 
 namespace StockPlatform.Tests;
@@ -258,5 +260,67 @@ public class FetchTaskCatalogTests
         // 具体地：必须跟分档资金流用的那两个源冲突，否则拦不住并发
         Assert.Contains(DataSourceId.EmPush2His, info.EffectiveSources);
         Assert.Contains(DataSourceId.Cninfo, info.EffectiveSources);
+    }
+
+    // ─────────── 残缺日修补要用的模式（2026-09-16）───────────
+    // 起因：两融 2026-08-21 / 09-02 只抓到沪市，体检查得出来、却没有任何一条路补得回去——
+    // 【首次整段回补】按"这天有没有行"跳过，而这几项当时既不支持【只补待办】也不支持
+    // 【只抓某一天】（UI 的日期格只在 SpecificDay 模式下才出现，见 PlanItemViewModel.NeedsDate）。
+
+    [Fact]
+    public void 上日频体检的那几项_都支持只补待办()
+    {
+        // 残缺日待办要靠 FillBacklog 分派回各自的任务；不声明这个模式就永远认领不到
+        foreach (var id in new[]
+                 {
+                     FetchActionId.StepMargin, FetchActionId.StepLhb,
+                     FetchActionId.FetchLhbSeat, FetchActionId.FetchMarketEvents,
+                     FetchActionId.FetchMoneyFlowDetail,
+                 })
+            Assert.True(FetchTaskCatalog.Info(id).SupportedModes.HasFlag(FetchMode.FillBacklog),
+                $"{id} 少了 FillBacklog");
+    }
+
+    /// <summary>
+    /// 两融和龙虎榜要支持【只抓某一天】——它们的说明文字和体检的修复指引都写着
+    /// "日期格填了就只抓那一天"，可 <c>NeedsDate</c> 要求模式是 SpecificDay 才显示日期框。
+    /// 不声明这个模式，那两句话就是**照着做不到**的（2026-09-16 修）。
+    /// </summary>
+    [Fact]
+    public void 两融和龙虎榜_支持只抓某一天()
+    {
+        foreach (var id in new[] { FetchActionId.StepMargin, FetchActionId.StepLhb })
+        {
+            var info = FetchTaskCatalog.Info(id);
+            Assert.True(info.SupportedModes.HasFlag(FetchMode.SpecificDay), $"{id} 少了 SpecificDay");
+            Assert.True(info.Params.HasFlag(FetchActionParams.Date), $"{id} 没有日期参数");
+        }
+    }
+
+    /// <summary>待办里的任务 id 是字符串常量，拼错了就永远认领不到自己的待办——
+    /// 每个都得解析得成真实的 <see cref="FetchActionId"/>。</summary>
+    [Fact]
+    public void 日频表的待办任务id_都对得上枚举()
+    {
+        foreach (var id in new[]
+                 {
+                     RetryTaskIds.Margin, RetryTaskIds.Lhb, RetryTaskIds.LhbSeat,
+                     RetryTaskIds.MarketEvents, RetryTaskIds.MoneyFlowDetail,
+                 })
+            Assert.True(Enum.TryParse<FetchActionId>(id, out _), $"{id} 不是有效的 FetchActionId");
+    }
+
+    /// <summary>体检里配的归属任务也要对得上——Spec.OwnerTaskId 是残缺日待办的落点。</summary>
+    [Fact]
+    public void 日频表Spec配的归属任务_都对得上枚举()
+    {
+        foreach (var spec in SqliteDailyTableAuditor.DailyTables)
+        {
+            if (string.IsNullOrEmpty(spec.OwnerTaskId)) continue;   // 只报不补的表
+            Assert.True(Enum.TryParse<FetchActionId>(spec.OwnerTaskId, out var id),
+                $"{spec.Table} 的 OwnerTaskId「{spec.OwnerTaskId}」不是有效的 FetchActionId");
+            Assert.True(FetchTaskCatalog.Info(id).SupportedModes.HasFlag(FetchMode.FillBacklog),
+                $"{spec.Table} 归属的 {id} 不支持 FillBacklog，残缺日补不了");
+        }
     }
 }

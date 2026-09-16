@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:oxy="http://oxyplot.org/wpf"
         xmlns:local="clr-namespace:StockPlatform.Analyzer"
-        Title="分析详情" MinHeight="500" MinWidth="900"
+        Title="分析详情" MinHeight="500" MinWidth="1240"
         WindowStartupLocation="CenterOwner" FontFamily="Microsoft YaHei"
         Background="{DynamicResource Theme.Window.Background}"
         Foreground="{DynamicResource Theme.Foreground}">
@@ -11,41 +11,110 @@
          不是再列一张比率表：每行都带"这意味着什么"，每节末尾给结论，最后汇总异常项。
          计算全在 FinancialAnalyzer 里（纯计算、不联网），这里只负责画。
 
-         布局（2026-09-14 重排）：**分栏从窗口最顶端开始**，左右两边各自独立、互不跨越。
-           左 2.1*：标题 / 需要留意的 N 项（都固定不滚） + 五节明细（滚）
-           右 1*  ：观察项（内容多高占多高，封顶 420） + 趋势小图（滚）
-         原来标题和"需要留意的项"是**通栏**的，右半截长期空着——北京银行那种异常项多的票，
-         右上白掉 620×140 一整片。收进左栏之后那块地方正好安置观察项
-         （用户 2026-09-14：个股的观察项和财务分析放一个页面，一看就有了，也可对比数据）。
+         布局（2026-09-16 改成三列，见 doc/capital-diagnosis-design.md §7）：
+           ① 1.57* (min 520)：资金面诊断（六个维度），整列一个 ScrollViewer
+           ② 2.43* (min 490)：财报分析，标题 = 报告期 + 总体判断，右端是同比基准/阈值说明
+           ③ 1.00* (min 240)：事件（上，封顶 320）+ 趋势小图（下），两个独立滚动区
+         这个比例是用户在实机上拖出来后定下的，不是估算值。
+         股票名/价格/总体判断**通栏**在三列之上——总体判断是对整只票的，不专属财报那一列
+         （原先它跟第②列标题合并在一行，第②列标题改成报告期之后就没地方了）。
 
-         ⚠ 观察项那块用 Auto 高度而不是定高：实测宁德全部事件才 7 行（约 230px），
-         定死 480 等于白占两百多像素、硬把趋势图挤下去。内容少就只占内容那么高。
+         宽度是算过的：屏幕 1920×1040，SizeToScreen 0.92 → 窗口 1766，减 Margin 和两条
+         splitter 还剩约 1730 可分。第②列有硬下限：那张七列表死宽 = 标记22+项目名150+
+         数值92+变化130 = 394，加说明列至少 80 → 490；**银行体检表多「条目号」「参考值」
+         两列要 730**，所以中间那条 GridSplitter 必须留着让用户拖。
+         第③列原先按"现在的一半"给了 190 固定，实机一看图标签挤在一起，用户拖宽到 377
+         后定为默认（1.0*，min 240）。
+
+         ⚠ 第①列仍要滚（六个维度全展开约 900px，可用高度约 860），但比事件还在这一列时少滚
+         不少——这正是 2026-09-16 把事件挪到第③列的原因：那一列竖向空间富余。
+         用户定的是"先全部排上去，超过屏幕有 Scroll 就行"，六个维度不折叠。
          窗口开到屏幕九成大，见 TextFitter.SizeToScreen。 -->
     <Grid Margin="12">
         <Grid.RowDefinitions>
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />   <!-- 通栏：股票名 / 价格 / 总体判断 / 复制全文 -->
+            <RowDefinition Height="*" />      <!-- 三列 -->
         </Grid.RowDefinitions>
 
-        <Grid Grid.Row="0">
+        <!-- ═══ 通栏标题行 ═══
+             「复制全文」挪到这里：原先它单独占窗口底部一整行，那行除了两个按钮什么都没有，
+             省下来给数据（用户 2026-09-16）。「关闭」按钮跟着去掉了——右上角的 X 和 Esc
+             （Window 的 IsCancel 行为）都还在。 -->
+        <Grid Grid.Row="0" Margin="0,0,0,8">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="2.1*" MinWidth="420" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" x:Name="HeaderText" FontSize="17" TextWrapping="Wrap"
+                       VerticalAlignment="Center" Margin="0,0,12,0" />
+            <Button Grid.Column="1" Content="复制全文" Width="90" Click="CopyAll_Click"
+                    VerticalAlignment="Center"
+                    ToolTip="把整份分析复制成纯文本（含六个维度的结论），可以贴到分析笔记里" />
+        </Grid>
+
+        <Grid Grid.Row="1">
+            <!-- 列宽比例 = 用户 2026-09-16 在实机上**手动拖出来的**那一版，直接定为默认。
+                 （最初按估算给的是 1.05* / 0.95* / 190固定；实机一看第②列的财报明细行太挤、
+                 第③列 190 又窄到图标签打架，用户拖成 591 : 916 : 377 后说"就按这个"。）
+                 写成 star 而不是像素：换屏幕/改窗口大小时按比例缩放，拖动手感也保持不变。
+                 MinWidth 仍是硬下限，见下。 -->
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="1.57*" MinWidth="520" />
                 <ColumnDefinition Width="6" />
-                <ColumnDefinition Width="1*" MinWidth="380" />
+                <!-- ⚠ 490 是硬下限：五节明细那张七列表死宽 394（标记22+项目名150+数值92+变化130）
+                     + 说明列至少 80。银行体检表多「条目号」「参考值」两列要 730，窄了会换行
+                     ——所以这两条 splitter 必须留着能拖。 -->
+                <ColumnDefinition Width="2.43*" MinWidth="490" />
+                <ColumnDefinition Width="6" />
+                <!-- 240：OxyPlot 的纵轴刻度 + 报告期标签再窄就开始打架（190 实测过，太挤）。 -->
+                <ColumnDefinition Width="1.0*" MinWidth="240" />
             </Grid.ColumnDefinitions>
 
-            <!-- ═══ 左栏：标题 + 需要留意的项（都固定不滚）+ 五节明细（滚）═══
-                 留意项**必须固定在上面不跟着滚**：阅读顺序是"先知道有哪几项要留意 →
-                 再往下看详细时就盯着这几项"，它要是跟着滚走，看到第三节就忘了盯什么。 -->
-            <Grid Grid.Column="0">
+            <!-- ═══ 第①列：资金面诊断（六个维度）═══
+                 事件 2026-09-16 挪到第③列趋势图上面了（用户实机看过后的决定）：那一列竖向
+                 空间富余，而这一列六个维度全展开约 900px、本来就要滚，再顶一个 420 的事件区
+                 等于凭空多滚半屏。 -->
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,4,0">
+                <StackPanel>
+                    <local:CapitalDiagnosisPanel x:Name="DiagnosisPanel" />
+                    <TextBlock x:Name="DiagnosisNoteText" TextWrapping="Wrap" FontSize="11"
+                               Foreground="{DynamicResource Theme.Foreground.Muted}" Margin="0,2,0,8" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <GridSplitter Grid.Column="1" Width="6" VerticalAlignment="Stretch" Background="Transparent"
+                          ResizeBehavior="PreviousAndNext" ResizeDirection="Columns"
+                          ToolTip="左右拖动可调整「事件+诊断」和「财报」的比例" />
+
+            <!-- ═══ 第②列：财报分析 ═══
+                 标题就是报告期（"2026年中报"），动态取自 report.PeriodName——不能写死，
+                 可能是中报/三季报/年报。 -->
+            <Grid Grid.Column="2">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
-            <!-- 标题行同时承载"总体判断"（2026-08-27 用户要求合并），所以要允许换行 -->
-            <TextBlock Grid.Row="0" x:Name="HeaderText" FontSize="17" Margin="0,0,0,6" TextWrapping="Wrap" />
+                <!-- 报告期 + 总体判断。总体判断 2026-09-16 从通栏标题挪到这里（用户要求）：
+                     通栏那行右边被「复制全文」占着、能给它的横向空间有限，而这一列标题右边
+                     本来就空着一大片。而且那句话讲的就是这期财报，跟列标题在一起更顺。
+                     两段由 code-behind 用 Inlines 拼（见构造函数）。 -->
+                <Grid Grid.Row="0" Margin="0,0,0,6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" x:Name="PeriodTitleText" FontSize="15" FontWeight="Bold"
+                               Foreground="{DynamicResource Theme.Accent.Deep}" TextWrapping="Wrap"
+                               VerticalAlignment="Bottom" Margin="0,0,12,0" />
+                    <!-- 「同比基准 / 阈值」解释的是**这一列**的数据：同比基准说明右边 +54.8% 那些
+                         同比数是拿哪一期比出来的，阈值说明 ✓ ! ✗ 的判定线在哪。2026-09-16 从通栏
+                         右上角挪来——放在那里紧挨着趋势图，会被读成在说趋势图（用户指出）。 -->
+                    <TextBlock Grid.Column="1" x:Name="FooterText" FontSize="11" TextWrapping="Wrap"
+                               VerticalAlignment="Bottom" Margin="0,0,0,2"
+                               Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                </Grid>
 
             <!-- 第 1 行同时容纳两块（都是默认隐藏、按需显示）：
                  ① 出错提示（没有财务数据时）——正常情况下总体判断已并进标题行，这块不出现
@@ -146,31 +215,36 @@
                 </ScrollViewer>
             </Grid>
 
-            <GridSplitter Grid.Column="1" Width="6" VerticalAlignment="Stretch" Background="Transparent"
+            <GridSplitter Grid.Column="3" Width="6" VerticalAlignment="Stretch" Background="Transparent"
                           ResizeBehavior="PreviousAndNext" ResizeDirection="Columns"
-                          ToolTip="左右拖动可调整表格和趋势图的比例" />
+                          ToolTip="左右拖动可调整财报和趋势图的比例" />
 
-            <!-- 右：趋势小图。只回答"在变好还是变坏"——只取同月份的报告期（避免累计口径
-                 把趋势画成锯齿），见 FinancialAnalyzer.BuildTrends。 -->
-            <!-- ═══ 右栏：观察项（上）+ 趋势小图（下）═══
-                 两个独立滚动区，不是一个。塞进同一个 ScrollViewer 的话，往下滚看毛利率那张图
-                 时观察项会跟着滚走——"能对比"的前提正是其中一个不会滚掉。 -->
-            <Grid Grid.Column="2">
+            <!-- ═══ 第③列：事件（上）+ 趋势小图（下）═══
+                 两个**独立**滚动区，不是一个：往下滚看毛利率那张图时事件不该跟着滚走——
+                 "能对照"的前提正是其中一个不动。（这也是 2026-09-14 事件最初放右栏时的理由，
+                 2026-09-16 短暂挪到第①列后又挪回来。）
+
+                 事件封顶 320 而不是原来的 420：这一列比当时窄（377 vs 1*），同样的事件文本
+                 换行更多、更占高度，而下面五张趋势图合计约 700px——给事件太多，图就全挤到
+                 滚动条里去了。内容少于 320 时只占内容那么高，不白占。 -->
+            <Grid Grid.Column="4">
                 <Grid.RowDefinitions>
-                    <!-- 内容多高占多高，封顶 420（物产金轮 14 条事件约到顶）。
-                         剩下的全给趋势图，不跟它抢。 -->
-                    <RowDefinition Height="Auto" MaxHeight="420" />
+                    <RowDefinition Height="Auto" MaxHeight="320" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
-                <local:StockWatchPanel x:Name="WatchPanel" Grid.Row="0" Margin="0,0,0,8" />
+                <local:StockWatchPanel x:Name="WatchPanel" Grid.Row="0" Margin="0,0,0,10" />
 
                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
                     <StackPanel>
-                        <TextBlock Text="趋势（同期比较，最多8期）" FontSize="13" FontWeight="Bold"
+                        <!-- 口径说明 2026-09-16 从常驻一行收进标题的 Tooltip（用户要求）：
+                             那段话解释的是"为什么只取同月份的报告期"，看两次就不用再看了，
+                             而它在 190 出头的窄列里要占掉四五行。ⓘ 提示有东西可看。
+                             跟资金面诊断那六个维度的做法一致，见 CapitalDiagnosisPanel。 -->
+                        <TextBlock x:Name="TrendTitleText" Text="趋势（同期比较，最多8期） ⓘ"
+                                   FontSize="13" FontWeight="Bold" TextWrapping="Wrap"
+                                   ToolTipService.ShowDuration="60000"
                                    Foreground="{DynamicResource Theme.Accent.Deep}" Margin="0,0,0,4" />
-                        <TextBlock x:Name="TrendHintText" FontSize="11" Foreground="{DynamicResource Theme.Foreground.Muted}"
-                                   TextWrapping="Wrap" Margin="0,0,0,6" />
                         <ItemsControl x:Name="TrendList" BorderBrush="{DynamicResource Theme.Border.Soft}" BorderThickness="0,0,0,1">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
@@ -186,17 +260,6 @@
                     </StackPanel>
                 </ScrollViewer>
             </Grid>
-        </Grid>
-
-        <!-- 底部只留按钮（异常项在左栏上部） -->
-        <Grid Grid.Row="1" Margin="0,8,0,0">
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <TextBlock x:Name="FooterText" VerticalAlignment="Center" FontSize="11"
-                           Foreground="{DynamicResource Theme.Foreground.Muted}" Margin="0,0,16,0" />
-                <Button Content="复制全文" Width="90" Click="CopyAll_Click"
-                        ToolTip="把整份分析复制成纯文本，可以贴到分析笔记里" />
-                <Button Content="关闭" Width="90" Margin="8,0,0,0" IsCancel="True" Click="Close_Click" />
-            </StackPanel>
         </Grid>
     </Grid>
 </Window>

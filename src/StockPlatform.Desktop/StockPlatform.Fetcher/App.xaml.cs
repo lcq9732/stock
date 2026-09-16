@@ -447,10 +447,32 @@ public partial class App : Application
             () => new CompanyProfileTask(companyProfileRepository, companyProfileProvider));
         taskRegistry.Register(FetchActionId.StepCustomerSupplier,
             () => new CustomerSupplierTask(custSuppRepository, companyProfileRepository,
-                                           custSuppProvider, companySubsidiaryRepository));
+                                           custSuppProvider, companySubsidiaryRepository,
+                // 当前在市个股名册——同全称冲突时用来挡住退市股/转换证券抢主体
+                currentStockCodes: () => SqliteStockMetaUpsert.GetAll(paths.CurrentDb)
+                    .Select(x => x.Code).ToHashSet(StringComparer.Ordinal)));
+        // 【子公司名单】2026-09-15 加了下载前置：缺年报的自己去下，不再依赖别的任务。
+        // ⚠ 限流参照【金融监管指标】那侧取保守值——打的是同一个新浪，配额是共用的。
+        //   ⚠ 清单只取前 50：年报中位 2 MB、最大 22 MB，一轮铺太开会把配额耗在这上面。
         taskRegistry.Register(FetchActionId.StepSubsidiaryExtract,
-            () => new SubsidiaryExtractTask(companySubsidiaryRepository, companyProfileRepository,
-                                            paths.AnnualReportsDir));
+            () => new SubsidiaryExtractTask(
+                companySubsidiaryRepository, companyProfileRepository, paths.ReportsDir,
+                parser: null,
+                index: new SinaReportIndex(
+                    pageLimiter: new RateLimiter(
+                        maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(3),
+                        batchSize: 40, restDuration: TimeSpan.FromSeconds(45)),
+                    fileLimiter: new RateLimiter(
+                        maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
+                        batchSize: 30, restDuration: TimeSpan.FromSeconds(30))),
+                priorityCodes: custSuppRepository.GetMostReferencedPartners,
+                maxDownloads: 50,
+                // 认金融机构用的快照。跟【金融监管指标】读的是同一张表、同一个判据。
+                latestFinancials: () => new SqliteFinancialRepository(paths.CurrentDb)
+                    .GetLatestSnapshotByCode(),
+                // 同全称冲突时把母公司代码归一到正主（上药转换 600849 → 上海医药 601607）
+                currentStockCodes: () => SqliteStockMetaUpsert.GetAll(paths.CurrentDb)
+                    .Select(x => x.Code).ToHashSet(StringComparer.Ordinal)));
         taskRegistry.Register(FetchActionId.StepIndustryIndicator,
             () => new IndustryIndicatorTask(indicatorRepository, indicatorProvider));
         // 【观察指标映射】2026-09-11，见 doc/watch-item-design.md M1。纯本地：三个输入全在
@@ -470,6 +492,10 @@ public partial class App : Application
                 boardMapRepository, indicatorRepository, paths));
         taskRegistry.Register(FetchActionId.StepFixVolumeUnit,
             () => new BarVolumeUnitFixTask(new SqliteBarVolumeUnitFixer(paths.CurrentDb)));
+        // 【融券余额补算】2026-09-16。纯本地 UPDATE，要排在【融资余额】和【个股日K】之后
+        // ——它拿当天收盘价乘当天融券余量，两样都落库了才算得出来。
+        taskRegistry.Register(FetchActionId.StepFillShortBalance,
+            () => new MarginShortBalanceFillTask(new SqliteMarginShortBalanceFiller(paths.CurrentDb)));
         // 【拉取行业分类】2026-09-10 从 orchestrator 迁过来（判据见
         // doc/full-audit-task-migration-design.md §0：迁移成本 + 维护成本，老方式耦合）。
         // 它只有一批（整表快照），MaxItems/Deadline 对它没意义，理由见 IndustryTask 类注释。
@@ -508,6 +534,17 @@ public partial class App : Application
                     maxPerRun: moneyFlowProvider is ChromeCdpMoneyFlowFetcher ? 20 : null));
 
         var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
+
+        // 【金融监管指标】2026-09-15 迁到新任务框架。注册放在 orchestrator 之后，
+        // 因为它要拿 FetchFinancialsForCodesAsync 做前置补数（金融股的特征科目没抓到
+        // 就认不出机构类型）。**传委托而不是传 orchestrator**：任务不该反过来依赖编排层。
+        taskRegistry.Register(FetchActionId.BankRegulatory,
+            () => new BankRegulatoryTask(
+                new SqliteBankRegulatoryRepository(paths.CurrentDb),
+                new SqliteFinancialRepository(paths.CurrentDb),
+                new SqliteEarningsScheduleRepository(paths.CurrentDb),
+                paths,
+                orchestrator.FetchFinancialsForCodesAsync));
 
         // 最后那个委托是给【重新读取配置】用的：按下时照当时的配置文件重造板块通道。
         // 传委托而不是把 App 的方法暴露出去，是为了让 MainViewModel 不用知道 browserChannel
