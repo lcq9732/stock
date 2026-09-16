@@ -34,13 +34,18 @@ public static class ThemeBrushes
     /// <summary>普通正文色——原来写死的 <c>Brushes.Black</c> 换成它。</summary>
     public static SolidColorBrush Foreground { get; } = new();
 
-    // 财务分析那种"结论"配色：好/需留意/不好。跟上面的涨跌红绿是两回事——那是行情方向，
-    // 这是判断结论，所以红取暗红一档、绿取偏正的绿，两套在同一屏里也不会串味。
-    /// <summary>结论：好。</summary>
+    // 财务分析那种"结论"配色：好/需留意/不好。**按 A 股口径上色——好=红、不好=绿**，
+    // 跟上面的涨跌红绿同向，不是欧美那套"绿=正数红=负数"。
+    //
+    // 2026-09-16 翻转过一次。原来是好=绿坏=红（国际惯例），理由是"这是结论不是方向，两套
+    // 色值岔开一档就不会串味"——实际不成立：深色下 Ok #5FC98A 跟 Green #4FC98A 色相几乎
+    // 一样，肉眼分不出，而且"归母净利 +1.08 亿"配绿色在 A 股用户眼里就是跌，看一眼就别扭。
+    // 代价是知道的：✗ 配绿色警示力不如红，所以异常项另外靠加粗 + 顶部"需要留意的 N 项"汇总兜底。
+    /// <summary>结论：好（红）。</summary>
     public static SolidColorBrush Ok { get; } = new();
     /// <summary>结论：需要留意。</summary>
     public static SolidColorBrush Warn { get; } = new();
-    /// <summary>结论：不好。</summary>
+    /// <summary>结论：不好（绿）。</summary>
     public static SolidColorBrush Danger { get; } = new();
 
     static ThemeBrushes()
@@ -60,9 +65,9 @@ public static class ThemeBrushes
         Set(DarkOrange, dark ? 0xF0A952 : 0xFF8C00);
         Set(SteelBlue, dark ? 0x6FB3E8 : 0x4682B4);
         Set(Foreground, dark ? 0xE4E4E4 : 0x000000);
-        Set(Ok, dark ? 0x5FC98A : 0x1E7A33);
+        Set(Ok, dark ? 0xF08A8A : 0xB02020);
         Set(Warn, dark ? 0xE0A860 : 0xB86E00);
-        Set(Danger, dark ? 0xF08A8A : 0xB02020);
+        Set(Danger, dark ? 0x5FC98A : 0x1E7A33);
     }
 
     private static void Set(SolidColorBrush brush, int rgb)

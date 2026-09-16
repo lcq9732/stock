@@ -88,18 +88,30 @@ public partial class CapitalDiagnosisPanel : UserControl
     private static readonly FontFamily UiFont = new("Microsoft YaHei");
 
     /// <summary>
-    /// 语义 → 画刷。跟同窗口的财务分析共用一套（Ok/Danger/Warn/Gray），不另起配色——
-    /// 三列并排时两套红绿会让人以为含义不同。
+    /// 语义 → 画刷。
     ///
-    /// ⚠ <see cref="CellTone.Positive"/>/<see cref="CellTone.Negative"/> 指的是**数本身的正负**，
-    /// 不是"好/坏"：资金流出对空头是好消息，这个功能不替用户判断立场。用绿/红只是因为
-    /// "正数绿、负数红"在这份报告里全程一致，扫一眼就知道符号。
+    /// ⚠ **正负数必须用 <see cref="ThemeBrushes.Red"/>/<see cref="ThemeBrushes.Green"/>，
+    /// 不能用 Ok/Danger**（2026-09-16 用户指出：颜色弄反了）。这两套画刷是**故意分开**的，
+    /// <see cref="ThemeBrushes"/> 的注释里写得很清楚：
+    ///   · Red/Green —— **行情方向**，A股口径**红涨绿跌**
+    ///   · Ok/Warn/Danger —— **判断结论**（好/需留意/不好），红取暗红、绿取正绿
+    /// 我原先拿"结论配色"去表示正负数，于是涨跌幅变成了"正数绿、负数红"，跟同一个程序里
+    /// 的行情图（涨红跌青，见 ChartTheme.Up/Down）和全市场看盘习惯全都反着。
+    ///
+    /// 这里用红/绿而不是行情图那套红/青：那套是黑底专业看盘图的配色（青在黑底上比深绿清楚），
+    /// 而这个面板是普通文字表格，走主题资源的 Theme.Up/Theme.Down 那一档（浅色纯红纯绿、
+    /// 深色提亮版），跟表格里其它"红涨绿跌"的文字一致。
+    ///
+    /// 至于"正负"本身不带褒贬——资金流出对空头是好消息，这个功能不替用户判断立场。
+    /// 红绿只表示**符号**，扫一眼知道方向而已。
     /// </summary>
     private static Brush BrushOf(CellTone tone) => tone switch
     {
-        CellTone.Positive => ThemeBrushes.Ok,
-        CellTone.Negative => ThemeBrushes.Danger,
+        CellTone.Positive => ThemeBrushes.Red,     // 涨 / 净流入 —— A股口径红
+        CellTone.Negative => ThemeBrushes.Green,   // 跌 / 净流出 —— A股口径绿
         CellTone.Muted => ThemeBrushes.Gray,
+        // Alert 是"需要注意"（放量下跌、背离），属于结论语义，用橙不用红绿——
+        // 免得跟上面的涨跌符号色串味
         CellTone.Alert => ThemeBrushes.Warn,
         _ => ThemeBrushes.Foreground,
     };

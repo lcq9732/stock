@@ -54,6 +54,8 @@ public class SqliteStockDossierReader
         Add(dossier, "十大流通股东", "TopShareholder(kind=float)。", () => ReadTopShareholder(conn, code, "float"));
         Add(dossier, "分红送配", "Dividend：新浪分红派息页。表里金额是**每10股**口径，\"每股股息\"列已除10。进度为\"预案/董事会通过\"的方案可能变更。", () => ReadDividend(conn, code));
         Add(dossier, "财务报表", "FinancialReport：单位亿元，**年内累计**口径（不是单季）。报告期是季度末，不是公告日。比率列为本表现算。", () => ReadFinancial(conn, code));
+        Add(dossier, "被谁列为客户/供应商", "StockCustomerSupplier 的**反向查询**：别家年报里把这只票列进前五大的记录。\n对龙头股这一节往往比下面那节有用得多——大公司自己披露时基本匿名（「第一名」「客户1」），\n而点它名的中小票通常写实名，所以只有站在这一边才看得到这条边。「占对方」是这笔生意占**对方**\n该类合计的比例，不是占这只票的。", () => ReadInboundPartners(conn, code));
+        Add(dossier, "前五大客户与供应商", "StockCustomerSupplier：东财，来自年报「主要客户及供应商」。名次6=「其余」，前五+其余=100%（校验和）。\n⚠ 占比的分母两组不同：客户组≈营收，供应商组=采购总额，**两组的金额和占比都不能互相比**。\n对手方约半数是匿名披露（公司自己决定写不写实名），匿名行连不出边，是正常的。", () => ReadCustomerSupplier(conn, code));
         Add(dossier, "主力资金净流入", "NetInflow：日频，正=净流入。", () => ReadNetInflow(conn, code));
         Add(dossier, "龙虎榜", "Lhb：新浪龙虎榜。同一天可因多个上榜指标出现多行；\"对应值\"随指标而定（涨跌幅/偏离值）。", () => ReadLhb(conn, code));
         Add(dossier, "通用基本面指标", "FundamentalMetric：键值表，目前实际写入的是流通市值（元，抓取日快照，不是每个交易日都有）。", () => ReadFundamental(conn, code));

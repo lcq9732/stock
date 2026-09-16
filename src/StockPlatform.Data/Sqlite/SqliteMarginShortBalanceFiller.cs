@@ -35,20 +35,49 @@ public sealed record MarginShortBalanceFillResult(int Days, int Rows, int NoClos
 /// 而市场判断走 <see cref="MarketClassifier"/>，不自己写前缀规则（自写规则漏过 920 开头的
 /// 北交所票，害得 342 只静默抓不到，见 feedback_market_prefix_via_classifier）。
 ///
+/// ════ 取价必须用**不复权**，不能用前复权 ════
+/// 公式里的"当日收盘价"是当日**真实成交价**。而 <c>Bar</c> 的 <c>day</c> 是源给的**减法式
+/// 前复权**（原价减去此后累计分红），高分红老股的早年价格会被减成**负数**——贵州茅台
+/// 2012-05-02：<c>day</c> = **−127.19**，<c>day_raw</c> = 225.98（真实收盘约 232）；
+/// 它 6005 根 <c>day</c> 里有 3529 根（59%）<c>close &lt;= 0</c>。全库 <c>day</c> 有
+/// 745,340 行负价、涉及 739 只标的，而 <c>day_raw</c> 一行都没有。
+///
+/// 所以取价**逐标的优先 <c>day_raw</c>**（见 <see cref="HasRawBars"/>）：
+///   · 用 <c>day</c> 的话，负价行被 <c>close &gt; 0</c> 挡掉——看着像"没有K线补不上"，
+///     实际上 2026-09-16 实测那 2.36% 的"补不上"里，Top20 全是茅台/招行/中国平安这些
+///     根本不缺K线的大票，缺失率还随年份单调下降（2010年 25.6% → 2026年 0.16%），
+///     正是前复权"越往前偏得越多"的形状
+///   · 更要紧的是**没被挡掉的那些也是错的**：2020-06-01 的茅台会按 1160.24 算而不是
+///     1419.50，低 18%，越往前错得越多
+/// 眼下 ETF 还没有 <c>day_raw</c>，它们回退 <c>day</c>；ETF 是纯分红的加法式失真
+/// （510300 的 <c>raw − qfq</c> 恒 0.2110 元、价格 4 元上下 ⇒ 约 5% 偏低，不会为负），
+/// 等 <c>doc/etf-backtest-granularity-design.md</c> 那套补上 ETF 的 <c>day_raw</c> 之后，
+/// 重跑一次这一项就会自动变准。
+///
 /// ════ ETF 的代码形式不一样 ════
-/// 两融标的里有 465 只 ETF，而 ETF 的K线在 <c>Bar</c> 里是**带市场前缀**存的（<c>sh510050</c>），
-/// 两融表里却是裸码（<c>510050</c>）。只按裸码找收盘价会让 323 只本来有数据的 ETF 也算成"补不上"。
-/// 所以查收盘价时三种形式都试（裸码 / sh+码 / sz+码）。
+/// ETF 的K线在 <c>Bar</c> 里是**带市场前缀**存的（<c>sh510050</c>），两融表里却是裸码
+/// （<c>510050</c>）。只按裸码找收盘价会让本来有数据的 ETF 也算成"补不上"。
+/// 所以查收盘价时两种形式都试（裸码 / sh+码）。
 ///
 /// ════ 幂等、可中断 ════
 /// **按交易日分批提交**，一天一个事务（沪市每天约 1700 行）。这样：
 ///   · WAL 不会涨——单事务写几百万行曾把 WAL 撑到 162GB（见 project_wal_blowup_and_stale_dotnet）
 ///   · 中断了直接重跑，已补的行不再满足"缺值"判据，不会重复算
-/// 补不上的（没有当日收盘价，实测占 2.46%，基本是从没抓到过K线的 ETF 和退市股）**留 NULL**，
-/// 不写 0——留 NULL 下次还有机会补上，写 0 就永久变成"确实没有融券"了。
+/// 补不上的（没有当日收盘价）**留 NULL**，不写 0——留 NULL 下次还有机会补上，
+/// 写 0 就永久变成"确实没有融券"了。剩下补不上的是**停牌日**（有融券余量但当天不交易，
+/// 没有收盘价），加上 <c>Bar</c> 里一根都没有的 15 只标的——689009 九号公司（名单源
+/// <c>hs_a</c> 不含科创板 CDR，1425 行）、12 只退市/换代码股、2 只已清盘 ETF，
+/// 详见 <c>doc/missing-instruments-design.md</c>。
 /// </summary>
 public class SqliteMarginShortBalanceFiller
 {
+    /// <summary>取价首选：不复权。交易所公式里的收盘价是当日**真实成交价**。</summary>
+    private const string GranRaw = "day_raw";
+
+    /// <summary>回退：源给的前复权。只有没有 <see cref="GranRaw"/> 的标的（眼下是 ETF）才用，
+    /// 算出来的余额偏低——见类注释。</summary>
+    private const string GranQfq = "day";
+
     private readonly string _dbPath;
 
     public SqliteMarginShortBalanceFiller(string dbFilePath) => _dbPath = dbFilePath;
@@ -69,8 +98,10 @@ public class SqliteMarginShortBalanceFiller
     {
         using var conn = Open();
 
-        int shCodes = PrepareShanghaiCodeTable(conn, ct);
+        var (shCodes, withRaw) = PrepareShanghaiCodeTable(conn, ct);
         onProgress?.Invoke($"　沪市两融标的 {shCodes} 只（按 MarketClassifier 判，含 ETF）");
+        onProgress?.Invoke($"　取价口径：{withRaw} 只走不复权 day_raw；"
+                           + $"{shCodes - withRaw} 只没有 day_raw、回退前复权 day（基本是 ETF，算出的余额偏低）");
 
         var days = SelectPendingDays(conn, sinceDate, ct);
         if (days.Count == 0)
@@ -93,7 +124,7 @@ public class SqliteMarginShortBalanceFiller
 
         int noClose = CountStillMissing(conn, sinceDate);
         onProgress?.Invoke($"　完成：补上 {rows:N0} 行；仍缺 {noClose:N0} 行"
-                           + "（这些标的没有当日收盘价——多是从未抓到过K线的 ETF 和退市股，留 NULL）");
+                           + "（这些标的没有当日收盘价——停牌日，以及 689009 和几只退市/换码股，留 NULL）");
         return new MarginShortBalanceFillResult(days.Count, rows, noClose);
     }
 
@@ -104,7 +135,7 @@ public class SqliteMarginShortBalanceFiller
     /// 市场判断必须走 <see cref="MarketClassifier"/>（SQL 里调不到），而逐票执行 UPDATE
     /// 又太慢。临时表是两者的折中——判断在 C# 做、批量在 SQL 做。
     /// </summary>
-    private static int PrepareShanghaiCodeTable(SqliteConnection conn, CancellationToken ct)
+    private static (int Total, int WithRaw) PrepareShanghaiCodeTable(SqliteConnection conn, CancellationToken ct)
     {
         var all = new List<string>();
         using (var cmd = conn.CreateCommand())
@@ -114,17 +145,18 @@ public class SqliteMarginShortBalanceFiller
             while (r.Read()) { ct.ThrowIfCancellationRequested(); all.Add(r.GetString(0)); }
         }
 
-        var codes = new List<string>();
+        var codes = new List<(string Code, string Gran)>();
         foreach (var code in all)
         {
             ct.ThrowIfCancellationRequested();
             var board = MarketClassifier.Classify(code);
             // 只要沪市——深市的 short_balance 是源头给的真值，一行都不碰
-            if (board is MarketBoard.ShanghaiMain or MarketBoard.ShanghaiStar or MarketBoard.ShanghaiB)
-                codes.Add(code);                     // 股票：MarketClassifier 说了算
-            else if (board == MarketBoard.Unknown && IsShanghaiByStoredPrefix(conn, code))
-                codes.Add(code);                     // ETF：库里存的前缀说了算，见那个方法的注释
+            bool isSh = board is MarketBoard.ShanghaiMain or MarketBoard.ShanghaiStar or MarketBoard.ShanghaiB
+                                                     // 股票：MarketClassifier 说了算
+                        || (board == MarketBoard.Unknown && IsShanghaiByStoredPrefix(conn, code));
+                                                     // ETF：库里存的前缀说了算，见那个方法的注释
             // 其余（深市股票、北交所、判不出来的）一律不碰
+            if (isSh) codes.Add((code, HasRawBars(conn, code) ? GranRaw : GranQfq));
         }
 
         using (var create = conn.CreateCommand())
@@ -133,7 +165,8 @@ public class SqliteMarginShortBalanceFiller
                 CREATE TEMP TABLE IF NOT EXISTS _sh_margin(
                     code    TEXT PRIMARY KEY,
                     bar_raw TEXT,   -- 裸码（个股在 Bar 里是这个形式）
-                    bar_pre TEXT    -- sh+码（ETF 在 Bar 里是这个形式）
+                    bar_pre TEXT,   -- sh+码（ETF 在 Bar 里是这个形式）
+                    gran    TEXT    -- 这只标的取价用哪个粒度：day_raw 优先，没有才回退 day
                 );
                 DELETE FROM _sh_margin;
                 """;
@@ -143,12 +176,31 @@ public class SqliteMarginShortBalanceFiller
         {
             using var ins = conn.CreateCommand();
             ins.Transaction = tx;
-            ins.CommandText = "INSERT OR IGNORE INTO _sh_margin(code, bar_raw, bar_pre) VALUES($c, $c, 'sh'||$c);";
+            ins.CommandText =
+                "INSERT OR IGNORE INTO _sh_margin(code, bar_raw, bar_pre, gran) VALUES($c, $c, 'sh'||$c, $g);";
             var p = ins.Parameters.Add("$c", SqliteType.Text);
-            foreach (var c in codes) { p.Value = c; ins.ExecuteNonQuery(); }
+            var g = ins.Parameters.Add("$g", SqliteType.Text);
+            foreach (var (code, gran) in codes) { p.Value = code; g.Value = gran; ins.ExecuteNonQuery(); }
             tx.Commit();
         }
-        return codes.Count;
+        return (codes.Count, codes.Count(x => x.Gran == GranRaw));
+    }
+
+    /// <summary>
+    /// 这只标的在 <c>Bar</c> 里有没有不复权序列。**有就用 day_raw 取价，没有才回退 day**——
+    /// 理由见类注释「取价必须用不复权」那一段。
+    ///
+    /// 逐标的判、不按表一刀切：个股基本都有 day_raw，ETF 目前一只都没有
+    /// （<c>doc/etf-backtest-granularity-design.md</c> 那套方案还没实施）。一刀切的话，
+    /// 要么个股陪着 ETF 一起用错口径，要么 ETF 的融券余额整块补不出来。
+    /// </summary>
+    private static bool HasRawBars(SqliteConnection conn, string code)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT 1 FROM Bar WHERE code IN ($c, 'sh' || $c) AND granularity = 'day_raw' LIMIT 1;";
+        cmd.Parameters.AddWithValue("$c", code);
+        return cmd.ExecuteScalar() != null;
     }
 
     /// <summary>
@@ -217,7 +269,7 @@ public class SqliteMarginShortBalanceFiller
             SET short_balance = short_volume * (
                     SELECT b.close FROM Bar b
                     JOIN _sh_margin s ON s.code = MarginDetail.code
-                    WHERE b.granularity = 'day'
+                    WHERE b.granularity = s.gran
                       AND substr(b.period_start, 1, 10) = MarginDetail.trade_date
                       AND b.code IN (s.bar_raw, s.bar_pre)
                       AND b.close > 0
@@ -229,7 +281,7 @@ public class SqliteMarginShortBalanceFiller
               AND EXISTS (
                     SELECT 1 FROM Bar b
                     JOIN _sh_margin s ON s.code = MarginDetail.code
-                    WHERE b.granularity = 'day'
+                    WHERE b.granularity = s.gran
                       AND substr(b.period_start, 1, 10) = MarginDetail.trade_date
                       AND b.code IN (s.bar_raw, s.bar_pre)
                       AND b.close > 0);

@@ -166,6 +166,43 @@ public class DailyTableMarketGapTests : IDisposable
         Assert.Equal([Exchange.Shenzhen], p.MissingMarkets);
     }
 
+    /// <summary>
+    /// **CheckDays 与 Check 对同一天的结论必须一致**——这是 CheckDays 存在的全部意义。
+    ///
+    /// 2026-09-16 上线当天踩到：CheckDays 曾把日历截断到"要查的最后一天"，于是
+    /// TrailingMedian 的"前面凑不够就往后补"和 IsQuietDay 的前后窗口都少了样本，
+    /// 复查比体检宽松。后果是 Lhb 2005-11-14 被复查判"已补齐"划掉、下一轮体检又报出来，
+    /// Tries 每轮重置成 0——那天在"补→划掉→再报"之间**永远循环、永不收敛**。
+    ///
+    /// 所以这里逐天比对两条路径，不比具体数值，只比"报不报"。
+    /// </summary>
+    [Fact]
+    public void 复查判据与体检判据_逐天结论一致()
+    {
+        SeedWithGap();
+
+        var byCheck = _auditor.Check(Margin, Anchor, Cutoff)!.PartialDays
+                              .Select(p => p.Day).ToHashSet();
+        // 整段日历逐天问一遍 CheckDays，结论集合必须跟 Check 完全相同
+        var byCheckDays = Cal.Where(d => _auditor.CheckDays(Margin, Anchor, [d]).Count > 0).ToHashSet();
+
+        Assert.Equal(byCheck, byCheckDays);
+    }
+
+    /// <summary>补齐之后两条路径也得一致地都说"没问题"。</summary>
+    [Fact]
+    public void 补齐之后_两条路径都判齐()
+    {
+        foreach (var d in Cal)
+        {
+            Insert(d, 100, "60");
+            Insert(d, 100, "00");
+        }
+
+        Assert.Empty(_auditor.Check(Margin, Anchor, Cutoff)!.PartialDays);
+        Assert.Empty(_auditor.CheckDays(Margin, Anchor, Cal));
+    }
+
     [Fact]
     public void 复查时已经补齐_返回空()
     {

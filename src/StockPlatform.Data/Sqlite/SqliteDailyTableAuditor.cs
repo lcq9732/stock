@@ -326,9 +326,15 @@ public sealed class SqliteDailyTableAuditor(string dbPath)
         using var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
 
-        // cutoff 取要查的最后一天——复查是"这几天现在怎么样"，跟"最近有没有落后"无关。
-        var cutoff = wanted.Max(StringComparer.Ordinal)!;
-        var calendar = ReadCalendar(conn, calendarCode, DateTime.ParseExact(cutoff, "yyyy-MM-dd", CultureInfo.InvariantCulture));
+        // ⚠ 日历必须读**完整**，不能截到"要查的最后一天"（2026-09-16 修，上线当天就踩了）。
+        //
+        // 两条判据都依赖前后窗口：TrailingMedian 在"前面凑不够 ThinWindowRadius 个"时会**往后**补，
+        // IsQuietDay 取的是前后各 QuietWindowRadius 天的成交额中位数。日历一截，后面的样本没了，
+        // 复查就比体检宽松——实测 Lhb 2005-11-14 被复查判"已补齐"划掉、下一轮体检又报出来，
+        // Tries 每次重置成 0，那天会在"补→划掉→再报"之间**永远循环、永不收敛**。
+        //
+        // 这个方法存在的全部意义就是"跟体检同一套判据"，截日历等于把这个前提拆掉了。
+        var calendar = ReadCalendar(conn, calendarCode, DateTime.Today);
         if (calendar.Count == 0) return new List<PartialDay>();
 
         var rowsByDay = ReadRowCounts(conn, spec);

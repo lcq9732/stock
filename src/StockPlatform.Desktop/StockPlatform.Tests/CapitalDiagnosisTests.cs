@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
 using Xunit;
@@ -172,6 +172,111 @@ public class CapitalDiagnosisTests
         var lev = r.Dimensions.Single(d => d.Index == 4);
         Assert.DoesNotContain(lev.Conclusions, c => c.StartsWith("⚠ 背离"));
         Assert.Contains(lev.Conclusions, c => c.Contains("方向一致"));
+    }
+
+    /// <summary>
+    /// 符号相反但**幅度太小**（融资余额变化 &lt;1%）时，不许说"方向一致"。
+    ///
+    /// 这一档是 2026-09-16 实机验证抓出来的：中国平安显示"股价 -5.9%、融资余额 +0.5%，
+    /// 方向一致 —— 杠杆资金顺势减仓"——符号明明相反却说一致，"减仓"还是拿股价方向判的
+    /// （融资余额实际是微增）。之前的测试只造了"明显背离"和"明显同向"两档，正好漏过中间这档。
+    /// </summary>
+    [Fact]
+    public void 融资余额变化太小时不说方向一致也不说背离()
+    {
+        var bars = Falling();                     // 股价从 400 跌到 321
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "601318",
+            Bars = bars,
+            IsMarginTarget = true,
+            // 融资余额全程只涨 0.5%——符号跟股价相反，但幅度够不上"背离"
+            Margins = bars.Select((b, i) => new MarginDetailRow
+            {
+                TradeDate = b.PeriodStart,
+                MarginBalance = 100e8 * (1 + 0.005 * i / (bars.Count - 1)),
+                ShortBalance = 1e8,
+            }).ToList(),
+        };
+
+        var r = new CapitalDiagnosisAnalyzer().Analyze(
+            input, CapitalDiagnosisAnalyzer.ResolveWindows(bars));
+
+        var lev = r.Dimensions.Single(d => d.Index == 4);
+        Assert.DoesNotContain(lev.Conclusions, c => c.Contains("方向一致"));
+        Assert.DoesNotContain(lev.Conclusions, c => c.StartsWith("⚠ 背离"));
+        Assert.Contains(lev.Conclusions, c => c.Contains("几乎没动"));
+    }
+
+    /// <summary>
+    /// **锚点日当天的净买入不计入区间**——区间的"起"是锚点日**收盘后**的余额。
+    ///
+    /// 2026-09-16 对账时发现口径不一致：宁德界面显示净买入累加 13.63亿，而表格里
+    /// 融资余额是 220.39亿 → 236.17亿（增量 15.78亿），差的 2.15亿正好是锚点日当天的
+    /// 净买入 -2.16亿。那天的净买入属于"到达高点的过程"，不该计入"从高点以来"
+    /// ——股价那行就是这个口径（高点收盘 → 现在收盘）。
+    ///
+    /// 造数据要点：锚点必须落在**中间**（前面得有数据才差分得出锚点日自己的净买入），
+    /// 所以让第 5 根价格最高；锚点日的余额设一个突变（100亿 → 50亿，净偿还 50亿），
+    /// 它若被算进去就会出现在 Top3 里。
+    /// </summary>
+    [Fact]
+    public void 锚点日当天的净买入不计入区间()
+    {
+        // 第 5 根最高 → 锚点落在 index 5，它前面还有 5 根可供差分
+        var bars = Enumerable.Range(0, 50)
+            .Select(i => Bar(i, i == 5 ? 500 : 400 - i)).ToList();
+        var margins = bars.Select((b, i) => new MarginDetailRow
+        {
+            TradeDate = b.PeriodStart,
+            // index 0-4 = 100亿；index 5（锚点日）突降到 50亿；之后每天 +1亿
+            MarginBalance = i < 5 ? 100e8 : (i == 5 ? 50e8 : 50e8 + (i - 5) * 1e8),
+            ShortBalance = 1e8,
+            MarginBuy = 2e8,
+        }).ToList();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750", Bars = bars, IsMarginTarget = true, Margins = margins,
+        };
+        var w = CapitalDiagnosisAnalyzer.ResolveWindows(bars);
+        Assert.Equal(5, w.AnchorIndex);                    // 前提：锚点在第 5 根
+
+        var r = new CapitalDiagnosisAnalyzer().Analyze(input, w);
+        var lev = r.Dimensions.Single(d => d.Index == 4);
+        var netTable = lev.Tables.FirstOrDefault(t => t.Caption.Contains("净买入"));
+        Assert.NotNull(netTable);
+
+        // 锚点日那天净偿还 50亿，**不该出现**在 Top3 里
+        Assert.DoesNotContain(netTable!.Rows, row => row.Any(c => c.Text.Contains("50.0亿")));
+        // 锚点日之后每天净买入 +1亿，Top3 应该全是这个
+        Assert.All(netTable.Rows.Skip(1),                  // Skip(1) 跳过表头行
+            row => Assert.Contains(row, c => c.Text.Contains("+1.0亿")));
+    }
+
+    /// <summary>"顺势加仓/减仓"说的是**融资余额**的方向，不是股价的方向。</summary>
+    [Fact]
+    public void 顺势加减仓取融资余额的方向而不是股价()
+    {
+        var bars = Falling();                     // 股价跌
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "601318",
+            Bars = bars,
+            IsMarginTarget = true,
+            // 融资余额同向大幅下降 → 应当说"顺势减仓"
+            Margins = bars.Select((b, i) => new MarginDetailRow
+            {
+                TradeDate = b.PeriodStart,
+                MarginBalance = 200e8 - i * 1e8,
+                ShortBalance = 1e8,
+            }).ToList(),
+        };
+
+        var r = new CapitalDiagnosisAnalyzer().Analyze(
+            input, CapitalDiagnosisAnalyzer.ResolveWindows(bars));
+
+        var lev = r.Dimensions.Single(d => d.Index == 4);
+        Assert.Contains(lev.Conclusions, c => c.Contains("方向一致") && c.Contains("减仓"));
     }
 
     /// <summary>

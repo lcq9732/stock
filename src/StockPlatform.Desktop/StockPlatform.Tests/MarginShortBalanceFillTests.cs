@@ -17,6 +17,9 @@ namespace StockPlatform.Tests;
 ///   ② **ETF 要按带前缀的代码找收盘价**——ETF 的K线存成 sh510050，两融表里是裸码 510050
 ///   ③ **补不上的留 NULL 不写 0**——写 0 就永久变成"确实没有融券"，再也补不回来
 ///   ④ **幂等**——补过的行重跑不再被选中
+///   ⑤ **取价走不复权 day_raw，不走前复权 day**——公式里的收盘价是当日真实成交价，
+///      而 day 是减法式前复权，高分红老股早年会被减成负数（茅台 2012-05-02：day = −127.19，
+///      day_raw = 225.98）；没有 day_raw 的标的（眼下是 ETF）才回退 day
 ///
 /// 全部用临时库，一行都不碰 current.sqlite。
 /// </summary>
@@ -111,7 +114,7 @@ public class MarginShortBalanceFillTests : IDisposable
 
     /// <summary>
     /// ETF 的K线在 <c>Bar</c> 里**带市场前缀**（sh510050），两融表里是裸码（510050）。
-    /// 只按裸码找收盘价会让 323 只本来有数据的 ETF 也算成"补不上"。
+    /// 只按裸码找收盘价会让本来有数据的 ETF 也算成"补不上"。
     /// </summary>
     [Fact]
     public void ETF按带前缀的代码找收盘价()
@@ -126,8 +129,54 @@ public class MarginShortBalanceFillTests : IDisposable
     }
 
     /// <summary>
-    /// 没有当日收盘价 → **留 NULL，不写 0**。实测 2.46% 的行是这种情况
-    /// （从未抓到过K线的 ETF 和退市股）。写 0 就永久变成"确实没有融券"，再也补不回来了。
+    /// ⭐ **取价必须走 day_raw（不复权），不能走 day（前复权）。**
+    ///
+    /// <c>day</c> 是源给的**减法式**前复权（原价减去此后累计分红），高分红老股的早年价格会被
+    /// 减成**负数**。这里的数字就是贵州茅台 2012-05-02 的实测值：<c>day</c> = −127.19、
+    /// <c>day_raw</c> = 225.98（真实收盘约 232）。它 6005 根 <c>day</c> 里有 3529 根（59%）
+    /// <c>close &lt;= 0</c>。
+    ///
+    /// 走错口径有两层后果，第二层更隐蔽：负价行被 <c>close &gt; 0</c> 挡掉，看着像"没有K线
+    /// 补不上"；而**没被挡掉的那些也全是错的**——2020-06-01 的茅台会按 1160.24 算而不是
+    /// 1419.50，低 18%，越往前错得越多。见 doc/missing-instruments-design.md §2。
+    /// </summary>
+    [Fact]
+    public void 有day_raw时取价走不复权_不被前复权的负价带偏()
+    {
+        SaveBar("600519", Day, -127.19);                                    // 前复权：负价
+        SaveBar("600519", Day, 225.98, Granularity.DayRaw);                 // 不复权：真实成交价
+        SaveMargin("600519", Day, shortVolume: 100_000, shortBalance: null);
+
+        var r = new SqliteMarginShortBalanceFiller(_dbPath).Fill();
+
+        Assert.Equal(1, r.Rows);
+        Assert.Equal(100_000 * 225.98, ReadShortBalance("600519", Day)!.Value, 2);
+    }
+
+    /// <summary>
+    /// 没有 <c>day_raw</c> 的标的**回退 <c>day</c>**，不是整个跳过。
+    ///
+    /// 眼下 ETF 一只都没有 <c>day_raw</c>（doc/etf-backtest-granularity-design.md 那套方案还没
+    /// 实施），两融的 4637 个标的里只有 3836 个有。口径必须**逐标的**定：一刀切的话，要么个股
+    /// 陪着 ETF 一起用错口径，要么 ETF 的融券余额整块补不出来。
+    /// ETF 是纯分红的加法式失真（约 5% 偏低、不会为负），等 ETF 的 day_raw 补上后重跑即可变准。
+    /// </summary>
+    [Fact]
+    public void 没有day_raw的标的回退前复权_ETF目前就是这种()
+    {
+        SaveBar("sh510050", Day, 3.256);                                    // 只有 day，没有 day_raw
+        SaveMargin("510050", Day, shortVolume: 1_000_000, shortBalance: null);
+
+        var r = new SqliteMarginShortBalanceFiller(_dbPath).Fill();
+
+        Assert.Equal(1, r.Rows);
+        Assert.Equal(1_000_000 * 3.256, ReadShortBalance("510050", Day)!.Value, 2);
+    }
+
+    /// <summary>
+    /// 没有当日收盘价 → **留 NULL，不写 0**。真正会走到这里的是**停牌日**（有融券余量但当天
+    /// 不交易），加上 <c>Bar</c> 里一根都没有的 15 只标的（689009、12 只退市/换码股、2 只已清盘
+    /// ETF，见 doc/missing-instruments-design.md）。写 0 就永久变成"确实没有融券"，再也补不回来。
     /// </summary>
     [Fact]
     public void 没有收盘价时留NULL不写零()
@@ -190,12 +239,13 @@ public class MarginShortBalanceFillTests : IDisposable
 
     // ─────────────────── 造数据 ───────────────────
 
-    private void SaveBar(string code, DateTime day, double close) =>
+    private void SaveBar(string code, DateTime day, double close,
+                         string granularity = Granularity.Day) =>
         _bars.InsertOrRefreshUnconfirmed(new[]
         {
             new Bar
             {
-                Code = code, Granularity = Granularity.Day, PeriodStart = day,
+                Code = code, Granularity = granularity, PeriodStart = day,
                 Open = close, Close = close, High = close, Low = close,
                 Volume = 1000, Amount = close * 1000, Turnover = 0.5,
             },

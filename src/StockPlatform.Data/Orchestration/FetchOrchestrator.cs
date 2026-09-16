@@ -99,6 +99,10 @@ public partial class FetchOrchestrator
     /// </summary>
     private readonly Remote.EastMoneySideMenuBoardListProvider? _sideMenuBoardList;
     private readonly IStockListProvider? _etfListProvider;
+
+    /// <summary>ETF 名单比库里存量少这个比例以上就判定为"半截名单"、改用存量兜底。
+    /// 5% 这个阈值沿用 <c>TotalSharesTask.MinKeepRatio</c>。</summary>
+    private const double EtfListMinKeepRatio = 0.95;
     private readonly IIndexConsProvider _indexConsProvider;
     private readonly IIndexWeightProvider _indexWeightProvider;
     private readonly ILhbProvider _lhbProvider;
@@ -904,7 +908,17 @@ public partial class FetchOrchestrator
     /// 带前缀的8位符号（"sh510300"），日K复用所选数据源的 BarFetcher。存进 Bar 表后因带前缀不是6位纯
     /// 数字，天然被 GetAllCodes 挡在选股全集外。跟个股共用同一套 errors/failedCodes/stats，ETF 代码也
     /// 计入 attempted，所以 ETF 失败同样进失败名单、可被"重新拉取失败股票"重试。返回本轮尝试的 ETF 代码
-    /// （给调用方并入 attempted）。</summary>
+    /// （给调用方并入 attempted）。
+    ///
+    /// ════ 半截名单护栏 + 本地兜底（2026-09-16 加）════
+    /// ETF 跟个股在这里有个**不对称**：个股的日常抓取清单走本地 <c>StockMeta.GetAll()</c>，
+    /// 列表接口抽风最多丢新票；ETF **每轮都重新联网取名单、没有本地兜底**，名单少一段就
+    /// 直接少抓一批K线，而且以前拿回 300 只还是 1600 只都照跑不误，一声不吭。
+    ///
+    /// 所以这里照搬 <c>TotalSharesTask</c> 的做法：本轮名单比库里存量少 5% 以上就**不用它**，
+    /// 改用库里 <c>type='etf'</c> 的存量名单跑增量（名单取不到时同样兜底）。
+    /// 代价只是"这一轮发现不了新上市的 ETF"，比静默少抓一批K线好得多。
+    /// </summary>
     private async Task<List<string>> FetchEtfBarsAsync(
         NamedBarSource source, DateTime end, int lookbackYears, SqliteBarRepository currentRepo,
         ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, FetchStats stats,
@@ -912,14 +926,37 @@ public partial class FetchOrchestrator
     {
         if (_etfListProvider == null) return new List<string>();
         progress?.Report("正在获取全市场ETF列表...");
+
+        // 库里的存量名单——既是护栏的标尺，也是名单取不到时的兜底
+        var local = SqliteStockMetaUpsert.GetByTypes(_paths.CurrentDb, SqliteStockMetaUpsert.TypeEtf)
+            .Select(x => new StockListEntry(x.Code, x.Name)).ToList();
+
         List<StockListEntry> etfs;
         try { etfs = await _etfListProvider.GetAllStocksAsync(progress, ct); }
         catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { errors.Add($"获取ETF列表失败（跳过ETF）：{ex.Message}"); return new List<string>(); }
-        if (etfs.Count == 0) { progress?.Report("ETF列表为空（接口可能不可达/被限流），本轮跳过ETF。"); return new List<string>(); }
+        catch (Exception ex) { errors.Add($"获取ETF列表失败：{ex.Message}"); etfs = new List<StockListEntry>(); }
+
+        // 护栏：空名单、或比库里存量少 5% 以上，都判定为"半截名单"，不拿它去跑
+        bool fromLocal = false;
+        if (etfs.Count < local.Count * EtfListMinKeepRatio)
+        {
+            if (local.Count == 0)
+            {
+                progress?.Report("ETF列表为空且库里也没有存量（接口可能不可达/被限流），本轮跳过ETF。");
+                return new List<string>();
+            }
+            errors.Add($"ETF名单只拿到 {etfs.Count} 只、库里存量有 {local.Count} 只，判定为半截名单——"
+                       + "本轮改用库里存量名单跑增量（这一轮发现不了新上市的ETF）");
+            progress?.Report($"⚠ ETF名单疑似被截断（{etfs.Count} < {local.Count}），改用库里存量 {local.Count} 只。");
+            etfs = local;
+            fromLocal = true;
+        }
+
         progress?.Report($"共 {etfs.Count} 只 ETF，开始抓取日K（已用时 {FormatElapsed(sw.Elapsed)}）...");
         // ETF 名称写进 StockMeta（type=etf）——让"查询"页能搜到 ETF（不影响个股选股）。
-        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, etfs.Select(e => (e.Code, e.Name)), SqliteStockMetaUpsert.TypeEtf);
+        // 走兜底时名字本来就是从这张表读出来的，没必要再写回去。
+        if (!fromLocal)
+            SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, etfs.Select(e => (e.Code, e.Name)), SqliteStockMetaUpsert.TypeEtf);
 
         int completed = 0;
         var tasks = etfs.Select(etf =>

@@ -124,8 +124,12 @@ public record DiagnosisColumn(string Header, double Width = 0, bool RightAlign =
 public record DiagnosisCell(string Text, CellTone Tone = CellTone.Neutral);
 
 /// <summary>
-/// 单元格语义。注意 <see cref="Positive"/>/<see cref="Negative"/> 指的是**这个数本身的正负**
+/// 单元格语义。<see cref="Positive"/>/<see cref="Negative"/> 指的是**这个数本身的正负**
 /// （净流入为正、跌幅为负），不是"好消息/坏消息"——资金流出对空头是好消息，本功能不替用户判断立场。
+///
+/// ⚠ 展示层把这两个映射成 **A股口径的红涨绿跌**（正数红、负数绿），别映射成"结论配色"那套
+/// 好绿坏红——2026-09-16 就栽在这上面：涨跌幅显示成正数绿、负数红，跟同程序的行情图和
+/// 全市场看盘习惯全反。Logic 层不认识画刷，但这个约定得写在这儿，免得下一个实现者再反一次。
 /// </summary>
 public enum CellTone
 {

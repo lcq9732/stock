@@ -84,8 +84,18 @@ public class SinaEtfListProvider : IStockListProvider
         if (bytes.Length == 0)
             throw new RateLimitedException("新浪财经返回空响应，疑似触发反爬限流");
 
-        var json = Encoding.GetEncoding("GBK").GetString(bytes);
-        if (string.IsNullOrWhiteSpace(json) || json == "null") return new List<StockListEntry>();
+        var json = Encoding.GetEncoding("GBK").GetString(bytes).Trim();
+
+        // ⚠ 翻过末页时接口回的是**空数组** `[]`（2026-09-16 实测：etf_hq_fund 有效页到 17，
+        // page 19 回的就是 `[]`），而字面量 `null` 是**被限流**的表现。
+        //
+        // 以前这里把 `null` 也当成"空页"返回空列表，调用方 `if (pageEntries.Count == 0) break;`
+        // 就当成翻过了末页——**限流那一刻之后的整段名单全部丢掉，一条错误都不报**。
+        // 个股这边还有本地 StockMeta 兜底（只会丢新票），ETF 名单没有兜底，少一段就直接少抓
+        // 一批K线。所以 `null` 走重试；重试耗尽就让整轮失败——失败是响亮的，静默截断不是。
+        if (json.Length == 0 || json == "null")
+            throw new RateLimitedException(
+                "新浪财经返回 null（不是空数组 []）——这是触发反爬限流的表现，不是翻到了末页");
 
         using var doc = JsonDocument.Parse(json);
         var result = new List<StockListEntry>();
