@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Models;
+﻿using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Abstractions;
 
@@ -26,8 +26,23 @@ public interface ILhbProvider
 /// </summary>
 public interface ILhbRangeProvider
 {
-    /// <summary>按月切片抓一段，每片就绪时回调一次由调用方落库；返回累计写入行数。</summary>
-    Task<int> FetchRangeAsync(
-        DateTime start, DateTime end, Func<List<LhbRow>, int> onBatch,
-        IProgress<string>? progress = null, CancellationToken ct = default);
+    /// <summary>
+    /// 按月切片抓一段，**每片 yield 一次**由调用方落库。
+    ///
+    /// 2026-09-17 从"回调式 onBatch"改成异步枚举：新任务框架的 <c>FetchAsync</c> 要的就是
+    /// "抓一批产出一批"，回调式的话落库时机被压在 provider 里，骨架的 MaxItems / Deadline
+    /// 两个上限就都插不进去。
+    /// </summary>
+    IAsyncEnumerable<LhbSlice> FetchSlicesAsync(
+        DateTime start, DateTime end, CancellationToken ct = default);
 }
+
+/// <summary>一个月片的结果——行 + 这一片覆盖的区间（报进度、判空日都要）。</summary>
+/// <param name="Start">片的起始日（含）。</param>
+/// <param name="End">片的结束日（含）。</param>
+/// <param name="Name">片名，形如 "2026-09"，报进度用。</param>
+/// <param name="Index">第几片（从 1 起）。</param>
+/// <param name="Total">共几片。</param>
+/// <param name="Rows">这一片抓到的行。</param>
+public sealed record LhbSlice(
+    DateTime Start, DateTime End, string Name, int Index, int Total, List<LhbRow> Rows);

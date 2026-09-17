@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Models;
+﻿using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Abstractions;
 
@@ -7,7 +7,14 @@ public interface ILhbRepository
 {
     void EnsureSchema();
 
-    /// <summary>写入一批龙虎榜记录（已存在的 (trade_date, stock_code, reason) 忽略）。</summary>
+    /// <summary>
+    /// 写入一批龙虎榜记录（已存在的 (trade_date, stock_code, reason) 忽略）。
+    ///
+    /// ⚠ 2026-09-17 起**产品代码里没有调用方了**，抓取的每一条路径都走
+    /// <c>LhbDayWriter</c>（派生对应值 + <see cref="ReplaceDays"/>）。留着是给单测说明语义用的。
+    /// 新写一条路径别图省事用它：它既不派生对应值、也不清掉那天的旧行，
+    /// 上榜原因文本一变就并排多出一套。
+    /// </summary>
     void InsertOrIgnore(IEnumerable<LhbRow> rows);
 
     /// <summary>

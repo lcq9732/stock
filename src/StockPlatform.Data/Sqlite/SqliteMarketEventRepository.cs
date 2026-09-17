@@ -71,18 +71,52 @@ public class SqliteMarketEventRepository : IMarketEventRepository
     }
 
     // ── 大宗交易 ───────────────────────────────────────────────────
-    public int UpsertBlockTrades(IEnumerable<BlockTrade> items)
+    /// <summary>
+    /// **整日替换**某个交易日的大宗交易（2026-09-17）——先删该日全部，再按本次返回的顺序重写。
+    ///
+    /// ════ 为什么不是 UPSERT ════
+    /// UPSERT 要靠主键认出"同一笔"，而主键第三列 <c>daily_rank</c> 原来存的是东财的
+    /// <c>DAILY_RANK</c>，它**跨抓取不稳定**：同一笔交易换个时间抓，值就变了，于是每次重抓
+    /// 都 INSERT 一份副本。全表因此多出 3087 行、最近一个月的金额普遍虚高一倍。
+    /// 详见 doc/block-trade-task-design.md。
+    ///
+    /// 整日替换之后，<c>daily_rank</c> 改由这里**按 code 分组、按接口返回顺序自赋 1..N**，
+    /// 于是它真的就是"该股当日第几笔"了（比东财那个还准确），而且反复跑多少次结果都一样。
+    ///
+    /// ⚠ 两条铁律：
+    /// ① <b>删和写必须在同一个事务里</b>——中途崩溃要回滚到删除前，不能留下空的一天；
+    /// ② <b>调用方必须先确认这一天抓全了</b>（<c>BlockTradeDay.IsComplete</c>）。
+    ///   拿残缺的一天覆盖完整的一天，事后完全看不出来。
+    ///
+    /// <paramref name="rows"/> 为空时**不删**、直接返回 0：接口偶尔会返回空结果，
+    /// 真按空的去替换就会把一整天抹掉。"那天真的没有大宗交易"由调用方去判断和记录。
+    /// </summary>
+    /// <returns>写入的行数。</returns>
+    public int ReplaceBlockTradesForDay(DateTime day, IReadOnlyList<BlockTrade> rows)
     {
-        var list = DedupeAndWarn(items.ToList(),
-            x => $"{x.TradeDate:yyyyMMdd}|{x.Code}|{x.DailyRank}", "BlockTrade");
-        if (list.Count == 0) return 0;
+        if (rows.Count == 0) return 0;
+
+        // 按 code 分组、组内保持接口返回顺序，赋 1..N。GroupBy 在 LINQ to Objects 里是稳定的，
+        // 组内元素顺序就是原顺序——正是我们要的"第几笔"。
+        var numbered = rows.GroupBy(x => x.Code)
+                           .SelectMany(g => g.Select((x, i) => (Row: x, Rank: i + 1)))
+                           .ToList();
 
         using var conn = Open();
         using var tx = conn.BeginTransaction();
+
+        using (var del = conn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM BlockTrade WHERE trade_date = $td;";
+            del.Parameters.AddWithValue("$td", D(day.Date));
+            del.ExecuteNonQuery();
+        }
+
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT OR REPLACE INTO BlockTrade
+            INSERT INTO BlockTrade
                 (trade_date, code, daily_rank, name, deal_price, deal_volume, deal_amount,
                  premium_ratio, close_price, change_rate, turnover_rate, buyer_name, seller_name,
                  buyer_code, seller_code, discount_ratio, free_shares_ratio, total_shares_ratio,
@@ -93,9 +127,9 @@ public class SqliteMarketEventRepository : IMarketEventRepository
         var p = Params(cmd, "$td", "$code", "$rank", "$name", "$price", "$vol", "$amt",
                        "$prem", "$close", "$chg", "$turn", "$buyer", "$seller",
                        "$bcode", "$scode", "$disc", "$fsr", "$tsr", "$c1", "$c5", "$c10", "$c20", "$f");
-        foreach (var x in list)
+        foreach (var (x, rank) in numbered)
         {
-            p["$td"].Value = D(x.TradeDate); p["$code"].Value = x.Code; p["$rank"].Value = x.DailyRank;
+            p["$td"].Value = D(x.TradeDate); p["$code"].Value = x.Code; p["$rank"].Value = rank;
             p["$name"].Value = x.Name; p["$price"].Value = N(x.DealPrice); p["$vol"].Value = N(x.DealVolume);
             p["$amt"].Value = N(x.DealAmount); p["$prem"].Value = N(x.PremiumRatio);
             p["$close"].Value = N(x.ClosePrice); p["$chg"].Value = N(x.ChangeRate);
@@ -110,7 +144,7 @@ public class SqliteMarketEventRepository : IMarketEventRepository
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
-        return list.Count;
+        return numbered.Count;
     }
 
     // ── 机构调研 ───────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using StockPlatform.Data.Remote;
+using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 using StockPlatform.Scheduling;
@@ -26,10 +27,18 @@ namespace StockPlatform.Tasks;
 /// ════ 一批＝一整天 ════
 /// 快照是"一整天要么有要么没有"的事，所以整批 yield 一次：中断就整批不落库、下次重来，
 /// 不会留下半个市场的当天数据（那种残缺事后完全看不出来）。
+///
+/// ════ 跑完必须回查库（2026-09-16 用户要求）════
+/// 抓取侧的对账（服务端自报 total − 停牌 − 实收）只证明"这一轮请求收全了"，证明不了
+/// "写进库了"。所以收尾时再用 <see cref="SqliteMoneyFlowDayAudit"/> 查一次库：
+/// 当天有日K的个股有多少只，库里的资金流就该有多少行。不齐就**整项判失败**（状态列红字），
+/// 并在日志里写清是哪天、差多少、拿什么比的——因为这一项漏一天就永久补不回来，
+/// 而别的日更表隔天都还能重抓。
 /// </summary>
 public sealed class MoneyFlowSnapshotTask(
     INetInflowDetailRepository repository,
-    EastMoneyMoneyFlowSnapshotProvider snapshot) : FetchTaskBase<NetInflowDetail>
+    EastMoneyMoneyFlowSnapshotProvider snapshot,
+    SqliteMoneyFlowDayAudit? dayAudit = null) : FetchTaskBase<NetInflowDetail>
 {
     public override FetchActionId Id => FetchActionId.FetchMoneyFlowSnapshot;
 
@@ -123,17 +132,69 @@ public sealed class MoneyFlowSnapshotTask(
     protected override Task<TaskRunResult?> OnCompletedAsync(
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
+        var day = CheckDay();
+        var errors = _errors.ToList();
+
         // 有跳过原因时记「本轮没开工」而不是完成——那是"这次没干成"，记成完成会让计划
         // 以为这一期做完了、今天不再来（见 TaskRunResult.Skipped）。盘中跑的那一次全靠这个。
+        //
+        // ⚠ 没开工**也要回查库**：熔断/盘中跳过的这一轮什么都没抓，而当天要是还空着，
+        //   那正是最危险的状态——没人告诉你的话，下一个交易日开盘它就永久没了。
         if (_skipped is { } why)
-            return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, _errors.ToList()));
+        {
+            if (day is { IsAlert: true })
+            {
+                Report($"⚠ 本轮没开工（{why}），而且 {WhyRed(day)}");
+                errors.Add($"分档资金流{day.Text}——本轮没开工（{why}）");
+            }
+            return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, errors));
+        }
 
         var summary = $"分档资金流快照：{_day:yyyy-MM-dd} 写入 {_rows} 行，用时 {Fmt(_sw.Elapsed)}。"
                     + $"本地共 {repository.CountCodes()} 只 / {repository.Count()} 行。";
+        if (day != null) summary += $" 核对：{day.Text}。";
         Report(summary);
+
+        // 库里就是不齐 → 整项失败（状态列标红）。为什么这一项要这么狠，而别的表不：
+        // 快照接口只给最近一个交易日，今天不补上，下一个交易日开盘后就**永久**取不回来了。
+        if (day is { IsAlert: true })
+        {
+            Report($"⚠ {WhyRed(day)}");
+            errors.Add($"分档资金流{day.Text}");
+            return Task.FromResult<TaskRunResult?>(
+                new TaskRunResult(TaskState.Failed, errors, NothingToDo: false, summary));
+        }
+
         return Task.FromResult<TaskRunResult?>(
-            new TaskRunResult(TaskState.Completed, _errors.ToList(), NothingToDo: false, summary));
+            new TaskRunResult(TaskState.Completed, errors, NothingToDo: false, summary));
     }
+
+    /// <summary>
+    /// 回查库：当天该有多少只、实际有多少只。判据本体在 <see cref="SqliteMoneyFlowDayAudit"/>——
+    /// 界面上那一格显示的是同一个判据，两处各写一份迟早漂移。
+    ///
+    /// 查不成（库被写锁占着、老库还没这些表）就返回 null：核对不了不等于数据不对，
+    /// 不能因此把一轮成功的抓取判成失败。
+    /// </summary>
+    private MoneyFlowDayStatus? CheckDay()
+    {
+        if (dayAudit == null) return null;
+        try { return dayAudit.Check(); }
+        catch (Exception ex)
+        {
+            Report($"（当天齐整度没核对成：{ex.Message}）");
+            return null;
+        }
+    }
+
+    /// <summary>标红时必须说清**为什么红**、以及为什么它比别的项急。</summary>
+    private static string WhyRed(MoneyFlowDayStatus d) =>
+        $"{d.Day:yyyy-MM-dd} 的分档资金流库里只有 {d.Have} 只，而当天有日线的个股是 {d.Expect} 只，"
+      + $"差 {d.Missing} 只（容差 {SqliteMoneyFlowDayAudit.Tolerance}）。"
+      + "多半是翻页被限流截断、或整项没跑成。"
+      + "⚠ 这份数据的接口**只给最近一个交易日**，下一个交易日开盘后就永久取不回来了"
+      + "（事后只能逐股补，5500 个请求换一天）——请现在就重跑本项，"
+      + "整天按主键 upsert 去重，已有的行不受影响。";
 
     private static string Fmt(TimeSpan t) =>
         t.TotalMinutes >= 1 ? $"{(int)t.TotalMinutes} 分 {t.Seconds} 秒" : $"{t.TotalSeconds:F1} 秒";

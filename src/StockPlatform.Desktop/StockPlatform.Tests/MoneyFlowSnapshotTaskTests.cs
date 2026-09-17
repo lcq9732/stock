@@ -84,10 +84,61 @@ public class MoneyFlowSnapshotTaskTests : IDisposable
                             batchSize: 10_000),
             new HttpClient(handler));
 
-    private async Task<(TaskRunResult Result, List<TaskProgress> Progress)> RunAsync(
-        PageHandler handler)
+    /// <summary>
+    /// 造出收尾核对要的那三份本地数据：交易日历、在市名册、当天的个股日K。
+    ///
+    /// 判据是"当天有日K的个股有多少只，资金流就该有多少行"，所以这三样缺一不可——
+    /// 少了日历判不出是哪个交易日，少了名册判不出日K自己到位没有。
+    /// </summary>
+    private void SeedLocal(DateTime day, int roster, int bars)
     {
-        var task = new MoneyFlowSnapshotTask(_repo, NewProvider(handler));
+        using var conn = new SqliteConnection($"Data Source={_paths.CurrentDb}");
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+        using var tx = conn.BeginTransaction();
+
+        void Exec(string sql)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
+
+        Exec($"INSERT OR REPLACE INTO TradingDay(day, source) VALUES('{day:yyyy-MM-dd}', 'test');");
+        for (int i = 0; i < roster; i++)
+        {
+            var code = (600000 + i).ToString();
+            Exec($"INSERT OR REPLACE INTO StockMeta(code, name, type) VALUES('{code}', 'T{i}', 'stock');");
+            if (i < bars)
+                Exec("INSERT OR REPLACE INTO Bar(code, granularity, period_start, close) "
+                   + $"VALUES('{code}', 'day', '{day:yyyy-MM-dd} 00:00:00', 1.0);");
+        }
+        tx.Commit();
+    }
+
+    /// <summary>直接往资金流表里塞几行（模拟"上一轮只抓到一半"）。</summary>
+    private void SeedFlow(DateTime day, int rows)
+    {
+        using var conn = new SqliteConnection($"Data Source={_paths.CurrentDb}");
+        conn.Open();
+        using var tx = conn.BeginTransaction();
+        for (int i = 0; i < rows; i++)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "INSERT OR REPLACE INTO NetInflowDetail(code, trade_date, main_net) "
+                            + $"VALUES('{600000 + i}', '{day:yyyy-MM-dd}', 1.0);";
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
+    private async Task<(TaskRunResult Result, List<TaskProgress> Progress)> RunAsync(
+        PageHandler handler, bool withAudit = false)
+    {
+        var task = new MoneyFlowSnapshotTask(_repo, NewProvider(handler),
+            withAudit ? new SqliteMoneyFlowDayAudit(_paths.CurrentDb) : null);
         var seen = new List<TaskProgress>();
         task.OnProgress += p => seen.Add(p);
         var result = await task.RunAsync(new TaskRunArgs(), CancellationToken.None);
@@ -166,6 +217,94 @@ public class MoneyFlowSnapshotTaskTests : IDisposable
 
         Assert.Equal(2, _repo.Count());                  // 拿到的照样落库
         Assert.Contains(result.Errors, e => e.Contains("少了 3 只"));
+    }
+
+    // ──────────── 收尾回查库（2026-09-16 用户要求）────────────
+    //
+    // 抓取侧那条对账（自报 total − 停牌 − 实收）只证明"这一轮请求收全了"，证明不了
+    // "库里真有那么多行"。这一组测的是落库之后再查一次库的那一步。
+
+    [Fact]
+    public async Task 收尾核对_库里齐了就正常完成()
+    {
+        SeedLocal(AfterClose.Date, roster: 3, bars: 3);
+        var handler = new PageHandler(Page(AfterClose, total: 3, "600000", "600001", "600002"));
+
+        var (result, progress) = await RunAsync(handler, withAudit: true);
+
+        Assert.Equal(TaskState.Completed, result.State);
+        Assert.Empty(result.Errors);
+        Assert.Contains(progress, p => p.Text.Contains("已齐"));
+    }
+
+    [Fact]
+    public async Task 收尾核对_库里就是不齐要整项失败_并说清为什么()
+    {
+        // 抓回来 1 只，可当天有日线的个股是 10 只——这就是"翻页被截断/整项没跑成"的样子。
+        // 必须红：这份数据下一个交易日开盘后就永久取不回来了。
+        SeedLocal(AfterClose.Date, roster: 10, bars: 10);
+        var handler = new PageHandler(Page(AfterClose, total: 1, "600000"));
+
+        var (result, progress) = await RunAsync(handler, withAudit: true);
+
+        Assert.Equal(TaskState.Failed, result.State);
+        Assert.Contains(result.Errors, e => e.Contains("差 9 只"));
+        // 标红必须带上"为什么红"：差多少、拿什么比的、为什么现在就得补
+        Assert.Contains(progress, p => p.Text.Contains("永久取不回来"));
+        Assert.Contains(progress, p => p.Text.Contains("当天有日线的个股是 10 只"));
+    }
+
+    [Fact]
+    public async Task 收尾核对_差一两只不算缺()
+    {
+        // 实测"当天个股日K只数 − 资金流行数"只出现过 0 和 +1，容差 2 是留给这个的。
+        SeedLocal(AfterClose.Date, roster: 100, bars: 100);
+        SeedFlow(AfterClose.Date, rows: 99);
+        var handler = new PageHandler(Page(AfterClose, total: 99, "600000"));
+
+        var (result, _) = await RunAsync(handler, withAudit: true);
+
+        Assert.Equal(TaskState.Completed, result.State);
+    }
+
+    [Fact]
+    public async Task 收尾核对_个股日K自己没到位时不判失败()
+    {
+        // 名册 100 只、当天日K只有 50 只 → 期望值本身不可信（日K还没抓完）。
+        // 这时候判"资金流缺了"是把日K的锅算到这一项头上，会让人去重跑一个本来没错的任务。
+        SeedLocal(AfterClose.Date, roster: 100, bars: 50);
+        var handler = new PageHandler(Page(AfterClose, total: 1, "600000"));
+
+        var (result, progress) = await RunAsync(handler, withAudit: true);
+
+        Assert.Equal(TaskState.Completed, result.State);
+        Assert.Contains(progress, p => p.Text.Contains("无法核对"));
+    }
+
+    [Fact]
+    public async Task 收尾核对_本轮没开工而当天还空着_也要报出来()
+    {
+        // 熔断/盘中那种"没开工"的轮次最危险：什么都没抓，而当天要是还空着，
+        // 没人提醒的话下一个交易日开盘它就永久没了。所以跳过的轮次也要回查库。
+        SeedLocal(DateTime.Today, roster: 10, bars: 10);
+        var handler = new PageHandler(Page(Intraday, total: 10, "600000"));
+
+        var (result, _) = await RunAsync(handler, withAudit: true);
+
+        Assert.NotNull(result.SkippedReason);            // 仍记「本轮没开工」，今天还能再来
+        Assert.Contains(result.Errors, e => e.Contains("差 10 只"));
+    }
+
+    [Fact]
+    public void 判据本身_没有交易日历时不下结论()
+    {
+        // 日历空着判不出"最近一个交易日是哪天"。这种状态要显示成"没法核对"，
+        // 不能默认成"缺了"——那会天天红着，人很快就不看了。
+        var status = new SqliteMoneyFlowDayAudit(_paths.CurrentDb).Check();
+
+        Assert.Null(status.Day);
+        Assert.False(status.IsAlert);
+        Assert.False(status.IsComplete);
     }
 
     [Fact]

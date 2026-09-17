@@ -305,7 +305,7 @@ public class FetchTaskCatalogTests
         foreach (var id in new[]
                  {
                      RetryTaskIds.Margin, RetryTaskIds.Lhb, RetryTaskIds.LhbSeat,
-                     RetryTaskIds.MarketEvents, RetryTaskIds.MoneyFlowDetail,
+                     RetryTaskIds.BlockTrade, RetryTaskIds.MoneyFlowDetail,
                  })
             Assert.True(Enum.TryParse<FetchActionId>(id, out _), $"{id} 不是有效的 FetchActionId");
     }

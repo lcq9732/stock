@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 using StockPlatform.Logic.Models;
@@ -139,12 +139,25 @@ public sealed class SqliteDailyTableAuditor(string dbPath)
     /// 放在 Spec 上而不是另开一张查表：这里已经有 <see cref="HowToFill"/> 这种"该跑哪一项"
     /// 的信息了，两处放迟早分叉。
     /// </param>
+    /// <param name="SkipDayCheck">
+    /// **当日完整性体检跳过这张表**（2026-09-17）。只有分档资金流是这样：它的窗口只有一个交易日，
+    /// 等到日更末尾才发现就晚了，所以那一项在自己收尾时就回查库（见 <see cref="SqliteMoneyFlowDayAudit"/>）。
+    /// 全库体检照查不误——这个开关只管当日那一趟。
+    /// </param>
+    /// <param name="RunsAfterDayCheck">
+    /// 这一项在 <c>DailyOrder</c> 里排在**当日完整性体检之后**（2026-09-17），
+    /// 所以当日体检要往前挪一个交易日查——体检跑的时候它今天那批还没抓，查当天必然误报。
+    ///
+    /// 做成配置而不是在体检里写 <c>spec.Table == "LhbSeat"</c>：日更顺序是会变的
+    /// （【拉取市场事件】拆成四项时就要重排），改顺序的人在这儿看得见，写在别处的 if 他看不见。
+    /// </param>
     public sealed record Spec(
         string Table, string DateColumn, string Label, string HowToFill,
         int LagDays = 0, int WindowDays = 0,
         double ThinRatio = 0.2, bool CheckMarkets = false,
         string CodeColumn = "code", double CoverageFloor = 0,
-        string OwnerTaskId = "");
+        string OwnerTaskId = "",
+        bool SkipDayCheck = false, bool RunsAfterDayCheck = false);
 
     /// <summary>
     /// 要体检的日频表。**只放"每个交易日全市场必有一批"的表**——机构调研、限售解禁、股东增减持
@@ -167,15 +180,62 @@ public sealed class SqliteDailyTableAuditor(string dbPath)
         new("NetInflowDetail", "trade_date",   "资金流明细(东财)",
             "【资金流明细】重跑一次——⚠ 数据源只给最近 120 天，更早的补不回来了",
             WindowDays: 120,
-            ThinRatio: SnapshotTableThinRatio, CheckMarkets: true, CoverageFloor: 0.8),
+            ThinRatio: SnapshotTableThinRatio, CheckMarkets: true, CoverageFloor: 0.8,
+            SkipDayCheck: true),   // 当天归【分档资金流快照】自己收尾核对，见 SqliteMoneyFlowDayAudit
             // ↑ 故意不配 OwnerTaskId：这张表只报不补。补一天要走 push2his 逐股通道 5500 个请求
             //   （快照那条通道只给最近一个交易日，补不了历史），代价远超收益；而且加了
             //   CoverageFloor 之后实测残缺 0 天——早先那 6 天全落在覆盖未达标期里。
         new("LhbSeat",         "trade_date",   "龙虎榜席位(东财)", "【龙虎榜席位】重跑一次",
-            ThinRatio: EventTableThinRatio, CheckMarkets: true, OwnerTaskId: RetryTaskIds.LhbSeat),
-        new("BlockTrade",      "trade_date",   "大宗交易(东财)",   "【市场事件】重跑一次",
-            ThinRatio: EventTableThinRatio, CheckMarkets: true, OwnerTaskId: RetryTaskIds.MarketEvents),
+            ThinRatio: EventTableThinRatio, CheckMarkets: true, OwnerTaskId: RetryTaskIds.LhbSeat,
+            // 它在 DailyOrder 里排在**整组最末**（首轮要几小时），当日体检跑的时候今天那批还没抓
+            RunsAfterDayCheck: true),
+        new("BlockTrade",      "trade_date",   "大宗交易(东财)",   "【大宗交易】重跑一次",
+            ThinRatio: EventTableThinRatio, CheckMarkets: true, OwnerTaskId: RetryTaskIds.BlockTrade),
     ];
+
+    /// <summary>
+    /// **覆盖式快照表**（2026-09-16）：库里只留最新一份、不留历史，所以"每天多少行"那套判据
+    /// 对它们根本不适用——能判的只有一件事：**它停在哪天**。
+    ///
+    /// 这类表的失效模式很实在：板块行情停在三天前，热度页、板块指数合成用的就是三天前的涨跌幅，
+    /// 而界面上什么都看不出来。
+    /// </summary>
+    /// <param name="DateColumn">日期列。可能是 "yyyy-MM-dd HH:mm:ss"（Board.as_of），比对时截前 10 位。</param>
+    /// <param name="LagDays">允许比最新交易日落后几个交易日。板块那两项在 <c>DailyOrder</c> 里排在
+    /// 当日体检**之后**，当天那批还没抓，所以允许落后 1 天，否则每轮必报。</param>
+    public sealed record SnapshotSpec(
+        string Table, string DateColumn, string Label, string HowToFill, int LagDays = 0);
+
+    /// <summary>要看"停在哪天"的覆盖式快照表。</summary>
+    public static readonly SnapshotSpec[] SnapshotTables =
+    [
+        new("Board", "as_of", "板块行情",
+            "【概念和行业板块】重跑一次（板块指数合成也要跟着跑，它负责把涨跌幅回填进 Board）",
+            LagDays: 1),
+        new("FundamentalMetric", "as_of_date", "总股本/流通市值",
+            "【总股本】和【股票名册与流通市值】各重跑一次——这两个数直接决定 PE/PB"),
+    ];
+
+    /// <summary>某张覆盖式快照表停在哪一天。表不存在或空表返回 null（＝这类数据本地还没抓过）。</summary>
+    public DateTime? LatestDayOf(SnapshotSpec spec)
+    {
+        if (!SafeIdent.IsMatch(spec.Table) || !SafeIdent.IsMatch(spec.DateColumn))
+            throw new ArgumentException($"表名/列名不合法：{spec.Table}.{spec.DateColumn}");
+
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+
+        using (var probe = conn.CreateCommand())
+        {
+            probe.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$t;";
+            probe.Parameters.AddWithValue("$t", spec.Table);
+            if (Convert.ToInt32(probe.ExecuteScalar() ?? 0) == 0) return null;
+        }
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT MAX(substr({spec.DateColumn}, 1, 10)) FROM {spec.Table};";
+        return cmd.ExecuteScalar() is string s && TryParse(s, out var d) ? d : null;
+    }
 
     /// <summary>残缺日命中了哪条判据（可同时命中，所以是 Flags）。</summary>
     [Flags]
@@ -307,6 +367,115 @@ public sealed class SqliteDailyTableAuditor(string dbPath)
     }
 
     /// <summary>
+    /// 当日体检往回看多少个自然日（2026-09-16）。判据要的样本是"前 10 个有效交易日"
+    /// （<see cref="ThinWindowRadius"/>）加清淡日豁免的前 10 天，60 个自然日稳稳够。
+    /// </summary>
+    private const int OneDayLookbackDays = 60;
+
+    /// <summary>
+    /// **只查一天**（2026-09-16，给日更末尾的当日完整性体检用）。判据跟 <see cref="Check"/>
+    /// 完全一样，区别只有两个：范围是一天，而且读表时带日期下界。
+    ///
+    /// ⚠ 为什么这里可以截日历，而 <see cref="CheckDays"/> 明确不许截：那个方法复查的是
+    /// **历史中间**的某些天，两条判据都要用到它们**后面**的样本，截了就比体检宽松、会把
+    /// 补不上的天静默划掉。这里查的是"最近一个该有数据的交易日"——它后面本来就没有样本，
+    /// 截掉的只是前面用不上的那十几年，判定结果一模一样（有测试守着，见 DailyTableOneDayTests）。
+    ///
+    /// 返回 null＝**判不了**（表不存在、这段窗口里没有日历、或者这张表在窗口内一行都没有，
+    /// 比如这类数据本地还没开始抓）。判不了不等于缺数据，别当成告警。
+    /// </summary>
+    /// <param name="day">要查的那个交易日。</param>
+    public DayCheck? CheckOneDay(Spec spec, string calendarCode, DateTime day)
+    {
+        ValidateIdents(spec);
+
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+
+        using (var probe = conn.CreateCommand())
+        {
+            probe.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$t;";
+            probe.Parameters.AddWithValue("$t", spec.Table);
+            if (Convert.ToInt32(probe.ExecuteScalar() ?? 0) == 0) return null;
+        }
+
+        var since = day.AddDays(-OneDayLookbackDays).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var target = day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        var calendar = ReadCalendar(conn, calendarCode, day, since);
+        if (calendar.Count == 0 || !string.Equals(calendar[^1].Day, target, StringComparison.Ordinal))
+            return null;   // 日历里根本没有这一天（还没抓到当天的指数K线）——判不了
+
+        var rowsByDay = ReadRowCounts(conn, spec, since);
+        if (rowsByDay.Count == 0) return null;   // 这张表在这段窗口里一行都没有＝本地还没抓这类数据
+
+        var marketsByDay = spec.CheckMarkets
+            ? ReadMarketsByDay(conn, spec, since)
+            : new Dictionary<string, DayMarkets>(StringComparer.Ordinal);
+        var coreMarkets = CoreMarketsOf(marketsByDay);
+
+        var rowSeries = calendar.Select(c => rowsByDay.GetValueOrDefault(c.Day)).ToList();
+        int i = calendar.Count - 1;
+        int n = rowSeries[i];
+
+        // 空日跟残缺日分开报：一行都没有是"这一项今天没跑成/数据源还没出"，
+        // 有行但不全是"只抓到一半"。补法相同，但话得说清楚，不然人不知道该查什么。
+        if (n == 0) return new DayCheck(spec, day, 0, 0, [], PartialReason.None, IsEmpty: true);
+
+        // 清淡日（熔断、长假前后）市场本身就没怎么交易，两条判据都豁免——跟 Check 一致。
+        if (IsQuietDay(calendar, i)) return new DayCheck(spec, day, n, 0, [], PartialReason.None);
+
+        int nearby = TrailingMedian(rowSeries, i);
+        var reason = PartialReason.None;
+        if (nearby > 0 && n < nearby * spec.ThinRatio) reason |= PartialReason.ThinRows;
+
+        var missing = MissingMarketsOn(marketsByDay, coreMarkets, target);
+        if (missing.Length > 0) reason |= PartialReason.MissingMarket;
+
+        return new DayCheck(spec, day, n, nearby, missing, reason);
+    }
+
+    /// <summary>
+    /// 当日体检对一张表的结论（2026-09-16）。
+    /// </summary>
+    /// <param name="Rows">这天实际有多少行。</param>
+    /// <param name="Nearby">邻近中位数（判 ThinRows 的基准）；没算出基准或不适用时是 0。</param>
+    /// <param name="MissingMarkets">缺了哪几个核心交易所。</param>
+    /// <param name="IsEmpty">这天一行都没有。</param>
+    public sealed record DayCheck(
+        Spec Spec, DateTime Day, int Rows, int Nearby, Exchange[] MissingMarkets,
+        PartialReason Reason, bool IsEmpty = false)
+    {
+        /// <summary>要不要报出来。</summary>
+        public bool IsBad => IsEmpty || Reason != PartialReason.None;
+
+        /// <summary>报给人看的一句话——必须说清是哪天、少了什么、拿什么比的。</summary>
+        public string Text
+        {
+            get
+            {
+                if (IsEmpty) return $"{Spec.Label}：{Day:MM-dd} 一行都没有";
+                var bits = new List<string>();
+                if (Reason.HasFlag(PartialReason.ThinRows))
+                    bits.Add($"只有 {Rows} 行、邻近水平是 {Nearby} 行");
+                if (Reason.HasFlag(PartialReason.MissingMarket))
+                    bits.Add($"缺{string.Join("、", MissingMarkets.Select(ExchangeName))}整天的数据");
+                return bits.Count == 0
+                    ? $"{Spec.Label}：{Day:MM-dd} 齐（{Rows} 行）"
+                    : $"{Spec.Label}：{Day:MM-dd} {string.Join("，", bits)}";
+            }
+        }
+
+        private static string ExchangeName(Exchange ex) => ex switch
+        {
+            Exchange.Shanghai => "沪市",
+            Exchange.Shenzhen => "深市",
+            Exchange.Beijing => "北交所",
+            _ => ex.ToString(),
+        };
+    }
+
+    /// <summary>
     /// **只复查指定的那几天**（2026-09-16 加）——补完残缺日之后要判断"补上了没有"，
     /// 判据必须跟 <see cref="Check"/> 完全一致。
     ///
@@ -351,8 +520,18 @@ public sealed class SqliteDailyTableAuditor(string dbPath)
             if (!TryParse(calendar[i].Day, out var day)) continue;
 
             int n = rowSeries[i];
-            // 整天变空了：那已经不是"残缺"而是"空日"，交给空日那条线，这里不留着
-            if (n == 0) continue;
+            // ⚠ 一行都没有＝**仍然没补上**，必须算"还不齐"（2026-09-16 改）。
+            //
+            // 原来这里是 `continue`（"空日交给空日那条线"）。那个前提在当日完整性体检接进来之后
+            // 不成立了：它会把"今天整天没有"记成这条待办（龙虎榜、融资余额都可能这样），
+            // 而复查一看"0 行不算残缺"就判成补齐、把它从名单里**静默划掉**——
+            // 补没补上都一样过关，正是这套东西要消灭的那种安静的错。
+            // 补不上的会靠 Tries 收敛：补满几轮仍是空，进 ConfirmedPartialDays，以后不再报。
+            if (n == 0)
+            {
+                still.Add(new PartialDay(day, 0, TrailingMedian(rowSeries, i), [], PartialReason.ThinRows));
+                continue;
+            }
             if (IsQuietDay(calendar, i)) continue;
 
             int nearby = TrailingMedian(rowSeries, i);
@@ -388,12 +567,15 @@ public sealed class SqliteDailyTableAuditor(string dbPath)
 
     /// <summary>每个交易日出现了哪些交易所。走 <see cref="MarketClassifier"/> 而不是在 SQL 里
     /// 写 substr 前缀规则——920 是北交所，自写前缀曾害得 342 只票静默抓不到。</summary>
-    private static Dictionary<string, DayMarkets> ReadMarketsByDay(SqliteConnection conn, Spec spec)
+    private static Dictionary<string, DayMarkets> ReadMarketsByDay(
+        SqliteConnection conn, Spec spec, string? since = null)
     {
         var byDay = new Dictionary<string, DayMarkets>(StringComparer.Ordinal);
         using var cmd = conn.CreateCommand();
         // DISTINCT：同股同日可能多行（大宗一天多笔、龙虎榜一只票多条），按"有没有这只票"算
-        cmd.CommandText = $"SELECT DISTINCT {spec.DateColumn} AS d, {spec.CodeColumn} AS c FROM {spec.Table};";
+        cmd.CommandText = $"SELECT DISTINCT {spec.DateColumn} AS d, {spec.CodeColumn} AS c FROM {spec.Table} "
+                        + $"WHERE ($since IS NULL OR {spec.DateColumn} >= $since);";
+        cmd.Parameters.AddWithValue("$since", (object?)since ?? DBNull.Value);
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -443,7 +625,7 @@ public sealed class SqliteDailyTableAuditor(string dbPath)
     }
 
     private static List<(string Day, double Amount)> ReadCalendar(
-        SqliteConnection conn, string calendarCode, DateTime cutoff)
+        SqliteConnection conn, string calendarCode, DateTime cutoff, string? since = null)
     {
         var calendar = new List<(string Day, double Amount)>();
         using var cmd = conn.CreateCommand();
@@ -451,21 +633,27 @@ public sealed class SqliteDailyTableAuditor(string dbPath)
             SELECT substr(period_start, 1, 10) AS d, COALESCE(amount, 0)
             FROM Bar
             WHERE code = $cal AND granularity = $g AND substr(period_start, 1, 10) <= $cutoff
+              AND ($since IS NULL OR substr(period_start, 1, 10) >= $since)
             ORDER BY d;
             """;
         cmd.Parameters.AddWithValue("$cal", calendarCode);
         cmd.Parameters.AddWithValue("$g", Granularity.Day);
         cmd.Parameters.AddWithValue("$cutoff", cutoff.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        cmd.Parameters.AddWithValue("$since", (object?)since ?? DBNull.Value);
         using var r = cmd.ExecuteReader();
         while (r.Read()) calendar.Add((r.GetString(0), r.IsDBNull(1) ? 0 : r.GetDouble(1)));
         return calendar;
     }
 
-    private static Dictionary<string, int> ReadRowCounts(SqliteConnection conn, Spec spec)
+    /// <param name="since">只数这一天起的（yyyy-MM-dd，null＝全表）。当日体检必须带它：
+    /// NetInflow 那张 1,389 万行的表全表 GROUP BY 要 12.3 秒，带下界是 0.11 秒（实测）。</param>
+    private static Dictionary<string, int> ReadRowCounts(SqliteConnection conn, Spec spec, string? since = null)
     {
         var rowsByDay = new Dictionary<string, int>(StringComparer.Ordinal);
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT {spec.DateColumn} AS d, COUNT(*) FROM {spec.Table} GROUP BY {spec.DateColumn};";
+        cmd.CommandText = $"SELECT {spec.DateColumn} AS d, COUNT(*) FROM {spec.Table} "
+                        + $"WHERE ($since IS NULL OR {spec.DateColumn} >= $since) GROUP BY {spec.DateColumn};";
+        cmd.Parameters.AddWithValue("$since", (object?)since ?? DBNull.Value);
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {

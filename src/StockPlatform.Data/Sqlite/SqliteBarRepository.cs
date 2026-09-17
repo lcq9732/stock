@@ -405,23 +405,35 @@ public class SqliteBarRepository : IBarRepository
     /// 本地最后一根可能停在几个月前，它们缺最新交易日是**正常的**，混进名单只会让重试永远做无用功。
     /// 只有"昨天还在交易、今天却没有"的才是真正值得重试的漏抓。
     ///
-    /// 只认6位纯数字代码（跟 <see cref="GetAllCodes"/> 同一条线）——指数/ETF/板块合成各有自己的
-    /// 抓取路径和覆盖情况，不该混在个股这份名单里。
+    /// 挑哪些标的看 <paramref name="type"/>（<c>StockMeta.type</c>）。
+    ///
+    /// ⚠ **2026-09-16 从"六位纯数字代码"换成按类型过滤**，这是个真漏洞：ETF 和指数在本地是
+    /// **带前缀存**的（<c>sh510300</c>、<c>sh000001</c>），`GLOB '[0-9]{6}'` 那条把它们全挡在外面，
+    /// 于是 1,665 只 ETF 和 9 条指数**当天整批没抓到也不会有任何告警**，体检照样打印
+    /// "当天的个股日线是齐的"。教训跟"市场前缀走 MarketClassifier"是同一条：
+    /// **别靠代码字面猜标的类型**。
+    ///
+    /// 顺带收紧的一处：退市股（<c>type='delisted'</c>）原来也是六位数字、混在个股名单里，
+    /// 现在按类型天然分开了——它们的尾巴归【退市股收尾】，重试名单里出现只会做无用功。
     /// </summary>
-    public List<string> GetCodesMissingDay(string granularity, DateTime latest, DateTime previous)
+    /// <param name="type"><c>StockMeta.type</c>：stock / etf / index。老行没有这一列，按 stock 算。</param>
+    public List<string> GetCodesMissingDay(string granularity, DateTime latest, DateTime previous,
+                                           string type = SqliteStockMetaUpsert.TypeStock)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT b.code FROM Bar b
+            JOIN StockMeta m ON m.code = b.code
             WHERE b.granularity = $g AND b.period_start = $prev
-              AND b.code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'
+              AND COALESCE(m.type, 'stock') = $type
               AND NOT EXISTS (
                     SELECT 1 FROM Bar x
                     WHERE x.code = b.code AND x.granularity = $g AND x.period_start = $latest)
             ORDER BY b.code;
             """;
         cmd.Parameters.AddWithValue("$g", granularity);
+        cmd.Parameters.AddWithValue("$type", type);
         cmd.Parameters.AddWithValue("$latest", latest.ToString(DateFormat, CultureInfo.InvariantCulture));
         cmd.Parameters.AddWithValue("$prev", previous.ToString(DateFormat, CultureInfo.InvariantCulture));
 

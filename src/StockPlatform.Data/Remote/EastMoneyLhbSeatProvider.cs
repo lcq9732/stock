@@ -5,14 +5,25 @@ using StockPlatform.Logic.Models;
 namespace StockPlatform.Data.Remote;
 
 /// <summary>
-/// 龙虎榜营业部席位明细（东财 datacenter）。买方榜 131 万行 + 卖方榜 133 万行，是本次接入的
-/// 数据里最大的一块，所以是唯一走**流式回调**而不是"返回一个大 List"的 provider：
-/// 264 万行全装进内存再写库，光对象开销就是几百 MB，而且中途失败前面全白抓。
+/// 龙虎榜营业部席位明细（东财 datacenter）。买方榜 131 万行 + 卖方榜 133 万行。
 ///
-/// 改成按片回调之后：每抓完一个月就交给调用方落库，中断时已经落库的部分是有效的，
-/// 重跑从本地水位线接着走即可。
+/// ════ 2026-09-17：从"按月切片"改成"按交易日" ════
+/// 原来一次查一个月（40~60 页）。排序键 <c>TRADE_DATE,SECURITY_CODE</c> **不唯一**
+/// （一天一只股有 5~10 行），而东财翻页靠排序定序——键不唯一时同键行在页与页之间的先后
+/// 不保证，**既会重复又会丢行**。实测 2021-05 月片收到 6226 行里重复 14 行、
+/// 同时丢掉 14 行真数据；全表 178 万行里这样的副本有 3579 行，缺的行一样多。
+///
+/// 改按日之后 5204 个"交易日 × 买卖侧"里有 4941 个**只有一页**，页边界根本不存在；
+/// 同样的 2021-05 逐日抓 18 天，收到 6226 行、重复 0 行，且正好含有月片漏掉的那 14 行。
+/// 剩下 263 个多页的日侧靠**排序键加长**兜（见 <see cref="SortColumns"/>）。
+///
+/// ⚠ 这个坑在 <c>EastMoneyLhbProvider.QueryAsync</c>（龙虎榜主表，2026-09-09 换源时写的）
+/// 的注释里早就写明白了，只是 2026-09-03 写的这个 provider 没跟上。
+///
+/// 落库是**整日替换**（<c>ILhbSeatRepository.ReplaceForDay</c>），所以反复抓多少次结果都一样，
+/// <see cref="LhbSeat.Seq"/> 这种位次型的主键末列也不会再堆出副本。
 /// </summary>
-public class EastMoneyLhbSeatProvider
+public class EastMoneyLhbSeatProvider : ILhbSeatDayFetcher
 {
     private const string BuyReport = "RPT_BILLBOARD_DAILYDETAILSBUY";
     private const string SellReport = "RPT_BILLBOARD_DAILYDETAILSSELL";
@@ -28,71 +39,62 @@ public class EastMoneyLhbSeatProvider
     }
 
     /// <summary>
-    /// 抓买卖双方席位明细，<b>每抓完一个月就回调一次</b>由调用方落库。
+    /// 排序键。<b>一列都不能少</b>——东财翻页靠排序定序，键不唯一时同键行在页与页之间的
+    /// 先后不保证，会既重复又丢行（见类注释里 2021-05 的实测）。
     ///
-    /// 回调粒度是"一片(一个月)"而不是"每 N 行"，因为 <see cref="LhbSeat.Seq"/> 要在**整片就位后**
-    /// 才能算：同一张榜里的多个匿名机构席位要按净额降序编位次，行没收齐就编不出稳定的号。
-    /// 一个月约 1.5 万行，内存毫无压力；而全量 264 万行一次性装内存才是真问题——这也正是
-    /// 不把整段数据攒完再返回的原因。断点粒度也因此天然是"月"。
+    /// 同一天同一只股可以有多张榜（<c>EXPLANATION</c>），同一张榜里可以有多个**匿名**机构席位
+    /// （<c>OPERATEDEPT_CODE</c> 一律 "0"、名称一律"机构专用"，实测同榜同代码多行的有 5.4 万组），
+    /// 所以定到唯一必须一路带到 <c>NET</c>。剩下的并列只有"席位和金额完全相同"的行，
+    /// 那种行彼此可互换，跨页换位也不改变结果。
+    ///
+    /// 2024-02-07（单侧 3085 行 / 7 页，全表最大的一天）实测：两侧各 7 页收齐、内部重复 0。
     /// </summary>
-    /// <param name="onBatch">一片数据就绪时的回调，返回值是实际写入行数。</param>
-    /// <returns>总共抓到并回调出去的行数。</returns>
-    public async Task<int> FetchAsync(
-        DateTime start, DateTime end, Func<List<LhbSeat>, int> onBatch,
-        IProgress<string>? progress = null, CancellationToken ct = default)
+    private const string SortColumns = "TRADE_DATE,SECURITY_CODE,EXPLANATION,NET,OPERATEDEPT_CODE";
+
+    /// <summary>
+    /// 抓某一个交易日的买卖两侧席位明细。
+    ///
+    /// ⚠ 两侧**都**要跟接口自报的 count 对上才算这一天完整（<see cref="LhbSeatDay.IsComplete"/>）——
+    /// 落库是整日替换，只收到买方就落库等于把卖方永久删掉。
+    /// 判断和处置交给调用方（<c>LhbSeatTask</c> 记残缺日、<c>LhbSeatDayWriter</c> 直接抛）。
+    ///
+    /// <see cref="LhbSeat.Seq"/> 在**整天两侧都收齐之后**统一自赋（见 <see cref="AssignSeq"/>）。
+    /// </summary>
+    public async Task<LhbSeatDay> FetchLhbSeatsOfDayAsync(DateTime day, CancellationToken ct = default)
     {
-        int total = 0;
-        // 按月切片：全量 2620 页，东财翻到上千页会拒绝；月片下每片 40 页左右，翻页永远是浅的
-        var slices = EastMoneyQuerySlicer.ByMonth(start, end);
+        var filter = EastMoneyQuerySlicer.DateFilter("TRADE_DATE", day.Date, day.Date);
+        var rows = new List<LhbSeat>();
+        int reportedBuy = -1, reportedSell = -1;
 
-        // ⚠ 循环嵌套顺序是**外层月份、内层买卖**，不能反过来。
-        //
-        // 反过来（先抓完所有月份的买方、再抓卖方）会在中断时丢数据：调用方的水位线是
-        // MAX(trade_date)、不区分买卖，买方一路抓到最新月时水位线就已经推到今天了；
-        // 此时中断，下一轮从今天开始抓，**卖方的历史就永远补不回来**。
-        // 首轮要跑几个小时，中断是常态，这个顺序错了迟早会踩上。
-        //
-        // 现在这样：某个月的买卖两边都落库了，水位线才会推过这个月。
-        for (int i = 0; i < slices.Count; i++)
+        foreach (var (report, isBuy) in new[] { (BuyReport, true), (SellReport, false) })
         {
-            var s = slices[i];
-            int inSlice = 0;
-
-            foreach (var (report, isBuy, label) in new[]
-                     {
-                         (BuyReport, true, "买方"),
-                         (SellReport, false, "卖方"),
-                     })
+            ct.ThrowIfCancellationRequested();
+            int reported = -1;
+            await foreach (var el in _dc.QueryAsync(
+                report, filter, SortColumns, onTotalCount: n => reported = n, ct: ct))
             {
-                ct.ThrowIfCancellationRequested();
-
-                var filter = EastMoneyQuerySlicer.DateFilter("TRADE_DATE", s.Start, s.End);
-                var rows = new List<LhbSeat>();
-
-                await foreach (var el in _dc.QueryAsync(report, filter, "TRADE_DATE,SECURITY_CODE", ct: ct))
-                {
-                    var row = Parse(el, isBuy);
-                    if (row != null) rows.Add(row);
-                }
-
-                AssignSeq(rows);
-                int written = rows.Count > 0 ? onBatch(rows) : 0;
-                inSlice += written;
-                total += written;
+                var row = Parse(el, isBuy);
+                if (row != null) rows.Add(row);
             }
-
-            if (inSlice > 0 || i % 12 == 0)
-                progress?.Report($"龙虎榜席位 {s.Name}（{i + 1}/{slices.Count}）：" +
-                                 $"本月买卖共 {inSlice} 行，累计 {total} 行");
+            // 那天那一侧一行都没有时接口连 result 都不给（走 yield break），拿不到 count——
+            // 记 0，跟"抓到 0 行"一致，调用方才能认成"数据源就是没有"而不是"抓漏了"。
+            if (reported < 0) reported = 0;
+            if (isBuy) reportedBuy = reported; else reportedSell = reported;
         }
-        return total;
+
+        AssignSeq(rows);
+        return new LhbSeatDay(day.Date, rows, reportedBuy, reportedSell);
     }
 
     /// <summary>
     /// 给同一张榜里的行编位次。分组键是"哪天+哪只股+买还是卖+哪张榜"，组内按净额降序。
     ///
-    /// 按净额而不是按接口返回顺序，是为了幂等——接口返回顺序不保证稳定，跟着它编号的话
-    /// 重抓一次就会产生一批 seq 不同的新行，同一天的数据在库里翻倍。
+    /// 按净额而不是按接口返回顺序，是为了让同一天两次抓出来的编号一致，看日志时对得上。
+    ///
+    /// ⚠ 但**幂等不是靠它保证的**，是靠整日替换（<c>ILhbSeatRepository.ReplaceForDay</c>）。
+    /// seq 是位次，取决于"这一组里有几行"：只要某次抓取多收了一行（跨页重复），整组编号就多
+    /// 一位，上一次落库的高位 seq 行没人覆盖得掉，永久留在库里——2026-09-17 之前正是这么
+    /// 堆出 3579 行副本的。改整日替换之后这条路彻底断了。
     /// </summary>
     public static void AssignSeq(List<LhbSeat> rows)
     {

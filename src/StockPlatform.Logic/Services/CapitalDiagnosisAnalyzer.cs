@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Models;
+﻿using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Services;
 
@@ -621,9 +621,12 @@ public class CapitalDiagnosisAnalyzer
             Tooltip =
                 "溢价率 = 成交价相对当日收盘的偏离。大幅折价常是股东减持套现，溢价接盘可能是产业资本，"
                 + "平价对倒多为机构间调仓或换券商席位。⚠ 溢价率按**成交金额加权**："
-                + "简单平均会被小额单带偏（宁德实测 33 笔简单平均 -1.13%、加权仅 -0.05%，两笔 288 万的"
-                + "小单占总额 0.14% 却改变了结论方向）。分类占比同样按金额而非笔数，且**向下取整不进位**"
-                + "（否则 99.7% 会显示成 100%，与折价 0.3% 相加超过 100%）。",
+                + "简单平均会被小额单带偏——宁德 2026-08-05 起实测 27 笔 18.48 亿，简单平均 -0.69%、"
+                + "加权只有 -0.03%，差距全来自 1 笔 288 万的营业部间折价过户（占总额 0.16%，"
+                + "成交价 303.20 贴着跌停、买卖双方都是东财的零售营业部，是过户不是抛售）。"
+                + "按笔数平均，这一笔拿到 1/27 的话语权，却只代表千分之一点六的钱。"
+                + "分类占比同样按金额而非笔数，且**向下取整不进位**"
+                + "（否则 99.8% 会显示成 100%，与折价那点相加超过 100%）。",
         };
 
         var main = w.Ranges[0];
@@ -665,8 +668,28 @@ public class CapitalDiagnosisAnalyzer
             : "折溢价结构分散，没有单一性质占主导";
         d.Conclusions.Add($"{list.Count} 笔 / {Yi(total)}，金额加权溢价率 {weighted:+0.00;-0.00}%，"
                           + $"平价对倒占金额 {Floor1(flat)} —— {nature}");
+        // 两个口径差得多时，把**差异的来源**点名出来（2026-09-17）。
+        // 只说"被小额单带偏"等于让人自己去猜是哪几笔；而这几笔往往本身就值得看一眼
+        // ——宁德那笔就是贴着跌停价的营业部间过户，不是抛售。
         if (Math.Abs(weighted - simple) > 0.3)
-            d.Conclusions.Add($"（简单平均为 {simple:+0.00;-0.00}%，被小额单带偏，不采用）");
+        {
+            // 判据：溢价率离加权值很远、金额却微不足道的那几笔，正是拉偏笔数平均的元凶。
+            var odd = list.Where(b => Math.Abs((b.PremiumRatio ?? 0) * 100 - weighted) > BlockPremium
+                                      && (b.DealAmount ?? 0) / total < 0.02)
+                          .OrderBy(b => b.DealAmount).ToList();
+            if (odd.Count > 0)
+            {
+                double oddAmt = odd.Sum(b => b.DealAmount ?? 0);
+                var when = odd.Count == 1 ? $"{odd[0].TradeDate:M-d} 那笔" : $"{odd.Count} 笔";
+                d.Conclusions.Add(
+                    $"（简单平均 {simple:+0.00;-0.00}%：差异来自 {when} {Yi(oddAmt)}，"
+                    + $"只占总额 {Floor1(oddAmt / total)}，按笔数平均却被它带偏 —— 不采用）");
+            }
+            else
+            {
+                d.Conclusions.Add($"（简单平均为 {simple:+0.00;-0.00}%，被小额单带偏，不采用）");
+            }
+        }
         return d;
     }
 

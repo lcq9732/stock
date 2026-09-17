@@ -528,6 +528,165 @@ public class SqliteStockDossierReader
         return num / den * 100;
     }
 
+    /// <summary>
+    /// 【被谁列为客户/供应商】——反向查 <c>partner_code</c>。
+    ///
+    /// ════ 为什么这一节单独存在、而且排在"自己披露"那节前面 ════
+    /// 披露有个很稳的规律：**大公司匿名、小公司实名**。宁德时代自己的年报里前五大客户是
+    /// 「第一名」「第二名」，一条边都连不出来；但反过来查，富临精工/德福科技/尚太科技…
+    /// 8 家实名点了它，而且占各自营收 36%~70%。站在宁德这一边只有反向查才看得见这些。
+    /// 实测 2358 只票这一节非空，比"自己披露"那节的实名覆盖大得多。
+    ///
+    /// ⚠ 没有趋势图，**是故意的**。唯一像时间序列的量是"每期被几家点名"，但那个数被
+    ///   各年抓取完成度左右（早年抓得少），画出来的斜率是抓取进度不是产业地位。
+    ///
+    /// 只取 rank≤5：rank=6 是「其余客户/其余供应商」那行校验和，它的 partner_code 恒为空，
+    /// 本来也进不来，写在条件里是为了让意图明确。
+    /// </summary>
+    private static DossierSection ReadInboundPartners(SqliteConnection conn, string code)
+    {
+        var columns = new List<DossierColumn>
+        {
+            new("报告期", 90), new("谁", 70), new("名称", 120), new("把它当作", 80),
+            new("名次", 50, true), new("金额", 100, true), new("占对方", 80, true), new("匹配档", 0),
+        };
+        var rows = new List<string[]>();
+        using var cmd = conn.CreateCommand();
+        // 按"占对方的比例"倒序，不按名次——占比才是"绑得有多深"。同样是第1名，
+        // 占对方 70% 和占对方 8% 是完全不同的两件事，而名次看不出这个差别。
+        cmd.CommandText = """
+            SELECT s.report_date, s.code, m.name, s.is_supplier, s.rank, s.amount, s.pct, s.match_type
+            FROM StockCustomerSupplier s
+            LEFT JOIN StockMeta m ON m.code = s.code
+            WHERE s.partner_code = $c AND s.rank <= 5
+            ORDER BY s.report_date DESC, s.pct DESC;
+            """;
+        cmd.Parameters.AddWithValue("$c", code);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            rows.Add(new[]
+            {
+                r.GetString(0),
+                Str(r, 1),
+                Str(r, 2),
+                // is_supplier 是**对方**的视角：对方把它记在供应商栏里，就是"对方向它采购"。
+                r.GetInt64(3) == 1 ? "供应商" : "客户",
+                Num(r.GetInt64(4), 0),
+                r.IsDBNull(5) ? "—" : Money(r.GetDouble(5)),
+                r.IsDBNull(6) ? "—" : Pct(r.GetDouble(6)),
+                MatchLabel(Str(r, 7, "")),
+            });
+        return new DossierSection { Columns = columns, Rows = rows };
+    }
+
+    /// <summary>
+    /// 【前五大客户与供应商】——这只票**自己**披露的那五行。
+    ///
+    /// 表格给全部报告期（99.9% 是年报，另有 107 只票有中报/一季报），趋势图**只画年报**：
+    /// 混进 6 个中报点会在年报线上造出假拐点，而那 6 个点解释不了任何东西。
+    ///
+    /// 集中度 = 前五名 pct 之和。它不依赖实名披露——匿名的「第一名」照样有金额和占比，
+    /// 所以这条线对**所有**有披露的票都成立，不受约五成实名率的限制。
+    /// </summary>
+    private static DossierSection ReadCustomerSupplier(SqliteConnection conn, string code)
+    {
+        var columns = new List<DossierColumn>
+        {
+            new("报告期", 90), new("类别", 60), new("名次", 50, true), new("对手方", 0),
+            new("金额", 100, true), new("占比", 80, true), new("对应个股", 160), new("匹配档", 110),
+        };
+        var rows = new List<string[]>();
+
+        // 图用：报告期 → (客户前五合计, 供应商前五合计)。只收年报。
+        var custTop5 = new SortedDictionary<string, double>(StringComparer.Ordinal);
+        var suppTop5 = new SortedDictionary<string, double>(StringComparer.Ordinal);
+
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT s.report_date, s.is_supplier, s.rank, s.partner_name, s.amount, s.pct,
+                       s.partner_code, s.match_type, m.name
+                FROM StockCustomerSupplier s
+                LEFT JOIN StockMeta m ON m.code = s.partner_code
+                WHERE s.code = $c
+                ORDER BY s.report_date DESC, s.is_supplier, s.rank;
+                """;
+            cmd.Parameters.AddWithValue("$c", code);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var date = r.GetString(0);
+                bool supplier = r.GetInt64(1) == 1;
+                long rank = r.GetInt64(2);
+                double pct = r.IsDBNull(5) ? 0 : r.GetDouble(5);
+                var pcode = Str(r, 6, "");
+                var pname = Str(r, 8, "");
+
+                if (rank <= 5 && date.EndsWith("-12-31", StringComparison.Ordinal))
+                {
+                    var bucket = supplier ? suppTop5 : custTop5;
+                    bucket[date] = bucket.GetValueOrDefault(date) + pct;
+                }
+
+                rows.Add(new[]
+                {
+                    date,
+                    supplier ? "供应商" : "客户",
+                    // 名次6 就是「其余」那行——标出来，免得被当成"第6大客户"。
+                    rank >= 6 ? "其余" : Num(rank, 0),
+                    Str(r, 3),
+                    r.IsDBNull(4) ? "—" : Money(r.GetDouble(4)),
+                    r.IsDBNull(5) ? "—" : Pct(pct),
+                    pcode.Length == 0 ? "" : $"{pcode} {pname}".TrimEnd(),
+                    MatchLabel(Str(r, 7, "")),
+                });
+            }
+        }
+
+        // 两条线共用一条 x 轴，所以刻度取两边报告期的并集——只披露了客户没披露供应商的期
+        // （确实存在）在另一条线上留 NaN 断开，而不是把两条线错位对齐。
+        var dates = custTop5.Keys.Union(suppTop5.Keys, StringComparer.Ordinal)
+                            .OrderBy(x => x, StringComparer.Ordinal).ToList();
+        var chart = dates.Count < 2 ? null : new DossierChart
+        {
+            XLabels = dates,
+            LeftAxisTitle = "%",
+            Series = new List<DossierSeries>
+            {
+                new("前五大客户占比合计（%）", dates.Select(d => custTop5.TryGetValue(d, out var v) ? v : double.NaN).ToArray()),
+                new("前五大供应商占比合计（%）", dates.Select(d => suppTop5.TryGetValue(d, out var v) ? v : double.NaN).ToArray()),
+            },
+            Note = "只画年报（中报/一季报混进来会造出假拐点）。两条线的分母不同——客户组≈营收、"
+                 + "供应商组=采购总额，所以看的是**各自的走势**，两条线之间的高低没有意义。"
+                 + "集中度不依赖实名披露，匿名的「第一名」照样有占比，所以这条线不受实名率限制。",
+        };
+
+        return new DossierSection { Columns = columns, Rows = rows, Chart = chart };
+    }
+
+    /// <summary>
+    /// <c>match_type</c> 的中文标签（见 <see cref="PartnerNameMatcher"/> 那六个常量的注释）。
+    ///
+    /// ⚠ 一定要把档次显示出来，不能只给个代码：六档的**置信度不是一个量级**。前三档
+    ///   （全称精确/简称精确/全称+限定词）断言的是"这两个名字指同一个法人"；subsidiary
+    ///   断言的是"这两个法人有控制关系"，弱得多。
+    ///
+    /// ⚠ parent_group 必须当场说清：它的 partner_code 指向那家上市平台，但对手方其实是它的
+    ///   **非上市母集团**。「某小票 74% 营收来自中石油集团」是真的，「它是 601857 的供应商」
+    ///   是假的。不标出来，这一档就会被当成普通边用，而那正是错的用法。
+    /// </summary>
+    private static string MatchLabel(string matchType) => matchType switch
+    {
+        PartnerNameMatcher.Exact => "全称精确",
+        PartnerNameMatcher.Short => "简称精确",
+        PartnerNameMatcher.Qualified => "全称+限定词",
+        PartnerNameMatcher.Normalized => "归一化后相等",
+        PartnerNameMatcher.Subsidiary => "子公司归并（弱）",
+        PartnerNameMatcher.ParentGroup => "⚠ 母集团，非该上市公司本身",
+        "" => "",
+        _ => matchType,
+    };
+
     /// <summary>主力净流入。图上除了单日柱还加一条**累计**净流入曲线——单日在正负之间跳，几千根柱
     /// 子看不出方向；累计曲线的斜率才是"这段时间到底在净流入还是净流出"。</summary>
     private static DossierSection ReadNetInflow(SqliteConnection conn, string code)

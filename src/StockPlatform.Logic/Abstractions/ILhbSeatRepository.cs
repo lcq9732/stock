@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Models;
+﻿using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Abstractions;
 
@@ -12,7 +12,14 @@ public interface ILhbSeatRepository
 {
     void EnsureSchema();
 
-    int Upsert(IEnumerable<LhbSeat> items);
+    /// <summary>
+    /// **整日替换**：删掉这一天的全部行、写入本批（同一事务），返回写入行数。
+    ///
+    /// ⚠ 必须传这一天**买卖两侧的全部行**——只传一侧等于把另一侧永久删掉。
+    /// 2026-09-17 取代了原来的 <c>Upsert</c>，理由见实现类的注释（主键末列 <c>seq</c> 是位次，
+    /// 靠它 UPSERT 会堆副本）。
+    /// </summary>
+    int ReplaceForDay(DateTime day, IReadOnlyList<LhbSeat> rows);
 
     /// <summary>本地已有的最新交易日，增量水位线（没有数据时为 null）。</summary>
     DateTime? GetLatestTradeDate();

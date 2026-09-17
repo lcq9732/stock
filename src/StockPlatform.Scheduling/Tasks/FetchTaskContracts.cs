@@ -140,6 +140,9 @@ public sealed record TaskRunResult(
         var r = new FetchResult
         {
             NothingToDo = NothingToDo, Progress = Progress, SkippedReason = SkippedReason,
+            // 失败要带过去（2026-09-16）：骨架把异常吞了、只在这个 State 上留了痕，
+            // 不传的话 PlanRunner 会把失败的轮次记成「完成」并显示成绿色（见 FetchResult.Failed）。
+            Failed = State == TaskState.Failed,
         };
         r.Errors.AddRange(Errors);
         // 被停止不是失败：现有引擎靠 OperationCanceledException 区分，这里保持一致——

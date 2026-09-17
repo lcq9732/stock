@@ -12,7 +12,14 @@ public class BlockTrade
     public string Code { get; set; } = "";
     public string Name { get; set; } = "";
     public DateTime TradeDate { get; set; }
-    /// <summary>当日第几笔——同一股同一天可能成交多笔，进主键。</summary>
+    /// <summary>
+    /// 该股当日第几笔，从 1 开始——同一股同一天可能成交多笔，进主键。
+    ///
+    /// ⚠ 2026-09-17 起这个值**由落库时自赋**（按接口返回顺序，见
+    /// <c>SqliteMarketEventRepository.ReplaceBlockTradesForDay</c>），不再是东财的 DAILY_RANK。
+    /// 那个值跨抓取会变（同一笔 09-15 抓到 22、09-16 抓到 1），拿它当主键第三列的后果是
+    /// 每次重抓都多一份副本。抓取侧填的 0 是占位，落库时会被覆盖。
+    /// </summary>
     public int DailyRank { get; set; }
 
     public double? DealPrice { get; set; }
@@ -67,6 +74,32 @@ public class BlockTrade
     public double? ChangeRate20D { get; set; }
 
     public DateTime FetchedAt { get; set; }
+}
+
+/// <summary>
+/// 某一个交易日的全市场大宗交易，连同接口自报的行数。
+/// </summary>
+/// <param name="Day">交易日。</param>
+/// <param name="Rows">解析出来的行，**保持数据源返回顺序**——落库时的序号就按这个顺序赋。</param>
+/// <param name="ReportedCount">
+/// 数据源自报的该日总行数。跟 <paramref name="Rows"/> 的条数不一致，就说明有页被截断了，
+/// 这一天不能落库。
+/// </param>
+public sealed record BlockTradeDay(DateTime Day, List<BlockTrade> Rows, int ReportedCount)
+{
+    /// <summary>实收行数跟数据源自报的对得上吗——对不上就别落库。</summary>
+    public bool IsComplete => Rows.Count == ReportedCount;
+}
+
+/// <summary>
+/// "抓某一天的全市场大宗交易"这一件事（2026-09-17）。
+///
+/// 单独成接口是为了让 <c>BlockTradeTask</c> 能离线测——它要验的是排期、count 校验、
+/// 分批收尾这些编排逻辑，不该为此起一个真的 HTTP 客户端。
+/// </summary>
+public interface IBlockTradeDayFetcher
+{
+    Task<BlockTradeDay> FetchBlockTradesOfDayAsync(DateTime day, CancellationToken ct = default);
 }
 
 /// <summary>

@@ -654,6 +654,21 @@ public sealed class PlanRunner(
             item.LastNothingToDo = result.NothingToDo;
 
             int errors = result.Errors.Count;
+
+            // 整项失败（2026-09-16）。以前这里只有"抛异常"那条路才记失败，而新式任务的异常
+            // 被骨架吞在里面、只翻译成 TaskState.Failed 返回——于是失败的轮次在状态列上
+            // 是绿色的"完成，但有 1 条错误"。【分档资金流快照】抓不到一行时正是这样，
+            // 而它漏一天就永久补不回来，最不能静默（见 FetchResult.Failed）。
+            if (result.Failed)
+            {
+                var failWhy = result.Errors.Count > 0 ? result.Errors[0] : "任务报告失败";
+                Finish(item, RunOutcome.Failed, Math.Max(errors, 1), failWhy);
+                if (item.Pacing == RunPacing.WhenIdle)
+                    _idleNextAllowed[item.Action] = DateTime.Now + IdleCooldown;
+                log($"✘ 计划：【{info.Name}】失败：{failWhy}（不影响后面的项，继续）{tail}");
+                return;
+            }
+
             // 存量进度优先显示（2026-09-04）：跨轮才做得完的活，"完成"说的只是这一轮，
             // 人真正想知道的是全库攒到什么程度了。
             Finish(item, RunOutcome.Ok, errors,

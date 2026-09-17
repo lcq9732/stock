@@ -521,6 +521,29 @@ eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填
                                                    Text="{Binding DataContext.PendingMoneyFlowText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
                                                    ToolTip="还有多少只个股没抓过分档资金流。&#10;⚠ 这一项跟别的「还差多少」不一样：接口只给最近约120个交易日、全市场5900只按配额每天只抓百来只，跑满一圈要两个月，所以「今天待抓5800只」是常态、不代表落后。&#10;真正要盯的是「从没抓过」那个数——它归零才算历史铺满了一轮，之后只是按最久没抓的顺序轮换维护。&#10;排队顺序是最久没抓的优先，所以不用担心代码靠后的票轮不到。" />
+                                        <!-- 【分档资金流快照】那一行：显示**当天齐没齐**，缺了标红（2026-09-16 用户要求）。
+                                             这一格跟旁边那些"还差多少只"不是一类：那些是慢慢补的进度，晚几天没关系；
+                                             这一份数据的接口只给最近一个交易日，今天没拿到、下一个交易日开盘后就永久没了，
+                                             所以它是"现在就要动手"的信号，必须比一行灰字更显眼。
+                                             只有"能判、而且真缺了"才红（日K还没抓完那种判不了的不红，见 MoneyFlowDayStatus.IsAlert）。 -->
+                                        <TextBlock VerticalAlignment="Center"
+                                                   Visibility="{Binding IsMoneyFlowSnapshot, Converter={StaticResource BoolToVis}}"
+                                                   Text="{Binding DataContext.MoneyFlowDayText,
+                                                          RelativeSource={RelativeSource AncestorType=Window}}"
+                                                   ToolTip="最近一个交易日的分档资金流齐不齐——拿「当天有日线的个股数」当期望，库里有多少行就该是多少。&#10;实测这两个数只差 0 或 1 只，所以差 3 只以上就是真缺了。&#10;&#10;⚠ 标红 = 现在就得重跑这一行：这个接口**只给最近一个交易日**，下一个交易日开盘后那天的分档资金流就永久取不回来了（事后只能逐股补，5500 个请求换一天）。&#10;重跑是整天按主键去重合并，已有的行不受影响。&#10;&#10;显示「无法核对」= 当天的个股日线自己还没抓完，期望值不可信，先把日K补齐。">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Subtle}" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding DataContext.MoneyFlowDayAlert,
+                                                                     RelativeSource={RelativeSource AncestorType=Window}}" Value="True">
+                                                            <Setter Property="Foreground" Value="{DynamicResource Theme.Danger.Foreground}" />
+                                                            <Setter Property="FontWeight" Value="Bold" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
                                         <TextBlock VerticalAlignment="Center"
                                                    Visibility="{Binding IsFetchBoardMembers, Converter={StaticResource BoolToVis}}"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"

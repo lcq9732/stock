@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using System.Text.Json;
 using StockPlatform.Data.Remote;
 using StockPlatform.Data.Sqlite;
@@ -104,7 +104,7 @@ public class LhbSeatExtraFieldsTests : IDisposable
         Assert.Equal(AccumAmount, buy.Buy.Value / buy.BuyRatio.Value, 0);
     }
 
-    /// <summary>三列要真的落到库里并读得回来——建表和 UPSERT 两条路径都覆盖到。</summary>
+    /// <summary>三列要真的落到库里并读得回来——建表和整日替换两条路径都覆盖到。</summary>
     [Fact]
     public void RoundTripsThroughSqlite()
     {
@@ -112,7 +112,7 @@ public class LhbSeatExtraFieldsTests : IDisposable
         repo.EnsureSchema();
         var buy = Parse(BuyJson, isBuy: true);
         var sell = Parse(SellJson, isBuy: false);
-        Assert.Equal(2, repo.Upsert(new[] { buy, sell }));
+        Assert.Equal(2, repo.ReplaceForDay(buy.TradeDate, new[] { buy, sell }));
 
         using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
         conn.Open();

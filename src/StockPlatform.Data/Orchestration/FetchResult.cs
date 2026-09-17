@@ -34,6 +34,20 @@ public class FetchResult
     /// 不适用的任务不设，保持 null，界面照旧。
     /// </summary>
     public string? Progress { get; set; }
+
+    /// <summary>
+    /// 这一轮**整项失败了**（2026-09-16）。跟 <see cref="Errors"/> 有几条是两回事：
+    /// 逐只抓的任务常常"5500 只里 3 只失败"，那是完成里带几条错误，不该标红；
+    /// 这个字段说的是"这一项这一轮没干成"。
+    ///
+    /// 为什么非要加：新式任务（<c>FetchTaskBase</c>）把异常**吞在骨架里**、翻译成
+    /// <see cref="Scheduling.Tasks.TaskState.Failed"/> 返回，而 <c>PlanRunner</c> 只有
+    /// "抛异常"那条路才记 <see cref="RunOutcome.Failed"/>。两边一对接，任务明明失败了，
+    /// 状态列显示的却是绿色的"完成，但有 1 条错误"——【分档资金流快照】抓不到一行时正是如此，
+    /// 而它恰恰是全库最不能静默失败的一项（漏一天就永久没了）。
+    /// 老编排层的任务不设这个字段，行为完全不变。
+    /// </summary>
+    public bool Failed { get; set; }
 }
 
 /// <summary>See <see cref="FetchOrchestrator.GetDataStatus"/>.</summary>

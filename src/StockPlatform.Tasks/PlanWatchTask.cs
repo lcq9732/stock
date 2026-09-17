@@ -36,6 +36,11 @@ namespace StockPlatform.Tasks;
 /// 某条公告取不到正文是**软失败**：标题那部分照样落库（stage 还在，数值留 null），
 /// 不算整轮失败。⚠ <c>cum_amount=0</c>（公告明说"尚未实施"）跟 <c>null</c>（没抽到）
 /// 是两回事，混了的话"抽取坏了"会显示成"公司没买"。
+///
+/// ════ 每轮尾巴上回补空壳（2026-09-17）════
+/// 软失败留下的空壳行**增量窗口再也不会路过**——水位线早越过那天了。所以每轮跑完新公告之后
+/// 再挑一批 <c>art_code</c> 为空的旧行，按 code+标题直接取一次正文（不用重新检索）补上数值，
+/// 见 <see cref="BackfillMax"/>。当天新抓那段配不上的，第二天这一段会自动再试一次。
 /// </summary>
 public sealed class PlanWatchTask(
     IPlanAnnouncementRepository repository,
@@ -67,6 +72,19 @@ public sealed class PlanWatchTask(
 
     /// <summary>巨潮每页大致条数，只用来估"是不是撞到翻页上限了"，不必精确。</summary>
     private const int PageSizeGuess = 10;
+
+    /// <summary>
+    /// 每轮回补多少条空壳记录（2026-09-17）。
+    ///
+    /// 取正文是软失败——配不上就只落标题、数值全 null。这些行**不会**被增量重抓捡起来：
+    /// 水位线早越过那天了，下一轮根本不搜那一段。不专门找出来，它们就永远是空壳。
+    /// 09-17 体检：库里 1959 条里有 38 条是这样躺着的（1.9%），最早的能追到两个月前。
+    ///
+    /// 一条两个请求、限流 1 秒一个，实测 1.3 秒/条——60 条≈80 秒，
+    /// 挂在一轮 20 分钟的任务尾巴上不显眼，积压再多也是几轮之内补完。
+    /// 上限存在的意义是**别让积压把日更那段挤到看门狗线以外**，不是省请求。
+    /// </summary>
+    private const int BackfillMax = 60;
 
     /// <summary>
     /// 取正文取到第几条报一次进度（2026-09-14 补，这是被误杀出来的）。
@@ -136,14 +154,14 @@ public sealed class PlanWatchTask(
         return (start, false);
     }
 
-    private int _hits, _parsed, _noDetail;
+    private int _hits, _parsed, _noDetail, _refillTried, _refillOk;
     private readonly List<string> _warnings = [];
 
     protected override async IAsyncEnumerable<IReadOnlyList<PlanAnnouncement>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
         repository.EnsureSchema();
-        _hits = _parsed = _noDetail = 0;
+        _hits = _parsed = _noDetail = _refillTried = _refillOk = 0;
         _warnings.Clear();
 
         var watermark = repository.GetLatestAnnounceDate(PlanKind.Buyback);
@@ -204,7 +222,15 @@ public sealed class PlanWatchTask(
                     var detail = await detailFetcher.FetchDetailAsync(
                         hit.Code, hit.Title, DateOnly.FromDateTime(hit.PublishDate), ct);
                     if (detail is { } d) { artCode = d.ArtCode; content = d.Content; }
-                    else _noDetail++;
+                    else
+                    {
+                        // ⚠ 这条**也要留名字**（2026-09-17 补）：原来这条路径只 ++ 计数，
+                        // 结果日志里只剩「N 条没取到正文」一个数字，是哪几只、为什么配不上，
+                        // 不翻库根本看不出来——09-17 那 6 条全是标题全角括号/多余空格配不上，
+                        // 归一化就能修，但当时没人知道该去修什么。
+                        _noDetail++;
+                        _warnings.Add($"{hit.Code} {hit.Title}：东财最近 100 条公告里没匹配到（标题或日期对不上）");
+                    }
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -235,6 +261,54 @@ public sealed class PlanWatchTask(
             Report($"{day:yyyy-MM-dd} 解析 {doneToday} 条", _parsed, _hits);
             if (batch.Count > 0) yield return batch;
         }
+
+        // ════ 回补：把之前留下的空壳记录再取一次正文（2026-09-17）════
+        // 为什么要有这一段，见 BackfillMax 和 IPlanAnnouncementRepository.GetMissingDetail 的注释：
+        // 空壳行是软失败留下的，增量窗口再也不会路过它们。
+        // 放在日循环**之后**：先把今天的新公告落袋为安，回补是锦上添花，被骨架的
+        // MaxItems/Deadline 掐掉也无所谓——幂等，下一轮接着补。
+        var since = today.AddDays(-FirstRunLookbackDays).ToDateTime(TimeOnly.MinValue);
+        var stale = repository.GetMissingDetail(PlanKind.Buyback, since, BackfillMax);
+        if (stale.Count == 0) yield break;
+
+        Report($"回补 {stale.Count} 条只有标题、没取到正文的旧记录…");
+        var refill = new List<PlanAnnouncement>();
+        foreach (var old in stale)
+        {
+            ct.ThrowIfCancellationRequested();
+            (string ArtCode, string Content)? detail = null;
+            try
+            {
+                detail = await detailFetcher.FetchDetailAsync(
+                    old.Code, old.Title, DateOnly.FromDateTime(old.AnnounceDate), ct);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                // 抛异常＝网络/限流那类真故障，留名字（输出那边有 20 行上限兜着）。
+                // 而"配上了但还是没匹配到"（返回 null）那条路**不告警**：积压有多少条就会刷多少行，
+                // 把当轮真正的新问题淹了——那种只汇总成末尾一行「回补 N/M」。
+                _warnings.Add($"回补 {old.Code} 失败：{ex.Message}");
+            }
+
+            _refillTried++;
+            // ⚠ 心跳要在**成功与否之前**打（这一段最慢 1.3 秒/条，跟主循环同一个看门狗）：
+            // 放在 continue 后面的话，一整批都配不上时就是整段静默。
+            if (_refillTried % ProgressEvery == 0 && _refillTried < stale.Count)
+                Report($"回补 {_refillTried}/{stale.Count}…");
+
+            if (detail is not { } dd) continue;   // 还是配不上：不写，下一轮再试
+
+            _refillOk++;
+            // stage 只从标题定（PlanAnnouncementExtractor.ClassifyStage），所以重抽出来的主键
+            // (code, kind, announce_date, stage) 跟原行一致——upsert 是就地补数值，不会多出一行。
+            refill.Add(PlanAnnouncementExtractor.Extract(
+                old.Code, old.Name, old.Title, old.AnnounceDate, dd.Content, dd.ArtCode, old.SourceUrl));
+            if (refill.Count >= YieldChunk) { yield return refill; refill = []; }
+        }
+
+        Report($"回补完成：{_refillOk}/{_refillTried} 条补上了正文");
+        if (refill.Count > 0) yield return refill;
     }
 
     protected override Task SaveBatchAsync(IReadOnlyList<PlanAnnouncement> batch, CancellationToken ct)
@@ -255,6 +329,7 @@ public sealed class PlanWatchTask(
 
         var (rows, stocks, open) = repository.GetCounts(PlanKind.Buyback);
         var msg = $"本轮解析 {_parsed} 条（{_noDetail} 条没取到正文，已按标题留档）；"
+                  + (_refillTried > 0 ? $"回补旧空壳 {_refillOk}/{_refillTried} 条；" : "")
                   + $"库里现有 {rows} 条 / {stocks} 只票，**{open} 个方案还在进行中**。";
         return Task.FromResult<TaskRunResult?>(TaskRunResult.Ok(progress: msg));
     }

@@ -90,7 +90,14 @@ public class TencentBarFetcher : IBarDataFetcher
     // backfill needs ~750 trading days, so long ranges must be paged by walking the end date
     // backwards and stitching results together.
     private const int PageHardCap = 640;
-    private const int MaxPages = 10; // 10 * 640 ≈ 6400 trading days ≈ 25 years — comfortably more than we'd ever request
+    // 20 * 640 = 12800 个交易日 ≈ 50 年，比 A 股全部历史还长一截（最老的 1990 年上市，到现在约 8700 根）。
+    //
+    // 原来是 10（≈6400 根≈25 年），2026-09-17 撞到了：sz159925 南方300 有 6827 个交易日
+    // （1998-04-07 起），抓 day_raw 时正好卡在 6401 根，**最早的 426 根静默丢掉**——
+    // 源明明给得出（单独请求 end=1999-12-28 能回 427 根），只是我们翻到第 10 页就停了。
+    // 截断没有任何告警：循环正常结束、返回的行也都是对的，只是少了一截。
+    // 所以这个上限只该用来防"翻页翻飞了"，不该贴着实际需求设。
+    private const int MaxPages = 20;
 
     private async Task<(string, List<Bar>)> FetchInternalAsync(string code, string granularity, DateTime? start, DateTime? end, CancellationToken ct)
     {

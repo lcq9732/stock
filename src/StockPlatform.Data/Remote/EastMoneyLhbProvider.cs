@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.Json;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
@@ -23,7 +23,7 @@ namespace StockPlatform.Data.Remote;
 ///
 /// ════ 两个入口，别用错 ════
 ///   · <see cref="GetDailyAsync"/>：日常增量，一天一个请求，实现 <see cref="ILhbProvider"/>。
-///   · <see cref="FetchRangeAsync"/>：整段回补，按月切片流式回调。
+///   · <see cref="FetchSlicesAsync"/>：整段回补，按月切片流式产出。
 /// 全量 2004-06-25 至今是 26.8 万行：走逐日入口要 5300 个请求约 1.8 小时，走月片只要
 /// 约 580 个、十几分钟。所以回补**必须**走后者——这也是这个 provider 比接口多长出一个方法的原因。
 ///
@@ -65,19 +65,21 @@ public class EastMoneyLhbProvider : ILhbProvider, ILhbRangeProvider
     }
 
     /// <summary>
-    /// 整段回补：按月切片，**每抓完一个月回调一次**由调用方落库。
+    /// 整段回补：按月切片，**每抓完一个月 yield 一次**由调用方落库。
     ///
-    /// 切月的理由跟 <see cref="EastMoneyLhbSeatProvider"/> 一样——全量 26.8 万行按 500/页是
+    /// 切月的理由跟 <see cref="EastMoneyLhbSeatProvider"/> 原来一样——全量 26.8 万行按 500/页是
     /// 536 页，东财翻到几百页就开始拒绝或极慢；切成月片后每片 1~3 页，翻页永远是浅的。
-    /// 中断时已落库的部分有效，重跑从水位线接着走。
+    ///
+    /// ⚠ 这张表**不必**跟着席位表改按日：它的排序键
+    /// <c>TRADE_DATE,SECURITY_CODE,EXPLANATION</c> 本来就唯一（见 <see cref="QueryAsync"/> 的注释），
+    /// 深分页的跨页错位对它不成立；改按日反而让请求数从 580 涨到 5300。
+    ///
+    /// 中断时已落库的片有效，重跑从水位线接着走。
     /// </summary>
-    /// <param name="onBatch">一个月的数据就绪时回调，返回实际写入行数。</param>
-    /// <returns>累计写入行数。</returns>
-    public async Task<int> FetchRangeAsync(
-        DateTime start, DateTime end, Func<List<LhbRow>, int> onBatch,
-        IProgress<string>? progress = null, CancellationToken ct = default)
+    public async IAsyncEnumerable<LhbSlice> FetchSlicesAsync(
+        DateTime start, DateTime end,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
-        int total = 0;
         var slices = EastMoneyQuerySlicer.ByMonth(start, end);
         for (int i = 0; i < slices.Count; i++)
         {
@@ -87,13 +89,8 @@ public class EastMoneyLhbProvider : ILhbProvider, ILhbRangeProvider
             var rows = new List<LhbRow>();
             await foreach (var row in QueryAsync(s.Start, s.End, ct)) rows.Add(row);
 
-            int written = rows.Count > 0 ? onBatch(rows) : 0;
-            total += written;
-
-            // 每片都报：这个回补要跑十几分钟，静默太久看不出是在跑还是卡住了
-            progress?.Report($"龙虎榜 {s.Name}（{i + 1}/{slices.Count}）：本月 {rows.Count} 行，累计 {total} 行");
+            yield return new LhbSlice(s.Start, s.End, s.Name, i + 1, slices.Count, rows);
         }
-        return total;
     }
 
     /// <summary>

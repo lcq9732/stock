@@ -92,18 +92,32 @@ public class SqliteMarginShortBalanceFiller
     /// <summary>
     /// 补算。<paramref name="sinceDate"/> 给了就只处理这天及以后（日更用，传上一个交易日即可），
     /// 不给就全历史回填。
+    ///
+    /// <paramref name="recompute"/>＝**连已经有值的行也重算一遍**。平时不要开——
+    /// 只在**取价口径变了**的时候用一次。
+    ///
+    /// 为什么需要它：常规判据是"<c>short_balance</c> 缺值（NULL 或 0）才补"，所以口径改了之后
+    /// 直接重跑是**没用的**——已经填过的行不再满足判据，错值会一直留着。2026-09-16 就真出了
+    /// 这事：第一版用前复权 <c>day</c> 取价跑完了全历史（274 万行），当天的对账全过
+    /// （前复权的最新点＝真实价，误差 0.0000%），而历史行系统性偏低（2018 年那批低 33%~83%）。
+    ///
+    /// 重算是安全的：旧口径填得上的行，新口径一定也填得上（有 day_raw 用它、没有就还用 day），
+    /// 所以不会留下"清成 NULL 又补不回来"的行。深市依旧一行不碰。
     /// </summary>
     public MarginShortBalanceFillResult Fill(
-        Action<string>? onProgress = null, DateTime? sinceDate = null, CancellationToken ct = default)
+        Action<string>? onProgress = null, DateTime? sinceDate = null, CancellationToken ct = default,
+        bool recompute = false)
     {
         using var conn = Open();
+        if (recompute)
+            onProgress?.Invoke("　⚠ 重算模式：连已经有值的沪市行也会按当前口径重新算一遍（深市仍不碰）");
 
         var (shCodes, withRaw) = PrepareShanghaiCodeTable(conn, ct);
         onProgress?.Invoke($"　沪市两融标的 {shCodes} 只（按 MarketClassifier 判，含 ETF）");
         onProgress?.Invoke($"　取价口径：{withRaw} 只走不复权 day_raw；"
                            + $"{shCodes - withRaw} 只没有 day_raw、回退前复权 day（基本是 ETF，算出的余额偏低）");
 
-        var days = SelectPendingDays(conn, sinceDate, ct);
+        var days = SelectPendingDays(conn, sinceDate, recompute, ct);
         if (days.Count == 0)
         {
             onProgress?.Invoke("　没有待补算的交易日——这一项是幂等的，跑过就会是这个结果");
@@ -115,7 +129,7 @@ public class SqliteMarginShortBalanceFiller
         foreach (var day in days)
         {
             ct.ThrowIfCancellationRequested();
-            rows += FillOneDay(conn, day);
+            rows += FillOneDay(conn, day, recompute);
             done++;
             // 进度别报太密：全历史有 3900 多天，一天一条日志会把日志刷爆
             if (done % 100 == 0 || done == days.Count)
@@ -233,14 +247,14 @@ public class SqliteMarginShortBalanceFiller
     /// （已验证：3,139,554 行沪市数据里 short_balance &gt; 0 的有 0 行）。
     /// </summary>
     private static List<string> SelectPendingDays(
-        SqliteConnection conn, DateTime? since, CancellationToken ct)
+        SqliteConnection conn, DateTime? since, bool recompute, CancellationToken ct)
     {
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT DISTINCT m.trade_date
             FROM MarginDetail m JOIN _sh_margin s ON s.code = m.code
             WHERE m.short_volume > 0
-              AND (m.short_balance IS NULL OR m.short_balance = 0)
+              {(recompute ? "" : "AND (m.short_balance IS NULL OR m.short_balance = 0)")}
               AND ($since IS NULL OR m.trade_date >= $since)
             ORDER BY m.trade_date;
             """;
@@ -259,12 +273,12 @@ public class SqliteMarginShortBalanceFiller
     /// 此时 <c>short_volume * NULL = NULL</c>，SQLite 会写回 NULL——正是想要的（留 NULL 待下次）。
     /// 所以 WHERE 里要挡掉"算出来还是 NULL"的行，免得白写一遍。
     /// </summary>
-    private static int FillOneDay(SqliteConnection conn, string day)
+    private static int FillOneDay(SqliteConnection conn, string day, bool recompute)
     {
         using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             UPDATE MarginDetail
             SET short_balance = short_volume * (
                     SELECT b.close FROM Bar b
@@ -276,7 +290,7 @@ public class SqliteMarginShortBalanceFiller
                     LIMIT 1)
             WHERE trade_date = $d
               AND short_volume > 0
-              AND (short_balance IS NULL OR short_balance = 0)
+              {(recompute ? "" : "AND (short_balance IS NULL OR short_balance = 0)")}
               AND code IN (SELECT code FROM _sh_margin)
               AND EXISTS (
                     SELECT 1 FROM Bar b

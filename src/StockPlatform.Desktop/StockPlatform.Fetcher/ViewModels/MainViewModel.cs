@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Windows.Threading;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Remote;
+using StockPlatform.Data.Sqlite;
 using StockPlatform.Scheduling;
 using StockPlatform.Scheduling.Tasks;
 using StockPlatform.Logic.Abstractions;
@@ -188,6 +189,33 @@ public class MainViewModel : INotifyPropertyChanged
         : m.Never > 0 ? $"还有 {m.Todo} 只历史不全（其中 {m.Never} 只一行都没有）"
         : m.Todo > 0 ? $"还有 {m.Todo} 只历史不全"
         : "历史已补齐，日常走当日快照";
+
+    private MoneyFlowDayStatus? _moneyFlowDay;
+
+    /// <summary>
+    /// 【分档资金流快照】当天齐不齐（2026-09-16 用户要求）。null = 还没算出来。
+    ///
+    /// 这一格跟别的"还差多少"不是一回事，所以单独摆一个属性而不是并进 PendingMoneyFlow：
+    /// 那个说的是"历史还要慢慢补"（几个月的活），这个说的是"今天的数据在不在"——
+    /// 接口只给最近一个交易日，今天没拿到，下一个交易日开盘后就永久没了。
+    /// </summary>
+    public MoneyFlowDayStatus? MoneyFlowDay
+    {
+        get => _moneyFlowDay;
+        private set
+        {
+            Set(ref _moneyFlowDay, value);
+            Raise(nameof(MoneyFlowDayText));
+            Raise(nameof(MoneyFlowDayAlert));
+        }
+    }
+
+    /// <summary>那一格的文案。判据和措辞都在 <see cref="MoneyFlowDayStatus.Text"/>——
+    /// 任务收尾核对时报的是同一句话，两处各写一份迟早对不上。</summary>
+    public string MoneyFlowDayText => MoneyFlowDay?.Text ?? "当天齐整度还没算出来";
+
+    /// <summary>要不要把那一格标红。只有"能判、而且真缺了"才红，见 <see cref="MoneyFlowDayStatus.IsAlert"/>。</summary>
+    public bool MoneyFlowDayAlert => MoneyFlowDay?.IsAlert == true;
 
     private (int Todo, int Never, int Total)? _pendingBoardMembers;
     /// <summary>板块成分股还剩多少个板块要抓。null = 还没算出来。</summary>
@@ -752,6 +780,10 @@ public class MainViewModel : INotifyPropertyChanged
                 // 这一个只查一条 GROUP BY，比上面几项便宜得多，放在这里不会拖慢刷新
                 (int Todo, int Never)? flow = null;
                 try { flow = _orchestrator.GetPendingMoneyFlowCount(); } catch { }
+                // 【分档资金流快照】当天齐不齐（2026-09-16）。三条走索引的 COUNT，0.1 秒以内。
+                // 它必须每轮都刷：这一格是"今天的数据在不在"，而那份数据隔天就取不回来了。
+                MoneyFlowDayStatus? flowDay = null;
+                try { flowDay = _orchestrator.GetMoneyFlowDayStatus(); } catch { }
                 // 三个 COUNT(*) 走 BoardMemberFetchState（千把行）和 Board，同样很便宜
                 (int Todo, int Never, int Total)? boards = null;
                 try { boards = _orchestrator.GetPendingBoardMemberCount(); } catch { }
@@ -768,6 +800,7 @@ public class MainViewModel : INotifyPropertyChanged
                     if (earn is { } v5) PendingEarnings = v5;
                     if (manual is { } v6) ManualFill = v6;
                     if (flow is { } v7) PendingMoneyFlow = v7;
+                    if (flowDay is not null) MoneyFlowDay = flowDay;
                     if (boards is { } v8) PendingBoardMembers = v8;
                     if (calendar is { } v9) TradingCalendar = v9;
                 });
@@ -2236,9 +2269,12 @@ public class MainViewModel : INotifyPropertyChanged
             case FetchActionId.FetchEarningsForecast:
                 return _orchestrator.RunFetchEarningsForecastAsync(progress, ct);
 
-            case FetchActionId.FetchLhbSeat:
-                return _orchestrator.RunFetchLhbSeatAsync(progress, ct);
+            // 【拉取龙虎榜席位】的 case 删于 2026-09-17：迁去了 StockPlatform.Tasks/LhbSeatTask，
+            // 走上面那条 _taskRegistry 总分支。补残缺日仍走 orchestrator（PartialDayRepair），
+            // 按天重抓的动作两边共用 LhbSeatDayWriter。
 
+            // 只剩机构调研/限售解禁/股东增减持三张——【大宗交易】2026-09-17 拆成独立任务，
+            // 走上面那条 _taskRegistry 总分支。
             case FetchActionId.FetchMarketEvents:
                 return _orchestrator.RunFetchMarketEventsAsync(progress, ct);
 
@@ -2347,18 +2383,18 @@ public class MainViewModel : INotifyPropertyChanged
                     ? _orchestrator.RunStepBackfillMarginAsync(progress, ct)
                     : _orchestrator.RunStepMarginRecentAsync(ParseOptionalDate(item.DateText), progress, ct);
 
-            case FetchActionId.StepLhb:
-                return item.EffectiveMode == FetchMode.FirstBackfill
-                    ? _orchestrator.RunStepBackfillLhbAsync(progress, ct)
-                    : _orchestrator.RunStepLhbDayAsync(ParseOptionalDate(item.DateText), progress, ct);
+            // 【龙虎榜】的 case 删于 2026-09-17：迁去了 StockPlatform.Tasks/LhbTask，
+            // 走上面那条 _taskRegistry 总分支（增量/只抓某一天/整段回补都在任务里）。
+            // 补残缺日仍走 orchestrator，按天重抓的动作两边共用 LhbDayWriter。
 
             // 【龙虎榜·换源重抓】的 case 删于 2026-09-10（那一项已退役，实现也删了）。
             // 枚举值还留着——用户计划文件里存的是动作名，删了会让整份计划读不出来。
             // 走不到 default 那个"还没实现的动作"：退役项由 FetchPlan.MigrateRetired 清出计划，
             // Normalize 也不会再把它补回来（只补 FetchTaskCatalog.Active）。
 
-            case FetchActionId.StepDayCoverage:
-                return _orchestrator.RunStepDayCoverageCheckAsync(progress, ct);
+            // 【当日完整性体检】的 case 删于 2026-09-17：它迁去了 StockPlatform.Tasks/DayCompletenessTask，
+            // 走上面那条 _taskRegistry 总分支。orchestrator 里那个同名方法还在，但只剩
+            // 【重新拉取失败】收尾时调（补过一轮之后名单要重算），跟这一项共用同一个 auditor。
 
             case FetchActionId.StepFillProbeFloor:
                 // 纯查库（三次 GROUP BY，本机 23GB 库上约 40 秒），推到线程池别让界面假死

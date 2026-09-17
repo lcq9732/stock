@@ -32,6 +32,18 @@ public interface IPlanAnnouncementRepository
     /// <summary>已入库的最新公告日，做增量回看的水位线。没有就返回 null。</summary>
     DateTime? GetLatestAnnounceDate(string kind);
 
+    /// <summary>
+    /// **正文没取到的空壳记录**（<c>art_code</c> 为空），按公告日倒序，最多 <paramref name="limit"/> 条——
+    /// 给每轮的回补段用，见 <c>PlanWatchTask</c> 的「回补」一节。
+    ///
+    /// 取正文是软失败：配不上就只落标题、数值全 null。这些行**不会**被增量重抓捡起来
+    /// （水位线早就越过那天了），不专门找出来就永远是空壳。
+    ///
+    /// ⚠ <paramref name="since"/> 不能省：东财只按「该股最近 100 条公告」匹配标题，
+    /// 更早的公告不在列表里，每轮重试都是白费两个请求。调用方传的是正文还取得到的窗口边界。
+    /// </summary>
+    List<PlanAnnouncement> GetMissingDetail(string kind, DateTime since, int limit);
+
     /// <summary>(记录数, 覆盖股票数, 未结束方案数)，给日志和体检看。</summary>
     (int Rows, int Stocks, int OpenPlans) GetCounts(string kind);
 }

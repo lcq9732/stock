@@ -1,4 +1,4 @@
-namespace StockPlatform.Logic.Models;
+﻿namespace StockPlatform.Logic.Models;
 
 /// <summary>
 /// 待办的归属任务 id（<c>FetchActionId</c> 的枚举名）。
@@ -13,6 +13,10 @@ public static class RetryTaskIds
     public const string StockHfqBars = "StepStockHfqBars";
     public const string StockRawBars = "StepStockRawBars";
     public const string EtfBars = "StepEtfBars";
+
+    /// <summary>ETF 的不复权那条线（2026-09-17 新增的独立任务）。跟 <see cref="EtfBars"/>
+    /// 分开记：两条水位线独立，缺一个不代表另一个也缺。</summary>
+    public const string EtfRawBars = "StepEtfRawBars";
     public const string IndexBars = "StepIndexBars";
     public const string DelistedTails = "StepDelistedTails";
     public const string Roster = "StepRoster";
@@ -28,7 +32,13 @@ public static class RetryTaskIds
     public const string Margin = "StepMargin";
     public const string Lhb = "StepLhb";
     public const string LhbSeat = "FetchLhbSeat";            // ⚠ Fetch 前缀，不是 Step
-    public const string MarketEvents = "FetchMarketEvents";  // 大宗交易归这一项（复合任务）
+    /// <summary>
+    /// 大宗交易（2026-09-17 从 <c>FetchMarketEvents</c> 改过来）——它已拆成独立任务。
+    /// ⚠ 改名是**不兼容**的：manifest 里旧的 "FetchMarketEvents" 待办键认领不到新任务。
+    /// 改名时库里只挂着两天，且实测那两天数据本来就是齐的（误判，见
+    /// doc/block-trade-task-design.md §0.5），直接清掉了，没做键迁移。
+    /// </summary>
+    public const string BlockTrade = "FetchBlockTrade";
 
     /// <summary>分档资金流·逐股补历史（push2his）。NetInflowDetail 的残缺日归它——
     /// 另一条通道【分档资金流快照】走 push2delay，接口**只给最近一个交易日**，补不了历史。</summary>

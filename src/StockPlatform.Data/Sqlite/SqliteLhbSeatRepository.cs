@@ -8,11 +8,13 @@ namespace StockPlatform.Data.Sqlite;
 /// <summary>
 /// 龙虎榜营业部席位明细的本地存取（2026-09-03）。
 ///
-/// 全量 264 万行，是本次接入的数据里最大的一块，所以写入路径刻意做成"按片多次"：
-/// provider 每抓完一个月（约 1.5 万行）回调一次，这里一次事务写完。中断时已落库的部分是
-/// 有效的，重跑从水位线接着走——通宵抓最怕的就是挂了要从头来。
+/// 全量 178 万行，写入粒度是**一个交易日**：一天买卖两侧都收齐了，整天删掉重写
+/// （<see cref="ReplaceForDay"/>）。中断时已落库的天是完整的，重跑从水位线接着走。
 ///
-/// 回调粒度是"月"而不是"每 N 行"，因为 LhbSeat.Seq 要整片就位后才能算（见那个字段的注释）。
+/// ⚠ 2026-09-17 把原来的 <c>Upsert</c>（<c>INSERT OR REPLACE</c>，靠主键去重）**删掉了**，
+/// 没有保留。留着就是留个陷阱——谁用了它，副本就回来了：主键末列 <c>seq</c> 是**位次**，
+/// 一次抓取多收一行、整组编号就多一位，上次落库的高位行没人覆盖得掉。
+/// 全表曾因此堆出 3579 行副本（同时缺着一样多的真行）。见 doc/lhb-seat-task-design.md。
 /// </summary>
 public class SqliteLhbSeatRepository : ILhbSeatRepository
 {
@@ -36,17 +38,37 @@ public class SqliteLhbSeatRepository : ILhbSeatRepository
         SqliteSchema.EnsureSchema(conn);
     }
 
-    public int Upsert(IEnumerable<LhbSeat> items)
+    /// <summary>
+    /// **整日替换**：删掉这一天的全部行，写入本批（同一个事务）。返回写入行数。
+    ///
+    /// ⚠ 传进来的必须是这一天**买卖两侧的全部行**。只传一侧就等于把另一侧永久删掉，
+    /// 而且事后完全看不出来——行数判据只会觉得"那天本来就少"。收齐的判断在
+    /// <see cref="StockPlatform.Logic.Models.LhbSeatDay.IsComplete"/>，调用方过了那一关才该走到这儿。
+    ///
+    /// 为什么是删了重写而不是 UPSERT：主键末列 <c>seq</c> 是位次、不是稳定标识，
+    /// 靠它去重会在抓取行数波动时留下孤儿行（见类注释）。删了重写跟"这一天现在是什么样"
+    /// 一一对应，抓多少次结果都一样。
+    /// </summary>
+    public int ReplaceForDay(DateTime day, IReadOnlyList<LhbSeat> rows)
     {
-        var list = items.ToList();
+        var list = rows.ToList();
         if (list.Count == 0) return 0;
 
         using var conn = Open();
         using var tx = conn.BeginTransaction();
+
+        using (var del = conn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM LhbSeat WHERE trade_date = $td;";
+            del.Parameters.AddWithValue("$td", day.Date.ToString(DateFormat, CultureInfo.InvariantCulture));
+            del.ExecuteNonQuery();
+        }
+
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT OR REPLACE INTO LhbSeat
+            INSERT INTO LhbSeat
                 (trade_date, code, name, is_buy, seat_code, seat_name, buy, sell, net,
                  explanation, rise_prob_3day, times_3day, trade_id, seq, close_price, change_rate, fetched_at,
                  buy_ratio, sell_ratio, change_type)

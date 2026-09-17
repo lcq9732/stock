@@ -234,6 +234,25 @@ class TradingCalendarTask {
   拉深交所交易日历
   写 TradingDay 表
 }
+class DayCompletenessTask {
+  <<Tasks>>
+  日更末尾·当日完整性体检
+  一批＝一段 K线/日更表/覆盖式快照
+  产出的是待办不是数据
+  不齐**不算自己失败**
+}
+class SqliteDayCompletenessAuditor {
+  <<Data.Sqlite>>
+  三段判据 + Apply 写待办
+  两个调用方共用：
+  这一项 / 重新拉取失败收尾重建
+}
+class SqliteMoneyFlowDayAudit {
+  <<Data.Sqlite>>
+  分档资金流当天齐不齐
+  期望＝当天有日K的个股数
+  快照任务收尾核对 + 界面那一格标红
+}
 class PlanRunner {
   <<Scheduling>>
 }
@@ -252,6 +271,9 @@ TradingCalendarTask --|> FetchTaskBase
 PlanWatchTask --|> FetchTaskBase
 WatchIndicatorRuleTask --|> FetchTaskBase
 MoneyFlowSnapshotTask --|> FetchTaskBase
+DayCompletenessTask --|> FetchTaskBase
+DayCompletenessTask --> SqliteDayCompletenessAuditor : 跑三段判据
+MoneyFlowSnapshotTask --> SqliteMoneyFlowDayAudit : 收尾回查库
 MoneyFlowBackfillTask --|> FetchTaskBase
 TotalSharesTask --|> FetchTaskBase
 class ITotalSharesProvider {
@@ -510,7 +532,7 @@ EastMoneyTerminalBoardFetcher --> EastMoneyDataCenterClient
 | `AnnouncementFetchOrchestrator` · `BoardListFetchLoop` | Data | 两条自成一体的子流程：公告（巨潮搜索→东财正文→解析入库）、板块名单分页循环。 |
 | `FetchPaths` · `FetcherSettings` · `JsonManifestStore` · `Heartbeat` · `ProgressThrottle` · `FetchResult` · `FailedRetrySummary` · `ManualFillWorklist` | Data | 编排层配套件：路径、JSONC 设置、水位线清单、心跳、进度节流、运行结果、失败重试汇总、手工补录清单。 |
 | `Data.Remote`（约 60 个类） | Data | 数据源实现，按"一个数据源/通道一个类"拆：新浪系（K线/财务/分红/股东/指数成分/市值/ETF，龙虎榜留作后备）、东财系（datacenter 客户端 + 预测/龙虎榜概要/龙虎榜席位/资金流/事件/板块映射/行业指标/客户供应商，板块另有 HTTP、页面、终端文件三通道并存）、腾讯 K线、交易所直连（融资/退市名单/深交所日历）、中证权重、巨潮公告与预约。公共件：`RateLimiter`、`NetworkInterfaceBinder`、`EastMoneyJson`、`EastMoneyClistPage`。PDF 提取已于 2026-09-11 拆去 `StockPlatform.Pdf`，这里只剩业务解析 `BankReportParser`（给页面判据 + 从行里取数）。 |
-| `Data.Sqlite`（约 40 个类） | Data | 仓储实现，一张（组）表一个类。`SqliteSchema` 是 schema 权威处；`SqliteMaintenance` 管索引与优化；`SqliteMissingBarRepository`/`SqliteDailyTableAuditor` 做缺口与覆盖体检；`SqliteStockDossierReader` 是给分析程序按表直读的旁路。 |
+| `Data.Sqlite`（约 40 个类） | Data | 仓储实现，一张（组）表一个类。`SqliteSchema` 是 schema 权威处；`SqliteMaintenance` 管索引与优化；`SqliteMissingBarRepository`/`SqliteDailyTableAuditor` 做缺口与覆盖体检，`SqliteDayCompletenessAuditor`（当天该有的都查一遍）和 `SqliteMoneyFlowDayAudit`（分档资金流当天齐不齐）是日更末尾那两道；`SqliteStockDossierReader` 是给分析程序按表直读的旁路。 |
 | `Logic.Services`（抓取侧） | Logic | `BarAggregator`、`AdjustFactorCalculator`、`TradingCalendar`、`MarketClassifier`、`BoardIndexSynthesizer`、`ProbeFloorPlanner`、`DailyBackfillGate`、`YearGapCalculator`/`CalendarYearSlicer`、`CoverageShapeAuditor`、`IndexCatalog`/`MarketIndexCatalog`、`OrderWinExtractor`、`PartnerNameMatcher`、`LimitUpClassifier`。全部纯计算，抽出来就是为了能被单测钉住。 |
 
 > ✅ **原来那处耦合已解除（2026-09-08）**：【手动】页那几个横跨所有数据源的大按钮不进占用表，

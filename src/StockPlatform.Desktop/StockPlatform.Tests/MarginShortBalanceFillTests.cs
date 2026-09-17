@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Models;
 using Xunit;
@@ -204,6 +204,34 @@ public class MarginShortBalanceFillTests : IDisposable
         Assert.Equal(0, r.Days);     // 连这一天都不该被选进待补名单
     }
 
+    /// <summary>
+    /// ⭐ **recompute=true 时必须覆盖已有值**。
+    ///
+    /// 这一档是 2026-09-16 的补救通道：第一版取价用了前复权 <c>day</c>，已经填进去的 263 万行
+    /// 偏低（茅台 2020-06-01 按 1160.24 算而不是 1419.50，低 18%）。取价改成 <c>day_raw</c> 之后，
+    /// 补算器"缺值才补"的幂等设计**不会修正已有的错值**——必须有一档能强制重算，
+    /// 否则那批错值永远留在库里，而且看不出来（它们是正数、不是 NULL，任何"缺值"判据都扫不到）。
+    /// </summary>
+    [Fact]
+    public void 重算模式覆盖已有的错值()
+    {
+        SaveBar("600519", Day, -127.19);                                    // 前复权：负价
+        SaveBar("600519", Day, 225.98, Granularity.DayRaw);                 // 不复权：真实价
+        // 模拟"上一版用前复权算出来的错值"——正数、不是 NULL，缺值判据扫不到它
+        SaveMargin("600519", Day, shortVolume: 100_000, shortBalance: 11_600_000);
+        var filler = new SqliteMarginShortBalanceFiller(_dbPath);
+
+        // 增量模式：有值就跳过，错值留着
+        var incremental = filler.Fill();
+        Assert.Equal(0, incremental.Rows);
+        Assert.Equal(11_600_000, ReadShortBalance("600519", Day)!.Value, 2);
+
+        // 重算模式：按 day_raw 覆盖
+        var recomputed = filler.Fill(recompute: true);
+        Assert.Equal(1, recomputed.Rows);
+        Assert.Equal(100_000 * 225.98, ReadShortBalance("600519", Day)!.Value, 2);
+    }
+
     /// <summary>幂等：补过一遍之后再跑是空转。中断重跑靠的就是这个，不用记断点。</summary>
     [Fact]
     public void 幂等_跑第二遍是空转()
@@ -218,6 +246,37 @@ public class MarginShortBalanceFillTests : IDisposable
         Assert.Equal(1, first.Rows);
         Assert.Equal(0, second.Rows);
         Assert.Equal(0, second.Days);
+    }
+
+    /// <summary>
+    /// ⭐ **重算模式**：连已经有值的沪市行也按当前口径重新算一遍。
+    ///
+    /// 常规判据是"缺值才补"，所以**取价口径改了之后直接重跑是没用的**——已经填过的行不再满足
+    /// 判据，错值会一直留着。2026-09-16 真出了这事：第一版用前复权取价跑完了全历史 274 万行，
+    /// 当天的对账还全过（前复权的最新点＝真实价，误差 0.0000%），历史行却系统性偏低。
+    ///
+    /// 深市在重算模式下**依然一行不碰**——临时表里压根没有深市的票。
+    /// </summary>
+    [Fact]
+    public void 重算模式连已有值的行也重算_深市仍不碰()
+    {
+        SaveBar("600519", Day, -127.19);                                    // 前复权：负价
+        SaveBar("600519", Day, 225.98, Granularity.DayRaw);
+        SaveMargin("600519", Day, shortVolume: 100_000, shortBalance: 12_719_000);  // 旧口径留下的错值
+        SaveBar("000001", Day, 11.85);
+        SaveMargin("000001", Day, shortVolume: 8_118_837, shortBalance: 96_208_618); // 深市真值
+
+        var filler = new SqliteMarginShortBalanceFiller(_dbPath);
+
+        // 常规模式：有值就不动——这正是"改了口径直接重跑没用"的原因
+        var normal = filler.Fill();
+        Assert.Equal(0, normal.Rows);
+        Assert.Equal(12_719_000, ReadShortBalance("600519", Day));            // 错值还在
+
+        var forced = filler.Fill(recompute: true);
+        Assert.Equal(1, forced.Rows);
+        Assert.Equal(100_000 * 225.98, ReadShortBalance("600519", Day)!.Value, 2);
+        Assert.Equal(96_208_618, ReadShortBalance("000001", Day));            // 深市原值分毫未动
     }
 
     /// <summary>sinceDate 只处理那天及以后——日更时不必每次扫全历史。</summary>

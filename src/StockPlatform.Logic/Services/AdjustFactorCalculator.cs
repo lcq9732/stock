@@ -45,7 +45,21 @@ public static class AdjustFactorCalculator
         DateTime ExDate, double ShareRatio, double CashPerShare,
         double RightsRatio = 0, double RightsPrice = 0)
     {
-        public bool IsEmpty => ShareRatio <= 0 && CashPerShare <= 0 && !HasRights;
+        /// <summary>
+        /// 什么都没发生的事件（不参与复权）。
+        ///
+        /// ⚠ 判的是 <c>ShareRatio == 0</c> 而**不是** <c>&lt;= 0</c>（2026-09-17 改）：
+        /// 负的送转比例是**合法输入**——它表示**份额合并**（基金把 10 份合成 N 份，价格上调），
+        /// ETF 里很常见（510500 中证500ETF 那次 <c>Diviratiob=2.80325</c> ⇒
+        /// <c>ShareRatio = 2.80325/10 − 1 = −0.71968</c>，价格乘数 <c>1/(1+ShareRatio) = 3.567</c>，
+        /// 实际跳空 +261.1%，跟理论的 +256.7% 对得上）。
+        /// 写成 <c>&lt;= 0</c> 的话这类事件会被当成空事件**静默跳过**，ETF 的复权序列在折算日直接断掉。
+        ///
+        /// <c>ShareRatio &lt;= −1</c>（份额合并到 0 或负）不用在这里挡：那会让除权参考价
+        /// <c>(前收 − 派息) / (1 + ShareRatio)</c> 算出 ≤0，主循环里已有的"参考价 ≤0 就跳过并记一条"
+        /// 会接住它。
+        /// </summary>
+        public bool IsEmpty => ShareRatio == 0 && CashPerShare <= 0 && !HasRights;
 
         /// <summary>配股要两个数都有才算数——缺一个就没法算除权参考价，当没配过处理。</summary>
         public bool HasRights => RightsRatio > 0 && RightsPrice > 0;

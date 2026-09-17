@@ -1,6 +1,7 @@
 # 残缺日检测与修补（Partial Day Repair）设计方案
 
-> 状态：**方案待确认，未动代码**（2026-09-16）
+> 状态：**已实现、真机跑通全流程**（2026-09-16）。方案同日定，实现中按真实库结果改了三处
+> （NetInflowDetail 改只报不补、新增样本量下限、CheckDays 不得截日历），详见 §3.3 / §4 / §5。
 > 起因：做资金面诊断对账时发现 `MarginDetail` 有两天只抓到沪市、深市整天缺失，
 > 而程序全程无告警，之后的【首次整段回补】还会把这两天当"已有"跳过、永远补不回来。
 
@@ -266,10 +267,10 @@ public sealed record Spec(
 | `LhbSeat` | 0.2 | true | code | 0 |
 | `BlockTrade` | 0.2 | true | code | 0 |
 
-⚠ `BlockTrade` 归属的是 **`FetchMarketEvents`（拉取市场事件）**，那是个**复合任务**
-（大宗交易 / 机构调研 / 限售解禁 / 股东增减持 四张表）。残缺日待办挂在这个 taskId 名下，
-但补的时候只该重抓大宗那一块，不要把另外三张一起拖下水——`fetchOne` 表里给它单配一个
-只打大宗接口的委托。另外三张是按公告出的（某天一条都没有很正常），本来就不在体检清单里。
+⚠ ~~`BlockTrade` 归属的是 `FetchMarketEvents`（拉取市场事件），那是个复合任务~~
+**已过时（2026-09-17）**：大宗交易拆成了独立任务，`RetryTaskIds.BlockTrade = "FetchBlockTrade"`，
+复合任务那层别扭没有了。这一节描述的"只重抓大宗那一块"的处置随之作废。
+见 doc/block-trade-task-design.md。
 
 ⚠ `Lhb` 的代码列是 `stock_code`。`SafeIdent` 校验要把 `CodeColumn` 也纳入
 （现在只校验 `Table` 和 `DateColumn`）。
@@ -385,7 +386,7 @@ public const string PartialDay = "partial_day";
 public const string Margin       = "StepMargin";
 public const string Lhb          = "StepLhb";
 public const string LhbSeat      = "FetchLhbSeat";      // ⚠ 是 Fetch 前缀不是 Step
-public const string MarketEvents = "FetchMarketEvents"; // 大宗交易归这一项
+public const string BlockTrade   = "FetchBlockTrade";   // 2026-09-17 从 FetchMarketEvents 改名
 ```
 
 #### Spec → TaskId 映射

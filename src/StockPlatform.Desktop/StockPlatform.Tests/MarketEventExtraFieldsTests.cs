@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using System.Text.Json;
 using StockPlatform.Data.Remote;
 using StockPlatform.Data.Sqlite;
@@ -259,7 +259,8 @@ public class MarketEventExtraFieldsTests : IDisposable
         var repo = new SqliteMarketEventRepository(_dbPath);
         repo.EnsureSchema();
 
-        Assert.Equal(1, repo.UpsertBlockTrades(new[] { Parse<BlockTrade>("ParseBlockTrade", BlockTradeOldJson) }));
+        var bt = Parse<BlockTrade>("ParseBlockTrade", BlockTradeOldJson);
+        Assert.Equal(1, repo.ReplaceBlockTradesForDay(bt.TradeDate, [bt]));
         Assert.Equal(1, repo.UpsertShareLifts(new[] { BuildShareLift() }));
         Assert.Equal(1, repo.UpsertHolderChanges(new[] { Parse<HolderChange>("ParseHolderChange", HolderChangeJson) }));
 

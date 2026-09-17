@@ -45,6 +45,15 @@ public enum FetchActionId
     StepIndexCons,
     StepIndexWeight,
     StepEtfIndexMap,
+
+    /// <summary>【导入基金除权除息】——从东财终端本地文件补 ETF 的分红/份额折算事件。</summary>
+    ImportFundExDividend,
+
+    /// <summary>【ETF日K·不复权】——ETF 的 day_raw，回测序列的输入。</summary>
+    StepEtfRawBars,
+
+    /// <summary>【补全退市名单】——巨潮全市场名单减去在市名单，把确实交易过的补进 DelistedStock。</summary>
+    StepDelistedSupplement,
     StepBoards,
     StepBoardList,
     StepIndustryIndicator,
@@ -74,6 +83,19 @@ public enum FetchActionId
     /// 而逐股那条通道要 5500 个请求才能补一天）。
     /// </summary>
     FetchMoneyFlowSnapshot,
+
+    /// <summary>
+    /// 【大宗交易】（2026-09-17 从 <see cref="FetchMarketEvents"/> 拆出来）。
+    ///
+    /// 拆的理由是**批的粒度**：另外三张（机构调研/限售解禁/股东增减持）按年切片、十几片
+    /// 几分钟跑完；大宗改成**按交易日整日替换**之后是两千多片，绑在一起会让那三张陪着
+    /// 跑完整个历史回补。而体检层面它们本来就已经分开了——日频残缺日体检只认大宗。
+    ///
+    /// 为什么非改按日不可：主键第三列原来存东财的 <c>DAILY_RANK</c>，那个值**跨抓取不稳定**，
+    /// UPSERT 认不出"同一笔"、每次重抓都多一份副本（最近一个月的金额普遍虚高一倍）。
+    /// 详见 doc/block-trade-task-design.md。
+    /// </summary>
+    FetchBlockTrade,
     FetchMarketEvents,
     FetchStockBoardMap,
 
@@ -567,12 +589,52 @@ public static class FetchTaskCatalog
             SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
             Sources: [DataSourceId.Sina, DataSourceId.Tencent]),
 
+        new(FetchActionId.StepEtfRawBars, "ETF日K·不复权", "腾讯", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(8), "每工作日",
+            "ETF 的原始成交价，跟个股的【个股日K·不复权】对称——**没有它 ETF 完全不能回测**：\n"
+            + "现在 ETF 只有源给的减法式前复权，非除权日的收益率也是错的"
+            + "（同口径实测：拿官方板块指数当标尺，前复权算出的收益率相关系数只有 0.454、每天差 5.88%）。\n"
+            + "**省掉八成请求**：1659 只里只有 323 只除权过（东财终端 fund_cqcx 覆盖），"
+            + "其余 1336 只的 day 逐值等于 day_raw，直接从库里复制。\n"
+            + "复制有闸门、不会静默抄错：首次抓一页真 day_raw 逐值比对（1 个请求/只），"
+            + "日常增量比库里两条序列在同一天的收盘价（**0 个请求**）——前复权的基准是最新价，"
+            + "一旦除权整条 day 历史都会变，所以\"老日子上还相等\"就等于\"此后没除过权\"。",
+            FetchActionParams.GlobalFetchOptions,
+            SoftDependsOn: [FetchActionId.StepEtfBars, FetchActionId.ImportFundExDividend],
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill | FetchMode.FillBacklog,
+            SupportsPartialRun: true,
+            Sources: [DataSourceId.Tencent]),
+
+        new(FetchActionId.ImportFundExDividend, "基金除权除息", "东财终端本地文件", QuotaGroup.Local,
+            TimeSpan.FromSeconds(20), "不定期",
+            "从东财终端自己落盘的 fund_cqcx.db 导 ETF 的分红/份额折算事件（5845 条 / 1017 只基金）。"
+            + "**纯本地读文件，一个请求都不发**；没装终端就整项跳过、不算失败。\n"
+            + "它是 ETF 能回测的另一半——day_adj ＝ 不复权价 × 本地算的因子，而因子要靠这些事件。\n"
+            + "两个字段的单位都用恒等式验过：Diviratioa＝每10份现金（对得上 raw−qfq 的累计），"
+            + "Diviratiob＝每10份折算后的份数（510500 两次折算，理论跳空 +256.7%/−12.70% "
+            + "对实际的 +261.1%/−14.13%）。份额合并时送转比例是**负数**，这是合法输入。\n"
+            + "⚠ 别跟 full_cqcx_hs_V3.dat 搞混——那份 10 万条里一条 ETF 都没有，全是个股和新三板。",
+            SoftDependsOn: [FetchActionId.StepEtfBars]),
+
         new(FetchActionId.StepDelistedTails, "退市股收尾", "两所官网 + 腾讯K线", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(2), "每工作日",
             "刷新退市名单，给\"本地跟踪过、但最后一根K线还早于终止日\"的票补完最后那几天。\n"
             + "股票一退市数据源就不再更新它，这几天不补就**永久缺失**，回测会有幸存者偏差。",
             FetchActionParams.GlobalFetchOptions,
             Sources: [DataSourceId.Exchange, DataSourceId.Tencent]),
+
+        new(FetchActionId.StepDelistedSupplement, "补全退市名单", "巨潮 + 腾讯K线", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(2), "季度",
+            "两所官网的终止上市名单漏两类，这一项用巨潮的全市场名单补上：\n"
+            + "① **科创板退市股整类缺失**——上交所终止上市名单(stockType=5)里 68 开头的是 0 只，"
+            + "688086 紫晶存储/688555 泽达易盛/688287 观典防务 在它家所有 stockType 里都查不到；\n"
+            + "② 已换代码的老号（600849 上海医药、601313 江南嘉捷这类），原代码不再交易、实质等同退市。\n"
+            + "判据＝巨潮 − 在市名单 − 已知退市，再逐只向数据源要一次日K：**给得出才算交易过**。"
+            + "候选里混着从未上市的（蚂蚁集团、浙江国祥那类过会后撤回的），写进退市表会污染分红抓取和选池。\n"
+            + "⚠ 巨潮**不能**直接并进在市名单：Upsert 默认写 type=stock 且是 INSERT OR REPLACE，"
+            + "会把几百行 delisted 冲成 stock，退市股重新进日常轮询。",
+            SoftDependsOn: [FetchActionId.StepRoster],
+            Sources: [DataSourceId.Tencent]),
 
         new(FetchActionId.StepBoardIndex, "板块指数合成", "本地计算·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(3), "每工作日",
@@ -648,7 +710,8 @@ public static class FetchTaskCatalog
             + "**为什么不留着**：它是\"重抓 580 个请求 + 顺带重算 2 列派生\"。真需要重算 deviation 时"
             + "（比如累计偏离值的规则哪天搞明白了），输入全在库里，该写本地重算、1 分钟跑完，"
             + "而不是把那 580 个请求重发一遍拿回一份一模一样的数据。可复用的零件都留着："
-            + "EastMoneyLhbProvider.FetchRangeAsync（按月切片）、ILhbRepository.ReplaceDays（整天替换）、"
+            + "EastMoneyLhbProvider.FetchSlicesAsync（按月切片，2026-09-17 由 FetchRangeAsync 改名并改成异步枚举）、"
+            + "ILhbRepository.ReplaceDays（整天替换）、"
             + "LhbDeviationDeriver（派生）、ExportTo（库外备份）——真要重来，六十行编排随时能再写。\n"
             + "换源的完整始末见 doc/data-dictionary.md 的 Lhb 小节。",
             FetchActionParams.None,
@@ -692,8 +755,14 @@ public static class FetchTaskCatalog
             + "（单事务写几百万行曾把 WAL 撑到 162GB，这里不重蹈）。\n"
             + "**补不上的留 NULL 不写 0**：实测 2.46% 的行没有当日收盘价（基本是从未抓到过K线的 ETF 和"
             + "退市股），留 NULL 下次还有机会补，写 0 就永久变成「确实没有融券」了。\n"
-            + "⚠ 排在【融资余额】和【个股日K】**之后**——两样都落库了才算得出来。",
-            FetchActionParams.None),
+            + "⚠ 排在【融资余额】和【个股日K】**之后**——两样都落库了才算得出来。\n"
+            + "**两档模式**：「日常增量」只补缺值（幂等、空转，每天跑就用它）；"
+            + "「彻底重查」**重算已有值**——取价口径改过之后必须用这一档，"
+            + "否则旧的错值永远留在库里。2026-09-16 就踩了：第一版取价用前复权 day，"
+            + "已填的 263 万行偏低（茅台 2020-06-01 低 18%、2026-06-01 低 2.1%，越往前越错），"
+            + "改成 day_raw 之后**必须跑一次重算**才能纠正。全历史重算约 48 分钟。",
+            FetchActionParams.None,
+            SupportedModes: FetchMode.Incremental | FetchMode.Thorough),
 
         new(FetchActionId.StepFillProbeFloor, "回填\"无更早数据\"水位", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(1), "一次性",
@@ -710,15 +779,25 @@ public static class FetchTaskCatalog
             + "幂等、可反复跑。要作废这些结论，跑【全库数据体检】并勾「彻底体检」。",
             SoftDependsOn: [FetchActionId.StepStockDayBars, FetchActionId.StepStockHfqBars, FetchActionId.StepStockRawBars]),
 
-        new(FetchActionId.StepDayCoverage, "当日覆盖率体检", "本地查库·不联网", QuotaGroup.Local,
+        new(FetchActionId.StepDayCoverage, "当日完整性体检", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(2), "每工作日",
-            "以上证指数最新一根日线当交易日锚，查出\"上一个交易日有、这一天没有\"的个股，写进待重试名单。\n"
+            "以上证指数最新一根日线当交易日锚，把**当天该有的数据挨个查一遍**，不齐的记进待重试名单。\n"
             + "**这一项是防静默漏抓的**：数据源盘后是逐步更新的，请求发早了接口会正常返回、里面却没有当天——"
             + "不报错、不进失败名单。2026-08-20 那轮 19:00 开跑，个股前复权只拿到 1773/5539 只，"
             + "而界面一切正常、失败名单是空的。\n"
-            + "查出来的名单交给【重新拉取失败】补。建议排在所有K线项的最后面。",
-            // 两份输入：指数日K 是交易日锚（"最近一个已收盘交易日是哪天"），个股日K 是被查的对象
-            SoftDependsOn: [FetchActionId.StepIndexBars, FetchActionId.StepStockDayBars]),
+            + "查三类东西（2026-09-16 从只查个股K线扩开）：\n"
+            + "　① **K线**——个股三个口径、ETF、指数，各按\"上一个交易日有、这天没有\"逐只对齐；\n"
+            + "　② **日更表**——资金净流入、融资余额(T+1)、龙虎榜、席位、大宗交易：整天没有、"
+            + "行数远低于邻近水平、某个交易所整天缺，三条判据任一命中就报；\n"
+            + "　③ **覆盖式快照**——板块行情、总股本/流通市值这类库里只留最新一份的，看它停在哪天。\n"
+            + "①②查出来的名单交给【重新拉取失败】补（它就排在本项后面，当轮就能补上）；③只报，"
+            + "该跑哪一项日志里写着。\n"
+            + "不查分档资金流（那一项自己收尾时就核对了，它的窗口只有一个交易日、等到这儿才发现就晚了），"
+            + "也不查公告/业绩预告/股东增减持这些按事件出的表——某天一条都没有本来就正常。\n"
+            + "建议排在所有K线项的最后面。",
+            // 三份输入：指数日K 是交易日锚（"最近一个已收盘交易日是哪天"），个股日K 和 ETF日K 是被查的对象
+            SoftDependsOn: [FetchActionId.StepIndexBars, FetchActionId.StepStockDayBars,
+                            FetchActionId.StepEtfBars]),
 
         // ══════ 另外三处复合动作拆出来的（2026-09-02，设计文档 3.3 节）══════
         // 判据：成分名单和权重各自入库、各自能单独用 ⇒ 两件事；纯本地的加工（映射、合成、
@@ -1035,30 +1114,64 @@ public static class FetchTaskCatalog
             Sources: [DataSourceId.EmDataCenter]),
 
         new(FetchActionId.FetchLhbSeat, "拉取龙虎榜席位", "东财", QuotaGroup.Mixed,
-            TimeSpan.FromMinutes(4), "每工作日",
-            "抓龙虎榜的**买卖前五营业部明细**——本地此前完全没有这份数据。\n"
-            + "⚠ 跟已有的【龙虎榜】**不是一回事、不替换它**：那一项（新浪）只有"
-            + "「某天某股上榜了、原因是涨跌幅偏离、成交额多少」，**没有营业部名单**。\n"
+            TimeSpan.FromSeconds(30), "每工作日",
+            "抓龙虎榜的**买卖前五营业部明细**。\n"
+            + "⚠ 跟已有的【龙虎榜】**不是一回事、不替换它**：那一项只有"
+            + "「某天某股上榜了、原因是什么、成交额多少」，**没有营业部名单**。\n"
             + "而龙虎榜的全部价值就在于看**是谁在买**：机构专用席位、知名游资、还是深股通。"
-            + "17 万行只有壳，补上这块才有用。\n"
-            + "带营业部代码，所以能跨时间追踪同一个席位——自建游资库、算某个席位的历史胜率都靠它；"
+            + "带营业部代码，能跨时间追踪同一个席位——自建游资库、算某个席位的历史胜率都靠它；"
             + "接口还直接给了该营业部近期上榜后的 3 日胜率。\n"
-            + "**首次全量很久**：买方 131 万 + 卖方 133 万行、约 5200 页，按月切片跑（东财深分页到"
-            + "上千页会拒绝），预计数小时。中途断了没关系——每 2000 行就落一次库，重跑从本地"
-            + "最新交易日接着走，不会从头再来。\n"
-            + "之后增量每次只有 40 页出头，几分钟。\n"
+            + "**按交易日抓、整日替换**（2026-09-17 改）：一天是买卖两个接口，两侧都跟接口自报的"
+            + "行数对上才删掉那天重写；只对上一侧就整天跳过、记成残缺日。所以反复跑结果都一样。\n"
+            + "⚠ 为什么非这么改不可：原来按月切片抓（一片 40~60 页），而排序键 "
+            + "TRADE_DATE,SECURITY_CODE **不唯一**（一天一只股有 5~10 行）。东财翻页靠排序定序，"
+            + "键不唯一时同键行跨页的先后不保证，**既会重复又会丢行**——2021-05 月片实测收到 6226 行里"
+            + "重复 14 行、同时丢掉 14 行真数据。而主键末列 seq 是**位次**，多收一行整组编号就多一位，"
+            + "上次落库的高位行没人覆盖得掉，副本就永久留下了。全表因此多了 3579 行副本、"
+            + "缺了一样多的真行，年份铺满 2016~2026。\n"
+            + "⚠ **别拿\"行数对上了\"当验收判据**：实测 12 天里库中行数全部等于接口 count，错的是内容。"
+            + "看的是唯一指纹数（同榜同席位同金额的重复组应为 0）。\n"
+            + "改按日之后 5204 个「交易日×买卖侧」里 4941 个只有一页、页边界根本不存在；"
+            + "剩下 263 个多页的日侧靠排序键加长兜（加到 EXPLANATION,NET,OPERATEDEPT_CODE）。\n"
+            + "日常增量回看 7 天（约 16 个请求，十几秒）——这张表**没有滞后字段**"
+            + "（rise_prob_3day 是营业部的滚动统计、每天都在变，回看多久都追不平），"
+            + "7 天只为兜住盘后陆续发布和交易所补录。\n"
+            + "「首次整段回补」＝2016-01-04 至今，约 **5540 个请求、50~60 分钟**，"
+            + "存量清理就用它（缺的那 3579 行只能真抓回来，本地算不出）。\n"
             + "⚠ 没有回退源——新浪/交易所都不提供结构化的营业部明细。",
-            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
-            SupportsPartialRun: false,
+            // 支持「只抓某一天」就必须要日期参数，否则界面上没地方填那一天、只能落到"默认今天"。
+            Params: FetchActionParams.Date,
+            SoftDependsOn: [FetchActionId.StepTradingCalendar],
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay
+                          | FetchMode.FirstBackfill | FetchMode.FillBacklog,
+            SupportsPartialRun: true,
+            Sources: [DataSourceId.EmDataCenter]),
+
+        new(FetchActionId.FetchBlockTrade, "大宗交易", "东财", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(1), "每工作日",
+            "大宗交易明细，带**买卖双方营业部**和折溢价率。大幅折价通常是股东减持套现，"
+            + "溢价接盘可能是产业资本，平价对倒多为机构间调仓或换券商席位——"
+            + "跟【龙虎榜席位】互补：那边是场内异动席位，这边是场外大额易手。\n"
+            + "⚠ 这张表**只有一半是股票**（实测 A股 48%、可转债/债券 41%、基金 2%），用之前要按代码前缀筛，"
+            + "否则折溢价分布被债券带偏；折溢价率存的是**小数**（-0.0628 = 折价 6.28%）。\n"
+            + "**按交易日抓、整日替换**（2026-09-17 从【拉取市场事件】拆出来时改的）："
+            + "抓完一天先跟接口自报的行数核对，对得上才删掉那天重写，对不上就跳过并记成残缺日。"
+            + "所以反复跑多少次结果都一样，也不会拿半天的数据盖掉完整的一天。\n"
+            + "⚠ 为什么非这么改不可：主键第三列原来存东财的 DAILY_RANK，而那个值**跨抓取会变**"
+            + "（同一笔交易 09-15 抓到 rank 22、09-16 抓到 rank 1），UPSERT 认不出「同一笔」，"
+            + "每次重抓都 INSERT 一份副本。全表曾因此多出 3087 行，最近一个月的笔数和金额普遍虚高一倍。\n"
+            + "单日 100~600 笔、一页 500 行，所以**永远只有 1~2 页**，深分页的坑绕开了。"
+            + "日常增量抓最近 30 天（约 35 个请求，一分钟）；整段回补 2016 年至今约 3000 个请求。\n"
+            + "⚠ 没有回退源——新浪/腾讯/交易所都不提供结构化的营业部明细。",
+            // 支持「只抓某一天」就必须要日期参数，否则界面上没地方填那一天、只能落到"默认今天"。
+            Params: FetchActionParams.Date,
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay
+                          | FetchMode.FirstBackfill | FetchMode.FillBacklog,
             Sources: [DataSourceId.EmDataCenter]),
 
         new(FetchActionId.FetchMarketEvents, "拉取市场事件", "东财", QuotaGroup.Mixed,
-            TimeSpan.FromMinutes(25), "每工作日",
-            "一次抓四份本地此前**完全没有**的数据：\n"
-            + "**大宗交易**——带买卖双方营业部和折溢价率。大幅折价通常是股东减持套现，"
-            + "溢价接盘可能是产业资本；跟龙虎榜席位是互补的两块筹码信息。"
-            + "⚠ 这张表**只有一半是股票**（实测 A股 48%、可转债/债券 41%、基金 2%），用之前要按代码前缀筛，"
-            + "否则折溢价分布被债券带偏；折溢价率存的是**小数**（-0.0628 = 折价 6.28%）。\n"
+            TimeSpan.FromMinutes(6), "每工作日",
+            "一次抓三份本地此前**完全没有**的数据：\n"
             + "**机构调研**——带参与调研的机构名单。一家公司突然被几十家机构集中调研，"
             + "常常早于股价异动。属软信号：它证明「有人在关注」，不证明「基本面变好」。"
             + "⚠ **接口只保留滚动一年**（实测自报 28.4 万行、最早只到一年前），跟别的几项能回溯到 2016 不同——"
@@ -1067,9 +1180,12 @@ public static class FetchTaskCatalog
             + "所以每次全量重取（3 万行、63 页）。解禁是次新股最明确的时间节点。\n"
             + "**股东增减持**——跟已有的十大股东表互补：那张说「季末谁持有多少」，"
             + "这张说「期间谁在买卖、多少、什么价」，是明确的内部人信号。\n"
-            + "四项各自独立失败：一项挂了不影响其余（覆盖面和重要性本来就不一样）。\n"
-            + "首次全量约 110 万行、25 分钟；之后增量每次几十页。\n"
-            + "⚠ 没有回退源——这四份数据新浪/腾讯/交易所/巨潮都不提供结构化版本。",
+            + "三项各自独立失败：一项挂了不影响其余（覆盖面和重要性本来就不一样）。\n"
+            + "首次全量约 44 万行、6 分钟；之后增量每次几十页。\n"
+            + "⚠ **大宗交易 2026-09-17 拆成独立的【大宗交易】一项**——它改成了按交易日整日替换"
+            + "（东财的 DAILY_RANK 跨抓取会变，原来当主键用，重抓一次就多一份副本），"
+            + "切片从十几片变成两千多片，跟这三张的节奏对不上。\n"
+            + "⚠ 没有回退源——这三份数据新浪/腾讯/交易所/巨潮都不提供结构化版本。",
             SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
             SupportsPartialRun: false,
             Sources: [DataSourceId.EmDataCenter]),
@@ -1369,6 +1485,7 @@ public static class FetchTaskCatalog
         FetchActionId.StepStockRawBars,
         FetchActionId.StepEtfBars,
         FetchActionId.StepLhb,
+        FetchActionId.FetchBlockTrade,
         FetchActionId.StepBoardIndex,
         FetchActionId.StepDayCoverage,
         FetchActionId.RetryFailed,
@@ -1405,7 +1522,8 @@ public static class FetchTaskCatalog
         // ⚠ 首次全量是另一回事（龙虎榜席位 264 万行要数小时）：新加的计划项默认不启用
         // （见 FetchPlan.Normalize 的注释），先用那一行的【执行】手工跑完首轮，再勾启用转日常增量。
         FetchActionId.FetchEarningsForecast or FetchActionId.FetchLhbSeat
-            or FetchActionId.FetchMarketEvents => PlanGroupKind.Daily,
+            or FetchActionId.FetchMarketEvents
+            or FetchActionId.FetchBlockTrade => PlanGroupKind.Daily,
 
         // 【分档资金流快照】（2026-09-12 拆出来）归日更，而且是"漏一天就永久没了"的那一类：
         // push2delay 只给最近一个交易日的资金流，当晚没抓，下一个交易日开盘接口就滚到新一天，
@@ -1420,6 +1538,18 @@ public static class FetchTaskCatalog
         // 【行业景气指标】（2026-09-07）归日更：116 个指标里 45 个是日频，每天都变。
         // 增量很轻——每个指标只拉水位线之后的那几行。
         FetchActionId.StepIndustryIndicator => PlanGroupKind.Daily,
+
+        // 【ETF日K·不复权】跟着【ETF日K】走日更：稳态下它几乎不发请求（没除权的那 1336 只
+        // 直接从 day 复制，判据纯本地），而漏一天就要在下一轮多翻一页补回来。
+        FetchActionId.StepEtfRawBars => PlanGroupKind.Daily,
+
+        // 【基金除权除息】归周期组：它读的是东财终端自己更新的本地文件，不定期变；
+        // 而且一次 20 秒、不发请求，晚几天补上毫无代价。
+        FetchActionId.ImportFundExDividend => PlanGroupKind.Periodic,
+
+        // 【补全退市名单】归周期组：退市这件事本身不常发生，而且它要先有最新的在市名册
+        // 才算得出差集（SoftDependsOn StepRoster）。
+        FetchActionId.StepDelistedSupplement => PlanGroupKind.Periodic,
 
         // 【观察指标映射】（2026-09-11）跟着【行业景气指标】走日更。它本身变得很慢（规则改了才变），
         // 但重算是纯本地、毫秒级、幂等，每天白跑一次的成本可以忽略；而放到季度组的话，
@@ -1577,6 +1707,7 @@ public static class FetchTaskCatalog
         FetchActionId.StepStockRawBars,
         FetchActionId.StepStockHfqBars,
         FetchActionId.StepEtfBars,
+        FetchActionId.StepEtfRawBars,
         FetchActionId.StepIndexBars,
         // ── 资金与交易 ──
         FetchActionId.StepNetInflow,
@@ -1586,8 +1717,10 @@ public static class FetchTaskCatalog
         FetchActionId.FetchMoneyFlowSnapshot,
         FetchActionId.StepMargin,
         FetchActionId.StepLhb,
-        // 【市场事件】大宗交易/机构调研/限售解禁/股东增减持，都是按日出的筹码面信息。
-        // 首轮 25 分钟、之后几分钟，排在这儿不碍事。
+        // 【大宗交易】紧跟龙虎榜（2026-09-17 拆出来时排的）：两者是互补的两块筹码信息——
+        // 龙虎榜是场内异动席位，大宗是场外大额易手。日常增量只抓最近 30 天、几十个请求。
+        FetchActionId.FetchBlockTrade,
+        // 【市场事件】机构调研/限售解禁/股东增减持，都是按日出的筹码面信息。
         FetchActionId.FetchMarketEvents,
         FetchActionId.StepAnnouncements,
         // 【业绩预告/快报】跟公告放一起：都是"公司今天发了什么"，而且预告本来就是一种公告。
@@ -1662,6 +1795,11 @@ public static class FetchTaskCatalog
         FetchActionId.StepEtfIndexMap,
         FetchActionId.FetchShareholder,
         FetchActionId.FetchDividend,
+        // 【基金除权除息】紧跟个股分红（2026-09-17）：同一族数据（除权除息事件），
+        // 只是一个抓个股、一个读东财终端的本地文件。它给【ETF日K·不复权】当前置——
+        // 那一项在日更组，靠它区分"这只 ETF 除过权（必须抓）"还是"从没除过（可以复制）"。
+        FetchActionId.ImportFundExDividend,
+        FetchActionId.StepDelistedSupplement,
         FetchActionId.FetchFinancials,        // 监管指标要靠它认机构类型，所以排在前面
         // 【公司档案】+【客户与供应商】紧跟财务报表（2026-09-07/09-08）：
         // 它们是同一份年报里的东西，一起更新才不会出现"财务是新的、客户集中度还是去年的"错配。

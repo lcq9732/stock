@@ -136,14 +136,19 @@ public partial class FetchOrchestrator
     /// <summary>分档资金流的全市场当日快照（2026-09-06，push2delay）。跟上面那个是同一份数据的两种切法。</summary>
     private readonly Remote.EastMoneyMoneyFlowSnapshotProvider? _moneyFlowSnapshotProvider;
     private readonly INetInflowDetailRepository? _moneyFlowRepository;
-    /// <summary>大宗交易/机构调研/限售解禁/股东增减持（2026-09-03，东财）。本地此前全都没有。</summary>
+    /// <summary>机构调研/限售解禁/股东增减持（2026-09-03，东财）。本地此前全都没有。
+    /// ⚠ 大宗交易 2026-09-17 拆出去了，见 <c>BlockTradeTask</c>——它要按日整日替换，
+    /// 跟这三张"按年切片、几分钟跑完"的节奏对不上。</summary>
     private readonly Remote.EastMoneyMarketEventProvider? _marketEventProvider;
     private readonly IMarketEventRepository? _marketEventRepository;
 
     /// <summary>
     /// 市场事件表增量时额外往前回看的天数（见 <see cref="RunFetchMarketEventsAsync"/> 里
-    /// RunOne 的注释）。大宗交易的"事件后 N 日涨跌幅"最长是 20 个交易日，取 30 个自然日
-    /// 足够覆盖（20 交易日 ≈ 28 自然日）。改小了滞后字段会填不满。
+    /// RunOne 的注释）。
+    ///
+    /// 这个 30 天原本是为**大宗交易的滞后字段**定的（"事件后 N 日涨跌幅"最长 20 个交易日
+    /// ≈ 28 自然日）。大宗 2026-09-17 拆去 <c>BlockTradeTask</c> 之后，留给剩下三张表的作用
+    /// 变成"公告补发/修订的兜底"——那三张都是按年切片的公告类数据，多抓一小段成本极低。</summary>
     /// </summary>
     private const int LaggingFieldLookbackDays = 30;
     /// <summary>个股行业/题材归属（2026-09-03，东财 datacenter）。补证监会分类的粒度不足。</summary>
@@ -1253,12 +1258,13 @@ public partial class FetchOrchestrator
         }, errors, progress, sw, _marginProvider.EarliestAvailable, ct);
 
         var lhbHave = _lhbRepository.GetTradeDates();
-        await BackfillDailyAsync($"{rangeLabel}龙虎榜", IDailyFetchNoDataRepository.LhbDataset, DateOnly.FromDateTime(yearStart), DateOnly.FromDateTime(yearEnd), lhbHave, async d =>
-        {
-            var rows = await _lhbProvider.GetDailyAsync(d, ct);
-            if (rows.Count > 0) { lock (_dbLock) { _lhbRepository.InsertOrIgnore(rows); } }
-            return rows.Count;
-        }, errors, progress, sw, _lhbProvider.EarliestAvailable, ct);
+        // 落库走 LhbDayWriter（2026-09-17）——跟【龙虎榜】任务、补残缺日共用同一套口径：
+        // 派生对应值 + 整天替换。这条路径原来走 InsertOrIgnore 且不派生，补进来的历史行
+        // deviation 永远是空的。
+        var lhbWriter = new LhbDayWriter(_paths.CurrentDb, _lhbRepository, _lhbProvider, _dbLock);
+        await BackfillDailyAsync($"{rangeLabel}龙虎榜", IDailyFetchNoDataRepository.LhbDataset, DateOnly.FromDateTime(yearStart), DateOnly.FromDateTime(yearEnd), lhbHave,
+            d => lhbWriter.RefetchAsync(d, ct),
+            errors, progress, sw, _lhbProvider.EarliestAvailable, ct);
 
         // ── 板块指数按新补齐的个股日K重新合成（本地计算、不联网）——让板块指数历史跟着一起变长 ──
         SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
@@ -1585,87 +1591,17 @@ public partial class FetchOrchestrator
     }
 
     /// <summary>
-    /// 抓龙虎榜**营业部席位明细**（2026-09-03，东财 datacenter）。
+    /// 抓机构调研 / 限售解禁 / 股东增减持（2026-09-03，东财 datacenter）。
+    /// 本地此前这几份数据全都没有，也都没有回退源。
     ///
-    /// 跟现有的【龙虎榜】任务是**两回事，不是替换**：那一项（新浪）抓的是"某天某股上榜了、
-    /// 原因是涨跌幅偏离、成交额多少"，**没有买卖前五营业部名单**——而龙虎榜的全部价值恰恰
-    /// 在于看**是谁在买**：机构专用席位、知名游资、还是深股通。17 万行数据缺了这块等于只留了个壳。
+    /// ⚠ **原本还有第四张：大宗交易**。2026-09-17 拆去 <c>BlockTradeTask</c>——它的主键
+    /// 用了东财那个不稳定的 <c>DAILY_RANK</c>，重抓一次就多一份副本，修法是改按日整日替换，
+    /// 于是切片从"按年十几片"变成"按日两千多片"，跟这三张的节奏彻底对不上。
+    /// 详见 doc/block-trade-task-design.md。
     ///
-    /// 数据量是本次接入里最大的（买方 131 万 + 卖方 133 万），所以是唯一走**流式回调**的：
-    /// provider 每攒 2000 行就交给仓储落库，不把 264 万行全装内存。首次全量约 5200 页、
-    /// 按月切片跑（东财深分页到上千页会拒绝），之后增量每月只有 40 页出头。
-    /// </summary>
-    public async Task<FetchResult> RunFetchLhbSeatAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var result = new FetchResult();
-        if (_lhbSeatProvider == null || _lhbSeatRepository == null)
-        {
-            progress?.Report("没有配置龙虎榜席位数据源（东财），跳过。");
-            result.NothingToDo = true;
-            return result;
-        }
-
-        var sw = Stopwatch.StartNew();
-        _lhbSeatRepository.EnsureSchema();
-
-        void Forward(string s) => progress?.Report(s);
-        _lhbSeatProvider.OnStatus += Forward;
-        try
-        {
-            var today = DateTime.Today;
-            // 水位线**回退到所在月的 1 号**，整月重抓。
-            //
-            // 不能直接拿 MAX(trade_date) 当起点——这张表的落库粒度是"月"，而且**一个月内买卖是
-            // 分两次落库的**（先买方后卖方）。如果在某月的买方已落库、卖方还没落时被打断，
-            // MAX(trade_date) 就停在了那个月的月中/月末，下一轮从那天起切片，该月月初到那天的
-            // **卖方数据就永久漏掉了**。
-            // 实测踩过：中断时买方最大日 2019-05-31、卖方 2019-04-30，2019-05 整月只有买方 7635 行、
-            // 卖方 0 行；不回退的话 05-01~05-30 的卖方就再也补不回来。
-            //
-            // 回退到月初的代价只是每次重抓一个月（约 1.6 万行、几十页），主键 UPSERT 保证不重复。
-            // 顺带也覆盖了"当天盘后陆续发布"那个场景（本来就要从最新那天本身重抓）。
-            var watermark = _lhbSeatRepository.GetLatestTradeDate();
-            var start = watermark.HasValue
-                ? new DateTime(watermark.Value.Year, watermark.Value.Month, 1)
-                : new DateTime(2016, 1, 1);
-            bool firstRun = _lhbSeatRepository.Count() == 0;
-            progress?.Report($"龙虎榜席位：从 {start:yyyy-MM-dd} 抓到 {today:yyyy-MM-dd}" +
-                             (firstRun ? "（首次全量约 264 万行、5200 页，按月切片，预计数小时）" : "（增量）"));
-
-            int total = await _lhbSeatProvider.FetchAsync(
-                start, today,
-                batch => _lhbSeatRepository.Upsert(batch),   // 每 2000 行落一次库
-                progress, ct);
-
-            progress?.Report($"龙虎榜席位写入 {total} 行，本地共 {_lhbSeatRepository.Count()} 行，"
-                           + $"用时 {FormatElapsed(sw.Elapsed)}。");
-        }
-        catch (OperationCanceledException)
-        {
-            // 中断时已落库的部分是有效的，重跑会从本地水位线接着走——这正是流式落库的意义
-            progress?.Report($"龙虎榜席位抓取中断，已落库 {_lhbSeatRepository.Count()} 行，下次从断点续。");
-            throw;
-        }
-        catch (Exception ex)
-        {
-            result.Errors.Add($"龙虎榜席位抓取失败：{ex.Message}");
-            progress?.Report($"⚠ 龙虎榜席位抓取失败：{ex.Message}（已落库的部分保留，重跑会续）");
-        }
-        finally
-        {
-            _lhbSeatProvider.OnStatus -= Forward;
-        }
-        return result;
-    }
-
-    /// <summary>
-    /// 抓大宗交易 / 机构调研 / 限售解禁 / 股东增减持（2026-09-03，东财 datacenter）。
-    /// 本地此前这四份数据全都没有，也都没有回退源。
-    ///
-    /// 放一个任务里跑是因为它们同构、共用同一个 datacenter 配额，分成四项只会让人在计划页上
-    /// 排四行、还得自己记住顺序。四项各自 try：一项失败不影响其余（覆盖面和重要性都不一样，
-    /// 机构调研挂了不该让已经抓好的大宗交易也算失败）。
+    /// 剩下三张仍放一个任务里跑：它们同构、共用同一个 datacenter 配额，分成三项只会让人在
+    /// 计划页上多排两行。三项各自 try：一项失败不影响其余（覆盖面和重要性都不一样，
+    /// 机构调研挂了不该让已经抓好的增减持也算失败）。
     ///
     /// 增量水位线各表自己的日期列；<b>限售解禁例外，每次全量重取</b>——它含未来的解禁计划
     /// （实测有 2035 年的），按"抓到今天为止"做增量会永远漏掉未来那部分，而未来正是它的价值。
@@ -1698,11 +1634,9 @@ public partial class FetchOrchestrator
             // 从水位线那一天**本身**重抓（不是次日）：公告是全天陆续发的，上次抓时当天可能没发完。
             // 主键 UPSERT 保证重抓不产生重复行。
             //
-            // 再额外往前推 LaggingFieldLookbackDays 天，是为了**滞后字段**：大宗交易的
-            // change_rate_1d/5d/10d/20d 是东财事后才算的，抓取当天窗口没走完一律返回 null
-            // （实测 2026-09-04 的股票行全空，2016-01-05 / 2020-06-10 的全部有值）。
-            // 只抓"水位线→今天"的话，这几列永远是 NULL——每次回头重抓一个月，等窗口走完后
-            // 被 UPSERT 覆盖填上。代价很小：大宗交易每月约 9 页。
+            // 再额外往前推 LaggingFieldLookbackDays 天，兜"公告补发/修订"——这几张都是按年
+            // 切片的公告类数据，多抓一小段成本极低。（这个回看原本是为大宗交易的滞后字段设的，
+            // 大宗已拆去 BlockTradeTask，那边按日整日替换、自带 30 天回看。）
             async Task RunOne(string label, string table, string dateCol, Func<DateTime, Task<int>> fetch)
             {
                 try
@@ -1740,10 +1674,6 @@ public partial class FetchOrchestrator
                     progress?.Report($"⚠ {label} 抓取失败：{ex.Message}");
                 }
             }
-
-            await RunOne("大宗交易", "BlockTrade", "trade_date", start =>
-                _marketEventProvider.FetchBlockTradesAsync(start, today,
-                    b => _marketEventRepository.UpsertBlockTrades(b), progress, ct));
 
             await RunOne("机构调研", "OrgSurvey", "notice_date", start =>
                 _marketEventProvider.FetchOrgSurveysAsync(start, today,
@@ -2010,6 +1940,26 @@ public partial class FetchOrchestrator
                                                 MoneyFlowBackfillPlan.DefaultGapThreshold);
             return (q.Todo.Count, q.Never);
         }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// 【分档资金流快照】那一行要显示的**当天齐不齐**（2026-09-16 用户要求）。
+    ///
+    /// 为什么这一行比别的行多一个"标红"：别的项参数格里那些计数（还差多少只历史、多少个板块）
+    /// 是"慢慢补"的进度，晚几天没关系；这一项说的是**今天的数据在不在**，而它的接口只给
+    /// 最近一个交易日——今天没拿到，下一个交易日开盘后就永久没了。所以它不只是个数字，
+    /// 缺了必须红着提醒人现在就补。
+    ///
+    /// 判据跟任务收尾时那次核对是同一份（<see cref="Sqlite.SqliteMoneyFlowDayAudit"/>）：
+    /// 两处各写一份的话，会出现"任务说齐了、界面说不齐"这种谁也不信谁的状态。
+    ///
+    /// 便宜：三条走索引的 COUNT（当天日K走 ix_bar_gran_date、资金流走 ix_flowdetail_date），
+    /// 本机实测 0.1 秒以内。
+    /// </summary>
+    public Sqlite.MoneyFlowDayStatus? GetMoneyFlowDayStatus()
+    {
+        try { return new Sqlite.SqliteMoneyFlowDayAudit(_paths.CurrentDb).Check(); }
         catch { return null; }
     }
 
@@ -2665,22 +2615,26 @@ public partial class FetchOrchestrator
                 if (rows.Count > 0) { lock (_dbLock) { _marginRepository.InsertOrIgnore(rows); } }
                 return rows.Count;
             },
-            RetryTaskIds.Lhb when _lhbRepository != null => async d =>
-            {
-                var rows = await _lhbProvider.GetDailyAsync(d, ct);
-                if (rows.Count > 0) { lock (_dbLock) { _lhbRepository.InsertOrIgnore(rows); } }
-                return rows.Count;
-            },
-            RetryTaskIds.LhbSeat when _lhbSeatProvider != null && _lhbSeatRepository != null => async d =>
-                await _lhbSeatProvider.FetchAsync(
-                    d.ToDateTime(TimeOnly.MinValue), d.ToDateTime(TimeOnly.MinValue),
-                    batch => { lock (_dbLock) { return _lhbSeatRepository.Upsert(batch); } }, progress, ct),
-            // ⚠ 【拉取市场事件】是复合任务（大宗/调研/解禁/增减持四张表），但只有大宗进了日频体检，
-            //    所以这里**只重抓大宗**，不要把另外三张一起拖下水。
-            RetryTaskIds.MarketEvents when _marketEventProvider != null && _marketEventRepository != null => async d =>
-                await _marketEventProvider.FetchBlockTradesAsync(
-                    d.ToDateTime(TimeOnly.MinValue), d.ToDateTime(TimeOnly.MinValue),
-                    b => { lock (_dbLock) { return _marketEventRepository.UpsertBlockTrades(b); } }, progress, ct),
+            // 【龙虎榜】2026-09-17 迁去 LhbTask，补残缺日的编排仍在这边。抓一天并落库的动作
+            // 跟任务侧**共用 LhbDayWriter**——顺带把这条路径的口径统一了：原来它走
+            // InsertOrIgnore 且不派生对应值，补进来的新行 deviation 永远是空的。
+            RetryTaskIds.Lhb when _lhbRepository != null =>
+                d => new LhbDayWriter(_paths.CurrentDb, _lhbRepository, _lhbProvider, _dbLock)
+                         .RefetchAsync(d, ct),
+            // 【拉取龙虎榜席位】2026-09-17 拆成独立任务并改按日整日替换，但残缺日的编排仍在这边
+            // （PartialDayRepair 那一套）。抓一天并落库的动作跟任务侧**共用 LhbSeatDayWriter**
+            // ——里面那条"买卖两侧没都抓全就不落库"是这张表最要命的规矩：整日替换时只写回一侧，
+            // 另一侧就被整天删掉了。
+            RetryTaskIds.LhbSeat when _lhbSeatProvider != null && _lhbSeatRepository != null =>
+                d => new LhbSeatDayWriter(_lhbSeatProvider, _lhbSeatRepository, _dbLock)
+                         .RefetchAsync(d, ct),
+            // 【大宗交易】2026-09-17 拆成独立任务，但残缺日的编排仍在这边（PartialDayRepair
+            // 那一套：复查用体检同判据、Tries、确认名单）。抓一天并落库的动作跟任务侧
+            // **共用 BlockTradeDayWriter**——各写一份必然漂移，而里面那条"抓不全就不落库"
+            // 正是这张表最要命的规矩。
+            RetryTaskIds.BlockTrade when _marketEventProvider != null && _marketEventRepository != null =>
+                d => new BlockTradeDayWriter(_marketEventProvider, _marketEventRepository, _dbLock)
+                         .RefetchAsync(d, ct),
             _ => null,
         };
 
@@ -2688,105 +2642,22 @@ public partial class FetchOrchestrator
     /// 补**残缺日**：那天有行、但不全（某个交易所整天没有，或行数明显偏少）。
     /// 见 doc/partial-day-repair-design.md。
     ///
-    /// ⚠ **复查绝对不能用 <c>COUNT > 0</c>**，这是这个方法跟
-    /// <see cref="FillMissingNetInflowDaysAsync"/> 最关键的差别：残缺日本来就有行
-    /// （2026-08-21 有 1,998 行沪市），拿"有没有行"去复查，深市补没补上都会被判成"已补齐"、
-    /// 从待办里静默划掉。所以复查走 <see cref="SqliteDailyTableAuditor.CheckDays"/>——
-    /// 跟体检**同一套判据**，补齐了才划掉。
+    /// 编排本体在 <see cref="PartialDayRepair"/>（2026-09-17 抽出去）——那段里没有一行是任务
+    /// 特定的，唯一的变量是"怎么重抓一天"，所以新框架的任务能共用同一份、不必各写一遍。
+    /// 这里只负责把编排器这侧的东西喂进去：任务 id、按天重抓的入口、那把 manifest 锁。
     /// </summary>
     private async Task FillPartialDaysAsync(
         string taskId, List<string> done, IProgress<string>? progress, CancellationToken ct)
     {
-        var spec = SqliteDailyTableAuditor.DailyTables.FirstOrDefault(s => s.OwnerTaskId == taskId);
-        if (spec == null) return;
-
-        List<RetryTarget> pending;
-        lock (_dbLock)
-            pending = _manifestStore.Load().Todo(taskId, RetryTodoKind.PartialDay)?.Targets.ToList() ?? new();
-        var days = pending.Where(p => p.Day.HasValue).Select(p => p.Day!.Value.Date)
-                          .Distinct().OrderBy(d => d).ToList();
-        if (days.Count == 0) return;
-
-        var refetch = DailyRefetcherFor(taskId, progress, ct);
-        if (refetch == null)
-        {
-            progress?.Report($"⚠ {spec.Label}：有 {days.Count} 天残缺，但这一项没有\"按天重抓\"的入口，只能人工处理。");
-            return;
-        }
-
-        var sw = Stopwatch.StartNew();
-        progress?.Report($"补{spec.Label}残缺日：{days.Count} 天"
-            + $"（{string.Join("、", days.Select(d => d.ToString("yyyy-MM-dd")))}）"
-            + "——这些天本地有数据但不全，重抓整天、按主键去重合并，已有的行不受影响。");
-
-        int rows = 0, failCount = 0;
-        foreach (var d in days)
-        {
-            ct.ThrowIfCancellationRequested();
-            try { rows += await refetch(DateOnly.FromDateTime(d)); }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                failCount++;
-                progress?.Report($"⚠ {spec.Label} {d:yyyy-MM-dd} 重抓失败：{ex.Message}");
-            }
-        }
-
-        // 整批都失败多半是被限流/断网，不是"数据源没有"——名单和计数原样留着，别白耗一轮 Tries。
-        if (failCount == days.Count)
-        {
-            progress?.Report($"{spec.Label}残缺日：{failCount} 天全部重抓失败，判定是连不上而不是数据源没有，"
-                           + "名单和重试计数原样留着，等会儿再跑一次。");
-            done.Add($"{spec.Label}残缺 {days.Count} 天（未计数）");
-            return;
-        }
-
-        // 复查：跟体检同一套判据（不是 COUNT>0，理由见方法注释）
-        var auditor = new SqliteDailyTableAuditor(_paths.CurrentDb);
-        var stillBad = auditor.CheckDays(spec, MarketIndexCatalog.ShanghaiCompositeSymbol, days)
-                              .Select(p => p.Day.Date).ToHashSet();
-        int fixedDays = days.Count - stillBad.Count;
-
-        int confirmedNow = 0;
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            var confirmed = manifest.ConfirmedPartialDays.TryGetValue(taskId, out var cd)
-                ? cd.Select(x => x.Date).ToHashSet() : new HashSet<DateTime>();
-            var triesByDay = pending.Where(p => p.Day.HasValue)
-                                    .GroupBy(p => p.Day!.Value.Date)
-                                    .ToDictionary(g => g.Key, g => g.Max(p => p.Tries));
-            var next = new List<RetryTarget>();
-            foreach (var d in stillBad.OrderBy(x => x))
-            {
-                int tries = triesByDay.GetValueOrDefault(d) + 1;
-                if (tries >= AuditMaxTries) { confirmed.Add(d); confirmedNow++; }
-                else next.Add(new RetryTarget { Day = d, Tries = tries });
-            }
-            manifest.SetTodo(taskId, RetryTodoKind.PartialDay, next);
-            manifest.ConfirmedPartialDays[taskId] = confirmed.OrderBy(x => x).ToList();
-            _manifestStore.Save(manifest);
-        }
-
-        progress?.Report($"{spec.Label}残缺日补齐完成：补上 {fixedDays}/{days.Count} 天、写入 {rows} 行"
-            + (failCount > 0 ? $"，{failCount} 天重抓失败" : "")
-            + (confirmedNow > 0
-                ? $"；{confirmedNow} 天补满 {AuditMaxTries} 轮仍不齐，已判定数据源那天就是只有这些、以后体检不再报"
-                : "")
-            + $"，用时 {FormatElapsed(sw.Elapsed)}。");
-        done.Add($"{spec.Label}残缺 {days.Count} 天");
+        var repair = new PartialDayRepair(_paths.CurrentDb, _manifestStore, _dbLock);
+        var r = await repair.RunAsync(taskId, DailyRefetcherFor(taskId, progress, ct), progress, ct);
+        if (r?.Done is { } line) done.Add(line);
     }
 
     /// <summary>某一项已知的残缺日——整段回补要拿它从 have 里扣掉（见
     /// <see cref="RunStepBackfillDailyOneAsync"/>），否则那些天会被当成"已有"永远跳过。</summary>
-    private HashSet<DateOnly> PartialDaysOf(string taskId)
-    {
-        lock (_dbLock)
-            return (_manifestStore.Load().Todo(taskId, RetryTodoKind.PartialDay)?.Targets ?? [])
-                .Where(t => t.Day.HasValue)
-                .Select(t => DateOnly.FromDateTime(t.Day!.Value.Date))
-                .ToHashSet();
-    }
+    private HashSet<DateOnly> PartialDaysOf(string taskId) =>
+        new PartialDayRepair(_paths.CurrentDb, _manifestStore, _dbLock).DaysOf(taskId);
 
     private async Task FetchNetInflowRangeAsync(
         IReadOnlyList<string> codes, DateTime rangeStart, DateTime rangeEnd, IProgress<string>? progress, CancellationToken ct)
@@ -3102,23 +2973,38 @@ public partial class FetchOrchestrator
             var missStats = new FetchStats();
             int missDone = 0;
             var today = DateTime.Today;
-            progress?.Report($"补 {missDate:yyyy-MM-dd} 还缺的个股日线，共 {codes.Count} 只"
-                           + $"（上一轮不是失败，是数据源当时还没出这些股票的当天数据），数据源：{source.Name}");
+            // **按任务决定补哪些口径**（2026-09-16 当日体检扩到 ETF/指数时加，09-17 补上 ETF 不复权）：
+            // 名单是体检按标的类型 × 口径分开记的，补的时候也得分开——拿 ETF 去跑后复权
+            // 是白发一轮请求，而数据源多半直接给空；反过来，ETF 的 day_raw 待办要是走成前复权，
+            // 补了半天那条线还是缺的（而且复查会说"已补齐"）。
+            //   · 个股：三个口径并成一份名单，三条线各按自己的水位线补，齐了的直接跳过；
+            //   · ETF/指数（前复权）：只有 day 这一路；
+            //   · ETF·不复权：只有 day_raw 这一路。
+            bool qfq = taskId is not RetryTaskIds.EtfRawBars;
+            bool hfq = taskId is RetryTaskIds.StockDayBars or RetryTaskIds.StockHfqBars
+                               or RetryTaskIds.StockRawBars;
+            bool raw = hfq || taskId is RetryTaskIds.EtfRawBars;
+            string missLabel = TaskLabel(taskId);
+            progress?.Report($"补 {missDate:yyyy-MM-dd} 还缺的{missLabel}，共 {codes.Count} 只"
+                           + $"（上一轮不是失败，是数据源当时还没出这些标的的当天数据），数据源：{source.Name}");
             // 窗口取"缺的那个交易日 → 今天"。前复权走 ProcessOneStockAsync，后复权/不复权走
             // FetchHfqBarsAsync（它自己按各口径的水位线算缺口）——已经补齐的那条线会在水位线
             // 判定里跳过、不发请求。
-            await Task.WhenAll(codes.Select(code =>
-                ProcessOneStockAsync(code, source, missDate, today, currentRepo,
-                    errors, failedCodes, missStats, progress, codes.Count,
-                    () => Interlocked.Increment(ref missDone), sw, ct)));
-            await FetchHfqBarsAsync(source, codes,
-                code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears),
-                currentRepo, errors, failedCodes, missStats, progress, sw, ct);
-            await FetchHfqBarsAsync(source, codes,
-                code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears, Granularity.DayRaw),
-                currentRepo, errors, failedCodes, missStats, progress, sw, ct, gran: Granularity.DayRaw);
+            if (qfq)
+                await Task.WhenAll(codes.Select(code =>
+                    ProcessOneStockAsync(code, source, missDate, today, currentRepo,
+                        errors, failedCodes, missStats, progress, codes.Count,
+                        () => Interlocked.Increment(ref missDone), sw, ct)));
+            if (hfq)
+                await FetchHfqBarsAsync(source, codes,
+                    code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears),
+                    currentRepo, errors, failedCodes, missStats, progress, sw, ct);
+            if (raw)
+                await FetchHfqBarsAsync(source, codes,
+                    code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears, Granularity.DayRaw),
+                    currentRepo, errors, failedCodes, missStats, progress, sw, ct, gran: Granularity.DayRaw);
             progress?.Report($"当天日线重补汇总：{missStats.Summarize()}");
-            done.Add($"{missDate:MM-dd}日线 {codes.Count} 只");
+            done.Add($"{missDate:MM-dd}{missLabel} {codes.Count} 只");
             attempted.AddRange(codes);
         }
 
@@ -3947,73 +3833,48 @@ public partial class FetchOrchestrator
     }
 
     /// <summary>
-    /// 一轮抓取跑完之后的"当天覆盖率体检"（2026-08-21新增）：把本该有最新交易日日线、库里却还是
-    /// 没有的个股记进 <see cref="Manifest.MissingDayCodes"/>，交给"重新拉取失败股票"一并重试。
+    /// 当日完整性体检——判据和编排都在 <see cref="SqliteDayCompletenessAuditor"/>（2026-09-17 抽走），
+    /// 这里只剩"跑一轮、写 manifest、把结论报出来"。
     ///
-    /// 起因：数据源盘后是**逐步**更新的，请求发过去时那只股票的当天K线可能还没出来——接口正常返回、
-    /// 只是里面没有那一天，代码算作"请求成功但无新数据"（<see cref="FetchStats.FetchedButEmpty"/>），
-    /// 既不报错也不进任何失败名单、更不会重试。2026-08-20 那轮 19:00 开跑的"拉取全部"，个股前复权
-    /// 只拿到 1773/5539 只（21:00 之后才抓的后复权和 ETF 一个不缺），而界面上一切正常、失败名单是
-    /// 空的，用户第二天看盘才发现一半股票的"最新收盘"还停在前一天。
-    ///
-    /// 判定不看抓取过程中的统计，而是**直接查库**：以上证指数最新一根日线当"最近一个已收盘交易日"
-    /// 的锚（<see cref="MarketIndexCatalog.ShanghaiCompositeSymbol"/> 就是为此存在的，指数不停牌、
-    /// 不退市），取"上一个交易日有、这一天没有"的个股当作漏抓（见
-    /// <see cref="SqliteBarRepository.GetCodesMissingDay"/>，用"上一个交易日有"过滤掉长期停牌和已
-    /// 退市的票）。这样不管漏抓的原因是数据源没出、请求失败还是被跳过，都能一网打尽。
-    ///
-    /// 前复权(day)、后复权(day_hfq)、不复权(day_raw) 各查一次、并成一份名单（不复权是 2026-09-04
-    /// 补上的——它是 day_adj 的输入，缺一天回测就错一天，而在此之前它当天缺了没人发现）：三条线
-    /// 水位线独立，缺一个不代表另外两个也缺，而重补时已经齐了的那条会在水位线判定里直接跳过、
-    /// 不发请求（【重新拉取失败】对这份名单本来就是三个口径都跑一遍）。所以名单本身不带口径，
-    /// 只记"这只票那天有东西缺着"。名单每次体检都**重建**，不累加。
+    /// ⚠ 计划里的【当日完整性体检】那一项走的**不是**这个方法，而是新框架的
+    /// <c>DayCompletenessTask</c>。留着它是因为还有一个调用方：【重新拉取失败】收尾时
+    /// （<see cref="FinishFetchRun"/> 的 <c>checkDayCoverage</c>）——刚补过一轮，名单必须重算。
+    /// 两边共用同一个 auditor，所以不会出现"体检说齐了、重试那边还挂着单子"的分叉。
     /// </summary>
-    public (DateTime? TradingDay, int MissingCount) CheckLatestDayCoverage(IProgress<string>? progress = null)
+    /// <returns>(查的是哪个交易日, 有几处不齐)。第二个数是**处数**不是只数——0 就是当天全齐。</returns>
+    public (DateTime? TradingDay, int Problems) CheckLatestDayCoverage(IProgress<string>? progress = null)
     {
         if (!File.Exists(_paths.CurrentDb)) return (null, 0);
-        var repo = new SqliteBarRepository(_paths.CurrentDb);
 
-        List<Bar> anchorBars;
+        var auditor = new SqliteDayCompletenessAuditor(_paths.CurrentDb);
+        var found = new List<DayFinding>();
+        DateTime? latest;
         lock (_dbLock)
         {
-            // 近两个月足够拿到最后两根交易日（含长假）。
-            anchorBars = repo.Query(MarketIndexCatalog.ShanghaiCompositeSymbol, Granularity.Day,
-                DateTime.Today.AddDays(-60), null);
+            foreach (var batch in auditor.RunSegments(out latest)) found.AddRange(batch);
         }
-        if (anchorBars.Count < 2)
+        if (latest == null)
         {
-            progress?.Report("（跳过当天覆盖率体检：本地上证指数日线不足两根，没有交易日锚可用）");
+            progress?.Report("（跳过当日完整性体检：本地上证指数日线不足两根，没有交易日锚可用）");
             return (null, 0);
         }
 
-        var latest = anchorBars[^1].PeriodStart.Date;
-        var previous = anchorBars[^2].PeriodStart.Date;
-
-        progress?.Report($"正在体检 {latest:yyyy-MM-dd} 的个股日线覆盖率（前复权/后复权/不复权三套）...");
-        List<string> missing;
         lock (_dbLock)
         {
-            missing = repo.GetCodesMissingDay(Granularity.Day, latest, previous)
-                .Union(repo.GetCodesMissingDay(Granularity.DayHfq, latest, previous))
-                .Union(repo.GetCodesMissingDay(Granularity.DayRaw, latest, previous))
-                .OrderBy(c => c, StringComparer.Ordinal)
-                .ToList();
+            var manifest = _manifestStore.Load();
+            SqliteDayCompletenessAuditor.Apply(manifest, found);
+            _manifestStore.Save(manifest);
         }
 
-        var manifest = _manifestStore.Load();
-        // 归【个股日K·前复权】补：三套口径的缺口这里是并集，而重试那边补这一批时
-        // 前复权走 ProcessOneStockAsync、后复权/不复权走 FetchHfqBarsAsync 各自的水位线，
-        // 一条待办就够（见 FillMissingDayTodoAsync）。
-        manifest.SetTodo(RetryTaskIds.StockDayBars, RetryTodoKind.MissingDay,
-            missing.Select(c => new RetryTarget { Code = c }).ToList(),
-            missing.Count > 0 ? latest : null);
-        _manifestStore.Save(manifest);
+        foreach (var f in found.Where(f => f.Detail is { Length: > 0 }))
+            progress?.Report($"⚠ {f.Detail}");
 
-        progress?.Report(missing.Count == 0
-            ? $"当天覆盖率体检：{latest:yyyy-MM-dd} 的个股日线是齐的"
-            : $"当天覆盖率体检：{latest:yyyy-MM-dd} 还有 {missing.Count} 只个股没有日线——多半是数据源盘后"
-              + "还没更新到它们（不是抓取失败），已记入待重试名单，可点\"重新拉取失败股票\"补上");
-        return (latest, missing.Count);
+        int problems = found.Count(f => f.IsBad);
+        progress?.Report(problems == 0
+            ? $"当日完整性体检：{latest:yyyy-MM-dd} 全齐 —— {string.Join("；", found.Select(f => f.Summary))}"
+            : $"当日完整性体检：{latest:yyyy-MM-dd} 有 {problems} 处不齐 —— "
+              + string.Join("；", found.Select(f => f.Summary)));
+        return (latest, problems);
     }
 
     /// <summary>
@@ -4292,56 +4153,6 @@ public partial class FetchOrchestrator
     }
 
     /// <summary>
-    /// "拉取龙虎榜"（2026-07-16新增）——新浪龙虎榜按交易日抓取(Lhb 表, INSERT OR IGNORE 累积)。
-    /// <paramref name="from"/>/<paramref name="to"/> 都为 null=只抓今天；给区间则逐交易日回补（跳过
-    /// 周末，节假日靠返回空自然跳过）。龙虎榜失败不进 Manifest 名单，失败的日期在日志报出，重新指定
-    /// 日期区间再点即可。
-    /// </summary>
-    public async Task<FetchResult> RunFetchLhbAsync(DateOnly? from, DateOnly? to, IProgress<string>? progress, CancellationToken ct = default)
-    {
-        void Forward(string s) => progress?.Report(s);
-        _lhbProvider.OnStatus += Forward;
-        try
-        {
-            return await RunFetchLhbInternalAsync(from, to, progress, ct);
-        }
-        finally
-        {
-            _lhbProvider.OnStatus -= Forward;
-        }
-    }
-
-    private async Task<FetchResult> RunFetchLhbInternalAsync(DateOnly? from, DateOnly? to, IProgress<string>? progress, CancellationToken ct)
-    {
-        _lhbRepository.EnsureSchema();
-        var start = from ?? DateOnly.FromDateTime(DateTime.Today);
-        var end = to ?? start;
-        if (end < start) (start, end) = (end, start);
-
-        var errors = new List<string>();
-        var sw = Stopwatch.StartNew();
-        int tradingDays = 0, rowsTotal = 0, failDays = 0;
-        progress?.Report($"开始拉取龙虎榜 {start:yyyy-MM-dd} ~ {end:yyyy-MM-dd}（新浪，按交易日）...");
-        for (var d = start; d <= end; d = d.AddDays(1))
-        {
-            ct.ThrowIfCancellationRequested();
-            if (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;   // 周末必非交易日，跳过
-            try
-            {
-                var rows = await _lhbProvider.GetDailyAsync(d, ct);
-                if (rows.Count > 0) { lock (_dbLock) _lhbRepository.InsertOrIgnore(rows); rowsTotal += rows.Count; }
-                tradingDays++;
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { errors.Add($"龙虎榜 {d:yyyy-MM-dd} 抓取失败：{ex.Message}"); failDays++; }
-            progress?.Report($"龙虎榜 {d:yyyy-MM-dd}：累计写入 {rowsTotal} 条（已用时 {FormatElapsed(sw.Elapsed)}）" + (failDays > 0 ? $"，失败 {failDays} 天" : ""));
-        }
-        progress?.Report($"龙虎榜完成：处理 {tradingDays} 天、写入 {rowsTotal} 条、失败 {failDays} 天" +
-                         (failDays > 0 ? "（失败的日期重新指定区间再点一次即可）" : ""));
-        return new FetchResult { Errors = errors };
-    }
-
-    /// <summary>
     /// "拉取股东数据"（2026-07-16新增）——逐只个股从新浪股本股东页抓取：股东户数(ShareholderCount) +
     /// 十大股东/十大流通股东(TopShareholder)。用本地已有个股列表(需先"拉取全部"一次)，全市场逐只、量大
     /// 较慢。逐只记录失败(<see cref="Manifest.FailedShareholderCodes"/>)，可用"重新拉取失败股票"重试。
@@ -4548,174 +4359,6 @@ public partial class FetchOrchestrator
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { errors.Add($"融资余额 {day:yyyy-MM-dd}：{ex.Message}"); }
-    }
-
-    /// <summary>
-    /// 龙虎榜的日常增量：以 <paramref name="day"/> 为终点**回看几个交易日**并写库（非致命）——
-    /// 供"拉取全部/当天"并入调用。历史用"回补龙虎榜"补齐。
-    ///
-    /// 2026-09-08 从"只抓当天"改成回看：龙虎榜是**盘后陆续公布**的，15:30 抓到 20 只写进库之后，
-    /// 老逻辑再也不会碰这一天（判据是"这天已经有行了"），晚上发布的另外 40 只就永久漏掉。
-    /// 重抓是幂等的（主键 (trade_date, stock_code, reason) + INSERT OR IGNORE），代价是每轮多几个请求。
-    ///
-    /// 明确指定某一天时（<paramref name="explicitDay"/>）只抓那一天，且**绕过"确认没有"名单**——
-    /// 人点名要这一天，就是要重查它。
-    /// </summary>
-    private async Task FetchLhbOneDayAsync(DateTime day, ConcurrentBag<string> errors,
-        IProgress<string>? progress, CancellationToken ct, bool explicitDay = false)
-    {
-        try
-        {
-            _lhbRepository.EnsureSchema();
-            var end = DateOnly.FromDateTime(day);
-            var calendar = LoadTradingCalendar(progress);
-            var confirmed = explicitDay || _dailyNoDataRepository == null
-                ? new HashSet<DateOnly>()
-                : _dailyNoDataRepository.GetConfirmed(IDailyFetchNoDataRepository.LhbDataset);
-            var confirmCutoff = DateOnly.FromDateTime(DateTime.Today).AddDays(-3);
-
-            // 回看多少个交易日：东财源要顺带把**滞后字段**（上榜后 N 日涨跌幅）补上，
-            // 而 d30 要等 30 个交易日才有值，所以窗口按 D30 的长度取；新浪源没有这些字段，
-            // 5 天只是为了覆盖"盘后陆续公布"。东财走月片，窗口拉长几乎不增加请求数
-            // （31 个交易日 ≈ 2 个月片 ≈ 2~3 个请求，逐日抓则要 31 个）。
-            int lookback = _lhbProvider is ILhbRangeProvider
-                ? LhbLaggingLookbackTradingDays
-                : LhbLookbackTradingDays;
-
-            // 指定日：就那一天。日常：回看若干交易日（日历没建时退化成最近 N 个自然日里的工作日）
-            List<DateOnly> targets;
-            if (explicitDay) targets = [end];
-            else if (calendar != null)
-                targets = calendar.LastTradingDays(day, lookback).Select(DateOnly.FromDateTime).ToList();
-            else
-                targets = Enumerable.Range(0, lookback * 7 / 5 + 2).Select(i => end.AddDays(-i))
-                    .Where(x => x.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday))
-                    .OrderBy(x => x).ToList();
-
-            // ── 东财：整段一次抓完（2~3 个请求），再按天落库 ──────────────────
-            if (!explicitDay && _lhbProvider is ILhbRangeProvider ranged && targets.Count > 0)
-            {
-                await FetchLhbRangeAsync(ranged, targets, confirmed, confirmCutoff, progress, ct);
-                return;
-            }
-
-            int wrote = 0, skipNoData = 0;
-            foreach (var d in targets)
-            {
-                ct.ThrowIfCancellationRequested();
-                if (confirmed.Contains(d)) { skipNoData++; continue; }
-                var rows = await _lhbProvider.GetDailyAsync(d, ct);
-                if (rows.Count > 0)
-                {
-                    if (_dailyNoDataRepository != null && confirmed.Contains(d))
-                        _dailyNoDataRepository.Remove(IDailyFetchNoDataRepository.LhbDataset, d);
-                    lock (_dbLock) _lhbRepository.InsertOrIgnore(rows);
-                    wrote += rows.Count;
-                    progress?.Report($"龙虎榜 {d:yyyy-MM-dd}：{rows.Count} 条已写入");
-                }
-                else
-                {
-                    // 能走到这儿说明 provider 的骨架校验过了（不是反爬页），确实是"这天没有"
-                    if (_dailyNoDataRepository != null && d <= confirmCutoff)
-                        _dailyNoDataRepository.Confirm(IDailyFetchNoDataRepository.LhbDataset, d);
-                    progress?.Report($"龙虎榜 {d:yyyy-MM-dd}：无数据" +
-                                     (d <= confirmCutoff ? "（已记下，往后不再重试）" : "（当天可能还没发布）"));
-                }
-            }
-            if (!explicitDay)
-                progress?.Report($"龙虎榜：回看 {targets.Count} 个交易日、写入 {wrote} 条" +
-                                 (skipNoData > 0 ? $"，跳过确认没有 {skipNoData} 天" : ""));
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { errors.Add($"龙虎榜 {day:yyyy-MM-dd}：{ex.Message}"); }
-    }
-
-    /// <summary>龙虎榜日常增量回看几个交易日。见 <see cref="FetchLhbOneDayAsync"/>：盘后陆续公布，
-    /// 只抓当天会把"只抓到一半"的状态永久固化。5 个交易日足够覆盖发布延迟，重抓幂等。</summary>
-    private const int LhbLookbackTradingDays = 5;
-
-    /// <summary>
-    /// 东财源的回看窗口（交易日）。照 <c>d30_chg</c> 定的——上榜后 30 日涨跌幅要等 30 个交易日
-    /// 才有值，窗口短了那一列就永远空着。
-    ///
-    /// ⚠ **35 而不是 31**（2026-09-10 改）：原来按"d30 要 30 个交易日"直接取 31，正好卡在
-    /// 边界上——窗口最早那天是 T−30，它的 d30 得等到 T 当天东财算完才有，于是每轮都差那么一步，
-    /// 实测跑完 2242 行 <c>d30_chg</c> **一个非空都没有**（而 d20 是满的，证明机制本身没问题）。
-    /// 多留 4 个交易日的余量，让最早那几天的 d30 早就落定。
-    ///
-    /// 为什么敢开这么大：东财按月切片抓，35 个交易日跨 2~3 个自然月＝2~3 个请求，跟原来 5 天
-    /// 逐日抓的 5 个请求是一个量级。新浪源没这个便利（一天一个页面），所以它仍用
-    /// <see cref="LhbLookbackTradingDays"/>。
-    /// </summary>
-    private const int LhbLaggingLookbackTradingDays = 35;
-
-    /// <summary>
-    /// 东财源的日常增量：整段抓一次，按天整天替换落库。
-    ///
-    /// 为什么是"整天替换"而不是 upsert：这段窗口里可能还躺着新浪时代的行，而两个源的上榜原因
-    /// 文本不一样、reason 又是主键的一部分——upsert 只会让同一天并排存着两套原因，
-    /// 26 万行的历史会翻倍且分不清谁是谁。见 <c>ILhbRepository.ReplaceDays</c>。
-    /// </summary>
-    private async Task FetchLhbRangeAsync(
-        ILhbRangeProvider ranged, List<DateOnly> targets,
-        HashSet<DateOnly> confirmed, DateOnly confirmCutoff,
-        IProgress<string>? progress, CancellationToken ct)
-    {
-        var start = targets.Min();
-        var end = targets.Max();
-        var seen = new HashSet<DateOnly>();
-        int wrote = 0;
-
-        wrote = await ranged.FetchRangeAsync(
-            start.ToDateTime(TimeOnly.MinValue), end.ToDateTime(TimeOnly.MinValue),
-            batch =>
-            {
-                foreach (var r in batch) seen.Add(DateOnly.FromDateTime(r.TradeDate));
-                return WriteLhbBatch(batch, progress);
-            },
-            progress, ct);
-
-        // 目标日里一行都没回来的＝这天确实没人上榜。跟逐日路径同一套判据：太近的不定案
-        // （盘后可能还没发布完），够旧的记进"确认没有"，往后不再为它发请求。
-        int noData = 0;
-        foreach (var d in targets)
-        {
-            if (seen.Contains(d) || confirmed.Contains(d)) continue;
-            noData++;
-            if (_dailyNoDataRepository != null && d <= confirmCutoff)
-                _dailyNoDataRepository.Confirm(IDailyFetchNoDataRepository.LhbDataset, d);
-        }
-        progress?.Report($"龙虎榜：回看 {targets.Count} 个交易日、写入 {wrote} 条" +
-                         (noData > 0 ? $"，其中 {noData} 天无数据" : ""));
-    }
-
-    /// <summary>
-    /// 一批东财龙虎榜行的落库：先补派生列，再整天替换。返回写入行数。
-    ///
-    /// 派生器每批新建一个：它内部按 (代码,粒度) 缓存日K，而这里给 loadBars 传的是**限定在
-    /// 这批日期附近**的区间——一只票取全历史日K是几百倍的浪费。缓存跟着批走，语义才不会串。
-    /// </summary>
-    private int WriteLhbBatch(List<LhbRow> rows, IProgress<string>? progress)
-    {
-        if (rows.Count == 0) return 0;
-
-        // 派生只需要上榜日和它前一天的K线，前后各放 10 天足够跨过长假
-        var from = rows.Min(r => r.TradeDate).AddDays(-10);
-        var to = rows.Max(r => r.TradeDate).AddDays(1);
-        var barRepo = new SqliteBarRepository(_paths.CurrentDb);
-        var deriver = new LhbDeviationDeriver((code, gran) => barRepo.Query(code, gran, from, to));
-        deriver.Apply(rows);
-
-        lock (_dbLock)
-        {
-            var (deleted, inserted) = _lhbRepository.ReplaceDays(rows);
-            // 删得比写的多，说明这一天原来有更多行——多半是新浪历史（原因粗类）被换成了东财
-            // 原文，行数本就不同；真要是东财这一片没抓全，也只有这一行日志能看出来。
-            if (deleted > inserted)
-                progress?.Report($"龙虎榜 {rows.Min(r => r.TradeDate):yyyy-MM-dd}~" +
-                                 $"{rows.Max(r => r.TradeDate):yyyy-MM-dd}：替换掉旧的 {deleted} 行、写入 {inserted} 行");
-            return inserted;
-        }
     }
 
     /// <summary>"回补融资余额"（2026-07-16新增）——按交易日区间回补历史（首次或补漏）。日常当天数据已并入

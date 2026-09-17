@@ -387,20 +387,6 @@ public partial class FetchOrchestrator
             h => _marginProvider.OnStatus += h, h => _marginProvider.OnStatus -= h,
             () => _marginRepository.EnsureSchema(), progress, ct);
 
-    /// <summary>见 <see cref="RunStepBackfillMarginAsync"/>——龙虎榜那一半。</summary>
-    public async Task<FetchResult> RunStepBackfillLhbAsync(
-        IProgress<string>? progress, CancellationToken ct = default) =>
-        await RunStepBackfillDailyOneAsync("龙虎榜", IDailyFetchNoDataRepository.LhbDataset, _lhbProvider.EarliestAvailable,
-            ct2 => _lhbRepository.GetTradeDates().Except(PartialDaysOf(RetryTaskIds.Lhb)).ToHashSet(),
-            async d =>
-            {
-                var rows = await _lhbProvider.GetDailyAsync(d, ct);
-                if (rows.Count > 0) { lock (_dbLock) { _lhbRepository.InsertOrIgnore(rows); } }
-                return rows.Count;
-            },
-            h => _lhbProvider.OnStatus += h, h => _lhbProvider.OnStatus -= h,
-            () => _lhbRepository.EnsureSchema(), progress, ct);
-
     private async Task<FetchResult> RunStepBackfillDailyOneAsync(
         string label,
         string dataset,
@@ -428,35 +414,17 @@ public partial class FetchOrchestrator
         return FinishFetchRun(errors, $"{label}·整段回补", Array.Empty<string>(), failed, progress);
     }
 
-    /// <summary>龙虎榜（新浪）。日期格**填了**就只抓那一天（并绕过"确认没有"名单，人点名要就重查）；
-    /// **留空**＝日常增量，以今天为终点回看 5 个交易日——龙虎榜是盘后陆续公布的，只抓当天会把
-    /// "只抓到一半"的状态永久固化（2026-09-08 改，见 <see cref="FetchLhbOneDayAsync"/>）。</summary>
-    public async Task<FetchResult> RunStepLhbDayAsync(
-        DateTime? day, IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        void Forward(string m) => progress?.Report(m);
-        _lhbProvider.OnStatus += Forward;
-        try { await FetchLhbOneDayAsync(day ?? DateTime.Today, errors, progress, ct, explicitDay: day.HasValue); }
-        finally { _lhbProvider.OnStatus -= Forward; }
-        return FinishFetchRun(errors, "龙虎榜", Array.Empty<string>(), failed, progress);
-    }
+    // 【龙虎榜】的 RunStepLhbDayAsync / RunStepBackfillLhbAsync 删于 2026-09-17：
+    // 整项迁去了 StockPlatform.Tasks/LhbTask（增量、只抓某一天、整段回补三条路都在那儿，
+    // 落库统一走 LhbDayWriter）。补残缺日仍在这边走 PartialDayRepair，按天重抓的动作
+    // 跟任务侧共用同一个 LhbDayWriter——见 doc/lhb-seat-task-design.md §8。
 
-    // ─────────────────── 13. 当日覆盖率体检（本地查库） ───────────────────
-
-    /// <summary>
-    /// 以上证指数最新一根日线当交易日锚，查出"上一个交易日有、这一天没有"的个股，写进待重试名单。
-    /// 纯查库，可能要扫几 GB，所以推到线程池上跑。
-    /// </summary>
-    public async Task<FetchResult> RunStepDayCoverageCheckAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        var (_, missing) = await Task.Run(() => CheckLatestDayCoverage(progress), ct);
-        var result = FinishFetchRun(errors, "当日覆盖率体检", Array.Empty<string>(), failed, progress);
-        result.NothingToDo = missing == 0;
-        return result;
-    }
+    // ─────────────────── 13. 当日完整性体检（本地查库） ───────────────────
+    //
+    // 这一项的入口 2026-09-17 迁去了 StockPlatform.Tasks/DayCompletenessTask（新任务框架），
+    // 原来的 RunStepDayCoverageCheckAsync 一并删掉。判据和编排在
+    // SqliteDayCompletenessAuditor，orchestrator 这边只剩 CheckLatestDayCoverage 那个薄封装
+    // ——【重新拉取失败】收尾时还要用它重建名单，跟新任务共用同一个 auditor。
 
     // ══════════════════════════════════════════════════════════════════════════
     //  另外三处复合动作拆出来的项（2026-09-02，设计文档 3.3 节）
@@ -887,6 +855,7 @@ public partial class FetchOrchestrator
         RetryTaskIds.StockRawBars => "个股·不复权",
         RetryTaskIds.StockDayBars => "个股·前复权",
         RetryTaskIds.EtfBars => "ETF",
+        RetryTaskIds.EtfRawBars => "ETF·不复权",
         RetryTaskIds.IndexBars => "指数",
         RetryTaskIds.NetInflow => "资金净流入",
         RetryTaskIds.Roster => "流通市值",

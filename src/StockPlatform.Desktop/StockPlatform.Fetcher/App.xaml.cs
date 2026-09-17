@@ -97,11 +97,30 @@ public partial class App : Application
         // 交给【重新拉取失败】重试——有名单、可追溯，比静默换源干净。
         //
         // 独立的 "Sina" 选项不受影响，仍是纯新浪（它的成交量换算在 SinaBarFetcher 里做）。
+        // 个股名单＝新浪 + 上交所官方，合并去重（2026-09-17）。**新浪必须排在前面**：它的条目带
+        // nmc/trade（市值和最新价），SinaListMarketCapFetcher 靠它省掉全市场一轮市值请求，
+        // 而上交所那条路这两个字段是 null，顺序反了会把市值洗掉（见 CompositeStockListProvider）。
+        //
+        // 为什么要加上交所：新浪 hs_a 会**静默漏票**——2026-09-17 对账查出 14 只只有上交所有，
+        // 包括 8 只改名"退市XX"但仍在交易的、2 只 *ST、以及**当天上市的 601091 沈鼓集团**。
+        // 这些票两融数据一直在更新、K线却一根都没有。深市/北交所目前仍只靠新浪（那边的同类缺口还没查）。
+        // ⚠ 这里**故意没有**把 CninfoStockListProvider（巨潮全市场名单）并进来，虽然它是超集。
+        // 原因：巨潮那份名单含**大批已退市股**（退市中天、中国北车、退市锐电…），而
+        // SqliteStockMetaUpsert.Upsert 默认写 type='stock' 且是 INSERT OR REPLACE——
+        // 并进来会把库里 319 只 type='delisted' 的行**冲成 'stock'**，于是退市股重新进入
+        // 日常轮询，每天几百个必然落空的请求（project_dividend_delisted_gap 当初就是为了
+        // 避免这个才把它们标成 delisted 的）。
+        // 巨潮真正的增量价值是**科创板退市股**（688086/688555/688287，上交所官网所有 stockType
+        // 里都查不到），那批本来就该进 DelistedStock 而不是在市名单——接法要另行设计。
+        static IStockListProvider StockList() => new CompositeStockListProvider(
+            ("新浪(沪深北A股+科创板)", new SinaStockListProvider()),
+            ("上交所官方(沪市全量)", new SseStockListProvider()));
+
         var sources = new List<NamedBarSource>
         {
             new("EastMoney", new EastMoneyBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))), new EastMoneyStockListProvider()),
-            new("Tencent", new TencentBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))), new SinaStockListProvider()),
-            new("Sina", new SinaBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))), new SinaStockListProvider()),
+            new("Tencent", new TencentBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))), StockList()),
+            new("Sina", new SinaBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))), StockList()),
         };
 
 #if DEBUG
@@ -443,6 +462,23 @@ public partial class App : Application
                 new EastMoneyTotalSharesProvider(
                     new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
                 tradingDayRepository));
+        // 【基金除权除息】2026-09-17。纯本地读东财终端的 fund_cqcx.db，一个请求都不发。
+        // 它和下面那项【ETF日K·不复权】是"让 ETF 能回测"的两半：这边给事件，那边给不复权序列，
+        // 凑齐之后【重算回测序列】零改动就能算出 ETF 的 day_adj。
+        taskRegistry.Register(FetchActionId.ImportFundExDividend,
+            () => new FundExDividendImportTask(paths, dividendRepository));
+        // 【ETF日K·不复权】：名单读库里 type='etf'（不再联网取一遍），K线走腾讯。
+        // 限流器跟个股那几条一致（3 并发、1 秒间隔）——稳态下它其实几乎不发请求，
+        // 没除权过的那 1336 只是从库里的 day 复制的。
+        taskRegistry.Register(FetchActionId.StepEtfRawBars,
+            () => new EtfRawBarTask(paths, new SqliteBarRepository(paths.CurrentDb), dividendRepository,
+                new TencentBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)))));
+        // 【补全退市名单】2026-09-17。巨潮的全市场名单减去在市名单，差集里确实交易过的补进 DelistedStock。
+        // 修的是两所官网名单的两个洞：科创板退市股整类缺失、已换代码的老号没有。
+        // 限流器 1 并发：候选通常几十只，一只一个探测请求。
+        taskRegistry.Register(FetchActionId.StepDelistedSupplement,
+            () => new DelistedSupplementTask(paths, new CninfoStockListProvider(),
+                new TencentBarFetcher(new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1)))));
         taskRegistry.Register(FetchActionId.StepCompanyProfile,
             () => new CompanyProfileTask(companyProfileRepository, companyProfileProvider));
         taskRegistry.Register(FetchActionId.StepCustomerSupplier,
@@ -515,6 +551,11 @@ public partial class App : Application
         // 不碰 manifest、不占数据源、调用点只有一个——老任务里最容易迁的一类。
         taskRegistry.Register(FetchActionId.RebuildAdjSeries,
             () => new AdjSeriesRebuildTask(paths.CurrentDb));
+        // 【当日完整性体检】2026-09-17 迁过来：它 09-16 从"只查个股K线"扩成三段之后正在长大，
+        // 跟【全库数据体检】那次破例是同一条判据。判据本体在 SqliteDayCompletenessAuditor，
+        // 【重新拉取失败】收尾时的那次重建跟它共用同一份。
+        taskRegistry.Register(FetchActionId.StepDayCoverage,
+            () => new DayCompletenessTask(paths, manifestStore));
         // 【分档资金流】两项（2026-09-12 拆开，理由见两个任务类的注释）：
         //   · 快照 走 push2delay，日更，一批＝一整天的全市场；漏一天就永久补不回来。
         //   · 补历史 走 push2his，季度组·空闲时补，一批＝一只票的 120 天，
@@ -523,7 +564,10 @@ public partial class App : Application
         // 注册一个拿不到 provider 的任务，只会在跑起来的时候才炸。
         if (moneyFlowSnapshotProvider != null)
             taskRegistry.Register(FetchActionId.FetchMoneyFlowSnapshot,
-                () => new MoneyFlowSnapshotTask(moneyFlowRepository, moneyFlowSnapshotProvider));
+                // 第三个参数是收尾时那次**回查库**（2026-09-16）：抓取侧的对账只证明"请求收全了"，
+                // 这个证明"库里真有那么多行"。不齐就整项判失败、状态列标红——这一项漏一天就永久没了。
+                () => new MoneyFlowSnapshotTask(moneyFlowRepository, moneyFlowSnapshotProvider,
+                                                new SqliteMoneyFlowDayAudit(paths.CurrentDb)));
         if (moneyFlowProvider != null)
             taskRegistry.Register(FetchActionId.FetchMoneyFlowDetail,
                 // 每轮上限按通道给：浏览器那条约 17~20 秒/只（间隔 2 秒＋每 10~15 只歇 2~5 分钟），
@@ -532,6 +576,30 @@ public partial class App : Application
                 () => new MoneyFlowBackfillTask(
                     paths, moneyFlowRepository, moneyFlowProvider,
                     maxPerRun: moneyFlowProvider is ChromeCdpMoneyFlowFetcher ? 20 : null));
+
+        // 【大宗交易】2026-09-17 从【拉取市场事件】拆出来。拆的理由是**批的粒度**：
+        // 它改成按交易日整日替换之后是两千多片，另外三张（调研/解禁/增减持）按年切片十几片，
+        // 绑在一起会让那三张陪着跑完整个历史回补。
+        // ⚠ 残缺日待办的编排仍在 orchestrator 那边（PartialDayRepair），按天重抓的动作
+        //   两边共用 BlockTradeDayWriter——见 doc/block-trade-task-design.md §6。
+        taskRegistry.Register(FetchActionId.FetchBlockTrade,
+            () => new BlockTradeTask(marketEventRepository, marketEventProvider,
+                                     tradingDayRepository, manifestStore));
+
+        // 【拉取龙虎榜席位】2026-09-17 迁到新任务框架，同时从"按月切片"改成"按交易日整日替换"
+        //   ——原来的排序键不唯一，月片深分页会既重复又丢行（见 doc/lhb-seat-task-design.md）。
+        // ⚠ 残缺日待办的编排仍在 orchestrator 那边（PartialDayRepair），按天重抓的动作
+        //   两边共用 LhbSeatDayWriter。
+        taskRegistry.Register(FetchActionId.FetchLhbSeat,
+            () => new LhbSeatTask(lhbSeatRepository, lhbSeatProvider,
+                                  tradingDayRepository, manifestStore));
+
+        // 【龙虎榜】主表 2026-09-17 一并迁到新任务框架。它**没有**席位表那个重复行的病
+        //   （排序键本来就唯一、落库本来就是整天替换），纯框架搬家；顺带把四个入口的落库口径
+        //   统一成"派生对应值 + 整天替换"（原来只有日常增量那条会派生）。
+        taskRegistry.Register(FetchActionId.StepLhb,
+            () => new LhbTask(paths.CurrentDb, lhbRepository, lhbProvider,
+                              tradingDayRepository, dailyNoDataRepository));
 
         var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
 

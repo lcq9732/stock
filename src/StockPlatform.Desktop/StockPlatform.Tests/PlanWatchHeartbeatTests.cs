@@ -141,7 +141,12 @@ public class PlanWatchHeartbeatTests
             BatchSizes.Add(n);
             return n;
         }
+        /// <summary>回补段要取的空壳行；默认空＝这组测试只看新抓那一段。</summary>
+        public List<PlanAnnouncement> Missing = [];
+
         public List<PlanAnnouncement> GetByCode(string code, string kind) => [];
+        public List<PlanAnnouncement> GetMissingDetail(string kind, DateTime since, int limit)
+            => Missing.Take(limit).ToList();
         public Dictionary<string, PlanAnnouncement> GetOpenPlans(string kind) => [];
         public DateTime? GetLatestAnnounceDate(string kind) => Watermark;
         public (int Rows, int Stocks, int OpenPlans) GetCounts(string kind) => (BatchSizes.Sum(), 1, 0);

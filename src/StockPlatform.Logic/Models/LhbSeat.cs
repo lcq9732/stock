@@ -1,4 +1,4 @@
-namespace StockPlatform.Logic.Models;
+﻿namespace StockPlatform.Logic.Models;
 
 /// <summary>
 /// 龙虎榜**营业部席位明细**（东财 <c>RPT_BILLBOARD_DAILYDETAILSBUY</c> / <c>...SELL</c>）。
@@ -85,4 +85,34 @@ public class LhbSeat
     public string ChangeType { get; set; } = "";
 
     public DateTime FetchedAt { get; set; }
+}
+
+/// <summary>
+/// "抓某一个交易日的全市场龙虎榜席位"这一件事（2026-09-17）。
+///
+/// ⚠ 一天是**两个接口**（买方榜 + 卖方榜），两侧都收齐才算这一天完整——这张表落库是
+/// **整日替换**，只收到一侧就落库等于把另一侧永久删掉，而且事后完全看不出来
+/// （行数判据只会觉得"那天本来就少"）。所以 <see cref="IsComplete"/> 要两侧同时成立。
+///
+/// 单独成接口是为了让 <c>LhbSeatTask</c> 能离线测排期、count 校验、分批收尾这些编排逻辑，
+/// 不必为此起一个真的 HTTP 客户端。
+/// </summary>
+/// <param name="Day">交易日。</param>
+/// <param name="Rows">买卖两侧的全部行，<see cref="LhbSeat.Seq"/> 已在整天收齐后自赋。</param>
+/// <param name="ReportedBuy">买方榜接口自报的行数。</param>
+/// <param name="ReportedSell">卖方榜接口自报的行数。</param>
+public sealed record LhbSeatDay(DateTime Day, List<LhbSeat> Rows, int ReportedBuy, int ReportedSell)
+{
+    /// <summary>实收行数跟数据源自报的对得上吗——买卖**两侧都要对上**，对不上就别落库。</summary>
+    public bool IsComplete =>
+        Rows.Count(r => r.IsBuy) == ReportedBuy && Rows.Count(r => !r.IsBuy) == ReportedSell;
+
+    /// <summary>接口自报这一天共有多少行（买 + 卖）。</summary>
+    public int ReportedCount => ReportedBuy + ReportedSell;
+}
+
+/// <summary>见 <see cref="LhbSeatDay"/>。</summary>
+public interface ILhbSeatDayFetcher
+{
+    Task<LhbSeatDay> FetchLhbSeatsOfDayAsync(DateTime day, CancellationToken ct = default);
 }

@@ -185,7 +185,7 @@ public sealed class RetryBacklog
             (RetryTodoKind.PartialDay, RetryTaskIds.Margin) => (RetryKind.PartialDays, "两融残缺日", "天", true),
             (RetryTodoKind.PartialDay, RetryTaskIds.Lhb) => (RetryKind.PartialDays, "龙虎榜残缺日", "天", true),
             (RetryTodoKind.PartialDay, RetryTaskIds.LhbSeat) => (RetryKind.PartialDays, "席位残缺日", "天", true),
-            (RetryTodoKind.PartialDay, RetryTaskIds.MarketEvents) => (RetryKind.PartialDays, "大宗残缺日", "天", true),
+            (RetryTodoKind.PartialDay, RetryTaskIds.BlockTrade) => (RetryKind.PartialDays, "大宗残缺日", "天", true),
             (RetryTodoKind.PartialDay, RetryTaskIds.MoneyFlowDetail) => (RetryKind.PartialDays, "资金流残缺日", "天", true),
             (RetryTodoKind.PartialDay, _) => (RetryKind.PartialDays, "残缺日", "天", true),
             (RetryTodoKind.Round, _) => (RetryKind.MarketCap, "市值", "轮", true),

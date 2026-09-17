@@ -284,6 +284,14 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
     public bool IsFetchEarnings => Model.Action == FetchActionId.FetchEarningsSchedule;
     public bool IsFetchMoneyFlow => Model.Action == FetchActionId.FetchMoneyFlowDetail;
 
+    /// <summary>
+    /// 是不是【分档资金流快照】那一行——参数格显示**当天齐没齐**，缺了还要标红（2026-09-16）。
+    ///
+    /// 别的行那一格是"还差多少慢慢补"的进度，这一行不是：快照接口只给最近一个交易日，
+    /// 今天没拿到，下一个交易日开盘后就永久没了。所以这一格是"现在要不要动手"的信号。
+    /// </summary>
+    public bool IsMoneyFlowSnapshot => Model.Action == FetchActionId.FetchMoneyFlowSnapshot;
+
     /// <summary>是不是【板块成分股】那一行——参数格显示还剩多少个板块要抓。</summary>
     public bool IsFetchBoardMembers => Model.Action == FetchActionId.StepBoardMembers;
 

@@ -220,6 +220,27 @@ public class SqlitePlanAnnouncementRepository : IPlanAnnouncementRepository
             ? t : null;
     }
 
+    public List<PlanAnnouncement> GetMissingDetail(string kind, DateTime since, int limit)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = SelectCols + """
+             WHERE kind = $k
+               AND (art_code IS NULL OR art_code = '')
+               AND announce_date >= $since
+             ORDER BY announce_date DESC
+             LIMIT $n;
+            """;
+        cmd.Parameters.AddWithValue("$k", kind);
+        cmd.Parameters.AddWithValue("$since", since.ToString(DateFormat, CultureInfo.InvariantCulture));
+        cmd.Parameters.AddWithValue("$n", limit);
+
+        var list = new List<PlanAnnouncement>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) list.Add(Read(r));
+        return list;
+    }
+
     public (int Rows, int Stocks, int OpenPlans) GetCounts(string kind)
     {
         using var conn = Open();

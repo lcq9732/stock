@@ -174,7 +174,11 @@ public class EastMoneySmokeTests
             var end = DateTime.Today;
             var start = end.AddDays(-5);      // 只取最近几天，够验证结构
 
-            int bt = await provider.FetchBlockTradesAsync(start, end, b => repo.UpsertBlockTrades(b));
+            // 大宗改成按日抓了（2026-09-17）：抓最近一个交易日那天，顺便验 count 对不对得上。
+            var btDay = await provider.FetchBlockTradesOfDayAsync(end.AddDays(-1));
+            int bt = btDay.Rows.Count == 0 ? 0 : repo.ReplaceBlockTradesForDay(btDay.Day, btDay.Rows);
+            Assert.True(btDay.IsComplete,
+                $"大宗 {btDay.Day:yyyy-MM-dd} 实收 {btDay.Rows.Count} 行、接口自报 {btDay.ReportedCount} 行，对不上");
             int os = await provider.FetchOrgSurveysAsync(start, end, b => repo.UpsertOrgSurveys(b));
             int hc = await provider.FetchHolderChangesAsync(start, end, b => repo.UpsertHolderChanges(b));
             _out.WriteLine($"大宗交易 {bt} 行 / 机构调研 {os} 行 / 股东增减持 {hc} 行");
@@ -262,14 +266,22 @@ public class EastMoneySmokeTests
             var provider = new EastMoneyLhbSeatProvider(NewClient());
             provider.OnStatus += s => _out.WriteLine("  " + s);
 
-            // 只取最近 10 天，验证流式回调这条路走得通即可（全量 264 万行要几小时）
+            // 只取最近 10 天，验证"按日抓 + 整日替换"这条路走得通即可（全量 178 万行要一小时）
             var end = DateTime.Today;
-            int batches = 0;
-            int total = await provider.FetchAsync(end.AddDays(-10), end,
-                batch => { batches++; return repo.Upsert(batch); },
-                new Progress<string>(s => _out.WriteLine("  " + s)));
+            int days = 0, total = 0;
+            for (var d = end.AddDays(-10); d <= end; d = d.AddDays(1))
+            {
+                var one = await provider.FetchLhbSeatsOfDayAsync(d);
+                if (one.Rows.Count == 0) continue;
+                // 买卖两侧都要跟接口自报的 count 对上，对不上说明某页被截断了
+                Assert.True(one.IsComplete,
+                    $"{d:yyyy-MM-dd} 没抓全：收到 买{one.Rows.Count(r => r.IsBuy)}/卖{one.Rows.Count(r => !r.IsBuy)}、"
+                    + $"自报 买{one.ReportedBuy}/卖{one.ReportedSell}");
+                total += repo.ReplaceForDay(one.Day, one.Rows);
+                days++;
+            }
 
-            _out.WriteLine($"抓到 {total} 行，分 {batches} 批落库，库内 {repo.Count()} 行");
+            _out.WriteLine($"抓到 {total} 行、{days} 个交易日，库内 {repo.Count()} 行");
             Assert.True(total > 0, "最近 10 天应该有龙虎榜数据");
 
             // 营业部信息是这份数据的全部意义所在，缺了就白抓
@@ -290,9 +302,14 @@ public class EastMoneySmokeTests
             _out.WriteLine($"水位线：{water:yyyy-MM-dd}");
             Assert.NotNull(water);
 
-            // 幂等：同一段重抓一次，行数不该变（主键去重）
+            // 幂等：同一段重抓一次，行数不该变（整日替换——**不是**靠主键去重，
+            // 主键末列 seq 是位次，靠它去重正是 2026-09-17 之前堆出 3579 行副本的原因）
             int before = repo.Count();
-            await provider.FetchAsync(end.AddDays(-3), end, batch => repo.Upsert(batch));
+            for (var d = end.AddDays(-3); d <= end; d = d.AddDays(1))
+            {
+                var one = await provider.FetchLhbSeatsOfDayAsync(d);
+                if (one.Rows.Count > 0) repo.ReplaceForDay(one.Day, one.Rows);
+            }
             Assert.Equal(before, repo.Count());
         }
         finally

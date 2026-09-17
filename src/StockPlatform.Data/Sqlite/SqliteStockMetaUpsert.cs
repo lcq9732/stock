@@ -30,12 +30,25 @@ public static class SqliteStockMetaUpsert
         using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
+        // ⚠ 用 ON CONFLICT 而不是 INSERT OR REPLACE，为的是那句 type 的 CASE：
+        // **已经标成 delisted 的，不许被 'stock' 覆盖回去**（2026-09-17 加）。
+        //
+        // 为什么需要：在市名单源对"什么叫在市"的口径不一致——上交所的 stockType=10（沪市全量）
+        // 里就含 18 只**已经退市**的票（600193 退市创兴、600355 *ST精伦 那批，K线停在 80~600 天前）。
+        // 没有这道保护的话，日更的【刷新名册】把它们写成 'stock'、周期组的【补全退市名单】
+        // 再写回 'delisted'，两边来回翻，而退市股一旦变回 'stock' 就重新进入日常轮询，
+        // 每天几百个必然落空的请求（project_dividend_delisted_gap 当初就是为了避免这个）。
+        //
+        // 退市是不可逆的状态，所以让 delisted 赢。真有"恢复上市"那种极罕见情况，
+        // 手工把 DelistedStock 和这张表里的 delisted 行删掉即可。
         cmd.CommandText = """
-            INSERT OR REPLACE INTO StockMeta (code, name, type, exchange, list_date, last_updated)
-            VALUES ($code, $name, $type,
-                COALESCE((SELECT exchange FROM StockMeta WHERE code = $code), ''),
-                (SELECT list_date FROM StockMeta WHERE code = $code),
-                $last_updated);
+            INSERT INTO StockMeta (code, name, type, exchange, list_date, last_updated)
+            VALUES ($code, $name, $type, '', NULL, $last_updated)
+            ON CONFLICT(code) DO UPDATE SET
+                name = excluded.name,
+                type = CASE WHEN StockMeta.type = 'delisted' AND excluded.type = 'stock'
+                            THEN 'delisted' ELSE excluded.type END,
+                last_updated = excluded.last_updated;
             """;
         var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
         var pName = cmd.CreateParameter(); pName.ParameterName = "$name"; cmd.Parameters.Add(pName);

@@ -14,7 +14,7 @@ namespace StockPlatform.Data.Remote;
 /// 切片粒度按数据量给：大宗交易 68 万行按月切，其余几万到几十万行按年切即可
 /// （切太细会产生大量小请求，反而更容易撞限流）。
 /// </summary>
-public class EastMoneyMarketEventProvider
+public class EastMoneyMarketEventProvider : IBlockTradeDayFetcher
 {
     private readonly EastMoneyDataCenterClient _dc;
 
@@ -26,15 +26,43 @@ public class EastMoneyMarketEventProvider
         _dc.OnStatus += s => OnStatus?.Invoke(s);
     }
 
-    /// <summary>大宗交易。约 68 万行，按月切片。</summary>
-    public async Task<int> FetchBlockTradesAsync(
-        DateTime start, DateTime end, Func<List<BlockTrade>, int> onBatch,
-        IProgress<string>? progress = null, CancellationToken ct = default)
-        => await RunSlicedAsync(
-            "RPT_DATA_BLOCKTRADE", "TRADE_DATE", EastMoneyQuerySlicer.ByMonth(start, end),
-            "大宗交易", ParseBlockTrade, onBatch, progress, ct,
-            // 主键是 (trade_date, code, daily_rank)，排序就得排到 daily_rank 才能定唯一序
-            tieBreaker: "DAILY_RANK");
+    /// <summary>
+    /// 大宗交易：抓**某一个交易日**的全市场（2026-09-17 从按月切片改成按日）。
+    ///
+    /// ════ 为什么改按日 ════
+    /// 原来按月切片、靠 <c>UPSERT</c> 去重，前提是主键能认出"同一笔"。可主键第三列
+    /// <c>DAILY_RANK</c> 是**不稳定**的——同一笔交易在不同时刻抓，东财给的值不一样
+    /// （实测 300750 的 2026-09-15 两笔：09-15 抓到 rank 22/27、09-16 抓到 rank 1/2），
+    /// 于是每次重抓都 INSERT 一份副本而不是覆盖。叠加"增量往前回看 30 天补滞后字段"，
+    /// 最近一个月的行数普遍虚高一倍（2026-09-08：20.3 亿 → 真值 9.8 亿）。
+    /// 详见 doc/block-trade-task-design.md。
+    ///
+    /// 按日抓 + 整日替换才是对的形状：一天 100~600 笔、<c>pageSize=500</c> 只需 1~2 页，
+    /// **永远浅分页**，而且每天都能拿接口自报的 <c>count</c> 校验收全没有。
+    ///
+    /// ⚠ <see cref="BlockTradeDay.ReportedCount"/> 跟实收行数不一致时**不要落库**——
+    /// 那说明某页被限流截断了，拿残缺的一天去覆盖完整的一天，事后完全看不出来。
+    /// </summary>
+    public async Task<BlockTradeDay> FetchBlockTradesOfDayAsync(
+        DateTime day, CancellationToken ct = default)
+    {
+        var filter = EastMoneyQuerySlicer.DateFilter("TRADE_DATE", day.Date, day.Date);
+        int reported = -1;
+        var rows = new List<BlockTrade>();
+        // 排序键沿用 TRADE_DATE,SECURITY_CODE,DAILY_RANK：单日只有 1~2 页，而且 count 校验
+        // 兜在后面。DAILY_RANK 跨抓取不稳定，但同一次查询内部是稳的，用来定序没问题——
+        // 2021-12-15（558 行 / 2 页）实测与接口逐行一致。
+        await foreach (var el in _dc.QueryAsync(
+            "RPT_DATA_BLOCKTRADE", filter, "TRADE_DATE,SECURITY_CODE,DAILY_RANK",
+            onTotalCount: n => reported = n, ct: ct))
+        {
+            var row = ParseBlockTrade(el);
+            if (row != null) rows.Add(row);
+        }
+        // 该日一笔都没有时接口连 result 都不给（走 yield break），拿不到 count——记 0，
+        // 跟"抓到 0 行"一致，调用方才能把这天认成"数据源就是没有"而不是"抓漏了"。
+        return new BlockTradeDay(day.Date, rows, reported < 0 ? 0 : reported);
+    }
 
     /// <summary>机构调研。约 28 万行，按年切片。</summary>
     public async Task<int> FetchOrgSurveysAsync(
@@ -167,7 +195,9 @@ public class EastMoneyMarketEventProvider
             Code = code,
             Name = Str(el, "SECURITY_NAME_ABBR"),
             TradeDate = d.Value,
-            DailyRank = (int)(Num(el, "DAILY_RANK") ?? 0),
+            // ⚠ 不读东财的 DAILY_RANK——它跨抓取不稳定（见 FetchBlockTradesOfDayAsync 的注释），
+            // 拿它当主键第三列正是重复行的根因。序号由落库时按返回顺序自赋，见
+            // SqliteMarketEventRepository.ReplaceBlockTradesForDay。
             DealPrice = Num(el, "DEAL_PRICE"),
             DealVolume = Num(el, "DEAL_VOLUME"),
             DealAmount = Num(el, "DEAL_AMT"),
