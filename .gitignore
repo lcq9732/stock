@@ -17,3 +17,7 @@ factorlab-output*/
 # 每跑一次就在这里留一个 ~150MB 的 testhost_*_hangdump.dmp（2026-09-05 攒到过 593MB）。
 # 全是排查用的临时 dump，看完就该删，绝不该进仓库。
 TestResults/
+# WPF 编译中途生成的临时工程 *_wpftmp.csproj。2026-08-21 误提交过一个（里面还写死了本机绝对路径），
+# 它一直躺在 Analyzer 目录里，导致 dotnet build 直接报 RG1000 "financialanalysiswindow.baml 键重复"。
+# 2026-09-17 删掉并加这条，免得再被提交进来。
+*_wpftmp.csproj

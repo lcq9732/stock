@@ -19,6 +19,15 @@ public interface IDividendRepository
     /// 批量返回是因为全市场扫描要用，逐只 <see cref="GetByCode"/> 查 5000+ 次太慢。</summary>
     Dictionary<string, double> GetTrailingCashDividendPerShare(DateTime since);
 
+    /// <summary>
+    /// 同上，但**只算一只票**（2026-09-17）——口径与批量版完全一致，没有分红返回 0。
+    ///
+    /// 为什么要单只版：分析详情窗口只看一只票的股息率，原先却调批量版把整张 Dividend 表
+    /// <c>GROUP BY</c> 一遍再从字典里取一个 key，白扫全表。批量版留着给全市场扫描用，两者
+    /// 的 <c>WHERE</c> 条件必须一字不差，否则同一个数在列表页和详情页会对不上。
+    /// </summary>
+    double GetTrailingCashDividendPerShare(string code, DateTime since);
+
     /// <summary>全市场"按年分组的每股现金派息"，单位=元/股（表里是每10股口径，这里已除10）。
     /// 年份取**除权除息日所属年**（钱实际到账那一年），只算 progress='实施' 的方案；同一年有多次
     /// 派息（中期+年度）的已合并成一行。返回值里每只股票的列表按年份升序。

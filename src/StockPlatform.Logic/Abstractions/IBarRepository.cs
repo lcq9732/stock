@@ -20,6 +20,14 @@ public interface IBarRepository
     /// CutoffBarRepository）：用户输入的截止日可能是周末/节假日，需要据此定位真正的最后交易日。</summary>
     DateTime? GetOverallLatestPeriodStartOnOrBefore(string granularity, DateTime cutoff);
     List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null);
+    /// <summary>
+    /// 这只票某个粒度下**最后一根**K线，没有就返回 null（2026-09-17）。
+    ///
+    /// 只要"最新收盘价 + 是哪天"的调用方走这里，别用 <c>Query(code, gran)[^1]</c>：那会把全历史
+    /// 读出来（老股 5000+ 行，每行两次 <c>ParseExact</c>）再丢掉，分析详情窗口原先就卡在这上面。
+    /// 周/月线不落库、由日线现算，传进来会抛 <see cref="ArgumentException"/>。
+    /// </summary>
+    Bar? GetLatestBar(string code, string granularity);
     /// <summary>Bar表里所有"个股"代码（6位纯数字）——Analyzer各选股Tab的扫描全集。大盘指数
     /// （带前缀的8位符号如"sh000001"，见 MarketIndexCatalog）故意排除在外：指数K线只是给大盘
     /// 环境过滤/回测用的参照数据，不参与选股。</summary>

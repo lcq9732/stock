@@ -29,6 +29,17 @@ public class CutoffBarRepository : IBarRepository
         return bars.Count > 0 ? bars[^1].PeriodStart : null;
     }
 
+    /// <summary>
+    /// ⚠ 这里**必须**走 <see cref="Query"/> 而不是转发给 _inner.GetLatestBar：底层那个取的是
+    /// 全历史的末根，截断到历史某一天之后，末根多半在截止日之后——直接转发等于把未来的数据
+    /// 泄回回测里。宁可慢（读全历史再取末尾），也不能错。
+    /// </summary>
+    public Bar? GetLatestBar(string code, string granularity)
+    {
+        var bars = Query(code, granularity);
+        return bars.Count > 0 ? bars[^1] : null;
+    }
+
     public DateTime? GetOverallLatestPeriodStart(string granularity)
         => _inner.GetOverallLatestPeriodStartOnOrBefore(granularity, _cutoffEnd);
 

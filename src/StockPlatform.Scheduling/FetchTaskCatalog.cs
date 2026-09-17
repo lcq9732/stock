@@ -499,12 +499,16 @@ public static class FetchTaskCatalog
         // 拆分判据见 doc/fetch-plan-atomic-tasks-design.md 第 2 节：同一次请求拿回来的不拆
         // （名册+市值）、多源接力才有结果的不拆（ETF/退市/公告）、本地计算单独成项。
 
-        new(FetchActionId.StepRoster, "股票名册与流通市值", "新浪列表分页", QuotaGroup.Sina,
+        new(FetchActionId.StepRoster, "股票名册与流通市值", "新浪 + 上交所官方", QuotaGroup.Sina,
             TimeSpan.FromMinutes(3), "每工作日",
             "刷新全市场名册（顺带发现当天新上市的票）+ 当下的流通市值快照——**同一个列表接口一次给两样**"
             + "（名册和 nmc 流通市值），所以是一项、拆不开，而且只扫一遍就够"
             + "（老的【拉取全部】是取名册扫一遍、市值又扫一遍，白花约 55 个请求）。\n"
             + "后面所有\"逐只\"的项都拿这份名册当输入，建议排在它们前面。\n"
+            + "**名册是两个源合并的**（2026-09-17）：新浪 hs_a+kcb 打底、上交所官方名单兜沪市。"
+            + "新浪会静默漏票——实测漏 14 只，含当天上市的新股、改名\"退市XX\"仍在退市整理期交易的、"
+            + "以及 *ST 那几只；漏掉的票两融数据一直在更新、K线却一根都没有。"
+            + "市值/最新价只有新浪那条路给，所以**新浪必须排在前面**（见 CompositeStockListProvider）。\n"
             + "⚠ 市值只有\"当下\"、接口没有历史，所以这一项没有\"补某一天\"的用法。",
             FetchActionParams.GlobalFetchOptions),
 

@@ -49,6 +49,9 @@ public sealed class SqliteDayCompletenessAuditor(string dbPath)
     /// 也够第②段判"该有数据的那天"往前数几天。</summary>
     private const int AnchorLookbackDays = 60;
 
+    /// <summary>明细最多列几个，超了只报总数（45 个指标全列出来没人会看）。</summary>
+    private const int IndicatorMaxListed = 5;
+
     /// <summary>
     /// 体检一轮，**一段一批**产出结论（① K线 → ② 日更表 → ③ 覆盖式快照）。
     ///
@@ -79,6 +82,7 @@ public sealed class SqliteDayCompletenessAuditor(string dbPath)
         yield return CheckBars(bars, days[^1], days[^2]);
         yield return CheckDailyTables(days);
         yield return CheckSnapshotLag(days);
+        yield return CheckIndicatorStaleness(days[^1]);
     }
 
     /// <summary>
@@ -193,6 +197,41 @@ public sealed class SqliteDayCompletenessAuditor(string dbPath)
                           + $"落后 {behind} 个交易日——{spec.HowToFill}"));
         }
         return found;
+    }
+
+    /// <summary>
+    /// 第④段：**日频景气指标停更了没有**（2026-09-17）。
+    ///
+    /// 判据本体在 <see cref="SqliteIndicatorStalenessAuditor"/>（跟它自己的历史节奏比，
+    /// 不信东财的 frequency 标注，全程按自然日——三个陷阱都记在那个类里）。这里只把结论
+    /// 包成一条 <see cref="DayFinding"/>：45 个指标不能各报一行，所以汇总成一句、明细列前几个。
+    ///
+    /// 只报不补：停更可能是数据源下线了这个指标、改了编号、或者接口挂了，三种处理完全不同。
+    /// </summary>
+    private List<DayFinding> CheckIndicatorStaleness(DateTime anchor)
+    {
+        const string Label = "行业景气指标(日频)";
+        var r = new SqliteIndicatorStalenessAuditor(dbPath).Check(anchor);
+
+        // 一个都判不了＝这类数据本地还没攒起来，不是告警
+        if (r.Judged == 0) return [];
+
+        if (r.Stale.Count == 0)
+            return [new DayFinding(Label, IsBad: false, Summary: $"{Label}齐（{r.Judged} 项）", Detail: null)];
+
+        var listed = r.Stale.Take(IndicatorMaxListed)
+            .Select(s => $"{s.Name}（停在 {s.Last:MM-dd}、已 {s.Behind} 天没更新，它平时最多停 {s.MaxGap} 天）");
+        return
+        [
+            new DayFinding(Label, IsBad: true,
+                Summary: $"{Label} {r.Stale.Count}/{r.Judged} 项停更",
+                Detail: $"{Label}：{r.Stale.Count} 个指标停得比自己平时最长的间隔还久——"
+                      + string.Join("；", listed)
+                      + (r.Stale.Count > IndicatorMaxListed
+                            ? $"；另有 {r.Stale.Count - IndicatorMaxListed} 个" : "")
+                      + "。跑一次【行业景气指标】看还能不能抓到；仍然没有就是数据源那边停了这个指标"
+                      + "（改了编号或下线），得去东财核对一下"),
+        ];
     }
 
     /// <summary>

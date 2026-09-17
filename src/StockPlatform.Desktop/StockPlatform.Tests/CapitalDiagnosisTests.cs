@@ -60,6 +60,33 @@ public class CapitalDiagnosisTests
         var w = CapitalDiagnosisAnalyzer.ResolveWindows(bars);
 
         Assert.Equal(new[] { "本波", "近20日", "近60日" }, w.Ranges.Select(r => r.Label).ToArray());
+
+    }
+
+    /// <summary>
+    /// 「本波」那一列要带天数显示——各票长短差很多（招行 3 日 vs 宁德 31 日），
+    /// 不标出来分不清「刚回调三天」还是「掉队一个月」。
+    ///
+    /// ⚠ 同时锁住 <c>Label</c> 本身**没被改**：它是 Reader 与 Analyzer 之间传
+    /// 指数/同业收益率的字典键，改了两边对不上，而且取值走 TryGetValue——
+    /// 不报错，只会让「vs 指数」那几列静默变成「—」。
+    /// </summary>
+    [Fact]
+    public void 区间列_本波带天数_但Label不变()
+    {
+        var bars = Enumerable.Range(0, 100).Select(i => Bar(i, 100 - i)).ToList();
+        var w = CapitalDiagnosisAnalyzer.ResolveWindows(bars);
+        var input = new CapitalDiagnosisInput { Code = "300750", Name = "测试", Bars = bars };
+        var r = new CapitalDiagnosisAnalyzer().Analyze(input, w);
+
+        // Label 一个字都不能变——它是字典键
+        Assert.Equal("本波", w.Ranges[0].Label);
+
+        // 但表格第一列要显示成「本波 N日」
+        var first = r.Dimensions.First(d => d.Tables.Count > 0).Tables[0].Rows[0][0].Text;
+        Assert.StartsWith("本波 ", first);
+        Assert.EndsWith("日", first);
+        Assert.Contains(w.Ranges[0].TradingDays.ToString(), first);
     }
 
     /// <summary>历史太短时不该硬凑出根本没有的区间。</summary>
@@ -361,6 +388,142 @@ public class CapitalDiagnosisTests
 
         Assert.Contains("矛盾", r.GlobalNote);
         Assert.Contains("不合成总分", r.GlobalNote);
+    }
+
+    // ── 资金方向与股价方向相反时要说破（2026-09-17）────────────────────
+
+    /// <summary>
+    /// 大额单净流出、小额单净流入，本该说"大额单在卖、小额单在接"——但股价在涨的时候，
+    /// 光看这句会以为有人在撤。
+    ///
+    /// 实测招商银行：近60日主力净流出 13.2 亿、60/60 日全是净流出，同期股价 +16.2%。
+    /// **价格是买卖力量的最终结果**——卖压真占上风，股价不会涨 16%。
+    /// 这个指标在慢涨股上长期为负是常态。
+    /// </summary>
+    [Fact]
+    public void 主力净流出但股价在涨_要提示指标特性()
+    {
+        // 80 根持续上涨的K线 + 全程主力净流出、小单净流入
+        var bars = Enumerable.Range(0, 80).Select(i => Bar(i, 100 + i)).ToList();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750",
+            Bars = bars,
+            Flows = bars.Select(b => new NetInflowDetail
+            {
+                TradeDate = b.PeriodStart,
+                MainNet = -1e8, SuperNet = -6e7, BigNet = -4e7, MidNet = 0, SmallNet = 1e8,
+            }).ToList(),
+        };
+
+        var r = new CapitalDiagnosisAnalyzer().Analyze(
+            input, CapitalDiagnosisAnalyzer.ResolveWindows(bars));
+        var flow = r.Dimensions.First(d => d.Index == 3);
+
+        Assert.Contains(flow.Conclusions, c => c.Contains("慢涨股上长期为负", StringComparison.Ordinal));
+        Assert.Contains(flow.Conclusions, c => c.Contains("不宜单独", StringComparison.Ordinal));
+    }
+
+    /// <summary>资金和股价方向一致（都在跌）——这时候"大额单在卖"本来就对，不该多嘴。</summary>
+    [Fact]
+    public void 主力净流出且股价在跌_不提示()
+    {
+        var bars = Falling();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750",
+            Bars = bars,
+            Flows = bars.Select(b => new NetInflowDetail
+            {
+                TradeDate = b.PeriodStart,
+                MainNet = -1e8, SuperNet = -6e7, BigNet = -4e7, MidNet = 0, SmallNet = 1e8,
+            }).ToList(),
+        };
+
+        var r = new CapitalDiagnosisAnalyzer().Analyze(
+            input, CapitalDiagnosisAnalyzer.ResolveWindows(bars));
+        var flow = r.Dimensions.First(d => d.Index == 3);
+
+        Assert.DoesNotContain(flow.Conclusions, c => c.Contains("方向相反", StringComparison.Ordinal));
+    }
+
+    /// <summary>涨跌幅不到 5% 的小波动不触发——那种方向相反是噪声，提了只会吵。</summary>
+    [Fact]
+    public void 股价只微涨_不触发提示()
+    {
+        // 80 根几乎平的K线：从 100 涨到 102（+2%），在 5% 门槛之下
+        var bars = Enumerable.Range(0, 80).Select(i => Bar(i, 100 + i * 0.025)).ToList();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750",
+            Bars = bars,
+            Flows = bars.Select(b => new NetInflowDetail
+            {
+                TradeDate = b.PeriodStart,
+                MainNet = -1e8, SuperNet = -6e7, BigNet = -4e7, MidNet = 0, SmallNet = 1e8,
+            }).ToList(),
+        };
+
+        var r = new CapitalDiagnosisAnalyzer().Analyze(
+            input, CapitalDiagnosisAnalyzer.ResolveWindows(bars));
+        var flow = r.Dimensions.First(d => d.Index == 3);
+
+        Assert.DoesNotContain(flow.Conclusions, c => c.Contains("方向相反", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// **分档只按单笔成交额分，识别不了身份**——大额单可能是游资/大户/量化，机构用算法拆单
+    /// 反倒落在中小单里。所以这一格的文案里不能出现「机构减仓」「散户承接」这种身份判断
+    /// （2026-09-17 改：原来就是这么写的，把统计口径直接翻译成了身份）。
+    /// </summary>
+    [Fact]
+    public void 分档资金流的文案_不做身份判断()
+    {
+        var bars = Falling();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750",
+            Bars = bars,
+            Flows = bars.Select(b => new NetInflowDetail
+            {
+                TradeDate = b.PeriodStart,
+                MainNet = -1e8, SuperNet = -6e7, BigNet = -4e7, MidNet = 0, SmallNet = 1e8,
+            }).ToList(),
+        };
+
+        var r = new CapitalDiagnosisAnalyzer().Analyze(
+            input, CapitalDiagnosisAnalyzer.ResolveWindows(bars));
+        var flow = r.Dimensions.First(d => d.Index == 3);
+        var text = string.Join(" ", flow.Conclusions) + flow.Title + flow.Tooltip;
+
+        foreach (var bad in new[] { "机构减仓", "机构加仓", "散户承接", "散户在卖", "散户反向" })
+            Assert.DoesNotContain(bad, text, StringComparison.Ordinal);
+
+        // 该说的还得说：大额单和小额单反向这个观察不能丢
+        Assert.Contains(flow.Conclusions, c => c.Contains("大额单在卖", StringComparison.Ordinal));
+    }
+
+    /// <summary>反过来也要说：主力净流入但股价在跌，那是下跌中的承接，不是机构抄底。</summary>
+    [Fact]
+    public void 主力净流入但股价在跌_提示是承接不是抄底()
+    {
+        var bars = Falling();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750",
+            Bars = bars,
+            Flows = bars.Select(b => new NetInflowDetail
+            {
+                TradeDate = b.PeriodStart,
+                MainNet = 1e8, SuperNet = 6e7, BigNet = 4e7, MidNet = 0, SmallNet = -1e8,
+            }).ToList(),
+        };
+
+        var r = new CapitalDiagnosisAnalyzer().Analyze(
+            input, CapitalDiagnosisAnalyzer.ResolveWindows(bars));
+        var flow = r.Dimensions.First(d => d.Index == 3);
+
+        Assert.Contains(flow.Conclusions, c => c.Contains("承接抛压而非推动价格", StringComparison.Ordinal));
     }
 
     /// <summary>分档资金流覆盖不满区间时必须告警——累计值不含缺失那几天，不说会被当成完整。</summary>

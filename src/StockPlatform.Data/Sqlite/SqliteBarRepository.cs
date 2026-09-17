@@ -313,13 +313,21 @@ public class SqliteBarRepository : IBarRepository
         return QueryStored(code, granularity, start, end);
     }
 
+    /// <summary>
+    /// <see cref="ReadBar"/> 依赖的列序。读 Bar 的 SELECT 都拼这个常量，别各写各的：
+    /// 列序是靠位置下标读的，某处手写的顺序跟这里差一列，读出来的就是张冠李戴的数字，
+    /// 而且看上去完全正常。
+    /// </summary>
+    private const string BarColumns =
+        "code, granularity, period_start, open, close, high, low, volume, amount, turnover, fetched_at";
+
     /// <summary>真正读表的那一半（<see cref="Query"/> 对周/月线会绕开它）。</summary>
     private List<Bar> QueryStored(string code, string granularity, DateTime? start, DateTime? end)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT code, granularity, period_start, open, close, high, low, volume, amount, turnover, fetched_at
+        cmd.CommandText = $"""
+            SELECT {BarColumns}
             FROM Bar
             WHERE code = $code AND granularity = $granularity
               AND ($start IS NULL OR period_start >= $start)
@@ -333,9 +341,17 @@ public class SqliteBarRepository : IBarRepository
 
         var result = new List<Bar>();
         using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            result.Add(new Bar
+        while (reader.Read()) result.Add(ReadBar(reader));
+        return result;
+    }
+
+    /// <summary>
+    /// 把一行读成 <see cref="Bar"/>。列序固定为 <see cref="BarColumns"/>，
+    /// <see cref="QueryStored"/> 和 <see cref="GetLatestBar"/> 共用——两处各写一遍的话，
+    /// 加一列时漏改一处就是静默的错值。
+    /// </summary>
+    private static Bar ReadBar(Microsoft.Data.Sqlite.SqliteDataReader reader)
+        => new()
             {
                 Code = reader.GetString(0),
                 Granularity = reader.GetString(1),
@@ -357,9 +373,38 @@ public class SqliteBarRepository : IBarRepository
                 // 历史天数不会因为FetchedAt是MinValue而被误判成需要重新抓——见FetchOrchestrator
                 // 的水位线逻辑，只有period_start等于当前日期时才会去看FetchedAt）。
                 FetchedAt = reader.IsDBNull(10) ? DateTime.MinValue : DateTime.ParseExact(reader.GetString(10), DateFormat, CultureInfo.InvariantCulture),
-            });
-        }
-        return result;
+            };
+
+    /// <summary>
+    /// 这只票某个粒度下**最后一根**K线，没有就返回 null。
+    ///
+    /// 为什么要它而不是 <c>Query(code, gran)[^1]</c>（2026-09-17）：只想知道"最新收盘价是多少、
+    /// 哪一天"的调用方（分析详情窗口的估值、行情面板的现价）本来要把全历史读出来才能取到末行，
+    /// 老股 5000+ 行、每行还要 ParseExact 两次日期，全花在马上就丢掉的对象上。
+    /// 这里走 <c>ORDER BY period_start DESC LIMIT 1</c>，命中主键 (code, granularity, period_start)
+    /// 的索引尾端，只读一行。
+    ///
+    /// ⚠ 只对**存着的**粒度成立。周/月线现在是从日线现算的（见 <see cref="Query"/>），
+    /// 传 week/month 进来会查到空表——所以这里挡住，调用方要末根周线就自己 Query 后取末尾。
+    /// </summary>
+    public Bar? GetLatestBar(string code, string granularity)
+    {
+        if (granularity is Granularity.Week or Granularity.Month)
+            throw new ArgumentException(
+                "周/月线不落库、由日线现算，取末根请走 Query()", nameof(granularity));
+
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT {BarColumns}
+            FROM Bar
+            WHERE code = $code AND granularity = $granularity
+            ORDER BY period_start DESC LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$code", code);
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        using var reader = cmd.ExecuteReader();
+        return reader.Read() ? ReadBar(reader) : null;
     }
 
     /// <summary>最新一行的日期+实际抓取时间，一次查询同时拿到两者（比先GetLatestPeriodStart再

@@ -108,15 +108,22 @@ public class SqliteDividendRepository : IDividendRepository
         return result;
     }
 
+    /// <summary>
+    /// "最近12个月已实施的现金派息"的筛选条件。全市场版和单只版共用一份文本——两处各写各的话，
+    /// 哪天调了口径只改一处，同一只票的股息率在列表页和详情页就会对不上，而且谁都不会报错。
+    /// </summary>
+    private const string TrailingCashWhere =
+        "progress = '实施' AND dividend_yuan > 0 AND ex_date IS NOT NULL AND ex_date >= $since";
+
     public Dictionary<string, double> GetTrailingCashDividendPerShare(DateTime since)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         // 表里 dividend_yuan 是"每10股派X元"（数据源口径，见 DividendRow），/10 换成每股。
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT code, SUM(dividend_yuan) / 10.0
             FROM Dividend
-            WHERE progress = '实施' AND dividend_yuan > 0 AND ex_date IS NOT NULL AND ex_date >= $since
+            WHERE {TrailingCashWhere}
             GROUP BY code;
             """;
         cmd.Parameters.AddWithValue("$since", since.ToString(DateFormat, CultureInfo.InvariantCulture));
@@ -128,6 +135,23 @@ public class SqliteDividendRepository : IDividendRepository
             result[reader.GetString(0)] = reader.GetDouble(1);
         }
         return result;
+    }
+
+    public double GetTrailingCashDividendPerShare(string code, DateTime since)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        // 多加一个 code = $code 就走主键前缀，不再扫全表（批量版那条是全表 GROUP BY）。
+        cmd.CommandText = $"""
+            SELECT SUM(dividend_yuan) / 10.0
+            FROM Dividend
+            WHERE code = $code AND {TrailingCashWhere};
+            """;
+        cmd.Parameters.AddWithValue("$code", code);
+        cmd.Parameters.AddWithValue("$since", since.ToString(DateFormat, CultureInfo.InvariantCulture));
+        // 一行都没匹配上时 SUM 返回 NULL（不是 0），所以这里必须判 DBNull
+        var value = cmd.ExecuteScalar();
+        return value is null or DBNull ? 0 : Convert.ToDouble(value, CultureInfo.InvariantCulture);
     }
 
     public Dictionary<string, List<(int Year, double PerShare)>> GetAnnualCashDividendPerShare(DateTime since)

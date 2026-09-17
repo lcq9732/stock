@@ -25,6 +25,7 @@ public class DayCompletenessTests : IDisposable
     private readonly string _dbPath;
     private readonly SqliteBarRepository _bars;
     private readonly SqliteDailyTableAuditor _auditor;
+    private readonly SqliteIndicatorStalenessAuditor _indicators;
 
     private const string Anchor = MarketIndexCatalog.ShanghaiCompositeSymbol;
 
@@ -56,6 +57,7 @@ public class DayCompletenessTests : IDisposable
         foreach (var d in Cal) InsertBar(Anchor, Granularity.Day, d);
         SqliteStockMetaUpsert.Upsert(_dbPath, [(Anchor, "上证指数")], SqliteStockMetaUpsert.TypeIndex);
         _auditor = new SqliteDailyTableAuditor(_dbPath);
+        _indicators = new SqliteIndicatorStalenessAuditor(_dbPath);
     }
 
     public void Dispose()
@@ -308,6 +310,97 @@ public class DayCompletenessTests : IDisposable
                 + (at > coverageAt ? "体检之后，Spec 却没标 RunsAfterDayCheck"
                                    : "体检之前，Spec 却标了 RunsAfterDayCheck"));
         }
+    }
+
+    // ═══════════════ ④ 日频景气指标：停更了没有 ═══════════════
+
+    /// <summary>造一个指标的序列：从 <paramref name="from"/> 起每隔 <paramref name="stepDays"/>
+    /// 自然日一个值，共 <paramref name="count"/> 个。</summary>
+    private void SeedIndicator(string id, string name, DateTime from, int stepDays, int count,
+                               string frequency = "日")
+    {
+        using var conn = new SqliteConnection($"Data Source={_dbPath}");
+        conn.Open();
+        using var tx = conn.BeginTransaction();
+        void Exec(string sql)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx; cmd.CommandText = sql; cmd.ExecuteNonQuery();
+        }
+        Exec($"INSERT OR REPLACE INTO IndustryIndicator(indicator_id, name, frequency) "
+           + $"VALUES('{id}', '{name}', '{frequency}');");
+        for (int i = 0; i < count; i++)
+            Exec("INSERT OR REPLACE INTO IndustryIndicatorValue(indicator_id, trade_date, value) "
+               + $"VALUES('{id}', '{from.AddDays(i * stepDays):yyyy-MM-dd}', 1.0);");
+        tx.Commit();
+    }
+
+    [Fact]
+    public void 日频指标按自身节奏判_正常的不报()
+    {
+        // 每天一个值、一直到锚那天 → 齐。
+        SeedIndicator("EMI1", "棉花期货价", Latest.AddDays(-40), stepDays: 1, count: 41);
+
+        var r = _indicators.Check(Latest);
+
+        Assert.Equal(1, r.Judged);
+        Assert.Empty(r.Stale);
+    }
+
+    [Fact]
+    public void 日频指标停得比自己平时还久_要报()
+    {
+        // 平时每天一个值，然后停了 5 天（宽限 1 天，5 > 1+1 → 报）。
+        SeedIndicator("EMI2", "焦炭期货价", Latest.AddDays(-40), stepDays: 1, count: 36);
+
+        var s1 = Assert.Single(_indicators.Check(Latest).Stale);
+
+        Assert.Equal("焦炭期货价", s1.Name);
+        Assert.Equal(1, s1.MaxGap);      // 平时每天一个值
+        Assert.Equal(5, s1.Behind);      // 停了 5 天
+    }
+
+    [Fact]
+    public void 本来就隔几天发一次的指标_不按日报()
+    {
+        // 实测踩到的那一类：东财把涤纶价格标成"日"，它实际每周发两三次、最长停 6 天。
+        // 判据要是信了那个标注，这一类天天误报——所以基准得从它自己的历史算。
+        SeedIndicator("EMI3", "涤纶POY价格", Latest.AddDays(-42), stepDays: 6, count: 7);
+
+        Assert.Empty(_indicators.Check(Latest).Stale);
+    }
+
+    [Fact]
+    public void 日期落在周末的指标也判得了()
+    {
+        // 国内汽油/柴油供应价的值就落在周六。拿交易日历数"落后几个交易日"会直接算不出来，
+        // 所以第④段全程用自然日。
+        var sat = Latest.AddDays(-(int)Latest.DayOfWeek + 6);   // 最近的周六
+        SeedIndicator("EMI4", "国内汽油供应价", sat.AddDays(-60), stepDays: 15, count: 5);
+
+        var r = _indicators.Check(Latest);
+
+        Assert.Equal(1, r.Judged);        // 周末的日期也数得出来
+        Assert.Empty(r.Stale);            // 15 天一个值是它的常态
+    }
+
+    [Fact]
+    public void 样本不足的指标_判不了就不报()
+    {
+        // 刚接进来的指标只有两三个点，推不出节奏。
+        SeedIndicator("EMI5", "新接的指标", Latest.AddDays(-30), stepDays: 1, count: 2);
+
+        Assert.Equal(0, _indicators.Check(Latest).Judged);
+    }
+
+    [Fact]
+    public void 只判日频_月频那些不掺进来()
+    {
+        // 月频指标停一个月是常态。它们的 maxGap 在 90 天窗口里样本太少，
+        // 判了只会瞎报——所以只取 frequency='日'。
+        SeedIndicator("EMI6", "规模以上工业增加值", Latest.AddDays(-90), stepDays: 30, count: 3, frequency: "月");
+
+        Assert.Equal(0, _indicators.Check(Latest).Judged);
     }
 
     // ═══════════════ ③ 覆盖式快照：停在哪天 ═══════════════

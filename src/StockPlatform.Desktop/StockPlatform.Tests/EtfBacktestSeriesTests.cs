@@ -45,10 +45,18 @@ public class EtfBacktestSeriesTests : IDisposable
         _divs.EnsureSchema();
     }
 
+    /// <summary>
+    /// ⚠ **不要在这里调 <c>SqliteConnection.ClearAllPools()</c>**——那是**进程级**的全局操作，
+    /// 会把连接池里所有连接（包括其它测试类此刻正在用的）从底层关掉。xunit 默认并行跑不同测试类，
+    /// 于是 native 层去访问已释放的连接，**整个 testhost 崩溃**，而且崩在第几个测试完全随机。
+    /// 2026-09-17 就是这么崩的（先 970 个、再 720 个，两次位置不同），
+    /// 跟 <see cref="MarginShortBalanceFillTests"/> 当初踩的是同一个坑。
+    ///
+    /// 临时目录删不掉就留着——反正在系统 temp 里，名字带 Guid 不会撞。
+    /// </summary>
     public void Dispose()
     {
-        SqliteConnection.ClearAllPools();
-        try { Directory.Delete(_dir, recursive: true); } catch { /* 临时目录，留给系统清理 */ }
+        try { Directory.Delete(_dir, recursive: true); } catch { /* 还被连接池占着，留给系统清理 */ }
     }
 
     // ═══════════════ ① 份额合并：负的送转比例是合法输入 ═══════════════

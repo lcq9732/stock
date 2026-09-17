@@ -86,9 +86,9 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <!-- 按钮在前、说明文字在后（2026-09-15 按用户要求调换）——这一页的说明是全程序
-                         最长的一段，摆在前面会把几个按钮顶到很右边、每次都要横着找一下。别的页开头
-                         那些是"固定使用日线"之类的短标签，不存在这个问题，所以只有这一行是这个顺序。 -->
+                    <!-- 这一页的说明是全程序最长的一段，2026-09-17 收进 ⓘ 的 ToolTip 里（用户说
+                         "知道后就不用天天看了"）。别的页开头那些是"固定使用日线"之类的短标签，
+                         摆在行首没问题，所以只有这一行没有平铺的说明文字。 -->
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
                         <Button Content="刷新" Command="{Binding RefreshCommand}" Width="70" />
                         <Button Content="移出主动仓" Command="{Binding RemoveFromPoolCommand}" Width="90" Margin="8,0,0,0"
@@ -96,9 +96,10 @@
                         <Button Content="仓位计算器" Width="90" Margin="8,0,0,0" Click="PositionSizingButton_Click"
                                 ToolTip="按凯利公式把&quot;我觉得有几成把握涨&quot;换算成&quot;该买多少钱/该留多少股&quot;。&#10;这里打开是空手起算（不带某只票）；要针对某一只，点那一行的【持仓股数】那一格，现价和持仓会自动带进去。" />
                         <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0" />
-                        <TextBlock Text="我打算买卖的票——买入/卖出在这里录（点表里的【买入】或【卖出】那一格，可分多笔金字塔建仓/分批止盈，佣金等费率也在那里设），每日晨检只体检这一页。从&quot;自选股&quot;或&quot;查询&quot;页勾选后点&quot;加入主动仓&quot;加进来。"
-                                   VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" TextWrapping="Wrap" MaxWidth="540"
-                                   Margin="16,0,0,0" />
+                        <TextBlock Text="&#8505;" FontWeight="Bold" FontSize="16" VerticalAlignment="Center"
+                                   Background="Transparent" Foreground="{DynamicResource Theme.Foreground.Muted}"
+                                   Margin="16,0,0,0" ToolTipService.ShowDuration="60000"
+                                   ToolTip="这一页放的是我打算买卖的票。&#10;买入/卖出在这里录：点表里的【买入】或【卖出】那一格，可分多笔金字塔建仓/分批止盈，佣金等费率也在那里设。&#10;每日晨检只体检这一页。&#10;从&quot;自选股&quot;或&quot;查询&quot;页勾选后点&quot;加入主动仓&quot;加进来。" />
                     </StackPanel>
 
                     <DataGrid x:Name="TradePoolGrid" Grid.Row="1" ItemsSource="{Binding Entries}" AutoGenerateColumns="False" IsReadOnly="False"

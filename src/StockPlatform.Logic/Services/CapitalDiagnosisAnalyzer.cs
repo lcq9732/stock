@@ -68,6 +68,23 @@ public class CapitalDiagnosisAnalyzer
     private static DiagnosisRange MakeRange(string label, int start, IReadOnlyList<Bar> bars) =>
         new(label, start, bars[start].PeriodStart, bars[^1].PeriodStart, bars.Count - start);
 
+    /// <summary>
+    /// 表格"区间"那一列的显示文本。
+    ///
+    /// **「本波」要带上天数**——它是按"近 60 日内最高收盘日"动态定的，各票长短差很多
+    /// （实测招商银行本波 3 日、宁德时代本波 31 日）。不标出来的话，同样一句"本波跑输 x pct"
+    /// 根本分不清是刚回调三天的噪声、还是掉队一个月的趋势。
+    ///
+    /// 「近20日」「近60日」本身已含天数，原样显示。
+    ///
+    /// ⚠ **只改显示、不改 <see cref="DiagnosisRange.Label"/>**：那个字符串是
+    /// <c>SqliteCapitalDiagnosisReader</c> 和这里之间传指数/同业收益率的**字典键**
+    /// （见 <c>IndexReturns</c>、<c>PeerMedianReturns</c>）。改它的话两边对不上，
+    /// 而取值走的是 TryGetValue——不报错，只会让"vs 指数"那几列静默变成"—"。
+    /// </summary>
+    private static string RangeLabel(DiagnosisRange r) =>
+        r.Label.StartsWith("近", StringComparison.Ordinal) ? r.Label : $"{r.Label} {r.TradingDays}日";
+
     public CapitalDiagnosis Analyze(CapitalDiagnosisInput input, DiagnosisWindows windows)
     {
         var bars = input.Bars;
@@ -130,7 +147,7 @@ public class CapitalDiagnosisAnalyzer
         var bars = input.Bars;
         var cols = new List<DiagnosisColumn>
         {
-            new("区间", 62),
+            new("区间", 80),
             new("本股", 72, true),
             new(input.IndexName.Length > 0 ? input.IndexName : "指数", 78, true),
             new("同业中位", 78, true),
@@ -149,7 +166,7 @@ public class CapitalDiagnosisAnalyzer
 
             table.Rows.Add(new[]
             {
-                new DiagnosisCell(r.Label),
+                new DiagnosisCell(RangeLabel(r)),
                 Signed(me, "F2", "%"),
                 hasIx ? Signed(ix, "F2", "%") : Dash(),
                 hasPm ? Signed(pm, "F2", "%") : Dash(),
@@ -215,7 +232,7 @@ public class CapitalDiagnosisAnalyzer
         {
             Columns =
             {
-                new("区间", 62),
+                new("区间", 80),
                 new("日均额", 82, true),
                 new("日均换手", 78, true),
                 new("前期日均额", 92, true),
@@ -236,7 +253,7 @@ public class CapitalDiagnosisAnalyzer
 
             table.Rows.Add(new[]
             {
-                new DiagnosisCell(r.Label),
+                new DiagnosisCell(RangeLabel(r)),
                 new DiagnosisCell(Yi(cur), CellTone.Neutral),
                 new DiagnosisCell($"{turn:F2}%"),
                 double.IsNaN(pre) ? Dash() : new DiagnosisCell(Yi(pre), CellTone.Muted),
@@ -312,13 +329,16 @@ public class CapitalDiagnosisAnalyzer
         var d = new DiagnosisDimension
         {
             Index = 3,
-            Title = "主力/超大单资金累计、散户反向",
+            Title = "主力/超大单资金累计、小单反向",
             Tooltip =
                 "五档按单笔成交额分：超大单 > 100 万、大单 20–100 万、中单 4–20 万、小单 < 4 万；主力 = 超大 + 大。"
                 + (input.FlowStart is { } fs ? $"本票分档数据自 {fs:yyyy-MM-dd} 起" : "本票暂无分档数据")
                 + (input.FlowMarketStart is { } ms ? $"、全市场自 {ms:yyyy-MM-dd} 起" : "")
                 + "（东财接口只给 120 天，更早的回补不了，只能靠往后每天累积）。"
-                + "起始日按标的各自算，不可用全表 MIN——全表 MIN 那天可能只有 1 只票，会虚报几个月可用历史。",
+                + "起始日按标的各自算，不可用全表 MIN——全表 MIN 那天可能只有 1 只票，会虚报几个月可用历史。"
+                + "⚠ **分档只按单笔成交额分，跟交易者身份无关**：大额单可能是游资、大户或量化，"
+                + "而机构用算法拆单时反倒落在中小单里。所以这几列不能读成「机构 vs 散户」，"
+                + "只能读成「大额单 vs 小额单」。",
         };
 
         if (input.Flows.Count == 0)
@@ -336,7 +356,7 @@ public class CapitalDiagnosisAnalyzer
         {
             Columns =
             {
-                new("区间", 62),
+                new("区间", 80),
                 new("主力", 76, true), new("超大单", 76, true), new("大单", 76, true),
                 new("中单", 76, true), new("小单", 76, true),
                 new("覆盖", 64, true),
@@ -349,7 +369,7 @@ public class CapitalDiagnosisAnalyzer
             {
                 table.Rows.Add(new[]
                 {
-                    new DiagnosisCell(r.Label),
+                    new DiagnosisCell(RangeLabel(r)),
                     Dash(), Dash(), Dash(), Dash(), Dash(),
                     new DiagnosisCell($"0/{r.TradingDays}日", CellTone.Alert),
                 });
@@ -357,7 +377,7 @@ public class CapitalDiagnosisAnalyzer
             }
             table.Rows.Add(new[]
             {
-                new DiagnosisCell(r.Label),
+                new DiagnosisCell(RangeLabel(r)),
                 YiCell(rows.Sum(x => x.MainNet ?? 0)),
                 YiCell(rows.Sum(x => x.SuperNet ?? 0)),
                 YiCell(rows.Sum(x => x.BigNet ?? 0)),
@@ -383,11 +403,46 @@ public class CapitalDiagnosisAnalyzer
         double smallSum = mainRows.Sum(x => x.SmallNet ?? 0);
         string dir = mainSum < 0 ? "净流出" : "净流入";
         var line = $"本波主力{dir} {Yi(Math.Abs(mainSum))}（超大单 {YiSigned(superSum)}）";
-        // 主力与小单反向是"机构派发/散户承接"的直接证据，同向则说明分歧不大
+        // 大额单与小额单反向＝这两拨人在对做，同向则说明分歧不大。
+        // ⚠ 措辞只说"大额单/小额单"，**不说"机构/散户"**（2026-09-17 改）：分档纯按单笔成交额，
+        //   识别不了身份——大额单可能是游资/大户/量化，机构用算法拆单反倒落在中小单里。
+        //   原来写"机构减仓、散户承接"，等于把统计口径直接翻译成了身份判断。
         if (Math.Sign(smallSum) != Math.Sign(mainSum) && Math.Abs(smallSum) > 0)
             line += $"，同期小单{(smallSum > 0 ? "净流入" : "净流出")} {YiSigned(smallSum)} —— "
-                    + (mainSum < 0 ? "机构减仓、散户承接" : "机构加仓、散户在卖");
+                    + (mainSum < 0 ? "大额单在卖、小额单在接" : "大额单在买、小额单在卖");
         d.Conclusions.Add(line);
+
+        // ⚠ 资金方向与股价方向相反时，必须说破——否则上面那句"大额单在卖"会被当成
+        // 对这只票的整体判断。招商银行实测：近60日主力净流出 13.2 亿、60/60 日全是净流出，
+        // 同期股价却 +16.2%——卖压真占上风的话，股价不会涨 16%。
+        //
+        // **价格是买卖力量的最终结果**：大额单净流出却涨着，说明卖压被更分散的买盘持续消化了；
+        // 反过来大额单净流入却跌着，说明那些买单是在承接抛压、没能推动价格。
+        // 这个指标在慢涨股上长期为负是常态（实测兴业 +5.1%/-35.5亿、宁波银行 +14.8%/-13.2亿、
+        // 中远海控 +22.4%/-13.2亿），在急跌股上（中际旭创 -31%/-421.9亿）信息量才结实。
+        //
+        // 用**最宽的窗口**判而不是本波：本波内往往是自洽的（招行本波 3 天确实在跌），
+        // 矛盾要拉长了才看得出来。
+        var wide = w.Ranges.Count > 1 ? w.Ranges[^1] : null;
+        if (wide != null)
+        {
+            var wideRows = Slice(bars, wide.StartIndex, byDate);
+            double wideSum = wideRows.Sum(x => x.MainNet ?? 0);
+            double wideChg = bars[wide.StartIndex].Close > 0
+                ? (bars[^1].Close / bars[wide.StartIndex].Close - 1) * 100 : 0;
+            // 幅度门槛 5%：小涨小跌方向相反是噪声，不值得提
+            if (wideRows.Count > 0 && Math.Abs(wideChg) >= 5
+                && Math.Sign(wideSum) != 0 && Math.Sign(wideSum) != Math.Sign(wideChg))
+            {
+                d.Conclusions.Add(wideSum < 0
+                    ? $"⚠ 但{wide.Label}主力同样净流出 {Yi(Math.Abs(wideSum))}，同期股价却 {wideChg:+0.0;-0.0}% —— "
+                      + "大额单净流出却涨着，说明卖压被更分散的买盘持续消化。"
+                      + "这一指标在**慢涨股上长期为负**是常态，不宜单独当作「有人在撤」的判据"
+                    : $"⚠ 但{wide.Label}主力同样净流入 {Yi(wideSum)}，同期股价却 {wideChg:+0.0;-0.0}% —— "
+                      + "大额单净流入却跌着，说明那些买单是在**承接抛压而非推动价格**，"
+                      + "不宜单独当作「有人在抄底」的判据");
+            }
+        }
 
         var last5 = mainRows.TakeLast(5).ToList();
         double m5 = last5.Sum(x => x.MainNet ?? 0);

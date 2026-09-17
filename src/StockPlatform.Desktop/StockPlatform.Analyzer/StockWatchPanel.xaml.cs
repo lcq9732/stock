@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using StockPlatform.Analyzer.ViewModels;
 using StockPlatform.Analyzer.Watchlist;
+using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Analyzer;
 
@@ -32,8 +33,13 @@ public partial class StockWatchPanel : UserControl
         EventsGrid.ItemsSource = _events;
     }
 
-    /// <summary>装上一只票。窗口构造完之后调，失败不抛——右上角空着不该让整个分析窗开不出来。</summary>
-    public void Load(WatchService service, StockNoteStore notes, string code, string name)
+    /// <summary>
+    /// 装上一只票的"轻"那一半：记住是谁、把【分析笔记】按钮的状态点出来、先显示"读取中"。
+    /// 真正的事件由调用方在后台读完后交给 <see cref="ApplyEvents"/>——
+    /// 读一只票的事件要打十来条 SQL，其中按代码查 Lhb 是全表扫，不能在 UI 线程上做
+    /// （2026-09-17 拆开；原先是一个同步的 <c>Load</c>）。
+    /// </summary>
+    public void BeginLoad(WatchService service, StockNoteStore notes, string code, string name)
     {
         _service = service;
         _notes = notes;
@@ -41,23 +47,31 @@ public partial class StockWatchPanel : UserControl
         _name = name;
 
         _events.Clear();
-        try
-        {
-            foreach (var e in service.ReadEvents(code))
-                _events.Add(new WatchEventLine
-                {
-                    Date = e.Date.ToString("yyyy-MM-dd"),
-                    Text = e.Text,
-                    Tip = e.Tip ?? "",
-                    // 缩进 12px（窗口里只占右栏，比独立窗口窄，20px 太吃宽度）
-                    Margin = new Thickness(e.Indent * 12, 0, 0, 0),
-                    IsFuture = e.IsFuture,
-                });
-        }
-        catch
-        {
-            // 库里缺表/缺数据不该连累财务分析
-        }
+        EventsGrid.Visibility = Visibility.Collapsed;
+        EmptyText.Visibility = Visibility.Visible;
+        EmptyText.Text = "读取中…";
+        CountText.Text = "";
+
+        // 这一句只查文件在不在，是本地小文件、毫秒级，不值得为它转异步
+        NoteButton.Content = notes.Exists(code) ? "分析笔记 ●" : "分析笔记";
+    }
+
+    /// <summary>
+    /// 把后台读好的事件填进来（UI 线程调）。<see cref="BeginLoad"/> 之后调一次。
+    /// </summary>
+    public void ApplyEvents(IReadOnlyList<WatchEvent> events)
+    {
+        _events.Clear();
+        foreach (var e in events)
+            _events.Add(new WatchEventLine
+            {
+                Date = e.Date.ToString("yyyy-MM-dd"),
+                Text = e.Text,
+                Tip = e.Tip ?? "",
+                // 缩进 12px（窗口里只占右栏，比独立窗口窄，20px 太吃宽度）
+                Margin = new Thickness(e.Indent * 12, 0, 0, 0),
+                IsFuture = e.IsFuture,
+            });
 
         bool empty = _events.Count == 0;
         EventsGrid.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
@@ -65,8 +79,6 @@ public partial class StockWatchPanel : UserControl
         // 说清是"库里没有"而不是"这票没事"——数据缺失和确实没动静是两回事
         EmptyText.Text = empty ? "库里没有这只票的事件（可能还没抓到，或它确实没有可跟踪的事项）。" : "";
         CountText.Text = empty ? "" : $"{_events.Count} 条";
-
-        NoteButton.Content = notes.Exists(code) ? "分析笔记 ●" : "分析笔记";
     }
 
     private void Note_Click(object sender, RoutedEventArgs e)
