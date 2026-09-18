@@ -614,6 +614,16 @@ public partial class App : Application
                 paths,
                 orchestrator.FetchFinancialsForCodesAsync));
 
+        // 【拉取分红送配】2026-09-18 迁到新任务框架。注册放在 orchestrator 之后只是就近——
+        // 它不依赖编排层（依赖是 provider + 仓储 + manifest）。
+        taskRegistry.Register(FetchActionId.FetchDividend,
+            () => new DividendTask(paths, dividendProvider, dividendRepository, manifestStore));
+
+        // 待办的转交口：【重新拉取失败股票】在 orchestrator 内部按 taskId 循环、不经过界面那一层，
+        // 所以声明了"自己补待办"的任务（目前只有分红）要靠这条路回调过来，
+        // 否则那一项会被静默跳过。见 ITaskBacklogRunner。
+        orchestrator.BacklogRunner = taskRegistry;
+
         // 最后那个委托是给【重新读取配置】用的：按下时照当时的配置文件重造板块通道。
         // 传委托而不是把 App 的方法暴露出去，是为了让 MainViewModel 不用知道 browserChannel
         // 和限流参数这些装配细节——它只管"按现在的配置再给我一个"。

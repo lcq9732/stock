@@ -192,4 +192,83 @@ public class SqliteDividendRepository : IDividendRepository
         cmd.CommandText = "SELECT COUNT(DISTINCT code) FROM Dividend;";
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
+
+    public Dictionary<string, DividendFetchState> GetFetchStates()
+    {
+        using var conn = Open();
+        SqliteSchema.EnsureSchema(conn);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT code, last_ok_at, dividend_rows, rights_rows, last_fail_at, fail_reason
+            FROM DividendFetchState;
+            """;
+        var result = new Dictionary<string, DividendFetchState>(StringComparer.Ordinal);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            var code = r.GetString(0);
+            result[code] = new DividendFetchState
+            {
+                Code = code,
+                LastOkAt = ReadTime(r, 1),
+                DividendRows = r.IsDBNull(2) ? 0 : r.GetInt32(2),
+                RightsRows = r.IsDBNull(3) ? 0 : r.GetInt32(3),
+                LastFailAt = ReadTime(r, 4),
+                FailReason = r.IsDBNull(5) ? null : r.GetString(5),
+            };
+        }
+        return result;
+    }
+
+    public void SaveFetchStates(IReadOnlyList<DividendFetchState> states)
+    {
+        if (states.Count == 0) return;
+        using var conn = Open();
+        SqliteSchema.EnsureSchema(conn);
+        using var tx = conn.BeginTransaction();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            // 整条覆盖：调用方持有的就是完整状态（失败那只带着原来的 last_ok_at），
+            // 这里再做字段级合并只会多一处判据、两处不一致。
+            cmd.CommandText = """
+                INSERT INTO DividendFetchState
+                    (code, last_ok_at, dividend_rows, rights_rows, last_fail_at, fail_reason)
+                VALUES ($c, $ok, $dr, $rr, $fa, $fr)
+                ON CONFLICT(code) DO UPDATE SET
+                    last_ok_at = excluded.last_ok_at,
+                    dividend_rows = excluded.dividend_rows,
+                    rights_rows = excluded.rights_rows,
+                    last_fail_at = excluded.last_fail_at,
+                    fail_reason = excluded.fail_reason;
+                """;
+            var pc = cmd.CreateParameter(); pc.ParameterName = "$c"; cmd.Parameters.Add(pc);
+            var pok = cmd.CreateParameter(); pok.ParameterName = "$ok"; cmd.Parameters.Add(pok);
+            var pdr = cmd.CreateParameter(); pdr.ParameterName = "$dr"; cmd.Parameters.Add(pdr);
+            var prr = cmd.CreateParameter(); prr.ParameterName = "$rr"; cmd.Parameters.Add(prr);
+            var pfa = cmd.CreateParameter(); pfa.ParameterName = "$fa"; cmd.Parameters.Add(pfa);
+            var pfr = cmd.CreateParameter(); pfr.ParameterName = "$fr"; cmd.Parameters.Add(pfr);
+            foreach (var st in states)
+            {
+                pc.Value = st.Code;
+                pok.Value = WriteTime(st.LastOkAt);
+                pdr.Value = st.DividendRows;
+                prr.Value = st.RightsRows;
+                pfa.Value = WriteTime(st.LastFailAt);
+                pfr.Value = (object?)st.FailReason ?? DBNull.Value;
+                cmd.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+    }
+
+    private static object WriteTime(DateTime? t) =>
+        t.HasValue ? t.Value.ToString(TimeFormat, CultureInfo.InvariantCulture) : DBNull.Value;
+
+    private static DateTime? ReadTime(SqliteDataReader r, int i)
+    {
+        if (r.IsDBNull(i)) return null;
+        var s = r.GetString(i);
+        return DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : null;
+    }
 }

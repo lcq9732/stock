@@ -70,10 +70,13 @@ public class LhbSeatTaskTests : IDisposable
         public int SeatsPerSide = 5;
         /// <summary>再加一行跟第一行席位和金额完全相同的——接口真的会这么返回（2016-03-25 实测 6 行）。</summary>
         public bool WithTwins;
+        /// <summary>抓到第 N 天时触发取消——用来验中断收尾。</summary>
+        public (int AfterDays, CancellationTokenSource Cts)? CancelAt;
 
         public Task<LhbSeatDay> FetchLhbSeatsOfDayAsync(DateTime day, CancellationToken ct = default)
         {
             Asked.Add(day.Date);
+            if (CancelAt is { } ca && Asked.Count >= ca.AfterDays) ca.Cts.Cancel();
             if (Throws.Contains(day.Date)) throw new HttpRequestException("连不上");
             if (Empty.Contains(day.Date)) return Task.FromResult(new LhbSeatDay(day.Date, [], 0, 0));
 
@@ -343,5 +346,50 @@ public class LhbSeatTaskTests : IDisposable
               HAVING n <> d OR mn <> 0 OR mx <> n - 1);
             """;
         Assert.Equal(0, Convert.ToInt32(cmd.ExecuteScalar()));
+    }
+
+    // ── 中断收尾的措辞 ────────────────────────────────────────────
+
+    /// <summary>
+    /// **「整段回补」中断时不能说"下次从水位线接着走"**——它压根不看水位线，每轮都从数据起点
+    /// 重新排期，中断＝进度不保留；改用增量也接不上（只回看 7 天，够不着中间那段）。
+    ///
+    /// 这条是 2026-09-17 真把人误导过一次之后补的：用户看到那句话才放心停掉了跑到 459/2603 的回补。
+    /// </summary>
+    [Fact]
+    public async Task 整段回补中断_要说清进度不保留()
+    {
+        var cts = new CancellationTokenSource();
+        var f = new FakeFetcher { CancelAt = (2, cts) };
+        var task = NewTask(f);
+        var lines = new List<string>();
+        task.OnProgress += p => lines.Add(p.Text);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => task.RunAsync(Backfill(), cts.Token));
+
+        var stop = Assert.Single(lines, l => l.Contains("中断"));
+        Assert.Contains("进度不保留", stop);
+        Assert.DoesNotContain("下次从水位线接着走", stop);
+    }
+
+    /// <summary>增量中断则确实是"从水位线接着走"——整日替换幂等，重跑无害。</summary>
+    [Fact]
+    public async Task 增量中断_说从水位线接着走()
+    {
+        await NewTask(new FakeFetcher()).RunAsync(Backfill(), CancellationToken.None);
+
+        var cts = new CancellationTokenSource();
+        var f = new FakeFetcher { CancelAt = (2, cts) };
+        var task = NewTask(f);
+        var lines = new List<string>();
+        task.OnProgress += p => lines.Add(p.Text);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => task.RunAsync(new TaskRunArgs(FetchMode.Incremental), cts.Token));
+
+        var stop = Assert.Single(lines, l => l.Contains("中断"));
+        Assert.Contains("下次从水位线接着走", stop);
+        Assert.DoesNotContain("进度不保留", stop);
     }
 }

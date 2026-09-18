@@ -299,6 +299,37 @@ public sealed class FetchPlanItem
     /// </summary>
     public bool LastNothingToDo { get; set; }
 
+    /// <summary>
+    /// **当前这一轮**是什么时候开工的（<see cref="DueAnchorAt"/>），拿来判"前置在这一轮跑过没有"。
+    ///
+    /// 两种拿不到锚点的情形都退回"今天零点"——那时行为跟自然日判据一致：
+    ///   · 手动项和「仅一次」：它们没有周期可言，<see cref="DueAnchorAt"/> 给的是
+    ///     <see cref="DateTime.MinValue"/>（⚠ 直接拿它当锚，"任何时候跑过"都会算成本轮跑过）；
+    ///   · 这一期还没轮到：<see cref="DueAnchorAt"/> 返回 null。
+    /// </summary>
+    public DateTime RoundAnchor(DateTime now)
+        => DueAnchorAt(now) is { } a && a > DateTime.MinValue ? a : now.Date;
+
+    /// <summary>
+    /// 从 <paramref name="anchor"/> 之后**成功跑过**——判"前置这一轮到位了没有"用的就是它
+    /// （见 PlanRunner.WarnIfSoftDependencyStale）。
+    ///
+    /// ⚠ 比的是**开始时刻**（没有才退回结束时刻），跟 <see cref="AlreadyRanOn"/> 一个道理：
+    /// 跨夜的长任务昨晚 18:00 开工、今天凌晨收工，拿结束时刻比会把它算成"新一轮跑的"。
+    /// </summary>
+    public bool RanOkSince(DateTime anchor)
+        => LastOutcome == RunOutcome.Ok && (LastStart ?? LastEnd) >= anchor;
+
+    /// <summary>
+    /// 从 <paramref name="anchor"/> 之后**跑过而且失败了**——判"硬前置这一轮垮了没有"用的就是它
+    /// （见 PlanRunner.DependencyFailedThisRound）。
+    ///
+    /// 这里比**结束时刻**：失败是在跑完那一刻定的，而且跳过那条路径会把 LastStart 清空
+    /// （见 PlanRunner 里那段防空转的注释）。
+    /// </summary>
+    public bool FailedSince(DateTime anchor)
+        => LastOutcome == RunOutcome.Failed && LastEnd >= anchor;
+
     /// <summary>今天已经因为前置失败被跳过、并且记过一次了——别再重复记。</summary>
     public bool AlreadySkippedOn(DateTime day) =>
         LastOutcome == RunOutcome.Skipped && StartedOnCalendarDay(day);

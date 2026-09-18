@@ -65,10 +65,13 @@ public class BlockTradeTaskTests : IDisposable
         public HashSet<DateTime> Shortfall = [];
         public HashSet<DateTime> Throws = [];
         public int RowsPerDay = 3;
+        /// <summary>抓到第 N 天时触发取消——用来验中断收尾。</summary>
+        public (int AfterDays, CancellationTokenSource Cts)? CancelAt;
 
         public Task<BlockTradeDay> FetchBlockTradesOfDayAsync(DateTime day, CancellationToken ct = default)
         {
             Asked.Add(day.Date);
+            if (CancelAt is { } ca && Asked.Count >= ca.AfterDays) ca.Cts.Cancel();
             if (Throws.Contains(day.Date)) throw new HttpRequestException("连不上");
             if (Empty.Contains(day.Date)) return Task.FromResult(new BlockTradeDay(day.Date, [], 0));
 
@@ -261,5 +264,52 @@ public class BlockTradeTaskTests : IDisposable
         // 水位线是 9-11，往前回看 30 天 → 这五天全在窗口里，全部重抓（幂等，不会多行）
         Assert.Equal(Days.Length, f.Asked.Count);
         Assert.Equal(Days.Length * 3, _repo.Count("BlockTrade"));
+    }
+
+    // ── 中断收尾的措辞 ────────────────────────────────────────────
+
+    /// <summary>
+    /// **「整段回补」中断时不能说"下次从水位线接着走"**——它压根不看水位线，每轮都从数据起点
+    /// 重新排期，中断＝进度不保留；改用增量也接不上（只回看 30 天，够不着中间那段）。
+    ///
+    /// 这条跟 <c>LhbSeatTaskTests</c> 里那两条是同一件事：2026-09-17 席位表整段回补跑到
+    /// 459/2603 时被停掉，收尾打的正是这句错话，人看了才放心停的。两个任务同一份逻辑，
+    /// 各写一遍就会各改错一遍，所以两边都锁住。
+    /// </summary>
+    [Fact]
+    public async Task 整段回补中断_要说清进度不保留()
+    {
+        var cts = new CancellationTokenSource();
+        var f = new FakeFetcher { CancelAt = (2, cts) };
+        var task = NewTask(f);
+        var lines = new List<string>();
+        task.OnProgress += p => lines.Add(p.Text);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => task.RunAsync(Backfill(), cts.Token));
+
+        var stop = Assert.Single(lines, l => l.Contains("中断"));
+        Assert.Contains("进度不保留", stop);
+        Assert.DoesNotContain("下次从水位线接着走", stop);
+    }
+
+    /// <summary>增量中断则确实是"从水位线接着走"——整日替换幂等，重跑无害。</summary>
+    [Fact]
+    public async Task 增量中断_说从水位线接着走()
+    {
+        await NewTask(new FakeFetcher()).RunAsync(Backfill(), CancellationToken.None);
+
+        var cts = new CancellationTokenSource();
+        var f = new FakeFetcher { CancelAt = (2, cts) };
+        var task = NewTask(f);
+        var lines = new List<string>();
+        task.OnProgress += p => lines.Add(p.Text);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => task.RunAsync(new TaskRunArgs(FetchMode.Incremental), cts.Token));
+
+        var stop = Assert.Single(lines, l => l.Contains("中断"));
+        Assert.Contains("下次从水位线接着走", stop);
+        Assert.DoesNotContain("进度不保留", stop);
     }
 }

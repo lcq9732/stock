@@ -25,7 +25,7 @@ public interface IFetchTaskRegistry
 }
 
 /// <inheritdoc cref="IFetchTaskRegistry"/>
-public sealed class FetchTaskRegistry : IFetchTaskRegistry
+public sealed class FetchTaskRegistry : IFetchTaskRegistry, ITaskBacklogRunner
 {
     private readonly Dictionary<FetchActionId, Func<IFetchTask>> _factories = new();
 
@@ -37,6 +37,30 @@ public sealed class FetchTaskRegistry : IFetchTaskRegistry
         => _factories.TryGetValue(id, out var f) ? f() : null;
 
     public IReadOnlyCollection<FetchActionId> Registered => _factories.Keys;
+
+    /// <summary>
+    /// 这个动作的**待办**是不是由任务自己补（2026-09-18）——见
+    /// <see cref="IFetchTask.HandlesBacklog"/>。
+    ///
+    /// ⚠ 按任务的声明判，不是"registry 里有就算"：没实现 FillBacklog 的任务收到这个模式
+    /// 会返回空、报一句"没有欠着的"，待办**永远补不上而且一声不吭**。
+    /// </summary>
+    public bool HandlesBacklog(FetchActionId id) => Create(id)?.HandlesBacklog == true;
+
+    // ── ITaskBacklogRunner：给编排层（Data 层，引用不到这里）转交待办用 ──
+    //    【重新拉取失败股票】是在 orchestrator 内部按 taskId 循环的，不经过界面那一层，
+    //    所以必须有这条回来的路，否则它会静默跳过"自己补待办"的那些任务。
+
+    bool ITaskBacklogRunner.Handles(string taskId)
+        => Enum.TryParse<FetchActionId>(taskId, out var id) && HandlesBacklog(id);
+
+    Task<FetchResult> ITaskBacklogRunner.RunAsync(
+        string taskId, IProgress<string>? progress, CancellationToken ct)
+    {
+        if (!Enum.TryParse<FetchActionId>(taskId, out var id))
+            throw new InvalidOperationException($"待办里的任务 id 解析不出动作：{taskId}");
+        return RunAsync(id, new TaskRunArgs(Mode: FetchMode.FillBacklog), progress, ct);
+    }
 
     /// <summary>
     /// 跑一个新式任务，并把它的事件桥回现有世界：

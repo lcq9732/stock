@@ -78,6 +78,12 @@ public partial class FetchOrchestrator
     /// </summary>
     public Action<string>? Liveness { get; set; }
 
+    /// <summary>
+    /// 待办自己补的那些任务的转交口（2026-09-18）——见 <see cref="ITaskBacklogRunner"/>。
+    /// null＝没注入，所有待办都按老路在这里编排（行为跟 2026-09-18 之前一致）。
+    /// </summary>
+    public ITaskBacklogRunner? BacklogRunner { get; set; }
+
     private readonly FetchPaths _paths;
     private readonly IManifestStore _manifestStore;
     private readonly IFundamentalMetricRepository _fundamentalRepository;
@@ -2914,6 +2920,18 @@ public partial class FetchOrchestrator
         ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, List<string> done,
         IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
     {
+        // ── 这一项的待办由任务自己补？转交，立刻返回 ──
+        // ⚠ 必须在 Load() **之前**判、并且直接 return：任务会自己写自己的那条待办，
+        //   而这里往下走的话，收尾时保存的是转交之前读到的那份 manifest，
+        //   会把任务刚写进去的名单覆盖掉。
+        if (BacklogRunner?.Handles(taskId) == true)
+        {
+            var handed = await BacklogRunner.RunAsync(taskId, progress, ct);
+            foreach (var e in handed.Errors) errors.Add(e);
+            if (!handed.NothingToDo) done.Add($"{TaskLabel(taskId)}（任务自补）");
+            return new List<string>();
+        }
+
         var attempted = new List<string>();
         var manifest = _manifestStore.Load();
 
@@ -2951,10 +2969,8 @@ public partial class FetchOrchestrator
                     await RetryShareholderAsync(failed, progress, ct);
                     done.Add($"股东数据 {failed.Count} 只");
                     break;
-                case RetryTaskIds.Dividend:
-                    await RetryDividendAsync(failed, progress, ct);
-                    done.Add($"分红送配 {failed.Count} 只");
-                    break;
+                // 【分红送配】的 case 删于 2026-09-18：它的待办由 DividendTask 自己补，
+                // 上面 BacklogRunner 那一段已经转交走了，到不了这里。
                 default:
                     // K线：**按这个任务自己的口径**重抓（2026-09-13 二期修的就是这条）。
                     // 以前所有K线失败挤在一个 FailedCodes 里，重试一律走 Granularity.Day，
@@ -4684,136 +4700,10 @@ public partial class FetchOrchestrator
     public FinancialFetchPlan GetFinancialFetchPlan(int? cap = null)
         => new FinancialFetchPlanner(_paths).Plan(cap);
 
-    /// <summary>
-
-    /// <summary>
-    /// 拉取分红送配（2026-07-31新增）——对每只在市个股，从新浪分红派息页(<see cref="SinaDividendProvider"/>)
-    /// 抓历年全部分红方案，按 code 整体覆盖写入 Dividend 表。库里原本没有任何分红明细（前复权把分红效果
-    /// 揉进了价格、反而看不出哪天除权派了多少），做股息率因子/核对除权除息日都得靠这张表。
-    ///
-    /// 分红一年一次为主、慢变，跟股东数据一样每次全量刷新（不做按期跳过）；逐只失败进
-    /// <see cref="Manifest.FailedDividendCodes"/>，可用"重新拉取失败股票"重试。较慢（每只1请求，全市场约5500只）。
-    /// </summary>
-    public async Task<FetchResult> RunFetchDividendAsync(IProgress<string>? progress, CancellationToken ct = default)
-    {
-        if (_dividendProvider == null || _dividendRepository == null)
-            throw new InvalidOperationException("未配置分红数据源（IDividendProvider/IDividendRepository）");
-
-        void Forward(string s) => progress?.Report(s);
-        _dividendProvider.OnStatus += Forward;
-        try
-        {
-            if (!File.Exists(_paths.CurrentDb))
-                throw new InvalidOperationException("本地还没有任何数据，无法拉取分红，请先执行一次\"拉取全部\"");
-            _dividendRepository.EnsureSchema();
-            // 含**退市股**（2026-09-06）：以前用 GetAll 只取 type='stock'，319 只 delisted 从来没抓过，
-            // 结果 2016 年后 617 条除权缺口里 562 条（91%）是退市股——而新浪本来就有它们的分红页
-            // （实测 600705 有 36 条到 1996 年）。回测要消除幸存者偏差，最需要的就是退市股的完整复权。
-            var stocks = SqliteStockMetaUpsert.GetByTypes(_paths.CurrentDb, "stock", "delisted");
-            if (stocks.Count == 0)
-                throw new InvalidOperationException("本地股票列表为空，无法拉取分红，请先执行一次\"拉取全部\"");
-
-            var errors = new ConcurrentBag<string>();
-            var failed = new ConcurrentBag<string>();
-            var attempted = stocks.Select(s => s.Code).ToList();
-            var sw = Stopwatch.StartNew();
-            int completed = 0, withData = 0, wrote = 0, wroteRights = 0;
-            progress?.Report($"开始拉取分红送配（含配股、含退市股），共 {stocks.Count} 只，逐只抓、较慢...");
-
-            var tasks = stocks.Select(async stock =>
-            {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    // 配股跟分红在源页面上是同一页的两张表，一次请求拿两份——分开抓等于把
-                    // 5500 只的请求数翻倍（限流 3 并发/1 秒，多花半小时），没有任何好处。
-                    var (rows, rights) = await _dividendProvider.GetAllWithRightsAsync(stock.Code, ct);
-                    if (rows.Count > 0)
-                    {
-                        lock (_dbLock) _dividendRepository.ReplaceByCode(stock.Code, rows);
-                        Interlocked.Increment(ref withData);
-                        Interlocked.Add(ref wrote, rows.Count);
-                    }
-                    if (rights.Count > 0)
-                    {
-                        lock (_dbLock) SqliteRightsIssueUpsert.ReplaceByCode(_paths.CurrentDb, stock.Code, rights);
-                        Interlocked.Add(ref wroteRights, rights.Count);
-                    }
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { errors.Add($"{stock.Code}: {ex.Message}"); failed.Add(stock.Code); }
-
-                int done = Interlocked.Increment(ref completed);
-                if (done % 50 == 0 || done == stocks.Count)
-                    progress?.Report($"分红送配 {done}/{stocks.Count}（有分红 {withData} 只、共写 {Volatile.Read(ref wrote):N0} 条、"
-                                   + $"配股 {Volatile.Read(ref wroteRights):N0} 条、失败 {failed.Count}，已用时 {FormatElapsed(sw.Elapsed)}）");
-            });
-            await Task.WhenAll(tasks);
-
-            lock (_dbLock)
-            {
-                var manifest = _manifestStore.Load();
-                SetFailedTodo(manifest, RetryTaskIds.Dividend, attempted, failed.ToList());
-                _manifestStore.Save(manifest);
-            }
-
-            progress?.Report($"分红送配完成：{withData} 只有分红、共写 {wrote:N0} 条、失败 {failed.Count} 只" +
-                             (failed.Count > 0 ? "（可点\"重新拉取失败股票\"重试）" : "") + $"，用时 {FormatElapsed(sw.Elapsed)}。");
-            var result = new FetchResult();
-            result.Errors.AddRange(errors);
-            return result;
-        }
-        finally
-        {
-            _dividendProvider.OnStatus -= Forward;
-        }
-    }
-
-    /// <summary>"重新拉取失败股票"里针对分红失败名单的重试（2026-07-31新增）——逐只精确重试，更新
-    /// 失败名单，可反复点击直到清零。</summary>
-    private async Task RetryDividendAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct)
-    {
-        if (_dividendProvider == null || _dividendRepository == null) return;
-        _dividendRepository.EnsureSchema();
-        void Forward(string s) => progress?.Report(s);
-        _dividendProvider.OnStatus += Forward;
-
-        var failed = new ConcurrentBag<string>();
-        var sw = Stopwatch.StartNew();
-        int completed = 0;
-        progress?.Report($"重试分红失败 {codes.Count} 只...");
-        try
-        {
-            var tasks = codes.Select(async code =>
-            {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    var rows = await _dividendProvider.GetAllAsync(code, ct);
-                    if (rows.Count > 0)
-                        lock (_dbLock) _dividendRepository.ReplaceByCode(code, rows);
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { progress?.Report($"{code} 分红重试仍失败：{ex.Message}"); failed.Add(code); }
-
-                int done = Interlocked.Increment(ref completed);
-                if (done % 50 == 0 || done == codes.Count)
-                    progress?.Report($"分红重试 {done}/{codes.Count}（已用时 {FormatElapsed(sw.Elapsed)}）");
-            });
-            await Task.WhenAll(tasks);
-        }
-        finally
-        {
-            _dividendProvider.OnStatus -= Forward;
-        }
-
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            SetFailedTodo(manifest, RetryTaskIds.Dividend, codes, failed.ToList());
-            _manifestStore.Save(manifest);
-        }
-    }
+    // 【拉取分红送配】2026-09-18 迁到新任务框架（StockPlatform.Tasks/DividendTask），
+    //   走 MainViewModel 的 _taskRegistry 总分支；它的失败待办也由任务自己补，
+    //   从这里转交过去（见 BacklogRunner 和 doc/dividend-task-design.md）。
+    //   迁的理由：老实现每轮全量重抓、取消时失败名单落不了盘，被限流打断就等于整轮白跑。
 
 }
 

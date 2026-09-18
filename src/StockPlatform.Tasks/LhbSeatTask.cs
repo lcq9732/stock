@@ -70,6 +70,9 @@ public sealed class LhbSeatTask(
     /// 到点收尾或被取消时一天都没发，那不是失败。</summary>
     private int _attempted;
     private string? _skipped;
+    /// <summary>本轮跑的是哪个模式——<see cref="OnStoppedAsync"/> 拿不到 args，
+    /// 而"中断之后怎么接着走"恰恰是按模式分岔的。</summary>
+    private FetchMode _mode;
 
     protected override async IAsyncEnumerable<IReadOnlyList<LhbSeatDay>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
@@ -79,6 +82,7 @@ public sealed class LhbSeatTask(
         _incomplete.Clear();
         _okDays = _emptyDays = _rows = _attempted = 0;
         _skipped = null;
+        _mode = args.Mode;
         _sw.Restart();
 
         // 定"抓哪些天"要查库（水位线、交易日历），都是同步 IO。骨架不替子类推到线程池，
@@ -168,8 +172,15 @@ public sealed class LhbSeatTask(
 
     protected override Task OnStoppedAsync(TaskRunStats stats)
     {
-        Report($"龙虎榜席位中断。已落库的 {_okDays} 天是完整的（每天整日替换、各自一个事务），"
-             + "下次从水位线接着走即可。");
+        // ⚠ "下次从水位线接着走"只对**增量**成立。「整段回补」压根不看水位线——它每轮都从
+        //   数据起点重新排期，所以中断＝**进度不保留**；而改用增量也接不上，那条只从水位线
+        //   往前回看 7 天，够不着中间没跑到的那一大段。2026-09-17 这句话真的把人误导过一次。
+        var resume = _mode == FetchMode.FirstBackfill
+            ? "⚠ 但「整段回补」不看水位线，**进度不保留**：要补齐只能再跑一整遍"
+              + "（已修好的天会被再抓一次，结果不变）；改用「增量」补不上——它只从水位线往前"
+              + $"回看 {LookbackDays} 天，够不着中间没跑到的那段。"
+            : "下次从水位线接着走即可。";
+        Report($"龙虎榜席位中断。已落库的 {_okDays} 天是完整的（每天整日替换、各自一个事务）。{resume}");
         SaveIncompleteTodo();
         return Task.CompletedTask;
     }
@@ -221,8 +232,9 @@ public sealed class LhbSeatTask(
 
         if (args.Mode == FetchMode.FillBacklog)
         {
-            // 【只补待办】压根到不了这儿——界面那一层在分派给新任务**之前**就把 FillBacklog
-            // 截走了，交给 FetchOrchestrator.RunFillBacklogAsync，由它统一编排各类待办
+            // 【只补待办】到不了这儿——本任务的 HandlesBacklog 是 false（2026-09-18 起按这个
+            // 属性分派，见 IFetchTask.HandlesBacklog）：界面那一层和【重新拉取失败股票】都会把
+            // 它截给 FetchOrchestrator.RunFillBacklogAsync，由那边统一编排各类待办
             // （席位只有"残缺日"一种，走 PartialDayRepair，按天重抓的动作共用
             // LhbSeatDayWriter）。这里返回空是兜底，不是主路径。
             return [];

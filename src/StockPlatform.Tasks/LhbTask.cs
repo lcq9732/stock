@@ -221,8 +221,9 @@ public sealed class LhbTask(
 
         if (args.Mode == FetchMode.FillBacklog)
         {
-            // 【只补待办】压根到不了这儿——界面那一层在分派给新任务**之前**就把 FillBacklog
-            // 截走了，交给 FetchOrchestrator.RunFillBacklogAsync（残缺日走 PartialDayRepair，
+            // 【只补待办】到不了这儿——本任务的 HandlesBacklog 是 false（2026-09-18 起按这个
+            // 属性分派，见 IFetchTask.HandlesBacklog）：界面那一层和【重新拉取失败股票】都会把
+            // 它截给 FetchOrchestrator.RunFillBacklogAsync（残缺日走 PartialDayRepair，
             // 按天重抓的动作共用 LhbDayWriter）。这里返回空是兜底，不是主路径。
             return (today, today, [], confirmed);
         }

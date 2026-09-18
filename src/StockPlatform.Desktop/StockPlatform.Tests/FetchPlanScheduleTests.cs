@@ -288,4 +288,90 @@ public class FetchPlanScheduleTests
         Assert.True(idle.IsDueOn(D("2026-09-02")));        // 1 号过了，本月仍待办
         Assert.Equal(RunPacing.WhenIdle, idle.Pacing);
     }
+
+    // ══ 前置判据也得按轮次算，不能按自然日（2026-09-18）════════════════════
+    //
+    // 这一组盯的是同一个坑在**前置**上的重演：跨夜的轮次里"今天"会翻篇，
+    // 而一轮的归属看的是当期锚点。两个方向都出过事：
+    //   · 软前置 → 假警告：日更 18:00 开跑、前置 19:00 跑完，排到凌晨 02:25 的
+    //     【当日完整性体检】被判成"前置今天没跑过"，日志挂一句"结果可能偏旧"，
+    //     而那轮体检其实 11 项全齐（2026-09-18 真实日志）；
+    //   · 硬前置 → 漏拦：前置昨晚 18:30 失败，凌晨排到的项判成"今天没失败过"照跑不误，
+    //     可它要的数据压根没抓到。
+
+    /// <summary>
+    /// 造一个组、里面按顺序放两项——**前置跟被挡的项必须在同一组**，这正是真实的形状
+    /// （日更组里【个股日K】排在【当日完整性体检】前面）。
+    ///
+    /// ⚠ 分成两个组测不出跨夜那条：<see cref="FetchPlanGroup.DueAnchorAt"/> 往回看昨晚那一轮时，
+    /// 要求**这一组已经有项开工过**才认那个锚（没开过工就谈不上"当前在那一轮里"）。
+    /// 一个只有被挡项自己的空组，昨晚一项都没跑，自然回 null。
+    /// </summary>
+    private static (FetchPlanItem Dep, FetchPlanItem Me) Pair(
+        FetchActionId dep, FetchActionId me, TimeOnly notBefore)
+    {
+        var g = new FetchPlanGroup
+        {
+            Name = "日更", Enabled = true, Repeat = RepeatKind.EveryWorkday, NotBefore = notBefore,
+        };
+        var d = new FetchPlanItem { Action = dep, Enabled = true, Owner = g };
+        var m = new FetchPlanItem { Action = me, Enabled = true, Owner = g };
+        g.Items.Add(d);
+        g.Items.Add(m);
+        return (d, m);
+    }
+
+    [Fact]
+    public void 跨午夜_前置昨晚跑成功_凌晨的项不该说它没跑过()
+    {
+        var (dep, me) = Pair(FetchActionId.StepStockDayBars, FetchActionId.StepDayCoverage, new TimeOnly(18, 0));
+        dep.LastStart = D("2026-09-17 19:00");               // 昨晚这一轮跑的
+        dep.LastEnd = D("2026-09-17 21:30");
+        dep.LastOutcome = RunOutcome.Ok;
+
+        var now = D("2026-09-18 02:25");                     // 同一轮，只是跨了午夜
+
+        Assert.Equal(D("2026-09-17 18:00"), me.RoundAnchor(now));
+        Assert.True(dep.RanOkSince(me.RoundAnchor(now)));
+    }
+
+    [Fact]
+    public void 前置停在上一轮_这一轮要报它没跑过()
+    {
+        var (dep, me) = Pair(FetchActionId.StepStockDayBars, FetchActionId.StepDayCoverage, new TimeOnly(18, 0));
+        dep.LastStart = D("2026-09-16 19:00");               // 上一轮跑的
+        dep.LastEnd = D("2026-09-16 21:30");
+        dep.LastOutcome = RunOutcome.Ok;
+
+        Assert.False(dep.RanOkSince(me.RoundAnchor(D("2026-09-17 23:00"))));
+    }
+
+    [Fact]
+    public void 跨午夜_硬前置昨晚失败_凌晨的项仍要被拦住()
+    {
+        var (dep, me) = Pair(FetchActionId.FetchFinancials, FetchActionId.BankRegulatory, new TimeOnly(18, 0));
+        dep.LastStart = D("2026-09-17 18:10");
+        dep.LastEnd = D("2026-09-17 18:30");
+        dep.LastOutcome = RunOutcome.Failed;
+
+        Assert.True(dep.FailedSince(me.RoundAnchor(D("2026-09-18 02:25"))));   // 同一轮，拦
+        Assert.False(dep.FailedSince(me.RoundAnchor(D("2026-09-18 18:00"))));  // 新一轮，放行
+    }
+
+    [Fact]
+    public void 手动项没有轮次_锚点退回当天零点()
+    {
+        // ⚠ DueAnchorAt 对手动项给的是 DateTime.MinValue，直接拿它当锚的话
+        //    "任何时候跑过"都会算成本轮跑过——那比按自然日判还松。
+        var manual = InGroup(FetchActionId.StepFullAudit, RepeatKind.Manual);
+        var now = D("2026-09-18 02:25");
+
+        Assert.Equal(now.Date, manual.RoundAnchor(now));
+
+        var dep = InGroup(FetchActionId.StepStockDayBars, RepeatKind.Manual);
+        dep.LastStart = D("2026-09-01 10:00");
+        dep.LastEnd = D("2026-09-01 10:30");
+        dep.LastOutcome = RunOutcome.Ok;
+        Assert.False(dep.RanOkSince(manual.RoundAnchor(now)));   // 半个月前跑的，不算"这一轮"
+    }
 }

@@ -39,4 +39,18 @@ public interface IDividendRepository
 
     /// <summary>已存有分红方案的股票只数（供界面显示"数据状态"）。</summary>
     int GetCodeCount();
+
+    /// <summary>
+    /// 逐只的抓取状态（2026-09-18）——【拉取分红送配】的水位线，见
+    /// <see cref="DividendFetchState"/>。key 是 code。表空着就返回空字典（首次全抓）。
+    /// </summary>
+    Dictionary<string, DividendFetchState> GetFetchStates();
+
+    /// <summary>
+    /// 写回一批抓取状态（整条覆盖，一个事务）。
+    ///
+    /// ⚠ 传进来的必须是**完整的**状态：失败那只要把原来的 <see cref="DividendFetchState.LastOkAt"/>
+    /// 原样带上，否则一次失败就会把"抓过"这个事实抹掉，下一轮它又成了没抓过的。
+    /// </summary>
+    void SaveFetchStates(IReadOnlyList<DividendFetchState> states);
 }

@@ -52,6 +52,19 @@ public interface IFetchTask
     /// <summary>状态变化。UI 刷行状态、调度类记结果。</summary>
     event Action<TaskStateChanged>? OnStateChanged;
 
+    /// <summary>
+    /// 这个任务能不能**自己补待办**（<see cref="FetchMode.FillBacklog"/>）。默认 false。
+    ///
+    /// false＝待办的编排仍在 <c>FetchOrchestrator.RunFillBacklogAsync</c> 那边（席位/大宗/
+    /// 龙虎榜的残缺日就是这样，按天重抓的动作两边共用一个写入器）。
+    ///
+    /// ⚠ **分派按这个属性走，不按"是不是新式任务"走**（2026-09-18）：粗暴地让 registry 里的
+    /// 任务全部自己接管的话，那三个没实现 FillBacklog 的任务会收到这个模式、返回空、
+    /// 报一句"没有欠着的"——**待办永远补不上而且一声不吭**。
+    /// 见 doc/dividend-task-design.md §9。
+    /// </summary>
+    bool HandlesBacklog => false;
+
     /// <summary>干活。"能不能跑"已经由调度侧判完了，这里直接开工。</summary>
     Task<TaskRunResult> RunAsync(TaskRunArgs args, CancellationToken ct);
 }

@@ -1374,7 +1374,15 @@ public static class FetchTaskCatalog
             + "配股是A股第四类除权事件（前三类是现金分红/送股/转增），2026-09-01 起才抓——漏掉它，"
             + "回测序列 day_adj 会在配股除权日凭空多一根阴线：实测招商证券 2020 年那次 10配3@7.46 "
             + "让十年累计收益少算了 25 个百分点，中信证券少 12 个。配股集中在**银行和券商**，正是底仓的重点。\n"
-            + "⚠ 抓完要再跑一次【重算回测序列】，配股才会体现到 day_adj 上。"),
+            + "⚠ 抓完要再跑一次【重算回测序列】，配股才会体现到 day_adj 上。\n"
+            + "**2026-09-18 迁到新任务框架**（DividendTask）：一批 30 只、抓一批存一批，"
+            + "每只的抓取时刻记在 DividendFetchState 表里。于是——\n"
+            + "· 【增量】只抓 25 天以内没抓过的（含从没抓过的），**中途停止再点执行会接着抓、不从头来**；\n"
+            + "· 想强刷全市场用【整段回补】；\n"
+            + "· 连续 3 批（90 只）全部因限流失败就收工记成「跳过」，限流过去今天还能再来。",
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill | FetchMode.FillBacklog,
+            SupportsPartialRun: true,
+            Sources: [DataSourceId.Sina]),
 
         new(FetchActionId.BankRegulatory, "金融监管指标", "新浪(页面 + PDF文件)", QuotaGroup.Sina,
             TimeSpan.FromHours(1), "半年（年报/中报后）",

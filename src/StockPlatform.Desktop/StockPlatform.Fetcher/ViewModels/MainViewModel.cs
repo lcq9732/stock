@@ -2230,9 +2230,15 @@ public class MainViewModel : INotifyPropertyChanged
     {
         // ── 【只补待办】走这一条总分支（2026-09-13）──
         // 这个模式跟具体是哪一项无关：都是"读 Manifest.Todos 里属于我的那几条、补上"，
-        // 所以在这里一次分派掉，下面那个 switch 和新式任务注册表都不用管它。
+        // 所以在这里一次分派掉，下面那个 switch 也不用管它。
         // 【重新拉取失败】自己也是遍历待办的 TaskId 走这条路（见 RunRetryFailedInternalAsync）。
-        if (item.EffectiveMode == FetchMode.FillBacklog)
+        //
+        // 例外是**声明了自己补待办**的新式任务（2026-09-18）：它们落到下面那条 registry 总分支，
+        // 由任务自己认领属于自己的待办。判据是任务的 HandlesBacklog，**不是"是不是新式任务"**
+        // ——席位/大宗/龙虎榜都没实现 FillBacklog，让它们接管的话会返回空、报一句
+        // "没有欠着的"，待办永远补不上而且一声不吭。见 doc/dividend-task-design.md §9。
+        if (item.EffectiveMode == FetchMode.FillBacklog
+            && _taskRegistry?.HandlesBacklog(item.Action) != true)
             return _orchestrator.RunFillBacklogAsync(item.Action.ToString(), SelectedSource, progress, ct);
 
         // ── 新式任务走这一条总分支（2026-09-08）──
@@ -2295,8 +2301,8 @@ public class MainViewModel : INotifyPropertyChanged
             case FetchActionId.FetchFinancials:
                 return FetchFinancialsRoundAsync(deadline, progress, ct);
 
-            case FetchActionId.FetchDividend:
-                return _orchestrator.RunFetchDividendAsync(progress, ct);
+            // 【拉取分红送配】2026-09-18 迁到新任务框架，走上面那条 _taskRegistry 总分支
+            // （它的待办也自己补，所以 FillBacklog 也走那条）。
 
             // 【金融监管指标】2026-09-15 迁到新任务框架，走上面那条 _taskRegistry 总分支，
             // 这里的 case 已经不可能命中，删掉。老方法 RunFetchBankRegulatoryAsync 同时移除。

@@ -20,6 +20,9 @@ public abstract class FetchTaskBase<TItem> : IFetchTask
 {
     public abstract FetchActionId Id { get; }
 
+    /// <inheritdoc cref="IFetchTask.HandlesBacklog"/>
+    public virtual bool HandlesBacklog => false;
+
     public event Action<TaskProgress>? OnProgress;
     public event Action<TaskLiveness>? OnLiveness;
     public event Action<TaskStateChanged>? OnStateChanged;

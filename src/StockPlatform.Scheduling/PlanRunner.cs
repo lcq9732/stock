@@ -318,7 +318,7 @@ public sealed class PlanRunner(
         //    代价是：停掉一个跑到一半的项，计划下一轮会从头再跑它一遍。这是明确要的行为。
         // 前置今天失败了：第一次放过去让 ExecuteOneAsync 记一条"跳过"并说明原因，之后就静默
         // 掠过——否则每分钟一轮评估就会往报告里刷一行。前置后来补跑成功的话，这里自然放行。
-        if (DependencyFailedToday(item) && item.AlreadySkippedOn(now)) return false;
+        if (DependencyFailedThisRound(item, now) && item.AlreadySkippedOn(now)) return false;
         return true;
     }
 
@@ -453,7 +453,7 @@ public sealed class PlanRunner(
             if (item.Pacing != RunPacing.WhenIdle) continue;
             if (!IsPending(item, now)) continue;
             if (_idleNextAllowed.TryGetValue(item.Action, out var next) && now < next) continue;
-            if (DependencyFailedToday(item)) continue;
+            if (DependencyFailedThisRound(item, now)) continue;
             // 装不装得下按**实测**耗时判（EffectiveEstimate：跑过就用自己最近几轮的中位数，
             // 没跑过才用目录里手填的那个值）——拆细之后手填值只是个数量级。
             if (window.HasValue && !item.SupportsPartialRunNow && window.Value < item.EffectiveEstimate) continue;
@@ -463,41 +463,53 @@ public sealed class PlanRunner(
     }
 
     /// <summary>
-    /// 前置动作**今天跑过而且失败了**。今天压根没跑（没勾选、或重复规则不落在今天）不算失败——
-    /// 那多半是刻意的：财务报表交给【空闲时自动补财务】在后台补，监管指标照样能用已有的数据跑。
+    /// **这一轮**开工之后，前置动作跑过而且失败了。本轮压根没跑（没勾选、或重复规则不落在今天）
+    /// 不算失败——那多半是刻意的：财务报表交给【空闲时自动补财务】在后台补，
+    /// 监管指标照样能用已有的数据跑。
+    ///
+    /// ⚠ 判据是**轮次锚点**不是自然日（2026-09-18 修）。原来写的是
+    /// <c>LastEnd?.Date == DateTime.Today</c>，跨夜的轮次里会**漏拦**：日更 18:00 开跑，
+    /// 前置 18:30 失败，等排到凌晨 02:25 的项时"今天"已经翻篇成第二天了，
+    /// 于是判成"前置今天没失败过"照跑不误——而它要的数据明明没抓到。
+    /// 这跟 <see cref="FetchPlanItem.AlreadyRanOn"/> 当初从"落在哪一天"改成锚点是同一个坑。
     /// </summary>
-    private bool DependencyFailedToday(FetchPlanItem item)
+    private bool DependencyFailedThisRound(FetchPlanItem item, DateTime now)
     {
         if (item.Info.DependsOn is not { } dep) return false;
         var depItem = plan.AllItems.FirstOrDefault(i => i.Action == dep);
-        return depItem is { LastOutcome: RunOutcome.Failed } && depItem.LastEnd?.Date == DateTime.Today;
+        // 判据本体在 FetchPlanItem（跟 AlreadyRanOn 并排，那样能直接测跨夜场景）
+        return depItem?.FailedSince(item.RoundAnchor(now)) == true;
     }
 
     /// <summary>
-    /// **软**前置今天还没成功跑过时说一声（2026-09-02 随【拉取全部】拆分新增）。
+    /// **软**前置在这一轮里还没成功跑过时说一声（2026-09-02 随【拉取全部】拆分新增）。
     ///
-    /// 跟硬前置（<see cref="DependencyFailedToday"/>）不同：软前置缺了照样跑，只是结果会旧——
+    /// 跟硬前置（<see cref="DependencyFailedThisRound"/>）不同：软前置缺了照样跑，只是结果会旧——
     /// 典型是"个股日K ← 股票名册"：名册没刷新就用库里上次那份名单，当天新上市的票不在里面。
     /// 这种事不该拦住执行，但**必须在日志里留一行**，否则第二天看少了几只票会找不到原因。
     ///
-    /// 判据是"今天成功跑过没有"，不是"排没排"：软前置压根没排进计划（比如用户就是不想每天刷名册）
+    /// 判据是"本轮成功跑过没有"，不是"排没排"：软前置压根没排进计划（比如用户就是不想每天刷名册）
     /// 一样会提示，这正是想要的——提示的是数据新鲜度，不是配置错误。
+    ///
+    /// ⚠ 按**轮次锚点**判，不是自然日（2026-09-18 修）。原来写的是 <c>?.Date == DateTime.Today</c>，
+    /// 于是**跨夜轮次里排在后半夜的每一项都会挂这句提示**：日更 18:00 开跑、前置 19:00 跑完，
+    /// 等排到凌晨 02:25 的【当日完整性体检】时"今天"已经是第二天了，判成"前置今天没跑过"。
+    /// 那轮体检其实 11 项全齐，提示却说"结果可能偏旧"——一句能把人带偏的假警告。
     /// </summary>
-    private void WarnIfSoftDependencyStale(FetchPlanItem item)
+    private void WarnIfSoftDependencyStale(FetchPlanItem item, DateTime now)
     {
         if (item.Info.SoftDependsOn is not { Count: > 0 } softs) return;
 
+        var anchor = item.RoundAnchor(now);
         var stale = new List<string>();
         foreach (var soft in softs)
         {
             var softItem = plan.AllItems.FirstOrDefault(i => i.Action == soft);
-            bool ranOkToday = softItem is { LastOutcome: RunOutcome.Ok }
-                              && (softItem.LastStart ?? softItem.LastEnd)?.Date == DateTime.Today;
-            if (!ranOkToday) stale.Add(FetchTaskCatalog.Info(soft).Name);
+            if (softItem?.RanOkSince(anchor) != true) stale.Add(FetchTaskCatalog.Info(soft).Name);
         }
         if (stale.Count == 0) return;
 
-        log($"　提示：【{item.Info.Name}】的前置【{string.Join("】【", stale)}】今天还没成功跑过，"
+        log($"　提示：【{item.Info.Name}】的前置【{string.Join("】【", stale)}】这一轮还没成功跑过，"
           + "这一项会用库里已有的数据继续跑（结果可能偏旧，比如漏掉当天新上市的标的）。");
     }
 
@@ -505,7 +517,8 @@ public sealed class PlanRunner(
     {
         var info = item.Info;
 
-        if (DependencyFailedToday(item))
+        var startedAt = DateTime.Now;
+        if (DependencyFailedThisRound(item, startedAt))
         {
             var depName = FetchTaskCatalog.Info(info.DependsOn!.Value).Name;
             // ⚠ 必须把上一轮遗留的开始时刻清掉。AlreadySkippedOn 靠 (LastStart ?? LastEnd) 判
@@ -514,13 +527,13 @@ public sealed class PlanRunner(
             //    循环零延迟空转（2026-09-05：一夜刷出 1.6GB 日志，计划文件被重写几万次，界面卡死）。
             item.LastStart = null;
             Finish(item, RunOutcome.Skipped, 0,
-                $"跳过：前置的【{depName}】今天失败了，现在跑也取不到要的数");
-            log($"⏭ 跳过【{info.Name}】——前置的【{depName}】今天失败了。"
-              + $"（前置补跑成功之后，这一项今天还会再有机会。）");
+                $"跳过：前置的【{depName}】这一轮失败了，现在跑也取不到要的数");
+            log($"⏭ 跳过【{info.Name}】——前置的【{depName}】这一轮失败了。"
+              + $"（前置补跑成功之后，这一项这一轮还会再有机会。）");
             return;
         }
 
-        WarnIfSoftDependencyStale(item);
+        WarnIfSoftDependencyStale(item, startedAt);
 
         // 卡死兜底：哑掉超过阈值就掐断这一项，让计划能自己往下走（见 MaxQuietFor 的说明）。
         // ⚠ CancellationToken 是**协作式**的：任务内部得真的在检查它才掐得动。
