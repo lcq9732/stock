@@ -1086,6 +1086,10 @@ public static class SqliteSchema
         // 老数据库文件（2026-07-09之前建的）已经有Bar/NetInflow表，上面CREATE TABLE IF NOT
         // EXISTS对已存在的表是空操作，不会补上新列——用ALTER TABLE显式迁移。加列前先检查是否已经
         // 存在（EnsureSchema要保持幂等可重复调用，且ALTER TABLE ADD COLUMN对已有同名列会直接报错）。
+        // 分红这一行是谁给的（2026-09-18）——【分红对账】会拿东财补新浪漏掉的记录
+        // （实测新浪对北交所覆盖不全，1043 条缺口）。NULL＝老行＝新浪。
+        // 有了它，补进来的行可追溯、可单独回滚，下次对账也知道哪些是自己补的。
+        AddColumnIfMissing(conn, "Dividend", "source", "TEXT");
         AddColumnIfMissing(conn, "Bar", "fetched_at", "TEXT");
         AddColumnIfMissing(conn, "NetInflow", "fetched_at", "TEXT");
         // 2026-07-15：StockMeta 从"只装个股"扩成"装所有标的"——加 type 列区分 stock/index/etf/board。

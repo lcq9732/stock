@@ -114,6 +114,8 @@ public partial class FetchOrchestrator
     private readonly ILhbProvider _lhbProvider;
     private readonly IIndexConsRepository _indexRepository;
     private readonly ILhbRepository _lhbRepository;
+    // 股东这两个依赖 2026-09-18 起本类已经不用了（整项迁去 ShareholderTask）。字段和构造
+    // 参数暂留：删它们要动这个 40 个参数的构造签名和所有调用点，跟分红那次的处理保持一致。
     private readonly IShareholderProvider _shareholderProvider;
     private readonly IShareholderRepository _shareholderRepository;
     private readonly IMarginProvider _marginProvider;
@@ -132,9 +134,6 @@ public partial class FetchOrchestrator
     /// 巨潮只有公告原文。所以东财不可用时这一项整体跳过，不像板块那样有备胎。</summary>
     private readonly Remote.EastMoneyEarningsForecastProvider? _forecastProvider;
     private readonly IEarningsForecastRepository? _forecastRepository;
-    /// <summary>龙虎榜营业部席位明细（2026-09-03，东财）。跟现有的 Lhb 表是不同粒度、不是替换。</summary>
-    private readonly Remote.EastMoneyLhbSeatProvider? _lhbSeatProvider;
-    private readonly ILhbSeatRepository? _lhbSeatRepository;
     /// <summary>分档资金流（2026-09-03，东财 push2his）。跟 NetInflow 是同一件事的不同精度。</summary>
     // 类型是接口而不是那个具体的 provider（2026-09-14）：逐股补历史现在有两条通道
     // （HttpClient／真浏览器），这里只用它报熔断状态，谁在跑都一样。
@@ -268,8 +267,6 @@ public partial class FetchOrchestrator
         Remote.CninfoPrebookProvider? prebookProvider = null,
         Remote.EastMoneyEarningsForecastProvider? forecastProvider = null,
         IEarningsForecastRepository? forecastRepository = null,
-        Remote.EastMoneyLhbSeatProvider? lhbSeatProvider = null,
-        ILhbSeatRepository? lhbSeatRepository = null,
         Logic.Abstractions.IMoneyFlowDetailFetcher? moneyFlowProvider = null,
         INetInflowDetailRepository? moneyFlowRepository = null,
         Remote.EastMoneyMarketEventProvider? marketEventProvider = null,
@@ -296,8 +293,6 @@ public partial class FetchOrchestrator
         _prebookProvider = prebookProvider;
         _forecastProvider = forecastProvider;
         _forecastRepository = forecastRepository;
-        _lhbSeatProvider = lhbSeatProvider;
-        _lhbSeatRepository = lhbSeatRepository;
         _paths = paths;
         _manifestStore = manifestStore;
         _fundamentalRepository = fundamentalRepository;
@@ -1256,12 +1251,10 @@ public partial class FetchOrchestrator
         _marginRepository.EnsureSchema();
         _lhbRepository.EnsureSchema();
         var marginHave = _marginRepository.GetTradeDates();
-        await BackfillDailyAsync($"{rangeLabel}融资余额", IDailyFetchNoDataRepository.MarginDataset, DateOnly.FromDateTime(yearStart), DateOnly.FromDateTime(yearEnd), marginHave, async d =>
-        {
-            var rows = await _marginProvider.GetDetailAsync(d, ct);
-            if (rows.Count > 0) { lock (_dbLock) { _marginRepository.InsertOrIgnore(rows); } }
-            return rows.Count;
-        }, errors, progress, sw, _marginProvider.EarliestAvailable, ct);
+        // 落库走 MarginDayWriter（2026-09-18）——跟【融资余额】任务、补残缺日共用同一个动作。
+        var marginWriter = new MarginDayWriter(_marginProvider, _marginRepository, _dbLock);
+        await BackfillDailyAsync($"{rangeLabel}融资余额", IDailyFetchNoDataRepository.MarginDataset, DateOnly.FromDateTime(yearStart), DateOnly.FromDateTime(yearEnd), marginHave, d => marginWriter.RefetchAsync(d, ct),
+            errors, progress, sw, _marginProvider.EarliestAvailable, ct);
 
         var lhbHave = _lhbRepository.GetTradeDates();
         // 落库走 LhbDayWriter（2026-09-17）——跟【龙虎榜】任务、补残缺日共用同一套口径：
@@ -2488,182 +2481,16 @@ public partial class FetchOrchestrator
         return etfs.Select(e => e.Code).ToList();
     }
 
-    /// <summary>
-    /// 按指定区间补资金净流入（2026-07-29新增，给"拉取指定年份"用）——跟K线同样的"只补缺口"语义：
-    /// 本地最早一行已早于区间起点就跳过，落在区间内就只补前面那段，没有就抓整个区间。写入全部走
-    /// InsertOrIgnore（历史行是既成事实；区间含今天时今天那行走 Upsert，跟主流程一致）。失败逐只记入
-    /// <see cref="Manifest.FailedNetInflowCodes"/>，可用"重新拉取失败股票"重试。
-    /// </summary>
-    /// <summary>
-    /// **补资金净流入整天缺失的那几天**（2026-09-06 新增，【重新拉取失败】的一部分）——
-    /// 名单由全库体检写入（见 <see cref="Manifest.MissingNetInflowDays"/>）。
-    ///
-    /// ════ 为什么值得单独做一条路，而不是让人跑【补指定历史日】 ════
-    /// 新浪那个源的响应是**整只票的全部历史**，窗口在客户端裁（见 SinaNetInflowFetcher 的类注释）。
-    /// 所以"补 1 天"和"补 5 天"的请求数一模一样：一轮全市场 5555 只、约 1 小时 45 分。
-    /// 而【补指定历史日】是一天一轮——2026-09-06 体检查出 5 个空日，用那个补要跑 9 小时。
-    ///
-    /// ════ 为什么只写缺的那几天、不把整段都写进去 ════
-    /// 响应里带回来的是这只票 [最早缺的那天, 最晚缺的那天] 之间的**全部**行，2018~2024 六年
-    /// 就是一千多行 × 5555 只 ≈ 八百万行的 InsertOrIgnore，绝大多数是本地已有的。
-    /// 只留落在缺失日集合里的那几行，写入量从八百万降到两三万。
-    ///
-    /// 收敛跟 K 线空洞一致：补完复查，还是空的就 Tries+1，满 <see cref="AuditMaxTries"/> 轮
-    /// 判定"数据源确实没有"、移进 ConfirmedNetInflowDays，往后体检不再报。
-    /// </summary>
-    private async Task FillMissingNetInflowDaysAsync(
-        List<string> done, IProgress<string>? progress, CancellationToken ct)
-    {
-        // 认领属于自己的那条待办（2026-09-13 二期：不再翻整份 manifest 找字段）
-        List<RetryTarget> pending;
-        lock (_dbLock)
-            pending = _manifestStore.Load().Todo(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays)
-                                   ?.Targets.ToList() ?? new List<RetryTarget>();
-        if (pending.Count == 0) return;
+    // 【补整天缺失】FillMissingNetInflowDaysAsync 和【补残缺日】FillPartialDaysAsync
+    // 双双删于 2026-09-18：
+    //   · 前者只服务资金净流入，随 NetInflowTask 一起迁走（见 doc/netinflow-task-design.md）；
+    //   · 后者在两融迁走时就只剩"转发给 PartialDayRepair 并报一句只能人工处理"的空壳——
+    //     唯一还会走到它的资金净流入这次也自己补了，于是没有任何调用方。
+    // 残缺日的编排本体一直在 PartialDayRepair（各任务共用），删掉的只是编排器这侧的转发。
 
-        var days = pending.Where(p => p.Day.HasValue).Select(p => p.Day!.Value.Date)
-                          .Distinct().OrderBy(d => d).ToList();
-        if (days.Count == 0) return;
-        var wanted = days.ToHashSet();
-        var codes = LocalStockCodes();
-        if (codes.Count == 0) return;
-
-        var repo = new SqliteNetInflowRepository(_paths.CurrentDb);
-        repo.EnsureSchema();
-
-        progress?.Report($"补资金净流入整天缺失：{days.Count} 天"
-            + $"（{string.Join("、", days.Select(d => d.ToString("yyyy-MM-dd")))}），"
-            + $"逐只抓 {codes.Count} 只——新浪一次请求返回整只票的全部历史，"
-            + "所以补几天跟补一天一样贵，一轮就够。⚠ 这一段是全市场逐只查，约 1.75 小时；"
-            + "不想现在补可以点\"停止\"，名单留着下次跑。");
-
-        var from = days[0];
-        var to = days[^1];
-        int rows = 0, failCount = 0, processed = 0;
-        var sw = Stopwatch.StartNew();
-
-        await Task.WhenAll(codes.Select(async code =>
-        {
-            ct.ThrowIfCancellationRequested();
-            List<NetInflow> got;
-            try { got = await _netInflowFetcher.FetchAsync(code, from, to, ct); }
-            catch (OperationCanceledException) { throw; }
-            catch { Interlocked.Increment(ref failCount); return; }
-
-            var keep = got.Where(r => wanted.Contains(r.PeriodStart.Date)).ToList();
-            if (keep.Count > 0)
-            {
-                lock (_dbLock) { repo.InsertOrIgnore(keep); }
-                Interlocked.Add(ref rows, keep.Count);
-            }
-            if (Interlocked.Increment(ref processed) % 500 == 0)
-                progress?.Report($"补资金净流入缺失日：已处理 {processed}/{codes.Count} 只、"
-                               + $"写入 {rows} 行（失败 {failCount} 只，已用时 {FormatElapsed(sw.Elapsed)}）");
-        }));
-
-        // 这一轮大面积失败（多半是被限流了）：**一个 Tries 都不加**。
-        // 不这么挡的话，限流期间跑两轮就会把 5 个真·漏抓日全部判成"数据源确实没有"、
-        // 永久静音——跟 FillAuditedGapsAsync 里"数据源不支持后复权就整组不计数"是同一个道理。
-        if (failCount > codes.Count / 2)
-        {
-            progress?.Report($"资金净流入缺失日：本轮 {failCount}/{codes.Count} 只请求失败，"
-                + "判定是被限流而不是数据源没有——名单和重试计数原样留着，等会儿再跑一次。");
-            done.Add($"资金净流入缺失 {days.Count} 天（被限流，未计数）");
-            return;
-        }
-
-        // 复查这几天现在有数据没有，决定划掉还是再来一轮
-        var counts = repo.CountRowsByDay(days);
-        var stillEmpty = days.Where(d => counts.GetValueOrDefault(d) == 0).ToList();
-        var filled = days.Count - stillEmpty.Count;
-        int confirmedNow = 0;
-
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            var confirmed = manifest.ConfirmedNetInflowDays.Select(d => d.Date).ToHashSet();
-            var triesByDay = pending.Where(p => p.Day.HasValue)
-                                    .GroupBy(p => p.Day!.Value.Date)
-                                    .ToDictionary(g => g.Key, g => g.Max(p => p.Tries));
-            var next = new List<RetryTarget>();
-            foreach (var d in stillEmpty)
-            {
-                int tries = triesByDay.GetValueOrDefault(d) + 1;
-                if (tries >= AuditMaxTries) { confirmed.Add(d); confirmedNow++; }
-                else next.Add(new RetryTarget { Day = d, Tries = tries });
-            }
-            manifest.SetTodo(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays, next);
-            manifest.ConfirmedNetInflowDays = confirmed.OrderBy(d => d).ToList();
-            _manifestStore.Save(manifest);
-        }
-
-        progress?.Report($"资金净流入缺失日补齐完成：补上 {filled}/{days.Count} 天、写入 {rows} 行"
-            + (failCount > 0 ? $"，{failCount} 只请求失败" : "")
-            + (confirmedNow > 0
-                ? $"；{confirmedNow} 天补满 {AuditMaxTries} 轮仍拿不到，已判定数据源确实没有、以后体检不再报"
-                : "")
-            + $"，用时 {FormatElapsed(sw.Elapsed)}。");
-        done.Add($"资金净流入缺失 {days.Count} 天");
-    }
-
-    /// <summary>
-    /// **按天重抓**的入口表（2026-09-16）——残缺日和整段回补共用同一份，避免两处重抓逻辑漂移。
-    ///
-    /// 各 provider 都是区间接口，补一天就是 <c>(d, d)</c>。写入一律走 InsertOrIgnore/Upsert：
-    /// 已有的行不动、只补缺的那部分，所以反复跑无害——这正是残缺日能被修好的前提。
-    /// </summary>
-    private Func<DateOnly, Task<int>>? DailyRefetcherFor(string taskId, IProgress<string>? progress, CancellationToken ct)
-        => taskId switch
-        {
-            RetryTaskIds.Margin when _marginRepository != null => async d =>
-            {
-                var rows = await _marginProvider.GetDetailAsync(d, ct);
-                if (rows.Count > 0) { lock (_dbLock) { _marginRepository.InsertOrIgnore(rows); } }
-                return rows.Count;
-            },
-            // 【龙虎榜】2026-09-17 迁去 LhbTask，补残缺日的编排仍在这边。抓一天并落库的动作
-            // 跟任务侧**共用 LhbDayWriter**——顺带把这条路径的口径统一了：原来它走
-            // InsertOrIgnore 且不派生对应值，补进来的新行 deviation 永远是空的。
-            RetryTaskIds.Lhb when _lhbRepository != null =>
-                d => new LhbDayWriter(_paths.CurrentDb, _lhbRepository, _lhbProvider, _dbLock)
-                         .RefetchAsync(d, ct),
-            // 【拉取龙虎榜席位】2026-09-17 拆成独立任务并改按日整日替换，但残缺日的编排仍在这边
-            // （PartialDayRepair 那一套）。抓一天并落库的动作跟任务侧**共用 LhbSeatDayWriter**
-            // ——里面那条"买卖两侧没都抓全就不落库"是这张表最要命的规矩：整日替换时只写回一侧，
-            // 另一侧就被整天删掉了。
-            RetryTaskIds.LhbSeat when _lhbSeatProvider != null && _lhbSeatRepository != null =>
-                d => new LhbSeatDayWriter(_lhbSeatProvider, _lhbSeatRepository, _dbLock)
-                         .RefetchAsync(d, ct),
-            // 【大宗交易】2026-09-17 拆成独立任务，但残缺日的编排仍在这边（PartialDayRepair
-            // 那一套：复查用体检同判据、Tries、确认名单）。抓一天并落库的动作跟任务侧
-            // **共用 BlockTradeDayWriter**——各写一份必然漂移，而里面那条"抓不全就不落库"
-            // 正是这张表最要命的规矩。
-            RetryTaskIds.BlockTrade when _marketEventProvider != null && _marketEventRepository != null =>
-                d => new BlockTradeDayWriter(_marketEventProvider, _marketEventRepository, _dbLock)
-                         .RefetchAsync(d, ct),
-            _ => null,
-        };
-
-    /// <summary>
-    /// 补**残缺日**：那天有行、但不全（某个交易所整天没有，或行数明显偏少）。
-    /// 见 doc/partial-day-repair-design.md。
-    ///
-    /// 编排本体在 <see cref="PartialDayRepair"/>（2026-09-17 抽出去）——那段里没有一行是任务
-    /// 特定的，唯一的变量是"怎么重抓一天"，所以新框架的任务能共用同一份、不必各写一遍。
-    /// 这里只负责把编排器这侧的东西喂进去：任务 id、按天重抓的入口、那把 manifest 锁。
-    /// </summary>
-    private async Task FillPartialDaysAsync(
-        string taskId, List<string> done, IProgress<string>? progress, CancellationToken ct)
-    {
-        var repair = new PartialDayRepair(_paths.CurrentDb, _manifestStore, _dbLock);
-        var r = await repair.RunAsync(taskId, DailyRefetcherFor(taskId, progress, ct), progress, ct);
-        if (r?.Done is { } line) done.Add(line);
-    }
-
-    /// <summary>某一项已知的残缺日——整段回补要拿它从 have 里扣掉（见
-    /// <see cref="RunStepBackfillDailyOneAsync"/>），否则那些天会被当成"已有"永远跳过。</summary>
-    private HashSet<DateOnly> PartialDaysOf(string taskId) =>
-        new PartialDayRepair(_paths.CurrentDb, _manifestStore, _dbLock).DaysOf(taskId);
+    // PartialDaysOf 删于 2026-09-18：唯一的用户是两融整段回补，随 MarginTask 一起迁走了
+    // （任务侧直接用 PartialDayRepair.DaysOf——"整段回补要把已知残缺日从 have 里扣掉，
+    // 否则那些天会被当成'已有'永远跳过"这条规矩跟着搬了过去）。
 
     private async Task FetchNetInflowRangeAsync(
         IReadOnlyList<string> codes, DateTime rangeStart, DateTime rangeEnd, IProgress<string>? progress, CancellationToken ct)
@@ -2938,37 +2765,14 @@ public partial class FetchOrchestrator
         List<string> CodesOf(string kind) =>
             manifest.Todo(taskId, kind)?.Targets.Select(t => t.Code).ToList() ?? new List<string>();
 
-        // ── 整轮扫描类（流通市值）：名单里那一大批代码只代表"有一轮要重来" ──
-        if (CodesOf(RetryTodoKind.Round) is { Count: > 0 } roundCodes)
-        {
-            progress?.Report($"流通市值：整轮重新扫描（上次整轮失败，名单里那 {roundCodes.Count} 个代码是当时那批的全体，"
-                           + "不是逐只失败——市值一次请求拿回全市场）");
-            await FetchMarketCapAsync(source, roundCodes, progress, ct);
-            done.Add("流通市值 1 轮");
-        }
-
         // ── 逐只失败：各类用各自的补法 ──
         var failed = CodesOf(RetryTodoKind.Failed);
         if (failed.Count > 0)
         {
             switch (taskId)
             {
-                case RetryTaskIds.NetInflow:
-                    await FetchNetInflowAsync(failed, DateTime.Today, exactDayOnly: false, progress, ct);
-                    done.Add($"主力净流入 {failed.Count} 只");
-                    break;
-                case RetryTaskIds.IndexCons:
-                    await RetryIndexAsync(failed, new List<string>(), progress, ct);
-                    done.Add($"指数成分 {failed.Count} 个");
-                    break;
-                case RetryTaskIds.IndexWeight:
-                    await RetryIndexAsync(new List<string>(), failed, progress, ct);
-                    done.Add($"指数权重 {failed.Count} 个");
-                    break;
-                case RetryTaskIds.Shareholder:
-                    await RetryShareholderAsync(failed, progress, ct);
-                    done.Add($"股东数据 {failed.Count} 只");
-                    break;
+                // 【股东数据】的 case 删于 2026-09-18：它的待办由 ShareholderTask 自己补，
+                // 上面 BacklogRunner 那一段已经转交走了，到不了这里。
                 // 【分红送配】的 case 删于 2026-09-18：它的待办由 DividendTask 自己补，
                 // 上面 BacklogRunner 那一段已经转交走了，到不了这里。
                 default:
@@ -3028,14 +2832,11 @@ public partial class FetchOrchestrator
         await FillGapTodoAsync(taskId, source, currentRepo, errors, failedCodes, done, progress, sw, ct);
         await FillValueTodoAsync(taskId, source, currentRepo, errors, failedCodes, done, progress, sw, ct);
 
-        // ── 整天缺失的日子（资金净流入）──
-        if (manifest.Todo(taskId, RetryTodoKind.MissingDays) is { Targets.Count: > 0 })
-            await FillMissingNetInflowDaysAsync(done, progress, ct);
-
-        // ── 残缺日：那天有行但不全（2026-09-16）。跟上面那条是两码事——复查判据不同，
-        //    详见 FillPartialDaysAsync 的注释。
-        if (manifest.Todo(taskId, RetryTodoKind.PartialDay) is { Targets.Count: > 0 })
-            await FillPartialDaysAsync(taskId, done, progress, ct);
+        // 【整天缺失】和【残缺日】两类的分支删于 2026-09-18：它们只属于资金净流入和那几个
+        // 日频项，而那些项现在都自己补待办（HandlesBacklog=true），分派在转交那一步就走掉了。
+        // 资金净流入把两类合并成一轮全市场抓（见 NetInflowTask 的类注释：一次请求返回整只票
+        // 全历史，补几天跟补一天一样贵），复查仍分开——整天缺失看"有没有行"，
+        // 残缺日走 PartialDayRepair.RunBatchAsync（体检同判据）。
 
         return attempted;
     }
@@ -3517,262 +3318,11 @@ public partial class FetchOrchestrator
         progress?.Report($"正在对比数据 ({done}/{totalCount}{counts})，已用时 {FormatElapsed(sw.Elapsed)}");
     }
 
-    /// <summary>
-    /// 流通市值——默认走 <see cref="SinaListMarketCapFetcher"/>（2026-07-08起），本质是让新浪的
-    /// 全市场股票列表扫描"顺便"带出每只股票的流通市值字段，不再逐只单独发请求（早期版本是逐只查
-    /// 东方财富/腾讯的单股行情接口，见 EastMoneyMarketCapFetcher/TencentMarketCapFetcher 的类
-    /// 注释，两者都还在代码里，只是不再是默认实现）。不受用户选的K线数据源（source参数）影响，
-    /// "拉取全部"和"拉取当天"都会跑一遍——"拉取当天"因此也会完整扫一遍全市场列表（只为了刷新
-    /// 市值，不影响它K线只抓本地已知股票的行为），用户已确认接受这个额外耗时（2026-07-08）。
-    /// 失败按非致命处理——查不到就跳过，不影响本轮K线抓取的其余部分（市值数据缺失只会让
-    /// MidCapPullbackAnalysisEngine 的条件4被当作"缺数据"跳过，不会导致程序崩溃或影响其他方法）。写入用
-    /// Upsert（主键是 code+metric_key+as_of_date）——同一天内如果跑了不止一次，后面这次会覆盖
-    /// 前面那次，只认最后一次抓到的值，不是"当天已经有了就跳过"（比如某天先在盘中跑过一次、收盘
-    /// 后又跑了一次，库里最终留下的是收盘后那次更准的值，不会被盘中那次锁住）。
-    ///
-    /// **as_of_date 记的是"这个值属于哪个交易日"，不是"哪天跑的抓取"（2026-08-04改）**：市值接口只给
-    /// "当下"的快照、不带日期，而快照的基准价在盘前/周末/节假日是**上一个交易日的收盘**——以前这里一律
-    /// 写 <c>DateTime.Today</c>，于是周六跑一次就会凭空多出一行"周六的市值"（值其实是周五收盘），
-    /// 盘前跑则把上一交易日的值记到今天名下。实测过的错位样本：2026-07-11(周六)/2026-08-01(周六) 的行
-    /// 是 07-10/07-31 的收盘值，2026-07-23 08:02 那行是 07-22 的收盘值。现在改成
-    /// <see cref="ResolveMarketCapAsOfDateAsync"/> 解析出的交易日。（当时这么改还顺带修好了按
-    /// <c>as_of_date LIKE 'D%'</c> 导出每日增量时周末市值行漏出增量包的问题；那套 GitHub 分发的
-    /// 增量导出已于 2026-08-21 删除，交易日对齐本身仍然是对的。）
-    /// 注意这跟"补指定历史日"的 <c>date</c> 参数无关——接口给不出往年的市值，无论补哪一天，
-    /// 市值刷的都是"当下"那个交易日的快照（补往年的 RunFetchYearAsync 干脆整段跳过市值）。
-    ///
-    /// 失败追踪（2026-07-09新增）：这是整轮扫描性质的操作，不是逐只单独查，所以"失败"粒度是
-    /// "这一轮扫描失败了"——扫描失败时把本轮请求的 <paramref name="codes"/> 全部记进
-    /// <see cref="Manifest.FailedMarketCapCodes"/>；扫描成功时把这些代码全部移出（某只股票本来
-    /// 就没有市值数据不算失败）。见 Manifest.FailedMarketCapCodes 的类注释。
-    ///
-    /// 新股发现（2026-07-10新增）：<see cref="SinaListMarketCapFetcher"/>本来就要扫一遍全市场
-    /// 列表，天然会看到<paramref name="codes"/>里没有的代码（本地股票表还不知道的新股/新上市）——
-    /// 顺手把这些也写进本地股票表（见 <see cref="MarketCapFetchResult.NewlyDiscoveredCodes"/>），
-    /// 不需要额外的网络请求。返回值供调用方（尤其是"拉取当天"）把这些新股也纳入本轮的K线/资金
-    /// 净流入抓取——不过"拉取当天"性质上只抓一天，新股不会像"拉取全部"那样自动回补历史，仍然需要
-    /// 跑一次"拉取全部"才能补齐历史（这个方法只保证新股"从现在起不再被漏掉"）。
-    /// </summary>
-    /// <returns>
-    /// <c>NewCodes</c>＝这次扫描顺带发现的、本地还没有的股票；
-    /// <c>RosterRefreshed</c>＝这次扫描是否已经把**全市场名册**整体刷新过了
-    /// （2026-09-02 新增：新浪的列表接口一次同时给名册和市值，调用方据此不必再单独扫一遍列表；
-    /// 逐只查询的市值实现给不出全市场名单，这里就是 false，调用方照旧自己去取名册）。
-    /// </returns>
-    private async Task<(List<(string Code, string Name)> NewCodes, bool RosterRefreshed)> FetchMarketCapAsync(
-        NamedBarSource source, IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct)
-    {
-        List<string> failedThisRun;
-        var newlyDiscovered = new List<(string Code, string Name)>();
-        bool rosterRefreshed = false;
-        try
-        {
-            progress?.Report("正在扫描全市场股票列表以刷新流通市值（顺带发现新股），会比较慢...");
-            var result = await _marketCapFetcher.GetMarketCapsAsync(codes, progress, ct);
-            var fetchedAt = DateTime.Now;
-            var asOfDate = await ResolveMarketCapAsOfDateAsync(source, result.QuotesAreLive, progress, ct);
-            var metrics = result.Entries.Select(e => new FundamentalMetric
-            {
-                Code = e.Code,
-                MetricKey = MetricKeys.CirculatingMarketCap,
-                AsOfDate = asOfDate,
-                Value = e.CirculatingMarketCap,
-                Source = _marketCapFetcher.GetType().Name,
-                FetchedAt = fetchedAt,
-            });
-            _fundamentalRepository.Upsert(metrics);
-            progress?.Report($"流通市值写入完成，共 {result.Entries.Count} 条，归到交易日 {asOfDate:yyyy-MM-dd}");
+    // 【流通市值】FetchMarketCapAsync 和 ResolveMarketCapAsOfDateAsync 删于 2026-09-18：
+    // 整项迁去了 StockPlatform.Tasks/RosterMarketCapTask。三条规矩跟着搬了过去——
+    // "失败粒度是一轮"（round 待办）、"扫描顺带发现新股"、"as_of_date 记的是值属于哪个交易日"，
+    // 最后一条还从"每轮抓一次上证指数"改成了"先问本地交易日历"。见 doc/index-roster-task-design.md。
 
-            // 扫描把全市场的代码+名称都带回来了（新浪列表实现）——直接整体刷新名册：
-            // 新股顺带入库、改过名的也跟着更新，**省掉单独再扫一遍列表接口的 ~55 个请求**
-            // （2026-09-02，见 MarketCapFetchResult.AllStocks）。
-            if (result.AllStocks is { Count: > 0 } allStocks)
-            {
-                SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, allStocks);
-                rosterRefreshed = true;
-            }
-
-            if (result.NewlyDiscoveredCodes.Count > 0)
-            {
-                // 名册没被整体刷新时（逐只查询的市值实现）才需要单独把新股写进去
-                if (!rosterRefreshed) SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, result.NewlyDiscoveredCodes);
-                newlyDiscovered = result.NewlyDiscoveredCodes;
-                progress?.Report($"发现本地股票表里没有的新股票 {newlyDiscovered.Count} 只，已加入本地列表");
-            }
-
-            failedThisRun = new List<string>(); // 整轮扫描成功——不管每只股票是否真的有市值数据，都不算失败
-        }
-        catch (OperationCanceledException)
-        {
-            throw; // 用户点了"停止"
-        }
-        catch (Exception ex)
-        {
-            progress?.Report($"获取流通市值失败（不影响K线抓取）：{ex.Message}");
-            failedThisRun = codes.ToList(); // 整轮扫描失败——保守地把这次请求的代码全部记为失败
-        }
-
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            SetFailedTodo(manifest, RetryTaskIds.Roster, codes, failedThisRun);
-            _manifestStore.Save(manifest);
-        }
-
-        return (newlyDiscovered, rosterRefreshed);
-    }
-
-    /// <summary>
-    /// 解析"这批流通市值快照属于哪个交易日"（2026-08-04新增，取代原先一律写 <c>DateTime.Today</c>）。
-    ///
-    /// 市值接口只给"当下"的快照且不带日期，所以日期得自己定。两步：
-    /// 1. <paramref name="quotesAreLive"/>==true（扫描时全市场大多数股票都有最新价 → 今天已开盘，见
-    ///    <see cref="MarketCapFetchResult.QuotesAreLive"/>）→ 值就是当日行情，记今天。**盘中跑属于这一档**：
-    ///    日期是对的，只是值还不是收盘价，收盘后再跑一次就会被更准的值覆盖（Upsert 同 as_of_date 覆盖）。
-    /// 2. 否则（盘前、周末、节假日，或该实现给不出这个信号）→ 快照的基准价是**上一个交易日的收盘**，
-    ///    于是去问数据源要上证指数最近几根日线，最新那根的日期就是那个交易日。用指数是因为它不停牌、
-    ///    不退市，永远有最新一根；这样就**不需要在本地维护A股节假日日历**，国庆/春节这种连休也天然处理对
-    ///    （实测：2026-08-04 09:07 盘前请求返回的最新日线是 2026-08-03，正是上一个交易日）。
-    ///
-    /// 刻意用当前选定的 <paramref name="source"/> 而不是固定某一家：本轮K线马上就要用它，能用才跑到这里，
-    /// 不会因为"锚用了另一家、而那家在用户环境里连不上"凭空多一个故障点。
-    ///
-    /// 锚请求失败/返回空时回退到今天并在日志里说明——市值本身已经抓到了，不值得为了日期把整步判失败；
-    /// 回退的后果就是退回改动前的老行为（可能多出一行非交易日的市值），不会丢数据。
-    /// </summary>
-    private async Task<DateTime> ResolveMarketCapAsOfDateAsync(
-        NamedBarSource source, bool? quotesAreLive, IProgress<string>? progress, CancellationToken ct)
-    {
-        var today = DateTime.Today;
-        if (quotesAreLive == true) return today;
-
-        try
-        {
-            // datelen 由 start/end 跨度推出来，给 15 天足够覆盖春节这种最长连休。
-            var (_, bars) = await source.Fetcher.FetchAsync(
-                MarketIndexCatalog.ShanghaiCompositeSymbol, Granularity.Day, today.AddDays(-15), today, ct);
-            var latest = bars.Count > 0 ? bars[^1].PeriodStart.Date : default;
-            if (latest != default && latest <= today)
-            {
-                if (latest != today)
-                    progress?.Report($"当前不在交易时段，流通市值快照归到上一个交易日 {latest:yyyy-MM-dd}");
-                return latest;
-            }
-            progress?.Report($"未能从上证指数日线判断最新交易日（返回 {bars.Count} 根），流通市值按今天记");
-        }
-        catch (OperationCanceledException)
-        {
-            throw; // 用户点了"停止"
-        }
-        catch (Exception ex)
-        {
-            progress?.Report($"判断最新交易日失败（不影响市值抓取，按今天记）：{ex.Message}");
-        }
-        return today;
-    }
-
-    /// <summary>
-    /// 主力净流入——逐只股票查东方财富的个股资金流向历史接口（fflow/daykline/get，跟K线用的
-    /// kline/get是完全不同的数据集/接口），按自己独立的水位线（NetInflow表里该股票已有的最新
-    /// 日期）增量补齐到本轮截止日；表里还没有记录的股票（新股票/第一次跑）从截止日往前回溯
-    /// NetInflowInitialLookbackDays 天开始。跟流通市值一样不受用户选的K线数据源影响，"拉取全部"
-    /// 和"拉取当天"都会跑一遍。失败按非致命处理——单只股票查不到就跳过，不影响K线抓取（数据缺失
-    /// 只会让"耀哥法"里"最近三天资金净流入"这条新规则判不满足，不会导致程序崩溃）。
-    ///
-    /// <paramref name="exactDayOnly"/>（2026-07-09新增）区分两种调用场景，跟K线的"拉取全部" vs
-    /// "拉取当天"是同一个道理：false（拉取全部）走水位线增量逻辑，只在水位线正好停在
-    /// <paramref name="rangeEnd"/>当天时才需要额外检查是否收盘后确认；true（拉取当天）直接检查
-    /// <paramref name="rangeEnd"/>这个具体日期本地是否已经收盘后确认，不看整体水位线在哪。
-    ///
-    /// 失败追踪（2026-07-09新增）：这个是逐只单独查的，跟K线一样能精确到具体哪只失败——失败的
-    /// 代码记进 <see cref="Manifest.FailedNetInflowCodes"/>，成功/跳过的移出，见该字段的类注释。
-    /// </summary>
-    private async Task FetchNetInflowAsync(IReadOnlyList<string> codes, DateTime rangeEnd, bool exactDayOnly, IProgress<string>? progress, CancellationToken ct)
-    {
-        var failedNetInflowCodes = new ConcurrentBag<string>();
-        try
-        {
-            progress?.Report($"正在获取主力净流入历史（共 {codes.Count} 只股票，逐只查询，会比较慢）...");
-            var repo = new SqliteNetInflowRepository(_paths.CurrentDb);
-            repo.EnsureSchema();
-
-            int totalRows = 0, failCount = 0;
-            var tasks = codes.Select(async code =>
-            {
-                DateTime start;
-                lock (_dbLock)
-                {
-                    if (exactDayOnly)
-                    {
-                        var existing = repo.Query(code, rangeEnd, rangeEnd).FirstOrDefault();
-                        start = (existing != null && IsConfirmedFinal(existing.FetchedAt, rangeEnd)) ? rangeEnd.AddDays(1) : rangeEnd;
-                    }
-                    else
-                    {
-                        var info = repo.GetLatestRowInfo(code);
-                        if (info == null)
-                            start = rangeEnd.AddDays(-NetInflowInitialLookbackDays);
-                        else if (info.Value.PeriodStart.Date < rangeEnd.Date)
-                            start = info.Value.PeriodStart.AddDays(1);
-                        else
-                            start = IsConfirmedFinal(info.Value.FetchedAt, rangeEnd) ? rangeEnd.AddDays(1) : rangeEnd;
-                    }
-                }
-                if (start.Date > rangeEnd.Date) return;
-
-                List<NetInflow> rows;
-                try
-                {
-                    rows = await _netInflowFetcher.FetchAsync(code, start, rangeEnd, ct);
-                }
-                catch (OperationCanceledException)
-                {
-                    throw; // 用户点了"停止"
-                }
-                catch
-                {
-                    Interlocked.Increment(ref failCount);
-                    failedNetInflowCodes.Add(code);
-                    return;
-                }
-
-                if (rows.Count == 0) return;
-                lock (_dbLock)
-                {
-                    // 跟Bar同样的道理："今天"这一行可能是第二次抓到（盘中一次、收盘后一次），要
-                    // 覆盖写入；更早的日期永远是第一次见到的新事实，InsertOrIgnore即可。
-                    var todaysRows = rows.Where(r => r.PeriodStart.Date == DateTime.Today).ToList();
-                    var olderRows = rows.Where(r => r.PeriodStart.Date != DateTime.Today).ToList();
-                    if (olderRows.Count > 0) repo.InsertOrIgnore(olderRows);
-                    if (todaysRows.Count > 0) repo.Upsert(todaysRows);
-                }
-                Interlocked.Add(ref totalRows, rows.Count);
-            });
-            await Task.WhenAll(tasks);
-
-            progress?.Report($"主力净流入写入完成，共 {totalRows} 条" + (failCount > 0 ? $"（{failCount} 只股票查询失败，已跳过）" : ""));
-        }
-        catch (OperationCanceledException)
-        {
-            throw; // 用户点了"停止"
-        }
-        catch (Exception ex)
-        {
-            progress?.Report($"获取主力净流入失败（不影响K线抓取）：{ex.Message}");
-            // 这层异常是整体性的（比如数据库层面出错，不是某只股票单独的问题）——保守地把这批
-            // 请求的代码全部记为失败，而不是只用目前收集到的那一部分。
-            foreach (var code in codes) failedNetInflowCodes.Add(code);
-        }
-
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            SetFailedTodo(manifest, RetryTaskIds.NetInflow, codes, failedNetInflowCodes);
-            _manifestStore.Save(manifest);
-        }
-    }
-
-    /// <summary>
     /// 中标/订单公告——原来是界面上一个独立的"抓取中标/订单公告"按钮，需要用户自己填起止日期手动
     /// 触发；现在整合进"拉取全部"和"拉取当天"里自动跑，不再单独触发。日期窗口由调用方决定："拉取
     /// 全部"用固定回看窗口（<see cref="AnnouncementLookbackDaysForFetchAll"/>天到今天，公告没有像
@@ -4106,320 +3656,23 @@ public partial class FetchOrchestrator
         return result;
     }
 
-    /// <summary>"重新拉取失败股票"里针对指数成分/权重失败名单的重试（2026-07-16新增）——逐指数精确重试，
-    /// 更新各自失败名单，可反复点击直到清零。错误通过 progress 报告（跟市值/资金流的重试一致）。</summary>
-    private async Task RetryIndexAsync(IReadOnlyList<string> consCodes, IReadOnlyList<string> weightCodes,
-        IProgress<string>? progress, CancellationToken ct)
-    {
-        _indexRepository.EnsureSchema();
-        void Forward(string s) => progress?.Report(s);
-        _indexConsProvider.OnStatus += Forward;
-        _indexWeightProvider.OnStatus += Forward;
+    // RetryIndexAsync（重试指数成分/权重失败）删于 2026-09-18：两项都迁成了新式任务，
+    // 补失败名单跟日常抓取是同一个动作，在各自的任务里（FillBacklog 模式）。
 
-        var consFailed = new List<string>();
-        var weightFailed = new List<string>();
-        var now = DateTime.Now;
-        try
-        {
-            if (consCodes.Count > 0)
-            {
-                progress?.Report($"重试指数成分失败 {consCodes.Count} 个...");
-                foreach (var code in consCodes)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var members = await _indexConsProvider.GetConsAsync(code, ct);
-                        if (members.Count > 0) { lock (_dbLock) _indexRepository.ReplaceCons(code, members, now); }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception ex) { progress?.Report($"指数 {code} 成分重试仍失败：{ex.Message}"); consFailed.Add(code); }
-                }
-            }
 
-            if (weightCodes.Count > 0)
-            {
-                progress?.Report($"重试指数权重失败 {weightCodes.Count} 个...");
-                foreach (var code in weightCodes)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var weights = await _indexWeightProvider.GetWeightsAsync(code, ct);
-                        if (weights.Count > 0) { lock (_dbLock) _indexRepository.ReplaceWeights(code, weights); }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception ex) { progress?.Report($"指数 {code} 权重重试仍失败：{ex.Message}"); weightFailed.Add(code); }
-                }
-            }
-        }
-        finally
-        {
-            _indexConsProvider.OnStatus -= Forward;
-            _indexWeightProvider.OnStatus -= Forward;
-        }
+    // 【拉取股东数据】2026-09-18 迁到新任务框架（StockPlatform.Tasks/ShareholderTask）：
+    //   判据抽成 ShareholderFetchPlanner（按报告期 + 实际披露日，纯查库零请求），
+    //   失败待办也由任务自己补，从 RunFillBacklogAsync 开头的 BacklogRunner 转交过去。
+    //   迁的理由跟分红一样：老实现每轮全量重抓、取消时失败名单落不了盘，被限流打断就整轮白跑；
+    //   顺带拆了 SinaShareholderProvider 注释里那颗雷（一只票两个请求 + 全市场 WhenAll
+    //   ⇒ "所有票的第1个请求 → 所有票的第2个请求"，前半程零写入）。见 doc/shareholder-task-design.md。
 
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            SetFailedTodo(manifest, RetryTaskIds.IndexCons, consCodes, consFailed);
-            SetFailedTodo(manifest, RetryTaskIds.IndexWeight, weightCodes, weightFailed);
-            _manifestStore.Save(manifest);
-        }
-    }
-
-    /// <summary>
-    /// "拉取股东数据"（2026-07-16新增）——逐只个股从新浪股本股东页抓取：股东户数(ShareholderCount) +
-    /// 十大股东/十大流通股东(TopShareholder)。用本地已有个股列表(需先"拉取全部"一次)，全市场逐只、量大
-    /// 较慢。逐只记录失败(<see cref="Manifest.FailedShareholderCodes"/>)，可用"重新拉取失败股票"重试。
-    /// 不掺进"拉取全部"主流程（股东数据季度级慢变，不必每天跑）。
-    ///
-    /// ⚠ 2026-08-15 修正：这个方法从一开始就是 public、注释也写着"独立按钮"，但**界面上的按钮直到
-    /// 今天才真正加上**——在那之前它只能通过"一键拉取定期数据"触发，而且排在第3位（行业分类 →
-    /// 指数成分/权重 → 股东数据 → …），前两步耗时很长。后果：修完持股数解析bug后想重抓验证，
-    /// 点了定期数据却没等到第3步，数据一行都没更新、还以为是修复没生效。
-    /// </summary>
-    public async Task<FetchResult> RunFetchShareholderAsync(IProgress<string>? progress, CancellationToken ct = default)
-    {
-        void Forward(string s) => progress?.Report(s);
-        _shareholderProvider.OnStatus += Forward;
-        try
-        {
-            return await RunFetchShareholderInternalAsync(progress, ct);
-        }
-        finally
-        {
-            _shareholderProvider.OnStatus -= Forward;
-        }
-    }
-
-    private async Task<FetchResult> RunFetchShareholderInternalAsync(IProgress<string>? progress, CancellationToken ct)
-    {
-        if (!File.Exists(_paths.CurrentDb))
-            throw new InvalidOperationException("本地还没有任何数据，无法拉取股东数据，请先执行一次\"拉取全部\"");
-        _shareholderRepository.EnsureSchema();
-        var stocks = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb);
-        if (stocks.Count == 0)
-            throw new InvalidOperationException("本地股票列表为空，无法拉取股东数据，请先执行一次\"拉取全部\"");
-
-        var errors = new ConcurrentBag<string>();
-        var failed = new ConcurrentBag<string>();
-        var attempted = stocks.Select(s => s.Code).ToList();
-        var sw = Stopwatch.StartNew();
-        int completed = 0, withData = 0, suspiciousRows = 0;
-        progress?.Report($"开始拉取股东数据（户数+十大股东+十大流通股东），共 {stocks.Count} 只，逐只抓、较慢...");
-
-        var tasks = stocks.Select(async stock =>
-        {
-            ct.ThrowIfCancellationRequested();
-            try
-            {
-                var data = await _shareholderProvider.GetAsync(stock.Code, ct);
-                if (data.Counts.Count > 0 || data.TopHolders.Count > 0)
-                {
-                    // 自洽性检查：排名夹在正数中间却是0 = 那一格没解析出来（2026-08-13 的箭头
-                    // 事故就是这么静默混进14953行的，见 SqliteShareholderRepository
-                    // .FindInconsistentZeroShares）。**只报警不拦截**——局部异常不该中断整批抓取，
-                    // 而且宁可先入库、让用户看到问题，也好过悄悄丢数据。
-                    var bad = SqliteShareholderRepository.FindInconsistentZeroShares(data.TopHolders);
-                    if (bad.Count > 0)
-                    {
-                        Interlocked.Add(ref suspiciousRows, bad.Count);
-                        foreach (var msg in bad.Take(3)) errors.Add($"⚠ 数据可疑 {msg}");
-                    }
-                    lock (_dbLock) _shareholderRepository.ReplaceByCode(stock.Code, data);
-                    Interlocked.Increment(ref withData);
-                }
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { errors.Add($"{stock.Code}: {ex.Message}"); failed.Add(stock.Code); }
-
-            int done = Interlocked.Increment(ref completed);
-            if (done % 50 == 0 || done == stocks.Count)
-                progress?.Report($"股东数据 {done}/{stocks.Count}（有数据 {withData}、失败 {failed.Count}，已用时 {FormatElapsed(sw.Elapsed)}）");
-        });
-        await Task.WhenAll(tasks);
-
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            SetFailedTodo(manifest, RetryTaskIds.Shareholder, attempted, failed.ToList());
-            _manifestStore.Save(manifest);
-        }
-
-        progress?.Report($"股东数据完成：{withData} 只有数据、失败 {failed.Count} 只" +
-                         (failed.Count > 0 ? "（可点\"重新拉取失败股票\"重试）" : ""));
-        if (suspiciousRows > 0)
-            progress?.Report($"⚠ 有 {suspiciousRows} 行持股数解析为0但排名夹在正数中间——" +
-                             "这通常意味着数据源页面格式变了（比如在数字后面加了新的装饰符号）。" +
-                             "数据已入库但那几行不可信，请检查 SinaShareholderProvider.ParseD 的清洗规则。");
-        var result = new FetchResult();
-        result.Errors.AddRange(errors);
-        return result;
-    }
-
-    /// <summary>"重新拉取失败股票"里针对股东数据失败名单的重试（2026-07-16新增）——逐只精确重试，更新
-    /// 失败名单，可反复点击直到清零。错误通过 progress 报告。</summary>
-    private async Task RetryShareholderAsync(IReadOnlyList<string> codes, IProgress<string>? progress, CancellationToken ct)
-    {
-        _shareholderRepository.EnsureSchema();
-        void Forward(string s) => progress?.Report(s);
-        _shareholderProvider.OnStatus += Forward;
-
-        var failed = new ConcurrentBag<string>();
-        var sw = Stopwatch.StartNew();
-        int completed = 0;
-        progress?.Report($"重试股东数据失败 {codes.Count} 只...");
-        try
-        {
-            var tasks = codes.Select(async code =>
-            {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    var data = await _shareholderProvider.GetAsync(code, ct);
-                    if (data.Counts.Count > 0 || data.TopHolders.Count > 0)
-                        lock (_dbLock) _shareholderRepository.ReplaceByCode(code, data);
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { progress?.Report($"{code} 股东数据重试仍失败：{ex.Message}"); failed.Add(code); }
-
-                int done = Interlocked.Increment(ref completed);
-                if (done % 50 == 0 || done == codes.Count)
-                    progress?.Report($"股东数据重试 {done}/{codes.Count}（已用时 {FormatElapsed(sw.Elapsed)}）");
-            });
-            await Task.WhenAll(tasks);
-        }
-        finally
-        {
-            _shareholderProvider.OnStatus -= Forward;
-        }
-
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            SetFailedTodo(manifest, RetryTaskIds.Shareholder, codes, failed.ToList());
-            _manifestStore.Save(manifest);
-        }
-    }
-
-    /// <summary>
-    /// 融资余额并入"拉取全部/当天"时回看的交易日数。
-    ///
-    /// **为什么必须回看、不能只抓当天**：两所的融资余额是 **T+1 发布**的——收盘当晚查当天，接口返回空。
-    /// 旧实现只抓 <c>today</c>，于是每次都拿到空、走"无数据（可能非交易日）"分支静默跳过，第二天又只
-    /// 看新的一天，**昨天的数据永远补不上**。2026-08 实测：日线正常更新到 8/14、同样并入主流程的龙虎榜
-    /// （当晚就发布）一天不缺，唯独融资余额从 7/30 起连续缺 12 个交易日；库里更早的记录也全是靠手动点
-    /// "一键补齐每日历史"补的（抓取时间比数据日晚 1~30 天不等），没有一条是当天抓到当天的。
-    ///
-    /// 回看 10 个交易日足够跨过长假（春节最长 9 个交易日），本地已有的日子直接跳过、不发请求，
-    /// 所以日常代价基本为零（正常只会真去抓 1 天）。
-    /// </summary>
-    private const int MarginLookbackTradingDays = 10;
-
-    /// <summary>抓最近若干交易日的融资余额并写库，**跳过本地已有的日子**（非致命：失败只记 error，
-    /// 不影响主流程其他步骤）——供"拉取全部/当天"并入调用。回看的原因见
-    /// <see cref="MarginLookbackTradingDays"/>；补更早的历史用"一键补齐每日历史"。</summary>
-    private async Task FetchMarginRecentAsync(DateTime day, ConcurrentBag<string> errors, IProgress<string>? progress, CancellationToken ct)
-    {
-        try
-        {
-            _marginRepository.EnsureSchema();
-            var have = _marginRepository.GetTradeDates();
-            var end = DateOnly.FromDateTime(day);
-            // 按自然日往前退，够覆盖 MarginLookbackTradingDays 个交易日即可。退 2 倍天数足够；
-            // 非交易日现在由交易日历挡掉（2026-09-08），不再白跑请求。
-            var start = end.AddDays(-MarginLookbackTradingDays * 2);
-
-            var calendar = LoadTradingCalendar(progress);
-            var confirmed = _dailyNoDataRepository?.GetConfirmed(IDailyFetchNoDataRepository.MarginDataset)
-                            ?? new HashSet<DateOnly>();
-            // 最近 5 个交易日无条件重抓：两所 T+1、且当天可能只发了一半，"有行就跳过"会把残缺状态固化
-            var recent = calendar != null
-                ? calendar.LastTradingDays(day, 5).Select(DateOnly.FromDateTime).ToHashSet()
-                : Enumerable.Range(0, 7).Select(i => end.AddDays(-i)).ToHashSet();
-            var confirmCutoff = DateOnly.FromDateTime(DateTime.Today).AddDays(-3);
-
-            int wrote = 0, days = 0, skipped = 0, skipHoliday = 0, skipNoData = 0;
-            for (var d = start; d <= end; d = d.AddDays(1))
-            {
-                ct.ThrowIfCancellationRequested();
-                switch (DailyBackfillGate.Evaluate(d, calendar, confirmed, have, recent))
-                {
-                    case DailySkipReason.Weekend: continue;
-                    case DailySkipReason.NotTradingDay: skipHoliday++; continue;
-                    case DailySkipReason.ConfirmedNoData: skipNoData++; continue;
-                    case DailySkipReason.AlreadyHave: skipped++; continue;
-                }
-                var rows = await _marginProvider.GetDetailAsync(d, ct);
-                days++;
-                if (rows.Count == 0)
-                {
-                    // 正常返回的空：3 天以前的才敢定案（当天/昨天多半只是还没发布，T+1）
-                    if (_dailyNoDataRepository != null && d <= confirmCutoff)
-                        _dailyNoDataRepository.Confirm(IDailyFetchNoDataRepository.MarginDataset, d);
-                    continue;
-                }
-                if (_dailyNoDataRepository != null && confirmed.Contains(d))
-                    _dailyNoDataRepository.Remove(IDailyFetchNoDataRepository.MarginDataset, d);   // 后来补上了
-                lock (_dbLock) _marginRepository.InsertOrIgnore(rows);
-                wrote += rows.Count;
-                progress?.Report($"融资余额 {d:yyyy-MM-dd}：{rows.Count} 条已写入");
-            }
-
-            var skipText = $"跳过本地已有 {skipped}、非交易日 {skipHoliday}、确认没有 {skipNoData} 天";
-            progress?.Report(wrote > 0
-                ? $"融资余额：本轮补了 {wrote} 条（试抓 {days} 天，{skipText}）"
-                : $"融资余额：无新增（试抓 {days} 天都没数据，{skipText}）。" +
-                  "两所是T+1发布，当天查不到属正常，明天这轮会自动补上。");
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { errors.Add($"融资余额 {day:yyyy-MM-dd}：{ex.Message}"); }
-    }
-
-    /// <summary>"回补融资余额"（2026-07-16新增）——按交易日区间回补历史（首次或补漏）。日常当天数据已并入
-    /// "拉取全部/当天"，这个按钮用于第一次把历史补齐或补某段缺的日子。from/to 都为 null=今天；失败不进
-    /// Manifest，重新指定区间再点即可。</summary>
-    public async Task<FetchResult> RunFetchMarginAsync(DateOnly? from, DateOnly? to, IProgress<string>? progress, CancellationToken ct = default)
-    {
-        void Forward(string s) => progress?.Report(s);
-        _marginProvider.OnStatus += Forward;
-        try
-        {
-            _marginRepository.EnsureSchema();
-            var start = from ?? DateOnly.FromDateTime(DateTime.Today);
-            var end = to ?? start;
-            if (end < start) (start, end) = (end, start);
-
-            var errors = new ConcurrentBag<string>();
-            var sw = Stopwatch.StartNew();
-            int days = 0, total = 0, fail = 0;
-            progress?.Report($"开始回补融资余额 {start:yyyy-MM-dd} ~ {end:yyyy-MM-dd}（交易所官方，按交易日）...");
-            for (var d = start; d <= end; d = d.AddDays(1))
-            {
-                ct.ThrowIfCancellationRequested();
-                if (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
-                try
-                {
-                    var rows = await _marginProvider.GetDetailAsync(d, ct);
-                    if (rows.Count > 0) { lock (_dbLock) _marginRepository.InsertOrIgnore(rows); total += rows.Count; }
-                    days++;
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { errors.Add($"融资余额 {d:yyyy-MM-dd}：{ex.Message}"); fail++; }
-                progress?.Report($"融资余额 {d:yyyy-MM-dd}：累计写入 {total} 条（已用时 {FormatElapsed(sw.Elapsed)}）" + (fail > 0 ? $"，失败 {fail} 天" : ""));
-            }
-            progress?.Report($"融资余额回补完成：处理 {days} 天、写入 {total} 条、失败 {fail} 天" +
-                             (fail > 0 ? "（失败的日期重新指定区间再点一次即可）" : ""));
-            var result = new FetchResult();
-            result.Errors.AddRange(errors);
-            return result;
-        }
-        finally
-        {
-            _marginProvider.OnStatus -= Forward;
-        }
-    }
+    // 【融资余额】的 FetchMarginRecentAsync / RunFetchMarginAsync 删于 2026-09-18：
+    // 整项迁去了 StockPlatform.Tasks/MarginTask（增量、只抓某一天、整段回补、只补待办
+    // 四条路都在那儿，四道闸走共用的 DailyBackfillGate、空日名单走 DailyNoDataGate）。
+    // 后者当时**已经没有任何调用方**，一并清掉——留着就是留个陷阱。
+    // 【拉取历史区间】里的两融那半边还在本类（上面 BackfillDailyAsync 那一段），
+    // 落库跟任务侧共用 MarginDayWriter。见 doc/margin-task-design.md。
 
     /// <summary>逐交易日补齐一类每日数据，只对**真正可能有数据**的日子发请求。<paramref name="fetchOne"/>
     /// 负责抓某天并写库、返回写入条数；异常记进 errors（非致命，继续下一天）。
@@ -4474,8 +3727,6 @@ public partial class FetchOrchestrator
         var recent = calendar != null
             ? calendar.LastTradingDays(DateTime.Today, 5).Select(DateOnly.FromDateTime).ToHashSet()
             : Enumerable.Range(0, 7).Select(i => today.AddDays(-i)).ToHashSet();
-        // 3 天以前的空才敢定案（两所 T+1、龙虎榜当晚发布）
-        var confirmCutoff = today.AddDays(-3);
 
         progress?.Report($"开始补齐{label}历史：{start:yyyy-MM-dd} ~ {end:yyyy-MM-dd}（跳过周末、非交易日、" +
                          $"本地已有和已确认没有的日子；最近 5 个交易日无条件重抓）" +
@@ -4497,18 +3748,21 @@ public partial class FetchOrchestrator
             {
                 int n = await fetchOne(d);
                 wrote += n;
-                if (n > 0)
+                // 名单的增删判据走共用的纯函数（2026-09-18 抽出来）——这套判据原来在本类里
+                // 写了两份，两融迁成新式任务时会出现第三份。⚠ cutoff 那条不能省，理由见它的注释。
+                if (dataset != null && _dailyNoDataRepository != null)
                 {
-                    // Case 6：源后来补上了，撤销之前的结论（能走到这里说明这天没被闸③挡住，
-                    // 也就是手动指定区间或彻底体检清过表）
-                    if (dataset != null && _dailyNoDataRepository != null && confirmed.Remove(d))
-                    { _dailyNoDataRepository.Remove(dataset, d); healed++; }
-                }
-                else if (dataset != null && _dailyNoDataRepository != null && d <= confirmCutoff)
-                {
-                    _dailyNoDataRepository.Confirm(dataset, d);
-                    confirmed.Add(d);
-                    newConfirmed++;
+                    switch (DailyNoDataGate.Evaluate(n, d, today, confirmed.Contains(d)))
+                    {
+                        case NoDataAction.Revoke:
+                            // 源后来补上了，撤销之前的结论（能走到这里说明这天没被闸③挡住，
+                            // 也就是手动指定区间或彻底体检清过表）
+                            _dailyNoDataRepository.Remove(dataset, d); confirmed.Remove(d); healed++;
+                            break;
+                        case NoDataAction.Confirm:
+                            _dailyNoDataRepository.Confirm(dataset, d); confirmed.Add(d); newConfirmed++;
+                            break;
+                    }
                 }
             }
             catch (OperationCanceledException) { throw; }

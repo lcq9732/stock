@@ -647,7 +647,7 @@ public sealed class PlanRunner(
             // 记成 Skipped，等数据源的熔断过去，今天还有机会补上。
             if (result.SkippedReason is { } why)
             {
-                Finish(item, RunOutcome.Skipped, result.Errors.Count, why);
+                Finish(item, RunOutcome.Skipped, result.Errors.Count, why, result.Errors);
                 log($"⏸ 计划：【{info.Name}】本轮没开工——{why}。今天恢复之后还会再来。{tail}");
                 return;
             }
@@ -675,7 +675,7 @@ public sealed class PlanRunner(
             if (result.Failed)
             {
                 var failWhy = result.Errors.Count > 0 ? result.Errors[0] : "任务报告失败";
-                Finish(item, RunOutcome.Failed, Math.Max(errors, 1), failWhy);
+                Finish(item, RunOutcome.Failed, Math.Max(errors, 1), failWhy, result.Errors);
                 if (item.Pacing == RunPacing.WhenIdle)
                     _idleNextAllowed[item.Action] = DateTime.Now + IdleCooldown;
                 log($"✘ 计划：【{info.Name}】失败：{failWhy}（不影响后面的项，继续）{tail}");
@@ -688,7 +688,8 @@ public sealed class PlanRunner(
                 result.NothingToDo ? "已经齐了，这一轮没什么可做"
                 : result.Progress is { Length: > 0 } prog
                     ? (errors > 0 ? $"{prog}（{errors} 条错误）" : prog)
-                : errors > 0 ? $"完成，但有 {errors} 条错误" : "完成");
+                : errors > 0 ? $"完成，但有 {errors} 条错误" : "完成",
+                result.Errors);
             log($"✔ 计划：【{info.Name}】完成，用时 {Describe(item.LastEnd!.Value - item.LastStart!.Value)}"
               + (errors > 0 ? $"（{errors} 条错误，详见上面的日志）" : "") + tail);
 
@@ -742,12 +743,24 @@ public sealed class PlanRunner(
         }
     }
 
-    private void Finish(FetchPlanItem item, RunOutcome outcome, int errorCount, string message)
+    /// <param name="errors">
+    /// 这一轮的错误内容（2026-09-18）。留前几条进计划文件——在此之前只留了个数，于是
+    /// "完成，但有 2 条错误"在日志滚掉之后就成了死信息（查【指数权重】那次就卡在这里）。
+    /// 不传＝这条路径本来就只有 <paramref name="message"/> 那一句（跳过、被停止、卡死掐断）。
+    /// </param>
+    private void Finish(FetchPlanItem item, RunOutcome outcome, int errorCount, string message,
+                        IReadOnlyList<string>? errors = null)
     {
         item.LastEnd = DateTime.Now;
         item.LastOutcome = outcome;
         item.LastErrorCount = errorCount;
         item.LastMessage = message;
+        // 最后一次成功的时刻是健康告警的基准（见 FetchPlanItem.LastOkAt）——**只在成功那一刻推进**，
+        // 失败/跳过/被停止都不动它，否则"连着几期没成功"永远数不出来。
+        if (outcome == RunOutcome.Ok) item.LastOkAt = item.LastStart ?? item.LastEnd;
+        // 错误内容每轮**整体替换**：留的是"上一轮出了什么错"，不是历史流水。
+        item.LastErrors = (errors ?? (errorCount > 0 ? [message] : []))
+            .Take(FetchPlanItem.MaxKeptErrors).Select(Trim).ToList();
         store.Save(plan);
         AppendReport(item, message);
     }
@@ -775,12 +788,29 @@ public sealed class PlanRunner(
                 ? Describe(item.LastEnd.Value - item.LastStart.Value) : "—";
             var line = $"{start:HH:mm} → {item.LastEnd:HH:mm}  {mark} {item.Info.Name,-14} "
                      + $"{span,-10} {message}";
-            File.AppendAllText(paths.PlanReportPath(DateTime.Today), line + Environment.NewLine,
-                new UTF8Encoding(true));
+            // 错误内容跟着那一行走（2026-09-18）：报告是第二天早上唯一会看的东西，
+            // 而"完成，但有 2 条错误"不说是什么错，等于没说。
+            var lines = new List<string> { line };
+            lines.AddRange(item.LastErrors.Select(e => $"{"",-22}└ {e}"));
+            File.AppendAllLines(paths.PlanReportPath(DateTime.Today), lines, new UTF8Encoding(true));
         }
         catch
         {
             // 报告只是方便复盘，写不下来不值得中断计划
+        }
+    }
+
+    /// <summary>往当日报告追加几行整句（健康告警那段用）。写失败同样不影响执行。</summary>
+    private void AppendReportLines(IReadOnlyList<string> lines)
+    {
+        try
+        {
+            Directory.CreateDirectory(paths.LogArchiveDir);
+            File.AppendAllLines(paths.PlanReportPath(DateTime.Today), lines, new UTF8Encoding(true));
+        }
+        catch
+        {
+            // 同上
         }
     }
 
@@ -899,6 +929,66 @@ public sealed class PlanRunner(
           + (failed > 0 ? $"、失败 {failed} 项" : "")
           + (skipped > 0 ? $"、跳过 {skipped} 项" : "")
           + $"。明细见 {paths.PlanReportPath(today)} =====");
+
+        LogHealth();
+    }
+
+    /// <summary>
+    /// **抓取行为健康**（2026-09-18，见 doc/fetch-health-design.md）——
+    /// 一轮收尾时说一句"哪几项连着几期不正常"。
+    ///
+    /// ════ 它补的是哪块空白 ════
+    /// 【当日完整性体检】查的是**库里数据齐不齐**，而"某一项连着几轮没跑成"至今没人管：
+    /// 计划页的状态列只显示**上一次**的结果，一项昨天失败、今天失败、明天还会失败，
+    /// 界面上永远只是一行"✘ 失败"，跟偶发失败长得一模一样。
+    ///
+    /// ════ 判据 ════
+    /// <see cref="FetchPlanItem.PeriodsSinceLastOk"/>：上一次成功是几期之前，
+    /// 超过这个频率的上限就报。**按期不按天**——实测季度组有 7 项距上次开跑 14~16 天，
+    /// 那全是正常的（月度项本期跑完就等下个月），按天数一刀切必然误报。
+    ///
+    /// ════ 全都健康时一个字都不报 ════
+    /// 这一段要是变成每天都有的噪声，第三天就没人看了。
+    /// </summary>
+    private void LogHealth()
+    {
+        var now = DateTime.Now;
+        // 判据和阈值都在 FetchPlanItem 上——计划页那一行的提示走的是同一个方法，
+        // 两处各写一份迟早漂移。
+        var bad = plan.AllItems
+            .Select(i => (Item: i, Periods: i.UnhealthyPeriods(now)))
+            .Where(x => x.Periods is not null)
+            .Select(x => (x.Item, Periods: x.Periods!.Value))
+            .ToList();
+        if (bad.Count == 0) return;
+
+        var lines = bad.OrderByDescending(b => b.Periods)
+            .Select(b => "　　" + DescribeHealth(b.Item, b.Periods)).ToList();
+        var head = $"⚠ 抓取健康：{bad.Count} 项连着几期不正常——";
+        log(head);
+        foreach (var l in lines) log(l);
+
+        // 同一段写进当日报告：无人值守跑完，第二天早上看的是那一份。
+        AppendReportLines([head, .. lines]);
+    }
+
+    /// <summary>
+    /// 三种"没成功"要分开措辞——它们的处理方式完全不同：失败去看错误，
+    /// 被跳过去看**前置**，被手动停止那是人自己停的（要么调整它，要么干脆取消勾选）。
+    /// </summary>
+    private static string DescribeHealth(FetchPlanItem item, int periods)
+    {
+        var name = item.Info.Name;
+        var last = (item.LastStart ?? item.LastEnd) is { } t ? $"，上次 {t:MM-dd HH:mm}" : "";
+        var msg = item.LastMessage is { Length: > 0 } m ? $"：{Trim(m)}" : "";
+        return item.LastOutcome switch
+        {
+            RunOutcome.Failed => $"【{name}】连着 {periods} 期失败{last}{msg}",
+            RunOutcome.Skipped => $"【{name}】连着 {periods} 期没开工{last}{msg}——去看它的前置",
+            RunOutcome.Cancelled => $"【{name}】连着 {periods} 期被手动停止{last}"
+                                  + "——要么它太慢该调整，要么就取消这一行的勾选",
+            _ => $"【{name}】已经 {periods} 期没成功跑过了{last}{msg}",
+        };
     }
 
     private static string Describe(TimeSpan t) =>

@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Remote;
 using StockPlatform.Data.Sqlite;
@@ -107,7 +107,7 @@ public class LhbSeatTaskTests : IDisposable
         };
     }
 
-    private LhbSeatTask NewTask(FakeFetcher f) => new(_repo, f, _cal, _manifest);
+    private LhbSeatTask NewTask(FakeFetcher f) => new(_repo, f, _cal, _manifest, _paths);
 
     private static TaskRunArgs Backfill(int? maxItems = null, DateTime? deadline = null) =>
         new(FetchMode.FirstBackfill, MaxItems: maxItems, Deadline: deadline);
@@ -391,5 +391,82 @@ public class LhbSeatTaskTests : IDisposable
         var stop = Assert.Single(lines, l => l.Contains("中断"));
         Assert.Contains("下次从水位线接着走", stop);
         Assert.DoesNotContain("进度不保留", stop);
+    }
+
+    // ── 只补待办（2026-09-18 收口：编排从 orchestrator 搬进任务）──────────
+
+    /// <summary>
+    /// 【只补待办】的目标**从待办清单来**，不从水位线来——这正是它跟增量的分界。
+    ///
+    /// 编排本体是共用的 <c>PartialDayRepair</c>（复查判据、Tries、确认名单都在那儿，
+    /// 由 <see cref="PartialDayRepairTests"/> 盯着），这一条只盯**接线**：
+    /// 收到这个模式之后抓的是不是待办里那一天、抓回来写没写回去。
+    /// </summary>
+    [Fact]
+    public async Task 只补待办_只抓待办里的那一天()
+    {
+        // 先把五天抓满，再把中间那天削掉一半——历史上"只抓到一半"的天就长这样
+        await NewTask(new FakeFetcher()).RunAsync(Backfill(), CancellationToken.None);
+        DeleteRows(Days[2], keep: 2);
+        Todo(Days[2]);
+
+        var f = new FakeFetcher();
+        var r = await NewTask(f).RunAsync(
+            new TaskRunArgs(FetchMode.FillBacklog), CancellationToken.None);
+
+        Assert.Equal([Days[2]], f.Asked);            // ← 不是五天：没走水位线那条路
+        Assert.Equal(10, RowsOn(Days[2]));           // 整日替换把那天补回来了
+        Assert.Equal(TaskState.Completed, r.State);
+    }
+
+    /// <summary>没有欠着的天就别开工：报跳过、一个请求都不发。</summary>
+    [Fact]
+    public async Task 只补待办_没有待办就跳过()
+    {
+        var f = new FakeFetcher();
+        var r = await NewTask(f).RunAsync(
+            new TaskRunArgs(FetchMode.FillBacklog), CancellationToken.None);
+
+        Assert.Empty(f.Asked);
+        Assert.NotNull(r.SkippedReason);
+    }
+
+    /// <summary>抓不动的时候整项判失败——名单和 Tries 由 PartialDayRepair 原样留着。</summary>
+    [Fact]
+    public async Task 只补待办_那天抓不动_整项失败()
+    {
+        await NewTask(new FakeFetcher()).RunAsync(Backfill(), CancellationToken.None);
+        DeleteRows(Days[2], keep: 2);
+        Todo(Days[2]);
+
+        var f = new FakeFetcher { Throws = [Days[2]] };
+        var r = await NewTask(f).RunAsync(
+            new TaskRunArgs(FetchMode.FillBacklog), CancellationToken.None);
+
+        Assert.Equal(TaskState.Failed, r.State);
+        Assert.Equal([Days[2]], PendingDays());      // 名单原样留着，下轮还来
+    }
+
+    /// <summary>往待办里记一天残缺日。</summary>
+    private void Todo(DateTime day)
+    {
+        var m = _manifest.Load();
+        m.SetTodo(RetryTaskIds.LhbSeat, RetryTodoKind.PartialDay,
+                  [new RetryTarget { Day = day.Date, Tries = 0 }]);
+        _manifest.Save(m);
+    }
+
+    /// <summary>把某天削成残缺：只留 <paramref name="keep"/> 行。</summary>
+    private void DeleteRows(DateTime day, int keep)
+    {
+        using var conn = new SqliteConnection($"Data Source={_paths.CurrentDb}");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "DELETE FROM LhbSeat WHERE trade_date = $d AND rowid NOT IN "
+            + "(SELECT rowid FROM LhbSeat WHERE trade_date = $d LIMIT $k);";
+        cmd.Parameters.AddWithValue("$d", day.ToString("yyyy-MM-dd"));
+        cmd.Parameters.AddWithValue("$k", keep);
+        cmd.ExecuteNonQuery();
     }
 }

@@ -3,7 +3,8 @@
 > 状态：**已实施**（2026-09-17）。方案 2026-09-11 写成，用户 09-17 确认后落地。
 > 代码：`FundExDividendImportTask`（导入事件）+ `EtfRawBarTask`（抓/复制 day_raw）
 > + `AdjustFactorCalculator.ExDividend.IsEmpty` 那一处改动；测试 `EtfBacktestSeriesTests` 10 条。
-> **还没真跑**（要发新版 exe，且首次回补约 3930 个请求）。
+> **已真跑并验收**（2026-09-17~18）：ETF 的 `day_raw` 1669 只全覆盖、闸门误判 0 只；
+> `day_adj` 于 09-18 02:18 随【重算回测序列】算出，ETF 从此可以回测。
 >
 > 落地前的只读预演（对真实数据，2026-09-17）：
 >

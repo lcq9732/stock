@@ -111,4 +111,52 @@ public class RetryDispatchTests
                 $"【{action.Name}】没声明 FillBacklog 模式");
         }
     }
+
+    /// <summary>
+    /// **自己补待办的那三项只认"残缺日"一类**（2026-09-18 收口的守卫，
+    /// 见 doc/fill-backlog-to-tasks-design.md §1）。
+    ///
+    /// 龙虎榜/席位/大宗的 <c>HandlesBacklog</c> 现在是 true：待办由任务自己补，而任务里
+    /// 只实现了残缺日那一路（<c>PartialDayRepair</c>）。编排器那条路对它们**已经不跑了**，
+    /// 所以真出现别的类别待办，就会静默补不上。
+    ///
+    /// 这条把现状钉住：给它们写一条非残缺日的待办，分派出来落在**兜底分支**上
+    /// （标签成了"前复权K线失败"——明显不对），说明没人认领。将来谁给这三项加了新类别
+    /// 并在 <c>RetryBacklog.Describe</c> 里补了映射，这里会红：那时请**先去任务里实现补法**，
+    /// 别只改这条断言。
+    /// </summary>
+    [Fact]
+    public void 自己补待办的三项_除了残缺日都没人认领()
+    {
+        foreach (var taskId in new[] { RetryTaskIds.Lhb, RetryTaskIds.LhbSeat, RetryTaskIds.BlockTrade })
+        {
+            var m = new Manifest();
+            m.SetTodo(taskId, RetryTodoKind.Failed, [new RetryTarget { Code = "600000" }]);
+
+            var item = Assert.Single(Backlog(m).Actionable);
+            Assert.Equal(RetryKind.BarCodes, item.Kind);      // ← 兜底分支＝没有专属补法
+        }
+    }
+
+    /// <summary>反过来：残缺日是**有**专属映射的那一类，标签按任务分。</summary>
+    [Fact]
+    public void 三项的残缺日_各有各的标签()
+    {
+        var expected = new[]
+        {
+            (RetryTaskIds.Lhb, "龙虎榜残缺日"),
+            (RetryTaskIds.LhbSeat, "席位残缺日"),
+            (RetryTaskIds.BlockTrade, "大宗残缺日"),
+        };
+        foreach (var (taskId, label) in expected)
+        {
+            var m = new Manifest();
+            m.SetTodo(taskId, RetryTodoKind.PartialDay,
+                      [new RetryTarget { Day = new DateTime(2026, 9, 9) }]);
+
+            var item = Assert.Single(Backlog(m).Actionable);
+            Assert.Equal(RetryKind.PartialDays, item.Kind);
+            Assert.Equal(label, item.Label);
+        }
+    }
 }

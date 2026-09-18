@@ -166,4 +166,33 @@ public class SqliteShareholderRepository : IShareholderRepository
         cmd.CommandText = "SELECT COUNT(DISTINCT code) FROM ShareholderCount;";
         return Convert.ToInt32(cmd.ExecuteScalar());
     }
+
+    public Dictionary<string, ShareholderFetchState> GetFetchStateByCode()
+    {
+        using var conn = Open();
+        SqliteSchema.EnsureSchema(conn);
+        using var cmd = conn.CreateCommand();
+        // 一次 GROUP BY 走 (code, report_date) 主键，26 万行几十毫秒。
+        // ⚠ 报告期取**户数表**的，不取十大股东表——后者带着不定期的股东名单变动公告，
+        //   期次偏"新"，拿它跟应有季度期比会把该抓的票判成已经很新（漏抓）。
+        cmd.CommandText = """
+            SELECT code, MAX(report_date), MAX(fetched_at)
+            FROM ShareholderCount
+            GROUP BY code;
+            """;
+        var result = new Dictionary<string, ShareholderFetchState>(StringComparer.Ordinal);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            var code = r.GetString(0);
+            // 报告期解析不出来就当这只票没抓过（该抓）——宁可多抓，不能漏。
+            if (!DateTime.TryParse(r.IsDBNull(1) ? null : r.GetString(1),
+                                   CultureInfo.InvariantCulture, DateTimeStyles.None, out var period))
+                continue;
+            DateTime.TryParse(r.IsDBNull(2) ? null : r.GetString(2),
+                              CultureInfo.InvariantCulture, DateTimeStyles.None, out var fetched);
+            result[code] = new ShareholderFetchState(period.Date, fetched);
+        }
+        return result;
+    }
 }

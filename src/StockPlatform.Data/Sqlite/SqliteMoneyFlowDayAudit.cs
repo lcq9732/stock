@@ -1,6 +1,5 @@
 using System.Globalization;
 using Microsoft.Data.Sqlite;
-using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Data.Sqlite;
 
@@ -15,7 +14,9 @@ namespace StockPlatform.Data.Sqlite;
 ///
 /// ════ 判据：期望 = 当天有日K的个股数 ════
 /// 有K线的那天就该有资金流。这跟 <see cref="Orchestration.MoneyFlowBackfillPlan"/>（逐股补历史的
-/// 排队判据）是**同一个口径**，故意如此——两处各写一份迟早漂移。
+/// 排队判据）是**同一个口径**，故意如此——两处各写一份迟早漂移；口径本身是
+/// <see cref="Orchestration.MoneyFlowBackfillPlan.ExpectGranularity"/>（**不复权**日线，因为它排在
+/// 这一项之前跑；理由和等价性核对见那儿）。
 ///
 /// 实测最近 25 个交易日，"当天个股日K只数 − 当天资金流行数"只出现过 0（9 天）和 +1（16 天），
 /// 没有第三种值。所以 <see cref="Tolerance"/> 取 2 已经很宽。
@@ -61,7 +62,8 @@ public sealed class SqliteMoneyFlowDayAudit(string dbPath)
             WHERE b.granularity = $g AND b.period_start >= $from AND b.period_start <= $to
               AND COALESCE(m.type,'stock') = 'stock';
             """,
-            ("$g", Granularity.Day), ("$from", day + " 00:00:00"), ("$to", day + " 23:59:59"));
+            ("$g", Orchestration.MoneyFlowBackfillPlan.ExpectGranularity),
+            ("$from", day + " 00:00:00"), ("$to", day + " 23:59:59"));
         int have = Scalar(conn, "SELECT COUNT(*) FROM NetInflowDetail WHERE trade_date = $d;", ("$d", day));
 
         return new MoneyFlowDayStatus(

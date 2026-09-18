@@ -111,8 +111,10 @@ public class MoneyFlowSnapshotTaskTests : IDisposable
             var code = (600000 + i).ToString();
             Exec($"INSERT OR REPLACE INTO StockMeta(code, name, type) VALUES('{code}', 'T{i}', 'stock');");
             if (i < bars)
+                // 口径跟判据走（不复权），别写死 'day'——判据换口径时这里要跟着换，
+                // 否则测试会"绿着"通过一个根本数不到行的查询。
                 Exec("INSERT OR REPLACE INTO Bar(code, granularity, period_start, close) "
-                   + $"VALUES('{code}', 'day', '{day:yyyy-MM-dd} 00:00:00', 1.0);");
+                   + $"VALUES('{code}', '{MoneyFlowBackfillPlan.ExpectGranularity}', '{day:yyyy-MM-dd} 00:00:00', 1.0);");
         }
         tx.Commit();
     }

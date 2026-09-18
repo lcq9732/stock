@@ -210,6 +210,67 @@ public static class FetcherSettings
     public static string ReadFinancialSource(string settingsPath) =>
         (ReadString(settingsPath, "FinancialSource") ?? "eastmoney").Trim().ToLowerInvariant();
 
+    /// <summary>
+    /// 【拉取分红送配】用什么判断"谁要抓"（2026-09-18）。规范化成 <c>"eastmoney"</c>／<c>"none"</c>，
+    /// 没配就是 <c>"eastmoney"</c>。
+    ///
+    /// <c>eastmoney</c>＝先问东财最近谁出了分红公告（含预案、进度更新），只抓这些加上到期兜底的；
+    /// 一轮从 5902 个请求降到一两百。**值仍然取新浪**，东财只当索引——它当值源不合格
+    /// （退市股全空、配股比例只在文本里），而且实测约 1% 漏检，那 1% 靠 90 天全量兜底捞回来。
+    ///
+    /// <c>none</c>＝不问，纯按水位线到期轮换（2026-09-18 之前的行为）。
+    /// ⚠ 这只是**默认开关**：运行期索引拿不到（超时/限流/返回空）时任务本来就会自动退回
+    /// 纯水位线并在日志里说一声，不需要人来改配置。
+    /// </summary>
+    public static string ReadDividendNoticeIndex(string settingsPath) =>
+        (ReadString(settingsPath, "DividendNoticeIndex") ?? "eastmoney").Trim().ToLowerInvariant();
+
+    /// <summary>
+    /// 读一个整数设置；读不到、不是数字、或不在 [<paramref name="min"/>, <paramref name="max"/>]
+    /// 区间内，一律返回 <paramref name="fallback"/>。
+    ///
+    /// 越界按默认处理而不是报错：这是**人手改的**文件，填个 0 或负数不该让抓取整条挂掉，
+    /// 但也不能照着用（并发 0 就是永远等下去）。
+    /// </summary>
+    public static int ReadInt(string settingsPath, string key, int fallback, int min, int max)
+    {
+        try
+        {
+            if (!File.Exists(settingsPath)) return fallback;
+            var text = File.ReadAllText(settingsPath);
+            if (string.IsNullOrWhiteSpace(text)) return fallback;
+            using var doc = JsonDocument.Parse(text, Options);
+            if (!doc.RootElement.TryGetProperty(key, out var v)) return fallback;
+            int? val = v.ValueKind switch
+            {
+                JsonValueKind.Number when v.TryGetInt32(out var n) => n,
+                JsonValueKind.String when int.TryParse(v.GetString(), out var n) => n,
+                _ => null,
+            };
+            return val is { } x && x >= min && x <= max ? x : fallback;
+        }
+        catch { return fallback; }
+    }
+
+    /// <summary>
+    /// 【拉取分红送配】那条新浪线的节奏（2026-09-18）：**一批发多少个、然后歇多久**。
+    ///
+    /// ════ 为什么要可配、默认为什么是这两个数 ════
+    /// 2026-09-18 凌晨那一轮留下了 18 次熔断的完整记录，规律整齐得出奇：
+    /// 新浪大约**每 18 分钟放行 100~150 个请求**，我们 2~3 分钟就把额度打光，
+    /// 然后被拒、熔断、干等 15 分钟，再来一轮。有效吞吐 5.6 只/分钟（全市场要 17 小时），
+    /// 而且每次撞墙还白发 15 个被拒请求（各带 2 次重试＝45 个）×18 次 ≈ 810 个无效请求。
+    ///
+    /// 所以默认改成 **90 个 / 歇 13 分钟**——踩在配额线以下匀速走，吞吐持平甚至略高，
+    /// 但零熔断、零无效请求。
+    ///
+    /// ⚠ 这是从**一天**的数据推出来的，18 分钟/100 个会随时段浮动（那天 03:48 那一轮
+    /// 放行了 600 只）。所以做成可配的：跑两天看日志里还撞不撞墙，再决定要不要调。
+    /// </summary>
+    public static (int BatchSize, TimeSpan RestDuration) ReadDividendPace(string settingsPath) =>
+        (ReadInt(settingsPath, "DividendBatchSize", 90, 1, 5000),
+         TimeSpan.FromMinutes(ReadInt(settingsPath, "DividendRestMinutes", 13, 0, 120)));
+
     /// <summary>读一个 true/false 设置；读不到就当 false。</summary>
     public static bool ReadBool(string settingsPath, string key)
     {
@@ -412,6 +473,22 @@ public static class FetcherSettings
           //"LhbSource": "em",
           //"LhbSource": "sina",
 
+          // ── 离线模拟总开关（仅 DEBUG 构建认这一项）──────────────────────
+          //  true ＝ 把**所有已有模拟源**的数据源一次全换成"一个请求都不发"的版本
+          //         （现有：资金净流入 / 龙虎榜 / 龙虎榜席位 / 大宗交易 / 融资余额 / 股东数据 /
+          //          指数成分 / 指数权重 / 流通市值。完整清单和"还有哪些没有"见
+          //          doc/offline-mock-design.md，那份文档才是权威）。
+          //         K线另走上面的 "BarSource": "Mock"。
+          //  用来在 Debug 实例里把整条链真跑一遍（四道闸、无条件重抓、空日名单、待办转交与复查、
+          //  【拉取区间数据】那一整轮），既不发请求，也不跟正在抓数据的正式实例抢配额。
+          //  做成一个总开关而不是每类一个，是因为逐类配必然漏——2026-09-18 就漏过、当场发了真请求。
+          //
+          //  ⚠ 打开它 ≠ 整个程序离线：还有一批源没有模拟版（席位、大宗、板块、公告、财务…），
+          //    那些照样联网。**哪些有、哪些没有、怎么加新的，见 doc/offline-mock-design.md。**
+          //  ⚠ 它写进库的是**假数据**。Release 构建根本不认这个值，
+          //    Debug 实例的数据目录也跟正式实例天然隔离——两道闸都别拆。
+          //"OfflineMock": "true",
+
           // ── 行业分类走哪个源 ────────────────────────────────────────────
           //  eastmoney ＝ 东财 F10（RPT_F10_ORG_BASICINFO 的 CSRC_INDUSTRY_NAME，一个字段两级）。【默认】
           //  sina      ＝ 两所门类 + 新浪 84 个行业节点逐个取成分股。
@@ -438,6 +515,23 @@ public static class FetcherSettings
           //  ⚠ 切过去之后要把 FinancialKeys.Version +1 才会全量重抓，否则老数据不会被替换。
           //"FinancialSource": "sina",
           //"FinancialSource": "eastmoney",
+
+          // ── 分红送配：怎么决定"这轮抓哪些票" ─────────────────────────
+          //  新浪的分红页没有时间参数（一次返回整页全历史），所以省不了"抓哪一段"，
+          //  只能省"抓哪些票"。先问一句东财最近谁出了公告，一轮 5902 个请求就降到一两百。
+          //  ⚠ 值仍然取新浪，东财只当索引：它当值源不合格（退市股全空、配股比例只在文本里），
+          //    而且实测约 1% 漏检（它自己缺记录）——那 1% 靠 90 天全量兜底捞回来。
+          //"DividendNoticeIndex": "eastmoney",  // 先问东财最近 45 天谁出了分红公告【默认】
+          //"DividendNoticeIndex": "none",       // 不问，纯按水位线到期轮换（2026-09-18 之前的行为）
+
+          // ── 分红送配：新浪那条线的节奏（发多少个、歇多久）─────────────
+          //  2026-09-18 凌晨那轮 18 次熔断的记录显示：新浪大约**每 18 分钟放行 100~150 个请求**。
+          //  我们 2~3 分钟打光额度 → 被拒 → 熔断干等 15 分钟 → 再来一轮，有效吞吐 5.6 只/分钟，
+          //  还白发了约 810 个被拒请求。默认值就是踩在配额线以下匀速走，不去撞墙。
+          //  ⚠ 那个 18 分钟/100 个会随时段浮动（那天 03:48 有一轮放行了 600 只），
+          //    所以跑两天看日志里还撞不撞墙再调。撞了就把 BatchSize 调小或 RestMinutes 调大。
+          //"DividendBatchSize": 90,      // 一批发多少个请求（默认 90）
+          //"DividendRestMinutes": 13,    // 一批发完歇多少分钟（默认 13；填 0 就是不歇）
 
           // ── K线数据源 ──────────────────────────────────────────────────
           //"BarSource": "Tencent",   // 纯腾讯。失败自动重试 3 次（间隔 2/10 秒），仍失败进【重新拉取失败】名单【默认】

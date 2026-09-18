@@ -1,4 +1,3 @@
-using Microsoft.Data.Sqlite;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Remote;
 using StockPlatform.Data.Sqlite;
@@ -44,8 +43,11 @@ public class DividendTaskResumeTests : IDisposable
 
     public void Dispose()
     {
-        SqliteConnection.ClearAllPools();
-        try { Directory.Delete(_dir, recursive: true); } catch { /* 临时目录 */ }
+        // ⚠ 不调 SqliteConnection.ClearAllPools()：那是**进程级**的，会把别的测试类正在用的
+        //   连接池一起清掉——整个测试跑就会随机崩在 testhost 上（2026-09-18 实测：单独跑这一类
+        //   31 条全绿、跟全量一起跑必 abort，去掉这一句就稳了）。
+        //   代价只是临时目录删不掉时留在 %TEMP% 里，下次开机自然清。
+        try { Directory.Delete(_dir, recursive: true); } catch { /* 文件还被连接占着，留着就留着 */ }
     }
 
     // ── 离线数据源 ─────────────────────────────────────────────────
@@ -89,8 +91,9 @@ public class DividendTaskResumeTests : IDisposable
     }
 
     /// <summary>批大小默认调成 2——一轮里得有好几批，"中断之后接着跑"才测得出来。</summary>
-    private DividendTask NewTask(FakeProvider provider, int batchSize = 2)
-        => new(_paths, provider, _repo, _manifest, batchSize);
+    private DividendTask NewTask(FakeProvider provider, int batchSize = 2,
+                                 IDividendNoticeIndex? index = null)
+        => new(_paths, provider, _repo, _manifest, index, batchSize);
 
     private static TaskRunArgs Args(FetchMode mode = FetchMode.Incremental, int? maxItems = null)
         => new(Mode: mode, MaxItems: maxItems);
@@ -182,6 +185,156 @@ public class DividendTaskResumeTests : IDisposable
         Assert.NotNull(r.SkippedReason);
         Assert.Contains("限流", r.SkippedReason);
         Assert.Equal(6, p.Requested.Count);           // 三批＝6 只之后就收工，没把 7 只跑满
+    }
+
+    // ── ⑤ 公告索引（2026-09-18）──────────────────────────────────
+
+    /// <summary>离线的公告索引。<see cref="Boom"/> 打开就模拟索引源挂了。</summary>
+    private sealed class FakeNoticeIndex : IDividendNoticeIndex
+    {
+        public event Action<string>? OnStatus { add { } remove { } }
+        public string SourceName => "假索引";
+        /// <summary>命中的票，公告日默认取今天（＝比任何"以前抓过"都新）。</summary>
+        public HashSet<string> Hits { get; init; } = [];
+        public bool Boom { get; init; }
+        public int Calls;
+
+        public Task<IReadOnlyDictionary<string, DateTime>> GetRecentAsync(
+            int lookbackDays, CancellationToken ct = default)
+        {
+            Calls++;
+            if (Boom) throw new InvalidOperationException("索引源挂了");
+            var today = DateTime.Today;
+            return Task.FromResult<IReadOnlyDictionary<string, DateTime>>(
+                Hits.ToDictionary(c => c, _ => today, StringComparer.Ordinal));
+        }
+    }
+
+    [Fact]
+    public async Task 索引命中的票即使刚抓过也重抓()
+    {
+        // 先跑一轮，全部都是"刚抓过"
+        await NewTask(new FakeProvider()).RunAsync(Args(), CancellationToken.None);
+
+        var idx = new FakeNoticeIndex { Hits = { "600000", "000001" } };
+        var p = new FakeProvider();
+        await NewTask(p, index: idx).RunAsync(Args(), CancellationToken.None);
+
+        Assert.Equal(1, idx.Calls);
+        Assert.Equal(["000001", "600000"], p.Requested.OrderBy(c => c, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task 索引挂了就退回水位线_不是什么都不抓()
+    {
+        // **绝不能**因为索引没拿到就"本轮没有要抓的"——那是静默漏抓。
+        var idx = new FakeNoticeIndex { Boom = true };
+        var p = new FakeProvider();
+        var r = await NewTask(p, index: idx).RunAsync(Args(), CancellationToken.None);
+
+        Assert.Equal(TaskState.Completed, r.State);
+        Assert.Equal(Codes.Length, p.Requested.Count);   // 一只不少，照水位线全抓
+    }
+
+    [Fact]
+    public async Task 索引没命中且都很新鲜时_一个请求都不发()
+    {
+        await NewTask(new FakeProvider()).RunAsync(Args(), CancellationToken.None);
+
+        var idx = new FakeNoticeIndex();          // 命中为空
+        var p = new FakeProvider();
+        var r = await NewTask(p, index: idx).RunAsync(Args(), CancellationToken.None);
+
+        Assert.Empty(p.Requested);
+        Assert.True(r.NothingToDo);
+    }
+
+    [Fact]
+    public async Task 只补待办时不问索引()
+    {
+        // 待办的目标从清单来，问索引是白问一轮请求。
+        var idx = new FakeNoticeIndex();
+        await NewTask(new FakeProvider(), index: idx).RunAsync(Args(FetchMode.FillBacklog), CancellationToken.None);
+        Assert.Equal(0, idx.Calls);
+    }
+
+    [Fact]
+    public async Task 整段回补时不问索引()
+    {
+        var idx = new FakeNoticeIndex();
+        var p = new FakeProvider();
+        await NewTask(p, index: idx).RunAsync(Args(FetchMode.FirstBackfill), CancellationToken.None);
+        Assert.Equal(0, idx.Calls);
+        Assert.Equal(Codes.Length, p.Requested.Count);
+    }
+
+    // ── ④ 水位线播种（2026-09-18）────────────────────────────────
+
+    /// <summary>直接往 Dividend 表塞一条历史行，模拟"老版本抓过、新表还空着"。</summary>
+    private void SeedOldDividendRow(string code, DateTime fetchedAt)
+        => _repo.ReplaceByCode(code, [new DividendRow
+        {
+            Code = code,
+            AnnounceDate = new DateTime(2025, 4, 10),
+            DividendYuan = 1.0,
+            Progress = "实施",
+            FetchedAt = fetchedAt,
+        }]);
+
+    [Fact]
+    public async Task 首轮按库里已有的分红播种水位线_不重抓()
+    {
+        // 老版本抓过的两只：Dividend 表里有行、状态表还空着。
+        SeedOldDividendRow("600000", DateTime.Now.AddDays(-3));
+        SeedOldDividendRow("000001", DateTime.Now.AddDays(-3));
+        Assert.Empty(_repo.GetFetchStates());
+
+        var p = new FakeProvider();
+        await NewTask(p).RunAsync(Args(), CancellationToken.None);
+
+        // 播种之后这两只算"3 天前抓过"，本轮只抓剩下的 5 只
+        Assert.DoesNotContain("600000", p.Requested);
+        Assert.DoesNotContain("000001", p.Requested);
+        Assert.Equal(Codes.Length - 2, p.Requested.Count);
+    }
+
+    [Fact]
+    public async Task 播种只做一次_不覆盖真实的抓取状态()
+    {
+        // 先跑一轮：状态表里是真的抓取记录（今天）
+        await NewTask(new FakeProvider()).RunAsync(Args(), CancellationToken.None);
+        var before = _repo.GetFetchStates()["600000"].LastOkAt;
+
+        // 再塞一条"很久以前抓的"分红行——表非空，播种不该动它
+        SeedOldDividendRow("600000", DateTime.Now.AddDays(-400));
+        Assert.Equal(0, _repo.SeedFetchStatesFromDividends());
+        Assert.Equal(before, _repo.GetFetchStates()["600000"].LastOkAt);
+    }
+
+    [Fact]
+    public void 时刻是空值的老行不播种()
+    {
+        // 库里有 323 只老 code 的 fetched_at 是 DateTime.MinValue（早期数据没记时刻）。
+        // 那不是"抓过"——播成水位线会让它们永远不再被抓。
+        SeedOldDividendRow("600000", DateTime.MinValue);
+        SeedOldDividendRow("000001", DateTime.Now.AddDays(-3));
+
+        Assert.Equal(1, _repo.SeedFetchStatesFromDividends());
+        Assert.DoesNotContain("600000", _repo.GetFetchStates().Keys);
+        Assert.Contains("000001", _repo.GetFetchStates().Keys);
+    }
+
+    [Fact]
+    public void 一行都没有的票播不了种_只能去抓()
+    {
+        // "无分红"和"没抓过"在 Dividend 表里长得一模一样——这正是要单独建状态表的理由。
+        SeedOldDividendRow("600000", DateTime.Now.AddDays(-3));
+        _repo.SeedFetchStatesFromDividends();
+
+        var states = _repo.GetFetchStates();
+        Assert.Single(states);
+        Assert.Equal(Codes.Length - 1,
+                     DividendTask.SelectDue(Codes, states, DateTime.Now.AddDays(-25)).Count);
     }
 
     // ── ③ 失败名单：落盘、可补、补完清零 ──────────────────────────

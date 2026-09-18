@@ -38,9 +38,23 @@ public sealed class LhbTask(
     ILhbRepository repository,
     ILhbProvider provider,
     ITradingDayRepository tradingDays,
+    IManifestStore? manifestStore = null,
     IDailyFetchNoDataRepository? noDataRepository = null) : FetchTaskBase<LhbRow>
 {
     public override FetchActionId Id => FetchActionId.StepLhb;
+
+    /// <summary>
+    /// 残缺日待办自己补（2026-09-18 收口，见 doc/fill-backlog-to-tasks-design.md）。
+    ///
+    /// 09-17 迁移时这一条还是 false——待办编排留在 <c>FetchOrchestrator</c> 那边。
+    /// 能搬过来的前提是**龙虎榜的待办只有"残缺日"这一类**（唯一来源是日频体检的
+    /// <c>OwnerTaskId</c>）：转交之后 orchestrator 那条路对本项不再跑，真有别的类别
+    /// 就会**静默补不上**。这个前提由 <c>RetryDispatchTests</c> 的守卫钉着。
+    ///
+    /// ⚠ 没注入 <c>manifestStore</c> 就补不了（待办在 manifest 里），所以这里跟着它走——
+    /// 声明 true 却没有仓库的话，分派会把待办交过来然后什么都不做。
+    /// </summary>
+    public override bool HandlesBacklog => manifestStore != null;
 
     /// <summary>
     /// 东财源的增量回看窗口（交易日）。照 <c>d30_chg</c> 定的——上榜后 30 日涨跌幅要等
@@ -65,6 +79,11 @@ public sealed class LhbTask(
     private bool _explicitDay;
     private string? _skipped;
 
+    /// <summary>【只补待办】那一路的结果。null＝这轮不是补待办、或没有欠着的天。</summary>
+    private PartialDayRepairResult? _backlog;
+    /// <summary>本轮是不是【只补待办】——<see cref="OnStoppedAsync"/> 拿不到 args。</summary>
+    private bool _fillBacklog;
+
     private LhbDayWriter Writer => new(dbPath, repository);
 
     protected override async IAsyncEnumerable<IReadOnlyList<LhbRow>> FetchAsync(
@@ -76,17 +95,33 @@ public sealed class LhbTask(
         _targets = [];
         _rows = _batches = _noData = 0;
         _skipped = null;
+        _backlog = null;
         _explicitDay = args.Mode == FetchMode.SpecificDay;
+        _fillBacklog = args.Mode == FetchMode.FillBacklog;
         _sw.Restart();
+
+        // ── 【只补待办】走完全不同的一条路：目标从待办清单来，不从水位线来 ──
+        // 编排整个在 PartialDayRepair 里（逐日重抓 → 用体检同一套判据复查 → Tries →
+        // 满 MaxTries 判定"数据源那天就这些"）。**不要**把残缺日当普通的天塞进 Plan
+        // 走下面的流式路径：那等于把复查判据和 Tries 抄一遍，正是抽出那个类要避免的事。
+        //
+        // 它自己一天一天循环、每天开头检查取消，所以停止停在**天的边界**上。
+        if (_fillBacklog && manifestStore is { } store)
+        {
+            // 包 Task.Run：它开头读 manifest、查体检 spec 都是同步 IO，骨架不替子类推线程池。
+            _backlog = await Task.Run(() => new PartialDayRepair(dbPath, store)
+                .RunAsync(RetryTaskIds.Lhb,
+                          d => new LhbDayWriter(dbPath, repository, provider).RefetchAsync(d, ct),
+                          ProgressSink, ct), ct);
+            yield break;
+        }
 
         // 定"抓哪一段"要查库（水位线、交易日历、空日名单），都是同步 IO。骨架不替子类推到
         // 线程池，在首个 await 之前干这些会冻住界面。
         var (start, end, targets, confirmed) = await Task.Run(() => Plan(args), ct);
         if (targets.Count == 0)
         {
-            _skipped = args.Mode == FetchMode.FillBacklog
-                ? "龙虎榜没有欠着的残缺日"
-                : "龙虎榜这一段里没有交易日，本轮不用抓";
+            _skipped = "龙虎榜这一段里没有交易日，本轮不用抓";
             Report($"{_skipped}。");
             yield break;
         }
@@ -158,6 +193,15 @@ public sealed class LhbTask(
 
     protected override Task OnStoppedAsync(TaskRunStats stats)
     {
+        // 【只补待办】中断：待办清单本身就是进度（复查在每一轮末尾，中途停的话这一轮一天
+        // 都没划掉，下轮原样重来——整天替换是幂等的）。跟水位线无关。
+        if (_fillBacklog)
+        {
+            Report("龙虎榜·补待办中断。已重抓的天都是整天替换、各自一个事务，"
+                 + "没补完的仍在待办里，下次再点一次即可。");
+            return Task.CompletedTask;
+        }
+
         Report($"龙虎榜中断。已落库的 {_batches} 批是完整的（各自整天替换、各自一个事务），"
              + "下次从水位线接着走即可。");
         return Task.CompletedTask;
@@ -166,6 +210,26 @@ public sealed class LhbTask(
     protected override Task<TaskRunResult?> OnCompletedAsync(
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
+        // 【只补待办】那一路：一行都不经过 SaveBatchAsync（编排和落库都在 PartialDayRepair
+        // 里），所以结局要单独翻译——走下面那套会报"0 个交易日、写入 0 行"。
+        if (args.Mode == FetchMode.FillBacklog)
+        {
+            if (_backlog is not { } r)
+                return Task.FromResult<TaskRunResult?>(
+                    TaskRunResult.Skipped("龙虎榜没有欠着的残缺日", _errors));
+
+            var line = $"龙虎榜残缺日：{r.Days} 天里补上 {r.Fixed} 天、写入 {r.Rows} 行"
+                     + (r.Failed > 0 ? $"，{r.Failed} 天重抓失败" : "")
+                     + (r.ConfirmedNow > 0 ? $"，{r.ConfirmedNow} 天补满仍不齐、已判定数据源就这些" : "")
+                     + "。";
+            // 一天都没补成 → 整项失败（多半是限流或断网）。名单和 Tries 已经被
+            // PartialDayRepair 原样留着了，下轮还会来。
+            return Task.FromResult<TaskRunResult?>(
+                r.Failed > 0 && r.Failed == r.Days
+                    ? new TaskRunResult(TaskState.Failed, _errors, NothingToDo: false, line)
+                    : new TaskRunResult(TaskState.Completed, _errors, NothingToDo: false, line));
+        }
+
         if (_skipped is { } why)
             return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, _errors));
 
@@ -221,10 +285,9 @@ public sealed class LhbTask(
 
         if (args.Mode == FetchMode.FillBacklog)
         {
-            // 【只补待办】到不了这儿——本任务的 HandlesBacklog 是 false（2026-09-18 起按这个
-            // 属性分派，见 IFetchTask.HandlesBacklog）：界面那一层和【重新拉取失败股票】都会把
-            // 它截给 FetchOrchestrator.RunFillBacklogAsync（残缺日走 PartialDayRepair，
-            // 按天重抓的动作共用 LhbDayWriter）。这里返回空是兜底，不是主路径。
+            // 【只补待办】正常在 FetchAsync 开头就分流走了（PartialDayRepair 那一路）。
+            // 只有**没注入 manifestStore** 时才会落到这儿——那种实例的 HandlesBacklog
+            // 也是 false，分派根本不会把待办交过来。返回空是兜底，不是主路径。
             return (today, today, [], confirmed);
         }
 

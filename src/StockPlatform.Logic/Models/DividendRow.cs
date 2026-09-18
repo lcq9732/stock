@@ -30,4 +30,8 @@ public class DividendRow
     public DateTime? ExDate { get; set; }
 
     public DateTime FetchedAt { get; set; }
+
+    /// <summary>这一行是哪个源给的（2026-09-18）：null/"sina"＝新浪，"eastmoney"＝【分红对账】补的。
+    /// 新浪对北交所覆盖不全（实测 1043 条缺口），那些只能靠对账从东财补。</summary>
+    public string? Source { get; set; }
 }

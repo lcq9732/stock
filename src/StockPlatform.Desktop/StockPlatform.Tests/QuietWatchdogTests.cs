@@ -100,4 +100,46 @@ public class QuietWatchdogTests
         await Task.Delay(200);
         lock (收到的) Assert.Contains("处理中 1/10", 收到的);
     }
+
+    // ── 看门狗自己不能把进程掀了 ──────────────────────────────────
+
+    /// <summary>
+    /// <see cref="QuietWatchdog"/> 的 Check() 是 <c>Timer</c> 回调、跑在**线程池线程**上，
+    /// 那里的未捕获异常不是"测试失败"，是**整个进程直接没了**。
+    ///
+    /// 这一条走**掐断**那条路：<c>Cancel()</c> 会同步执行注册在令牌上的所有回调，
+    /// 任一抛出都会被包成 <c>AggregateException</c> 扔回来——修之前那里只 catch
+    /// <c>ObjectDisposedException</c>，于是异常从 Timer 回调逃出去、把宿主一起带走。
+    ///
+    /// ⚠ 这条测试**红起来的样子是 testhost 崩掉**（Test Run Aborted），不是断言失败。
+    /// </summary>
+    [Fact]
+    public async Task 取消回调抛异常_不掀进程也不影响立旗()
+    {
+        using var dog = new QuietWatchdog(Quiet, CancellationToken.None, checkInterval: Tick);
+        using var reg = dog.Token.Register(() => throw new InvalidOperationException("注册方故意抛"));
+
+        await Task.Delay(TimeSpan.FromMilliseconds(900));   // 一直不 Beat，等它判定卡死
+
+        Assert.True(dog.Starved);                            // 旗子照立
+        Assert.True(dog.Token.IsCancellationRequested);      // 掐断照常生效
+    }
+
+    /// <summary>
+    /// 同上，走**长跑提醒**那条路：提醒回调是外部代码（PlanRunner 传的是写日志的委托），
+    /// 它抛出来既不该掀进程、也不该耽误后面的掐断判定。
+    /// </summary>
+    [Fact]
+    public async Task 长跑提醒回调抛异常_不掀进程也不影响掐断()
+    {
+        using var dog = new QuietWatchdog(
+            Quiet, CancellationToken.None,
+            onLongRun: _ => throw new InvalidOperationException("提醒回调故意抛"),
+            checkInterval: Tick,
+            longRunNotice: TimeSpan.FromMilliseconds(50));
+
+        await Task.Delay(TimeSpan.FromMilliseconds(900));
+
+        Assert.True(dog.Starved);
+    }
 }

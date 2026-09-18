@@ -90,16 +90,81 @@ public sealed class PartialDayRepair(
         }
 
         // 整批都失败多半是被限流/断网，不是"数据源没有"——名单和计数原样留着，别白耗一轮 Tries。
-        if (failCount == days.Count)
+        return Finish(spec, taskId, days, pending, rows, failCount,
+                      throttled: failCount == days.Count, sw, progress);
+    }
+
+    /// <summary>
+    /// **一次补掉所有欠着的天**（2026-09-18）——给"按天重抓很贵、但一轮能覆盖所有天"的项用。
+    ///
+    /// 资金净流入就是这样：数据源一次请求返回整只票的**全部历史**，窗口在客户端裁，
+    /// 所以"补一天"和"补十天"都是同一轮全市场逐只抓（约 1.75 小时）。
+    /// 拿 <see cref="RunAsync"/> 那条逐天路径去跑，十天就是十轮——纯浪费。
+    ///
+    /// 复查、Tries、"确认就这些"名单跟逐天那条**完全共用**（见 <see cref="Finish"/>）：
+    /// 这些才是最不能各写一份的部分。
+    /// </summary>
+    /// <param name="refetchAll">
+    /// 一次把这些天全补上，返回 (写入行数, 是否判定被限流)。
+    /// **限流那个信号由调用方给**——判据因项而异（资金流是"过半只数失败"），
+    /// 但后果一样：一个 Tries 都不加，名单原样留着。
+    /// </param>
+    public async Task<PartialDayRepairResult?> RunBatchAsync(
+        string taskId,
+        Func<IReadOnlyList<DateTime>, Task<(int Rows, bool Throttled)>> refetchAll,
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        var spec = SqliteDailyTableAuditor.DailyTables.FirstOrDefault(s => s.OwnerTaskId == taskId);
+        if (spec == null) return null;
+
+        List<RetryTarget> pending = Locked(() =>
+            manifestStore.Load().Todo(taskId, RetryTodoKind.PartialDay)?.Targets.ToList() ?? new());
+        var days = pending.Where(p => p.Day.HasValue).Select(p => p.Day!.Value.Date)
+                          .Distinct().OrderBy(d => d).ToList();
+        if (days.Count == 0) return null;
+
+        var sw = Stopwatch.StartNew();
+        progress?.Report($"补{spec.Label}残缺日：{days.Count} 天"
+            + $"（{string.Join("、", days.Select(d => d.ToString("yyyy-MM-dd")))}）"
+            + "——这些天本地有数据但不全。这一项按天重抓很贵，所以一轮把这些天一起补。");
+
+        int rows; bool throttled;
+        try { (rows, throttled) = await refetchAll(days); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
         {
-            progress?.Report($"{spec.Label}残缺日：{failCount} 天全部重抓失败，判定是连不上而不是数据源没有，"
-                           + "名单和重试计数原样留着，等会儿再跑一次。");
+            progress?.Report($"⚠ {spec.Label}残缺日重抓失败：{ex.Message}——名单和重试计数原样留着。");
             return new PartialDayRepairResult(
-                spec.Label, days.Count, 0, 0, failCount, 0,
+                spec.Label, days.Count, 0, 0, days.Count, 0,
                 NoRefetcher: false, Done: $"{spec.Label}残缺 {days.Count} 天（未计数）");
         }
 
-        // 复查：跟体检同一套判据（不是 COUNT>0，理由见类注释）
+        return Finish(spec, taskId, days, pending, rows, throttled ? days.Count : 0, throttled, sw, progress);
+    }
+
+    /// <summary>
+    /// 重抓之后的收尾：复查 → Tries → "确认就这些"名单 → 汇总。两条重抓路径共用这一份。
+    ///
+    /// ⚠ **复查绝不能退化成 <c>COUNT &gt; 0</c>**：残缺日本来就有行，拿"有没有行"去复查，
+    /// 补没补上都会被判成"已补齐"、从待办里静默划掉。所以走
+    /// <see cref="SqliteDailyTableAuditor.CheckDays"/>——跟体检同一套判据。
+    /// </summary>
+    private PartialDayRepairResult Finish(
+        SqliteDailyTableAuditor.Spec spec, string taskId, List<DateTime> days,
+        List<RetryTarget> pending, int rows, int failCount, bool throttled,
+        Stopwatch sw, IProgress<string>? progress)
+    {
+        if (throttled)
+        {
+            progress?.Report($"{spec.Label}残缺日：这一轮全都没补成，判定是连不上/被限流而不是数据源没有，"
+                           + "名单和重试计数原样留着，等会儿再跑一次。");
+            return new PartialDayRepairResult(
+                spec.Label, days.Count, 0, rows, failCount, 0,
+                NoRefetcher: false, Done: $"{spec.Label}残缺 {days.Count} 天（未计数）");
+        }
+
+        // 复查：跟体检同一套判据（不是 COUNT>0，理由见上面的 ⚠）
         var auditor = new SqliteDailyTableAuditor(dbPath);
         var stillBad = auditor.CheckDays(spec, MarketIndexCatalog.ShanghaiCompositeSymbol, days)
                               .Select(p => p.Day.Date).ToHashSet();

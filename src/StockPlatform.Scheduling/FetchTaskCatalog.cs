@@ -106,6 +106,10 @@ public enum FetchActionId
     /// </summary>
     FetchTotalShares,
 
+    /// <summary>【分红对账】（2026-09-18）——拿东财全量比一遍，把新浪漏掉的除权记录补进来。
+    /// 只加不删，见 doc/dividend-reconcile-design.md。</summary>
+    FetchDividendReconcile,
+
     // ───── 本地维护（2026-09-07）─────
     StepFillProbeFloor,
 
@@ -509,13 +513,22 @@ public static class FetchTaskCatalog
             + "新浪会静默漏票——实测漏 14 只，含当天上市的新股、改名\"退市XX\"仍在退市整理期交易的、"
             + "以及 *ST 那几只；漏掉的票两融数据一直在更新、K线却一根都没有。"
             + "市值/最新价只有新浪那条路给，所以**新浪必须排在前面**（见 CompositeStockListProvider）。\n"
-            + "⚠ 市值只有\"当下\"、接口没有历史，所以这一项没有\"补某一天\"的用法。",
-            FetchActionParams.GlobalFetchOptions),
+            + "⚠ 市值只有\"当下\"、接口没有历史，所以这一项没有\"补某一天\"的用法。\n"
+            + "2026-09-18 迁到新任务框架：一批＝**一轮**（一次请求拿回全市场），所以"
+            + "「只补待办」就是\"整轮重来\"——待办里那批代码是当时那批的全体，不是逐只失败。\n"
+            + "快照归到哪个交易日：先问本地交易日历（稳态下零请求），问不出才抓上证指数日线兜底。",
+            FetchActionParams.GlobalFetchOptions,
+            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog),
 
         new(FetchActionId.StepNetInflow, "资金净流入", "新浪", QuotaGroup.Sina,
             TimeSpan.FromMinutes(30), "每工作日",
             "逐只抓主力资金净流入（约 5500 只，做资金流因子）。失败的进自己的重试名单。\n"
-            + "模式选「只抓某一天」就按那一天精确取（原【补指定历史日】的做法），日期留空＝今天。",
+            + "模式选「只抓某一天」就按那一天精确取（原【补指定历史日】的做法），日期留空＝今天。\n"
+            + "2026-09-18 迁到新任务框架（NetInflowTask）：一批 30 只、组内并发，"
+            + "所以这个 1.75 小时的活**能分批跑、能中途停**了（以前停了就是整轮白费）。\n"
+            + "「只补待办」一次把三类都补上：失败名单按各自水位线重抓；整天缺失和体检查出的残缺日"
+            + "合并成一轮全市场（数据源一次返回整只票全历史，补几天跟补一天一样贵）"
+            + "——残缺日以前**没有人补**，只会每轮报一句\"只能人工处理\"。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.Date,
             SoftDependsOn: [FetchActionId.StepRoster],
             SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay | FetchMode.FillBacklog),
@@ -673,7 +686,10 @@ public static class FetchTaskCatalog
             + "模式：「增量」＝以日期格那天（留空＝今天）为终点回看几个交易日；"
             + "「首次整段回补」＝从 2010-03-31（融资融券开市首日，早于此日两融业务还不存在、"
             + "两所一天数据都没有）一路补到今天（原【一键补齐每日历史】的融资那半边），幂等可反复跑。\n"
-            + "非交易日由【交易日历】挡掉、\"确认没有数据\"的日子由空日名单挡掉，都不再白发请求。",
+            + "非交易日由【交易日历】挡掉、\"确认没有数据\"的日子由空日名单挡掉，都不再白发请求。\n"
+            + "2026-09-18 迁到新任务框架（MarginTask）：四条模式的口径统一了，"
+            + "「只补待办」＝补体检查出的残缺日（原来编排在 orchestrator），"
+            + "整段回补现在支持分批跑和到点收尾（约 3900 个交易日，停了下轮接着走）。",
             FetchActionParams.Date,
             SoftDependsOn: [FetchActionId.StepTradingCalendar],
             SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay
@@ -742,7 +758,7 @@ public static class FetchTaskCatalog
             FetchActionParams.None),
 
         new(FetchActionId.StepFillShortBalance, "融券余额补算", "本地查库·不联网", QuotaGroup.Local,
-            TimeSpan.FromMinutes(6), "每日（并入拉取全部/当天）",
+            TimeSpan.FromMinutes(6), "每日",
             "按交易所官方公式「**融券余量 × 当日收盘价**」补算**沪市**缺失的融券余额。一个请求都不发。\n"
             + "**修的是什么**：上交所接口的 rqylje（融券余额）**恒为 null**，而解析用的 GetNum 把 null 读成 0"
             + "——于是 1675 只沪市票的融券余额**历史上从来没有过非 0 值**（3,139,554 行沪市数据里 "
@@ -766,6 +782,11 @@ public static class FetchTaskCatalog
             + "已填的 263 万行偏低（茅台 2020-06-01 低 18%、2026-06-01 低 2.1%，越往前越错），"
             + "改成 day_raw 之后**必须跑一次重算**才能纠正。全历史重算约 48 分钟。",
             FetchActionParams.None,
+            // 软前置（2026-09-18 随挪进日更一起登记）：这两样是算式的两个因子——
+            // 融券余量来自【融资余额】、当日不复权收盘价来自【个股日K·不复权】。
+            // 缺哪个都不该拦住它（它本来就是"能算多少算多少、算不出来留 NULL"），
+            // 但日志里得留一行，否则某天沪市又出现一批空值时没人知道是前置没跑。
+            SoftDependsOn: [FetchActionId.StepMargin, FetchActionId.StepStockRawBars],
             SupportedModes: FetchMode.Incremental | FetchMode.Thorough),
 
         new(FetchActionId.StepFillProbeFloor, "回填\"无更早数据\"水位", "本地查库·不联网", QuotaGroup.Local,
@@ -810,7 +831,10 @@ public static class FetchTaskCatalog
         new(FetchActionId.StepIndexCons, "指数成分名单", "新浪", QuotaGroup.Sina,
             TimeSpan.FromMinutes(8), "季度",
             "内置的 732 个指数各自的成分股名单。成分名单本身就是一种选股全集（比如\"只在沪深300里选\"）。\n"
-            + "新浪对某些老指数本来就没有成分，返回空不算失败；请求失败的进重试名单。"),
+            + "新浪对某些老指数本来就没有成分，返回空不算失败；请求失败的进重试名单。\n"
+            + "2026-09-18 迁到新任务框架：一批＝一个指数，所以能分批跑、能到点收尾"
+            + "（以前中断就是整轮白费）；「只补待办」＝只抓失败名单里那些。",
+            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog),
 
         new(FetchActionId.StepIndexWeight, "指数权重", "中证 OSS", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(8), "季度",
@@ -822,7 +846,10 @@ public static class FetchTaskCatalog
             + "③确认过\"没有权重文件\"的指数记下来，30 天内不再问（全集 732 个里有四五百个是非中证系，"
             + "每轮拿它们去敲一遍最容易把反爬撞醒，而且一条数据也拿不到）。\n"
             + "稳态下每轮实际发出的请求接近 0，只有月初那一轮才会真抓中证系那两三百个。\n"
-            + "在季度组里**排最后**：它最容易撞墙，排末尾的话即使自己进了熔断，前面那些数据也早落库了。",
+            + "在季度组里**排最后**：它最容易撞墙，排末尾的话即使自己进了熔断，前面那些数据也早落库了。\n"
+            + "2026-09-18 迁到新任务框架：一批＝一个指数，能分批跑、能到点收尾；"
+            + "「只补待办」＝只抓失败名单（不过那两道筛子——那些就是要重试的）。",
+            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
             SoftDependsOn: [FetchActionId.StepIndexCons],
             Sources: [DataSourceId.CsIndex]),
 
@@ -1208,6 +1235,11 @@ public static class FetchTaskCatalog
             + "翻页少翻一页、某页被限流截断，表现出来都只是「今天少几百只」，不报的话没人会发现。\n"
             + "历史缺口归【分档资金流·补历史】那一项，两项写的是同一张表（逐条比对过、零差异）。",
             SupportsPartialRun: false,
+            // 软依赖**不复权**个股日K（2026-09-18 补登记）：收尾那次"当天齐没齐"的核对拿它当期望
+            // （"有K线的那天就该有资金流"，判据见 SqliteMoneyFlowDayAudit）。排在它前面的必须是
+            // 不复权那一套——前复权排在这一项之后，拿它当期望的话核对时它还没到位，
+            // 判据只会说"无法核对"，而这一项的全部意义就是当晚发现缺口。
+            SoftDependsOn: [FetchActionId.StepStockRawBars],
             Sources: [DataSourceId.EmPush2Delay]),
 
         new(FetchActionId.FetchTotalShares, "总股本", "东财", QuotaGroup.Mixed,
@@ -1347,8 +1379,26 @@ public static class FetchTaskCatalog
 
         new(FetchActionId.FetchShareholder, "拉取股东数据", "新浪", QuotaGroup.Sina,
             TimeSpan.FromHours(1.5), "季度",
-            "逐只抓股东户数 + 十大股东 + 十大流通股东的全部历史。"
-            + "十大流通股东里的「香港中央结算」就是北向资金的名义持有人。"),
+            "逐只抓股东户数 + 十大股东 + 十大流通股东的全部历史（一只票 2 个请求）。"
+            + "十大流通股东里的「香港中央结算」就是北向资金的名义持有人。\n"
+            + "**2026-09-18 迁到新任务框架**（ShareholderTask）：一批 30 只、抓一批存一批，"
+            + "**中途停止再点执行会接着抓、不从头来**。\n"
+            + "「要不要抓」按**报告期**判，不按「多久没抓」：库里这只票股东户数的最新报告期"
+            + "落后于它**已披露**的最新一期才抓（披露日来自【拉取财报预约日】，查不到的退回"
+            + "法定截止日）。所以半年报抓齐之后、三季报披露之前，这一项一个请求都不发。\n"
+            + "另有两条：100 天没抓过的整只重刷一遍（兜那 4% 不定期的股东名单变动公告）；"
+            + "一年多没成交的跳过（恢复交易会自动回到名单）。\n"
+            + "⚠ 不设人为的每轮上限——季度高峰约 60 分钟一轮跑得完；真撞限流会在连续 3 批"
+            + "全部失败时收工记成「跳过」，下轮接着抓剩下的。\n"
+            + "**名单含退市股**（2026-09-18 纳入，口径跟分红一致）：回测要消除幸存者偏差，"
+            + "而纳入前 337 只退市股里只有 5 只有股东数据——十大流通股东里的「香港中央结算」"
+            + "是北向持股的唯一来源。退市股的时间兜底走 365 天一档（它们的数据是静态历史），"
+            + "而「报告期永远落后」那一面靠「一年没成交就跳过」挡住。\n"
+            + "⚠ 退市名单来自【补全退市名单】：那一项没跑过，这边就少抓那些票（不报错，只是少）。",
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill | FetchMode.FillBacklog,
+            SupportsPartialRun: true,
+            Sources: [DataSourceId.Sina],
+            SoftDependsOn: [FetchActionId.FetchEarningsSchedule, FetchActionId.StepDelistedSupplement]),
 
         new(FetchActionId.FetchFinancials, "拉取财务报表", "东财 F10（保险走新浪）", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(90), "季度·跨天分轮",
@@ -1379,10 +1429,28 @@ public static class FetchTaskCatalog
             + "每只的抓取时刻记在 DividendFetchState 表里。于是——\n"
             + "· 【增量】只抓 25 天以内没抓过的（含从没抓过的），**中途停止再点执行会接着抓、不从头来**；\n"
             + "· 想强刷全市场用【整段回补】；\n"
-            + "· 连续 3 批（90 只）全部因限流失败就收工记成「跳过」，限流过去今天还能再来。",
+            + "· 连续 3 批（90 只）全部因限流失败就收工记成「跳过」，限流过去今天还能再来。\n"
+            + "**2026-09-18 加了公告索引**：先问东财最近 45 天谁出了分红公告（含预案、进度更新），"
+            + "只抓这些 + 到期兜底的那批，一轮从 5902 个请求降到一两百，每轮上限 400 只。\n"
+            + "⚠ 值仍然取新浪，东财只当索引——它当值源不合格（退市股全空、配股比例只在文本里），"
+            + "实测还有约 1% 漏检，靠 90 天全量兜底捞回来（退市股 365 天一轮，它们的分红不会再变）。\n"
+            + "索引拿不到就自动退回纯水位线并在日志里说一声；想彻底关掉：fetcher-settings.json 里"
+            + "把 DividendNoticeIndex 设成 none。",
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill | FetchMode.FillBacklog,
             SupportsPartialRun: true,
-            Sources: [DataSourceId.Sina]),
+            Sources: [DataSourceId.Sina, DataSourceId.EmDataCenter]),
+
+        new(FetchActionId.FetchDividendReconcile, "分红对账", "东财", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(5), "季度",
+            "拿东财 RPT_SHAREBONUS_DET 全量（按年切片，约 120 个请求、3 分钟）跟库里的分红比一遍，\n"
+            + "**把新浪漏掉的除权记录补进来**。只加不删：库里有而东财没有的一律不动\n"
+            + "（东财那张表退市股全空，2,516 条只有我们有），两边互补、谁也不是权威。\n"
+            + "为什么要对账：分红是复权因子的输入，**缺一条除权记录，那只票的复权序列整段错且不报错**\n"
+            + "——行都在、值也都对，只是少了一次事件，没有任何现成的体检查得出来。\n"
+            + "2026-09-18 首次对账查出 1,050 条缺口，其中 1,043 条是北交所：新浪对北交所覆盖不全\n"
+            + "（920061/920547/833171/430047 实测都返回「暂时没有数据」）。\n"
+            + "⚠ 补完如果日志说有缺口落在 day_adj 区间内，要再跑一次【重算回测序列】。",
+            Sources: [DataSourceId.EmDataCenter]),
 
         new(FetchActionId.BankRegulatory, "金融监管指标", "新浪(页面 + PDF文件)", QuotaGroup.Sina,
             TimeSpan.FromHours(1), "半年（年报/中报后）",
@@ -1568,6 +1636,12 @@ public static class FetchTaskCatalog
         // 改完规则要等下一个季度才生效，或者每次都得手工点一下——那正是这套东西想省掉的事。
         FetchActionId.StepWatchIndicator => PlanGroupKind.Daily,
 
+        // 【融券余额补算】（2026-09-18）归日更：它补的是**当天**那批两融数据里沪市缺的那一列
+        // （上交所 rqylje 恒 null），跟着【融资余额】一起走才有意义。纯本地 UPDATE、不发请求，
+        // 增量只补缺值、没新数据就空转，放日更没有任何负担。
+        // 不归【按需启动】：那一组是"想起来才做的一次性活"，而这一项漏一天就有一天的沪市融券余额是空的。
+        FetchActionId.StepFillShortBalance => PlanGroupKind.Daily,
+
         // 【回购公告进展】（2026-09-11）必须日更：首次回购是**次一交易日**披露的，
         // 晚一天就失去意义——那正是这一项唯一要等的信号。
         FetchActionId.StepPlanWatch => PlanGroupKind.Daily,
@@ -1728,6 +1802,14 @@ public static class FetchTaskCatalog
         // 它必须当天跑成——接口只给最近一个交易日，隔一个开盘就永久取不回来了。
         FetchActionId.FetchMoneyFlowSnapshot,
         FetchActionId.StepMargin,
+        // 【融券余额补算】紧跟【融资余额】（2026-09-18 挪进日更）：上交所的 rqylje 恒为 null，
+        // 沪市那 1675 只票的融券余额**只能**靠这一项按「融券余量 × 当日收盘价」算出来——
+        // 不跑就是天天留一列 0/NULL，而且是静默的（资金面诊断的「融券余额变化」对沪市算不出来，
+        // 界面还显示成「融券余额 0」）。它原来待在【按需启动】组且不启用，等于每天都得人记着点一下。
+        // 排在这个位置两个前置都满足：不复权日K 在前面的 K线族里、融资余额就是上一行——
+        // 它要拿当天的余量乘当天的不复权收盘价，两样都落库了才算得出来。
+        // 纯本地 UPDATE、一个请求都不发；日常增量只补缺值，没新数据时空转。
+        FetchActionId.StepFillShortBalance,
         FetchActionId.StepLhb,
         // 【大宗交易】紧跟龙虎榜（2026-09-17 拆出来时排的）：两者是互补的两块筹码信息——
         // 龙虎榜是场内异动席位，大宗是场外大额易手。日常增量只抓最近 30 天、几十个请求。
@@ -1790,10 +1872,12 @@ public static class FetchTaskCatalog
     /// <summary>
     /// 「季度定期」组的默认排法（2026-09-02）。整组「每月 1 号到期 + 空闲时补」。
     ///
-    /// ⚠ 顺序上有两条依赖，别按"快的排前面"随手挪：
+    /// ⚠ 顺序上有三条依赖，别按"快的排前面"随手挪：
     ///   · 【金融监管指标】要在【财务报表】之后——机构类型（银行/券商/保险）是靠财务特征科目
     ///     认出来的，没有财务数据它一家都识别不出；
-    ///   · 【导入手工数据】要在【金融监管指标】之后——它填的正是监管指标里没解析出来的那些格子。
+    ///   · 【导入手工数据】要在【金融监管指标】之后——它填的正是监管指标里没解析出来的那些格子；
+    ///   · 【补全退市名单】要在【拉取股东数据】和【拉取分红送配】之前（2026-09-18）——
+    ///     那两项的名单都含退市股，而退市名单是它写进 StockMeta 的。
     /// 财务报表最慢（每轮 300 只、跨几天），但它有冷却：补完一轮歇 20 分钟，
     /// 那段空档后面的小任务照样能跑，不会被饿死。
     /// </summary>
@@ -1805,13 +1889,17 @@ public static class FetchTaskCatalog
         // 指数那两项是拆开的：成分名单（新浪）/ ETF映射（本地）；权重排到最后，理由见末尾
         FetchActionId.StepIndexCons,
         FetchActionId.StepEtfIndexMap,
+        // 【补全退市名单】排在股东和分红**前面**（2026-09-18）：那两项的名单都含退市股
+        // （分红 09-06 纳入、股东 09-18 纳入），而退市名单正是这一项往 StockMeta 写的。
+        // 排在后面的话，同一轮里它们用的永远是上一轮的旧名单——**新退市的票会少抓一整轮**，
+        // 而且不报错、只是少。目录里股东那条挂了 SoftDependsOn，PlanTemplateTests 会守住这个顺序。
+        FetchActionId.StepDelistedSupplement,
         FetchActionId.FetchShareholder,
         FetchActionId.FetchDividend,
         // 【基金除权除息】紧跟个股分红（2026-09-17）：同一族数据（除权除息事件），
         // 只是一个抓个股、一个读东财终端的本地文件。它给【ETF日K·不复权】当前置——
         // 那一项在日更组，靠它区分"这只 ETF 除过权（必须抓）"还是"从没除过（可以复制）"。
         FetchActionId.ImportFundExDividend,
-        FetchActionId.StepDelistedSupplement,
         FetchActionId.FetchFinancials,        // 监管指标要靠它认机构类型，所以排在前面
         // 【公司档案】+【客户与供应商】紧跟财务报表（2026-09-07/09-08）：
         // 它们是同一份年报里的东西，一起更新才不会出现"财务是新的、客户集中度还是去年的"错配。

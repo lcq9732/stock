@@ -82,6 +82,117 @@ public class DividendTaskTests
         Assert.Equal(["000001", "000004", "000003", "000002"], due);
     }
 
+    // ── 公告索引（2026-09-18）────────────────────────────────────
+
+    [Fact]
+    public void 索引命中的无视水位线也要抓()
+    {
+        // 命中＝出了新方案或进度变了，昨天刚抓过也得再抓——这是索引法的全部意义。
+        var now = new DateTime(2026, 9, 18);
+        var states = new Dictionary<string, DividendFetchState> { ["600000"] = Ok("600000", now.AddDays(-1)) };
+
+        // 公告日比上次抓取晚 ⇒ 抓
+        var due = DividendTask.SelectDue(["600000"], states, now.AddDays(-90),
+                                         hits: Notice(("600000", now)));
+
+        Assert.Equal(["600000"], due);
+    }
+
+    [Fact]
+    public void 上次抓取晚于那条公告就不再抓()
+    {
+        // 这条是"每天重抓 900 只"那个毛病的判据（2026-09-18 当天修）：
+        // 45 天窗口里同一只票天天在索引里，但只有"上次抓取早于那条公告"才真要抓。
+        var now = new DateTime(2026, 9, 18);
+        var states = new Dictionary<string, DividendFetchState> { ["600000"] = Ok("600000", now) };
+
+        // 公告是 10 天前的，而今天抓过了 ⇒ 已经覆盖，不抓
+        Assert.Empty(DividendTask.SelectDue(["600000"], states, now.AddDays(-90),
+                                            hits: Notice(("600000", now.AddDays(-10)))));
+    }
+
+    [Fact]
+    public void 当天出的公告_当天抓过之后第二天还会再抓一次()
+    {
+        // 公告只有日期没有时刻，所以"当天抓过"不能算覆盖当天的公告——
+        // 判据写成 notice > lastOk 的话，这条公告**永远抓不到**（第二天比较仍然相等）。
+        // 取"公告日的次日零点"，代价是多抓一次，换的是绝不漏。
+        var noticeDay = new DateTime(2026, 9, 18);
+        var states = new Dictionary<string, DividendFetchState>
+        {
+            ["600000"] = Ok("600000", noticeDay.AddHours(9)),   // 当天上午抓的
+        };
+
+        Assert.Equal(["600000"],
+            DividendTask.SelectDue(["600000"], states, noticeDay.AddDays(-90),
+                                   hits: Notice(("600000", noticeDay))));
+    }
+
+    [Fact]
+    public void 索引命中的排在到期的前面()
+    {
+        // 被每轮上限或 Deadline 截断时，先保住真有新数据的那些。
+        var now = new DateTime(2026, 9, 18);
+        var states = new Dictionary<string, DividendFetchState>
+        {
+            ["000001"] = Ok("000001", now.AddDays(-200)),   // 很旧，到期
+            ["600000"] = Ok("600000", now.AddDays(-1)),     // 很新，但索引命中
+        };
+
+        var due = DividendTask.SelectDue(["000001", "600000"], states, now.AddDays(-90),
+                                         hits: Notice(("600000", now)));
+
+        Assert.Equal(["600000", "000001"], due);
+    }
+
+    [Fact]
+    public void 索引为空时仍按水位线兜底()
+    {
+        // 索引拿不到 ⇒ hits 是空集合。这时**绝不能**变成"本轮没有要抓的"，那是静默漏抓。
+        var now = new DateTime(2026, 9, 18);
+        var states = new Dictionary<string, DividendFetchState> { ["000001"] = Ok("000001", now.AddDays(-200)) };
+
+        var due = DividendTask.SelectDue(["000001", "600000"], states, now.AddDays(-90),
+                                         hits: Notice());
+
+        Assert.Equal(["600000", "000001"], due);   // 没抓过的 + 到期的，一个不少
+    }
+
+    [Fact]
+    public void 退市股走更长的那一档()
+    {
+        // 退市股不在索引里，而分红是静态历史——200 天前抓过的在市股该抓，退市股不该。
+        var now = new DateTime(2026, 9, 18);
+        var states = new Dictionary<string, DividendFetchState>
+        {
+            ["000001"] = Ok("000001", now.AddDays(-200)),
+            ["600001"] = Ok("600001", now.AddDays(-200)),
+        };
+
+        var due = DividendTask.SelectDue(
+            ["000001", "600001"], states, now.AddDays(-90),
+            hits: Notice(),
+            delisted: new HashSet<string> { "600001" },
+            delistedCutoff: now.AddDays(-365));
+
+        Assert.Equal(["000001"], due);
+    }
+
+    [Fact]
+    public void 退市股过了一年也要重抓()
+    {
+        var now = new DateTime(2026, 9, 18);
+        var states = new Dictionary<string, DividendFetchState> { ["600001"] = Ok("600001", now.AddDays(-400)) };
+
+        var due = DividendTask.SelectDue(
+            ["600001"], states, now.AddDays(-90),
+            hits: Notice(),
+            delisted: new HashSet<string> { "600001" },
+            delistedCutoff: now.AddDays(-365));
+
+        Assert.Equal(["600001"], due);
+    }
+
     [Fact]
     public void 整批因限流失败才算全军覆没()
     {
@@ -100,6 +211,10 @@ public class DividendTaskTests
         // 比如页面改版把解析全打挂了：那种该老老实实报失败，收工只会把问题藏起来。
         Assert.False(DividendTask.IsDeadBatch([Fail("1", limited: false), Fail("2", limited: false)]));
     }
+
+    /// <summary>造一份"代码 → 最新公告日"的索引结果。</summary>
+    private static Dictionary<string, DateTime> Notice(params (string Code, DateTime Day)[] items)
+        => items.ToDictionary(x => x.Code, x => x.Day, StringComparer.Ordinal);
 
     private static DividendTask.DividendOutcome Good(string code) =>
         new(code, [new DividendRow { Code = code }], [], true, null, false);

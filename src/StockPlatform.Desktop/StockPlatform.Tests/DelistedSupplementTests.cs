@@ -41,13 +41,15 @@ public class DelistedSupplementTests : IDisposable
     }
 
     /// <summary>
-    /// ⚠ **不要在这里调 <c>SqliteConnection.ClearAllPools()</c>**——那是**进程级**的全局操作，
-    /// 会把连接池里所有连接（包括其它测试类此刻正在用的）从底层关掉。xunit 默认并行跑不同测试类，
-    /// 于是 native 层去访问已释放的连接，**整个 testhost 崩溃**，而且崩在第几个测试完全随机。
-    /// 2026-09-17 就是这么崩的（先 970 个、再 720 个，两次位置不同），
-    /// 跟 <see cref="MarginShortBalanceFillTests"/> 当初踩的是同一个坑。
+    /// 不调 <c>SqliteConnection.ClearAllPools()</c>——那是**进程级**的全局操作，这里没必要用。
+    /// 临时目录删不掉就留着：反正在系统 temp 里、名字带 Guid 不会撞。
     ///
-    /// 临时目录删不掉就留着——反正在系统 temp 里，名字带 Guid 不会撞。
+    /// ⚠ 2026-09-17 我一度把当天的 testhost 崩溃（先崩在第 970 个、再崩在第 720 个）归因成
+    /// "ClearAllPools 撞上 xunit 的并行"，**那个因果是错的**：本仓库 2026-09-07 就在
+    /// <c>AssemblyInfo.cs</c> 里设了 <c>DisableTestParallelization = true</c>，测试类之间根本不并行。
+    /// 当时同时做了两件事（杀掉残留 testhost + 去掉这行调用），崩溃消失该记在前者头上。
+    /// 真要排查这类随机崩，先查残留进程数、跑 <c>dotnet build-server shutdown</c>
+    /// （见 project_stale_dotnet_crashes_tests）。
     /// </summary>
     public void Dispose()
     {

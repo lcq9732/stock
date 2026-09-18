@@ -360,6 +360,10 @@ ToolTip 不在行的可视树里，`RelativeSource AncestorType=Window` 在 Tool
 ⚠ 两道闸，别拆：① 只在 `#if DEBUG` 里注册进数据源列表（Release 的 `BarSource` 选不到它）；
 ② Debug 实例的数据目录在 `bin\Debug\...\data` 下，跟正式实例的 `publish\data` 天然隔离。
 
+> 这套设施后来长大了（2026-09-18 起有两融/资金净流入/龙虎榜/股东四个模拟源，
+> 由总开关 `"OfflineMock": "true"` 统一打开）。**说明书在 `doc/offline-mock-design.md`**——
+> 现有哪些模拟源、开关怎么配、哪些源还没有（仍会真发请求）、怎么加新的，都在那儿。
+
 **造的场景**（每条对应链上一个分支）：
 
 | 标的 | 状况 | 待办 |

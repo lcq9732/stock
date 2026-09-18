@@ -299,7 +299,8 @@ public class SqliteCapitalDiagnosisReader
         using var cmd = conn.CreateCommand();
         // margin_repay 只有沪市有（深交所那张表没这一列）——拿它算官方口径的净买入；
         // 深市为 NULL，算净买入时退回余额差分（见 CapitalDiagnosisAnalyzer.NetBuySeries）。
-        cmd.CommandText = @"SELECT trade_date, margin_balance, margin_buy, short_balance, margin_repay
+        cmd.CommandText = @"SELECT trade_date, margin_balance, margin_buy, short_balance, margin_repay,
+                                   short_volume
                             FROM MarginDetail WHERE code=$c ORDER BY trade_date;";
         cmd.Parameters.AddWithValue("$c", code);
         var list = new List<MarginDetailRow>();
@@ -317,6 +318,9 @@ public class SqliteCapitalDiagnosisReader
                 // 补算过才有值。读成 0 的话界面会显示"融券余额为零"，那正是修掉的那个 bug。
                 ShortBalance = r.IsDBNull(3) ? null : r.GetDouble(3),
                 MarginRepay = r.IsDBNull(4) ? null : r.GetDouble(4),
+                // 融券**余量**（股）是两所都给的源头字段，既不需要补算也不含价格因素——
+                // 维度4 判"做空力量"就靠它，余额只当规模参考（2026-09-18）。
+                ShortVolume = r.IsDBNull(5) ? 0 : r.GetDouble(5),
             });
         }
         return list;

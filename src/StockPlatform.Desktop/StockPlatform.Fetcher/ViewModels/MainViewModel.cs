@@ -2295,8 +2295,8 @@ public class MainViewModel : INotifyPropertyChanged
             case FetchActionId.FetchIndexCons:
                 return _orchestrator.RunFetchIndexConsAsync(progress, ct);
 
-            case FetchActionId.FetchShareholder:
-                return _orchestrator.RunFetchShareholderAsync(progress, ct);
+            // 【拉取股东数据】2026-09-18 迁到新任务框架，走上面那条 _taskRegistry 总分支
+            // （它的待办也自己补，所以 FillBacklog 也走那条）。
 
             case FetchActionId.FetchFinancials:
                 return FetchFinancialsRoundAsync(deadline, progress, ct);
@@ -2336,11 +2336,11 @@ public class MainViewModel : INotifyPropertyChanged
             // 它们调的是编排层 FetchOrchestrator.Steps.cs 里的单项入口，跟【拉取全部】内部走的是
             // 同一段抓取逻辑（那边只是包了个壳、自己建 errors/stats），所以两边行为一致。
 
-            case FetchActionId.StepRoster:
-                return _orchestrator.RunStepRosterAndMarketCapAsync(SelectedSource, progress, ct);
+            // 【股票名册与流通市值】【指数成分】【指数权重】三个 case 删于 2026-09-18：
+            // 都迁去了 StockPlatform.Tasks，走上面那条 _taskRegistry 总分支。
 
-            case FetchActionId.StepNetInflow:
-                return _orchestrator.RunStepNetInflowAsync(progress, ct, SpecificDayOf(item));
+            // 【资金净流入】的 case 删于 2026-09-18：迁去了 StockPlatform.Tasks/NetInflowTask，
+            // 走上面那条 _taskRegistry 总分支（三个模式都在任务里，三类待办也自己补）。
 
             case FetchActionId.StepAnnouncements:
                 return _orchestrator.RunStepAnnouncementsAsync(
@@ -2383,11 +2383,8 @@ public class MainViewModel : INotifyPropertyChanged
             case FetchActionId.StepBoardIndex:
                 return _orchestrator.RunStepSynthesizeBoardIndexAsync(progress, ct);
 
-            case FetchActionId.StepMargin:
-                // 「首次整段回补」＝原【一键补齐每日历史】的融资那半边
-                return item.EffectiveMode == FetchMode.FirstBackfill
-                    ? _orchestrator.RunStepBackfillMarginAsync(progress, ct)
-                    : _orchestrator.RunStepMarginRecentAsync(ParseOptionalDate(item.DateText), progress, ct);
+            // 【融资余额】的 case 删于 2026-09-18：迁去了 StockPlatform.Tasks/MarginTask，
+            // 走上面那条 _taskRegistry 总分支（四个模式都在任务里，待办也自己补）。
 
             // 【龙虎榜】的 case 删于 2026-09-17：迁去了 StockPlatform.Tasks/LhbTask，
             // 走上面那条 _taskRegistry 总分支（增量/只抓某一天/整段回补都在任务里）。
@@ -2408,11 +2405,7 @@ public class MainViewModel : INotifyPropertyChanged
 
             // ───── 另外三处复合动作拆出来的（2026-09-02）─────
 
-            case FetchActionId.StepIndexCons:
-                return _orchestrator.RunStepIndexConsOnlyAsync(progress, ct);
 
-            case FetchActionId.StepIndexWeight:
-                return _orchestrator.RunStepIndexWeightOnlyAsync(progress, ct);
 
             case FetchActionId.StepEtfIndexMap:
                 return _orchestrator.RunStepEtfIndexMapAsync(progress, ct);

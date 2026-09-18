@@ -84,7 +84,7 @@ public class SqliteDividendRepository : IDividendRepository
         using var conn = Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT code, announce_date, bonus_shares, transfer_shares, dividend_yuan, progress, record_date, ex_date, fetched_at
+            SELECT code, announce_date, bonus_shares, transfer_shares, dividend_yuan, progress, record_date, ex_date, fetched_at, source
             FROM Dividend WHERE code = $c ORDER BY announce_date;
             """;
         cmd.Parameters.AddWithValue("$c", code);
@@ -103,6 +103,7 @@ public class SqliteDividendRepository : IDividendRepository
                 RecordDate = reader.IsDBNull(6) ? null : DateTime.ParseExact(reader.GetString(6), DateFormat, CultureInfo.InvariantCulture),
                 ExDate = reader.IsDBNull(7) ? null : DateTime.ParseExact(reader.GetString(7), DateFormat, CultureInfo.InvariantCulture),
                 FetchedAt = reader.IsDBNull(8) ? DateTime.MinValue : DateTime.ParseExact(reader.GetString(8), TimeFormat, CultureInfo.InvariantCulture),
+                Source = reader.IsDBNull(9) ? null : reader.GetString(9),
             });
         }
         return result;
@@ -218,6 +219,118 @@ public class SqliteDividendRepository : IDividendRepository
             };
         }
         return result;
+    }
+
+    public Dictionary<string, HashSet<DateTime>> GetImplementedExDates()
+    {
+        using var conn = Open();
+        SqliteSchema.EnsureSchema(conn);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT code, ex_date FROM Dividend
+            WHERE progress = '实施' AND ex_date IS NOT NULL AND ex_date <> '';
+            """;
+        var result = new Dictionary<string, HashSet<DateTime>>(StringComparer.Ordinal);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            if (!DateTime.TryParse(r.GetString(1), CultureInfo.InvariantCulture,
+                                   DateTimeStyles.None, out var d)) continue;
+            if (!result.TryGetValue(r.GetString(0), out var set))
+                result[r.GetString(0)] = set = new HashSet<DateTime>();
+            set.Add(d.Date);
+        }
+        return result;
+    }
+
+    public int InsertMissing(IReadOnlyList<DividendRow> rows)
+    {
+        if (rows.Count == 0) return 0;
+        using var conn = Open();
+        SqliteSchema.EnsureSchema(conn);
+        using var tx = conn.BeginTransaction();
+        int n = 0;
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            // OR IGNORE：主键撞上就原样不动。判重在调用方按除权日做过了（见
+            // GetImplementedExDates 的注释），这里只是最后一道不覆盖的保险。
+            cmd.CommandText = """
+                INSERT OR IGNORE INTO Dividend
+                    (code, announce_date, bonus_shares, transfer_shares, dividend_yuan,
+                     progress, record_date, ex_date, fetched_at, source)
+                VALUES ($c, $ad, $bs, $ts, $dy, $pg, $rd, $ex, $at, $src);
+                """;
+            var ps = new[] { "$c","$ad","$bs","$ts","$dy","$pg","$rd","$ex","$at","$src" }
+                .Select(n2 => { var p = cmd.CreateParameter(); p.ParameterName = n2; cmd.Parameters.Add(p); return p; })
+                .ToArray();
+            foreach (var r in rows)
+            {
+                ps[0].Value = r.Code;
+                ps[1].Value = r.AnnounceDate.ToString(DateFormat, CultureInfo.InvariantCulture);
+                ps[2].Value = r.BonusShares;
+                ps[3].Value = r.TransferShares;
+                ps[4].Value = r.DividendYuan;
+                ps[5].Value = (object?)r.Progress ?? DBNull.Value;
+                ps[6].Value = r.RecordDate.HasValue ? r.RecordDate.Value.ToString(DateFormat, CultureInfo.InvariantCulture) : DBNull.Value;
+                ps[7].Value = r.ExDate.HasValue ? r.ExDate.Value.ToString(DateFormat, CultureInfo.InvariantCulture) : DBNull.Value;
+                ps[8].Value = r.FetchedAt.ToString(TimeFormat, CultureInfo.InvariantCulture);
+                ps[9].Value = (object?)r.Source ?? DBNull.Value;
+                int wrote = cmd.ExecuteNonQuery();
+
+                // 撞主键了（wrote==0）：判重是按**除权日**过的，所以这条在库里确实还没有，
+                // 是它的公告日恰好跟另一条撞上了——东财会给出"两条不同除权日、预案公告日相同"
+                // 的记录。直接 IGNORE 掉的话，这条缺口每轮都会被判成缺、每轮被吞，
+                // 日志还每轮报一次假的成功数，**永远收敛不了**（2026-09-18 实机跑出来的，139 条）。
+                // 换成用除权日当公告日再试一次：除权日在库里本来就不存在（判重刚验过），
+                // 撞第二次的概率极低，真撞了就在返回值里体现出来，由调用方报差额。
+                if (wrote == 0 && r.ExDate is { } ex && r.AnnounceDate.Date != ex.Date)
+                {
+                    ps[1].Value = ex.ToString(DateFormat, CultureInfo.InvariantCulture);
+                    wrote = cmd.ExecuteNonQuery();
+                }
+                n += wrote;
+            }
+        }
+        tx.Commit();
+        return n;
+    }
+
+    public int SeedFetchStatesFromDividends()
+    {
+        using var conn = Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        // 只在整张表还空着的时候播种。非空＝新版已经跑过，那时的状态是真的抓取记录，
+        // 绝不能被这份近似值盖掉。
+        using (var probe = conn.CreateCommand())
+        {
+            probe.CommandText = "SELECT EXISTS(SELECT 1 FROM DividendFetchState);";
+            if (Convert.ToInt32(probe.ExecuteScalar()) != 0) return 0;
+        }
+
+        using var tx = conn.BeginTransaction();
+        int seeded;
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            // fetched_at 早于 1990 的丢掉——库里有 323 只老 code 记的是 DateTime.MinValue
+            // （'0001-01-01…'，早期数据没记时刻）。那不是"抓过"，播成水位线会让它们永远不抓。
+            cmd.CommandText = """
+                INSERT OR IGNORE INTO DividendFetchState
+                    (code, last_ok_at, dividend_rows, rights_rows)
+                SELECT d.code,
+                       MAX(d.fetched_at),
+                       COUNT(*),
+                       COALESCE((SELECT COUNT(*) FROM RightsIssue r WHERE r.code = d.code), 0)
+                FROM Dividend d
+                WHERE d.fetched_at IS NOT NULL AND d.fetched_at >= '1990'
+                GROUP BY d.code;
+                """;
+            seeded = cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return seeded;
     }
 
     public void SaveFetchStates(IReadOnlyList<DividendFetchState> states)

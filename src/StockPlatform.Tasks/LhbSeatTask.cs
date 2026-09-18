@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using StockPlatform.Data.Orchestration;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 using StockPlatform.Scheduling;
@@ -39,9 +40,21 @@ public sealed class LhbSeatTask(
     ILhbSeatRepository repository,
     ILhbSeatDayFetcher provider,
     ITradingDayRepository tradingDays,
-    IManifestStore manifestStore) : FetchTaskBase<LhbSeatDay>
+    IManifestStore manifestStore,
+    FetchPaths paths) : FetchTaskBase<LhbSeatDay>
 {
     public override FetchActionId Id => FetchActionId.FetchLhbSeat;
+
+    /// <summary>
+    /// 残缺日待办自己补（2026-09-18 收口，见 doc/fill-backlog-to-tasks-design.md）。
+    ///
+    /// 09-17 迁移时这一条还是 false——待办编排留在 <c>FetchOrchestrator</c> 那边。
+    /// 能搬过来的前提是**席位的待办只有"残缺日"这一类**（体检的 OwnerTaskId 和
+    /// <c>SaveIncompleteTodo</c> 是仅有的两个来源）：转交之后 orchestrator 那条路
+    /// 对本项不再跑，真有别的类别就会**静默补不上**。这个前提由
+    /// <c>RetryDispatchTests</c> 的守卫钉着。
+    /// </summary>
+    public override bool HandlesBacklog => true;
 
     /// <summary>东财这两张表最早到 2016-01-04，再往前查是空的。</summary>
     private static readonly DateTime Floor = new(2016, 1, 1);
@@ -74,6 +87,9 @@ public sealed class LhbSeatTask(
     /// 而"中断之后怎么接着走"恰恰是按模式分岔的。</summary>
     private FetchMode _mode;
 
+    /// <summary>【只补待办】那一路的结果。null＝这轮不是补待办、或没有欠着的天。</summary>
+    private PartialDayRepairResult? _backlog;
+
     protected override async IAsyncEnumerable<IReadOnlyList<LhbSeatDay>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
@@ -82,17 +98,34 @@ public sealed class LhbSeatTask(
         _incomplete.Clear();
         _okDays = _emptyDays = _rows = _attempted = 0;
         _skipped = null;
+        _backlog = null;
         _mode = args.Mode;
         _sw.Restart();
+
+        // ── 【只补待办】走完全不同的一条路：目标从待办清单来，不从水位线来 ──
+        // 编排整个在 PartialDayRepair 里（逐日重抓 → 用体检同一套判据复查 → Tries →
+        // 满 MaxTries 判定"数据源那天就这些"）。**不要**把残缺日当普通的天塞进 PlanDays
+        // 走下面的流式路径：那等于把复查判据和 Tries 抄一遍，正是抽出那个类要避免的事。
+        //
+        // 它自己一天一天循环、每天开头检查取消，所以停止停在**天的边界**上，
+        // 整日替换的事务不会被腰斩。MaxItems/Deadline 进不去它——残缺日是个位数天，
+        // 真需要的话给 PartialDayRepair 加可选参数，别在这里另写循环。
+        if (args.Mode == FetchMode.FillBacklog)
+        {
+            // 包 Task.Run：它开头读 manifest、查体检 spec 都是同步 IO，骨架不替子类推线程池。
+            _backlog = await Task.Run(() => new PartialDayRepair(paths.CurrentDb, manifestStore)
+                .RunAsync(RetryTaskIds.LhbSeat,
+                          d => new LhbSeatDayWriter(provider, repository).RefetchAsync(d, ct),
+                          ProgressSink, ct), ct);
+            yield break;
+        }
 
         // 定"抓哪些天"要查库（水位线、交易日历），都是同步 IO。骨架不替子类推到线程池，
         // 在首个 await 之前干这些会冻住界面。
         var days = await Task.Run(() => PlanDays(args), ct);
         if (days.Count == 0)
         {
-            _skipped = args.Mode == FetchMode.FillBacklog
-                ? "龙虎榜席位没有欠着的残缺日"
-                : "龙虎榜席位已经抓到最新交易日了";
+            _skipped = "龙虎榜席位已经抓到最新交易日了";
             Report($"{_skipped}，本轮不用抓。");
             yield break;
         }
@@ -172,6 +205,16 @@ public sealed class LhbSeatTask(
 
     protected override Task OnStoppedAsync(TaskRunStats stats)
     {
+        // 【只补待办】中断：待办清单本身就是进度，补齐的那些天已经在复查时划掉了
+        // （复查发生在每一轮 PartialDayRepair 的末尾——中途停的话这一轮一天都没划，
+        // 下轮原样重来，整日替换是幂等的）。跟水位线无关，所以不套下面那套话。
+        if (_mode == FetchMode.FillBacklog)
+        {
+            Report("龙虎榜席位·补待办中断。已重抓的天都是整日替换、各自一个事务，"
+                 + "没补完的仍在待办里，下次再点一次即可。");
+            return Task.CompletedTask;
+        }
+
         // ⚠ "下次从水位线接着走"只对**增量**成立。「整段回补」压根不看水位线——它每轮都从
         //   数据起点重新排期，所以中断＝**进度不保留**；而改用增量也接不上，那条只从水位线
         //   往前回看 7 天，够不着中间没跑到的那一大段。2026-09-17 这句话真的把人误导过一次。
@@ -188,6 +231,26 @@ public sealed class LhbSeatTask(
     protected override Task<TaskRunResult?> OnCompletedAsync(
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
+        // 【只补待办】那一路：一行数据都不经过 SaveBatchAsync（编排和落库都在
+        // PartialDayRepair 里），所以结局要单独翻译——走下面那套会报"0 天写入 0 行"。
+        if (args.Mode == FetchMode.FillBacklog)
+        {
+            if (_backlog is not { } r)
+                return Task.FromResult<TaskRunResult?>(
+                    TaskRunResult.Skipped("龙虎榜席位没有欠着的残缺日", _errors));
+
+            var line = $"龙虎榜席位残缺日：{r.Days} 天里补上 {r.Fixed} 天、写入 {r.Rows} 行"
+                     + (r.Failed > 0 ? $"，{r.Failed} 天重抓失败" : "")
+                     + (r.ConfirmedNow > 0 ? $"，{r.ConfirmedNow} 天补满仍不齐、已判定数据源就这些" : "")
+                     + "。";
+            // 一天都没补成 → 整项失败（多半是限流或断网）。名单和 Tries 已经被
+            // PartialDayRepair 原样留着了，下轮还会来。
+            return Task.FromResult<TaskRunResult?>(
+                r.Failed > 0 && r.Failed == r.Days
+                    ? new TaskRunResult(TaskState.Failed, _errors, NothingToDo: false, line)
+                    : new TaskRunResult(TaskState.Completed, _errors, NothingToDo: false, line));
+        }
+
         if (_skipped is { } why)
             return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, _errors));
 
@@ -230,15 +293,8 @@ public sealed class LhbSeatTask(
             return d.Date < Floor ? [] : [d.Date];
         }
 
-        if (args.Mode == FetchMode.FillBacklog)
-        {
-            // 【只补待办】到不了这儿——本任务的 HandlesBacklog 是 false（2026-09-18 起按这个
-            // 属性分派，见 IFetchTask.HandlesBacklog）：界面那一层和【重新拉取失败股票】都会把
-            // 它截给 FetchOrchestrator.RunFillBacklogAsync，由那边统一编排各类待办
-            // （席位只有"残缺日"一种，走 PartialDayRepair，按天重抓的动作共用
-            // LhbSeatDayWriter）。这里返回空是兜底，不是主路径。
-            return [];
-        }
+        // 【只补待办】不走这儿——它在 FetchAsync 开头就分流掉了（目标从待办清单来，
+        // 不从水位线来）。这里只管"按水位线/起点排期"那一类模式。
 
         DateTime start;
         if (args.Mode == FetchMode.FirstBackfill)

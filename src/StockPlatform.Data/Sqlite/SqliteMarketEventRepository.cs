@@ -41,33 +41,92 @@ public class SqliteMarketEventRepository : IMarketEventRepository
     }
 
     /// <summary>
-    /// 批内主键去重自检。返回去重后的列表；发现重复就告警。
+    /// 批内主键去重自检。返回去重后的列表；**真的丢了东西**才告警。
     /// 之所以是"告警+去重"而不是"抛异常"：抓了几十万行不该因为主键差一列就整轮失败，
     /// 但也绝不能让它悄悄发生——龙虎榜那次就是悄悄丢了 7.5%。
+    ///
+    /// ════ 主键撞了分两种，只有一种是问题（2026-09-18 拆开）════
+    ///   · **内容也一样**——接口自己把同一条记录返回了两遍，覆盖掉一条什么都没丢。
+    ///     实测：机构调研里东财把"2 家投资者"展开成两行，而区分列 <c>NUM</c> 两行都给 1，
+    ///     个人投资者又没有机构代码和参与人员，于是两行逐字段相同。真实家数在 <c>SUM</c>
+    ///     （<c>OrgTotal</c>）里存着，一条都没少。
+    ///   · **内容不一样**——那才是"主键少了区分列"，覆盖会静默丢数据，必须报。
+    ///
+    /// 拆开之前这两种都报同一句"会静默丢数据"，于是【拉取市场事件】每轮都带着 1 条错误、
+    /// 连着十几天，而它其实零影响——**天天喊的告警等于没有告警**。
+    ///
+    /// 内容相同的那批不报错，但**占比过高时提一句**（见 <see cref="EchoNoticeRatio"/>）：
+    /// 接口哪天开始大批量重复返回，仍然该有人知道，只是那不叫"丢数据"。
     /// </summary>
     private List<T> DedupeAndWarn<T>(List<T> list, Func<T, string> keyOf, string table)
     {
         var seen = new Dictionary<string, T>(list.Count);
-        int dup = 0;
+        int lost = 0;      // 主键撞了、而且内容不同 —— 真的丢了东西
+        int echo = 0;      // 主键撞了、内容也完全一样 —— 接口自己的重复返回
         var samples = new List<string>();
         foreach (var x in list)
         {
             var k = keyOf(x);
-            if (seen.ContainsKey(k))
+            if (seen.TryGetValue(k, out var prev))
             {
-                dup++;
-                // 带上样例 key：光知道"有重复"没法修，得知道是哪几行撞了才能定位缺哪个区分列。
-                // 机构调研那次就是靠样例才发现取错了字段（ORG_NAME 是上市公司名不是调研机构）。
-                if (samples.Count < 3) samples.Add(k);
+                if (SameContent(prev, x))
+                {
+                    echo++;
+                }
+                else
+                {
+                    lost++;
+                    // 带上样例 key：光知道"有重复"没法修，得知道是哪几行撞了才能定位缺哪个区分列。
+                    // 机构调研那次就是靠样例才发现取错了字段（ORG_NAME 是上市公司名不是调研机构）。
+                    if (samples.Count < 3) samples.Add(k);
+                }
             }
             seen[k] = x;      // 后来的覆盖先前的，跟 INSERT OR REPLACE 行为一致
         }
-        if (dup > 0)
+
+        if (lost > 0)
             OnWarning?.Invoke(
-                $"⚠ {table}：本批 {list.Count} 行里有 {dup} 行主键重复（{dup * 100.0 / list.Count:F1}%），" +
-                $"已按后到覆盖处理。主键可能少了区分列——这类问题不会报错但会静默丢数据。" +
-                $"重复样例：{string.Join(" / ", samples)}");
+                $"⚠ {table}：本批 {list.Count} 行里有 {lost} 行主键重复、**内容还不一样**"
+                + $"（{lost * 100.0 / list.Count:F1}%），已按后到覆盖处理。"
+                + "主键少了区分列——这类问题不会报错但会静默丢数据。"
+                + $"重复样例：{string.Join(" / ", samples)}");
+
+        if (echo >= EchoNoticeMin && echo >= list.Count * EchoNoticeRatio)
+            OnWarning?.Invoke(
+                $"（{table}：本批 {list.Count} 行里有 {echo} 行是接口原样重复返回的" +
+                $"（{echo * 100.0 / list.Count:F1}%，逐字段相同），已去重。没有丢数据，" +
+                $"但占比这么高值得看一眼接口是不是变了。）");
+
         return seen.Values.ToList();
+    }
+
+    /// <summary>接口原样重复返回的占比超过这个数才提一句。实测机构调研常年 0.004%（5 万行里 2 行），
+    /// 那个量级不值得每轮都说。</summary>
+    private const double EchoNoticeRatio = 0.01;
+
+    /// <summary>
+    /// 而且至少要有这么多行才看占比——**小样本里的比例是噪声不是信号**：
+    /// 一批只有 2 行、其中 1 行重复就是 50%，按占比判必报，可那说明不了任何事。
+    /// 这跟日频表体检里的"市场判据样本量下限"是同一个道理（那边取 30）。
+    /// </summary>
+    private const int EchoNoticeMin = 20;
+
+    /// <summary>
+    /// 两行的**内容**是不是完全一样（<see cref="DedupeAndWarn"/> 用来区分"接口重复返回"和"真丢数据"）。
+    ///
+    /// 走反射比所有属性——只在主键撞了的时候才调，一批最多几行，代价可以忽略；
+    /// 而写死字段清单的话，以后给模型加一列就得记得同步改这里，漏了就会把"真丢数据"误判成重复返回。
+    ///
+    /// ⚠ 排除 <c>FetchedAt</c>：那是**我们什么时候抓的**，不是数据内容。同一批里它也可能差几毫秒。
+    /// </summary>
+    private static bool SameContent<T>(T a, T b)
+    {
+        foreach (var p in typeof(T).GetProperties())
+        {
+            if (p.Name == nameof(OrgSurvey.FetchedAt)) continue;
+            if (!Equals(p.GetValue(a), p.GetValue(b))) return false;
+        }
+        return true;
     }
 
     // ── 大宗交易 ───────────────────────────────────────────────────

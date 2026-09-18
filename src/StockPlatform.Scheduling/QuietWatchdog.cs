@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace StockPlatform.Scheduling;
 
 /// <summary>
@@ -113,38 +115,68 @@ public sealed class QuietWatchdog : IDisposable
         }
     }
 
+    /// <summary>
+    /// 定时检查。
+    ///
+    /// ⚠ <b>这是 <see cref="Timer"/> 的回调，跑在线程池线程上——所以整个方法体必须把异常
+    /// 全吞掉</b>。线程池线程上的未捕获异常不是"记一笔错"，是**直接终止整个进程**：
+    /// 看门狗的职责是发现别人卡死，它自己把宿主掀了是最坏的结果，而且现场极难认
+    /// （崩在哪个线程、哪一刻全看 Timer 什么时候触发，跟当时在跑什么毫无关系）。
+    ///
+    /// 里面有两处会抛，各自单独兜，见下面的注释。
+    /// </summary>
     private void Check()
     {
-        TimeSpan? longRun = null;
-        lock (_gate)
+        try
         {
-            if (_quietCts.IsCancellationRequested) return;
-
-            var ran = DateTime.Now - _startedAt;
-            if (!_longRunNoticed && ran >= _longRunNotice)
+            TimeSpan? longRun = null;
+            lock (_gate)
             {
-                _longRunNoticed = true;
-                longRun = ran;
+                if (_quietCts.IsCancellationRequested) return;
+
+                var ran = DateTime.Now - _startedAt;
+                if (!_longRunNoticed && ran >= _longRunNotice)
+                {
+                    _longRunNoticed = true;
+                    longRun = ran;
+                }
+
+                if (DateTime.Now - _lastBeat < _maxQuiet)
+                {
+                    // 提醒要在锁外发，别让回调把锁攥着
+                    if (longRun == null) return;
+                }
+                else
+                {
+                    // ⚠ 先立旗再取消：catch 那边靠这个旗子认"是不是我掐的"，
+                    //    顺序反了会有一瞬间读到 false，被当成普通异常。
+                    Starved = true;
+                }
             }
 
-            if (DateTime.Now - _lastBeat < _maxQuiet)
+            // ⚠ 这是**外部代码**：PlanRunner 传的是写日志的委托，单测传的可能是
+            //   非线程安全的 List.Add。它抛出来不该连累下面的掐断判定，所以单独兜。
+            if (longRun is { } ran2)
             {
-                // 提醒要在锁外发，别让回调把锁攥着
-                if (longRun == null) return;
+                try { _onLongRun?.Invoke(ran2); }
+                catch (Exception ex) { Debug.WriteLine($"[QuietWatchdog] 长跑提醒回调抛异常已忽略：{ex.Message}"); }
             }
-            else
+
+            if (Starved)
             {
-                // ⚠ 先立旗再取消：catch 那边靠这个旗子认"是不是我掐的"，
-                //    顺序反了会有一瞬间读到 false，被当成普通异常。
-                Starved = true;
+                // ⚠ Cancel() 会**同步执行注册在这个令牌上的所有回调**，任何一个抛出都会被包成
+                //   AggregateException 扔回来。原来这里只 catch ObjectDisposedException，
+                //   于是别人注册的回调一抛，异常就从 Timer 回调逃出去、把进程一起带走。
+                try { _quietCts.Cancel(); }
+                catch (ObjectDisposedException) { /* 任务同时收工了，正常 */ }
+                catch (AggregateException ex) { Debug.WriteLine($"[QuietWatchdog] 取消回调抛异常已忽略：{ex.Message}"); }
             }
         }
-
-        if (longRun is { } ran2) _onLongRun?.Invoke(ran2);
-        if (Starved)
+        catch (Exception ex)
         {
-            try { _quietCts.Cancel(); }
-            catch (ObjectDisposedException) { /* 任务同时收工了，正常 */ }
+            // 兜底。上面每处都各自兜了，走到这儿说明是没预料到的——但宁可**漏报一次卡死**，
+            // 也不能让看门狗把进程掀了：漏报的代价是那一项多跑一会儿，掀进程的代价是全丢。
+            Debug.WriteLine($"[QuietWatchdog] 检查本身抛异常已忽略：{ex.Message}");
         }
     }
 

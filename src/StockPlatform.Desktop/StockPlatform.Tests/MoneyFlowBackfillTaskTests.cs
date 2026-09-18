@@ -95,7 +95,7 @@ public class MoneyFlowBackfillTaskTests : IDisposable
     private void Bars(string code, params DateTime[] days) =>
         _bars.InsertOrRefreshUnconfirmed(days.Select(d => new Bar
         {
-            Code = code, Granularity = "day", PeriodStart = d,
+            Code = code, Granularity = MoneyFlowBackfillPlan.ExpectGranularity, PeriodStart = d,
             Open = 1, Close = 1, High = 1, Low = 1, Volume = 1, Amount = 1,
             FetchedAt = d.AddHours(20),
         }));
@@ -333,7 +333,7 @@ public class MoneyFlowBackfillPlanTests : IDisposable
     private void Bars_(string code, params DateTime[] days) =>
         _bars.InsertOrRefreshUnconfirmed(days.Select(d => new Bar
         {
-            Code = code, Granularity = "day", PeriodStart = d,
+            Code = code, Granularity = MoneyFlowBackfillPlan.ExpectGranularity, PeriodStart = d,
             Open = 1, Close = 1, High = 1, Low = 1, Volume = 1, Amount = 1, FetchedAt = d.AddHours(20),
         }));
 

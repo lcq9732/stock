@@ -1,5 +1,6 @@
 ﻿using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
+using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Data.Orchestration;
 
@@ -41,6 +42,23 @@ public static class MoneyFlowBackfillPlan
 {
     /// <summary>窗口有多少个交易日。接口给的是最近约 120 个交易日，跟它对齐。</summary>
     public const int WindowTradingDays = 120;
+
+    /// <summary>
+    /// 拿**哪一套日线**当期望（2026-09-18 从前复权换成不复权）。
+    ///
+    /// 判据本身跟复权口径无关——两处都只 <c>COUNT</c> 根数、一个价格字段都不碰，
+    /// 换的是**抓取顺序**：不复权日线（<see cref="Granularity.DayRaw"/>）排在分档资金流之前跑，
+    /// 前复权（<see cref="Granularity.Day"/>）排在后面。拿前复权当锚的话，资金流收尾核对的那一刻
+    /// 当天的 day 还没到位，<see cref="Sqlite.MoneyFlowDayStatus.BarsReady"/> 不成立，
+    /// 判据只会说"无法核对"——而这一项的全部意义就是**当晚**发现缺口（过了窗口永久取不回来）。
+    ///
+    /// 换之前核过等价性：2026-02 ~ 2026-09-17，day 与 day_raw 的个股根数逐月、逐日完全相同
+    /// （day_raw 的历史已回补齐）。两套口径都只对个股和退市股抓，正好是这里要数的范围。
+    ///
+    /// ⚠ 这个常量是 <see cref="Sqlite.SqliteMoneyFlowDayAudit"/>（当天齐整度）和本类（补历史排队）
+    /// **共用**的，故意只此一份——两处各写一份迟早漂移，那时界面说齐了、任务还在抓，谁都发现不了。
+    /// </summary>
+    public const string ExpectGranularity = Granularity.DayRaw;
 
     /// <summary>
     /// 「增量」模式的排队门槛：缺 3 行以上才值得为它发一个请求。
@@ -91,7 +109,7 @@ public static class MoneyFlowBackfillPlan
                 "本地交易日历不足两天，排不出补历史的窗口——请先跑一次【交易日历】");
         var (from, to) = window.Value;
 
-        var expected = new SqliteBarRepository(dbPath).CountByCodeBetween("day", from, to);
+        var expected = new SqliteBarRepository(dbPath).CountByCodeBetween(ExpectGranularity, from, to);
         var have = repository.GetRowCountByCode(from, to);
         var lastFetched = repository.GetLastFetchedAt();
 

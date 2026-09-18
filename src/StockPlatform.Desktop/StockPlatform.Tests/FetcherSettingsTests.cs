@@ -260,4 +260,60 @@ public class FetcherSettingsTests : IDisposable
         FetcherSettings.EnsureTemplate(Path_);
         Assert.Null(FetcherSettings.ReadBoardMemberHost(Path_));
     }
+
+    // ── 分红送配的节奏（2026-09-18）──────────────────────────────
+
+    [Fact]
+    public void 分红节奏没配时是90个歇13分钟()
+    {
+        FetcherSettings.EnsureTemplate(Path_);
+        var pace = FetcherSettings.ReadDividendPace(Path_);
+        Assert.Equal(90, pace.BatchSize);
+        Assert.Equal(TimeSpan.FromMinutes(13), pace.RestDuration);
+    }
+
+    [Fact]
+    public void 分红节奏配了就照配的来()
+    {
+        File.WriteAllText(Path_, """
+            {
+              "DividendBatchSize": 40,
+              "DividendRestMinutes": 20
+            }
+            """);
+        var pace = FetcherSettings.ReadDividendPace(Path_);
+        Assert.Equal(40, pace.BatchSize);
+        Assert.Equal(TimeSpan.FromMinutes(20), pace.RestDuration);
+    }
+
+    [Theory]
+    [InlineData("0")]        // 一批 0 个＝永远发不出去
+    [InlineData("-5")]
+    [InlineData("999999")]   // 比全市场还多，等于没有节奏
+    [InlineData("\"abc\"")]
+    public void 分红节奏填了离谱的值就回退默认_而不是照用也不是崩(string raw)
+    {
+        // 这是人手改的文件。填错不该让抓取整条挂掉，但更不能照着用——
+        // 一批 0 个会让任务永远等下去，而且一声不吭。
+        File.WriteAllText(Path_, $$"""
+            { "DividendBatchSize": {{raw}} }
+            """);
+        Assert.Equal(90, FetcherSettings.ReadDividendPace(Path_).BatchSize);
+    }
+
+    [Fact]
+    public void 歇0分钟是合法的_表示不歇()
+    {
+        File.WriteAllText(Path_, """{ "DividendRestMinutes": 0 }""");
+        Assert.Equal(TimeSpan.Zero, FetcherSettings.ReadDividendPace(Path_).RestDuration);
+    }
+
+    [Fact]
+    public void 模板里分红节奏那两行是注释掉的_默认走代码里的值()
+    {
+        FetcherSettings.EnsureTemplate(Path_);
+        var text = File.ReadAllText(Path_);
+        Assert.Contains("//\"DividendBatchSize\": 90,", text);
+        Assert.Contains("//\"DividendRestMinutes\": 13,", text);
+    }
 }

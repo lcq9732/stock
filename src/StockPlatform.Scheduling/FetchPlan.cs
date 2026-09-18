@@ -173,8 +173,45 @@ public sealed class FetchPlanItem
     public DateTime? LastStart { get; set; }
     public DateTime? LastEnd { get; set; }
     public RunOutcome LastOutcome { get; set; } = RunOutcome.None;
+
+    /// <summary>
+    /// **最后一次成功**是什么时候开跑的（2026-09-18，抓取行为健康体检要用）。
+    ///
+    /// ════ 为什么非加这个字段不可 ════
+    /// 上面那三个只记**最近一次**。最近一次是失败时，"上一次成功在什么时候"就彻底查不到了——
+    /// 而"连着几期没成功"恰恰是这套告警的全部价值：一项昨天失败、今天失败、明天还会失败，
+    /// 光看 <see cref="LastOutcome"/> 跟偶发失败长得一模一样。
+    ///
+    /// 只存一个时刻、不存滚动历史：判据只问"上次成功是几期之前"，一个 DateTime 就够。
+    /// 更细的（最近 N 轮成败分布、长期带错完成）见 doc/fetch-health-design.md §6，那才需要历史。
+    ///
+    /// ⚠ **升级的空窗**：老计划文件里没有这一列，读出来是 null。
+    /// 判据对"null 且最近一次不是成功"的项**不下结论**（见 <see cref="PeriodsSinceLastOk"/>）——
+    /// 宁可等它下次成功把基准记上，也不能升级当天把一堆项报成"从没成功过"。
+    /// </summary>
+    public DateTime? LastOkAt { get; set; }
     public int LastErrorCount { get; set; }
     public string? LastMessage { get; set; }
+
+    /// <summary>
+    /// 上一轮的**错误内容**，最多 <see cref="MaxKeptErrors"/> 条（2026-09-18）。
+    ///
+    /// ════ 为什么非留不可 ════
+    /// 在此之前只留了 <see cref="LastErrorCount"/>。于是计划页显示"完成，但有 2 条错误"，
+    /// 而错误是什么**只活在滚动日志里**——2026-09-18 查【指数权重】那 2 条时才发现：
+    /// 它上次跑是 09-02，日志归档最早只到 09-06，内容永远查不到了，只能靠"没留下缺失名单"
+    /// 反推它大概没造成后果。
+    ///
+    /// 带错完成的项在这个项目里不是个别现象（当时就有两项常年带着错误），
+    /// 而"带的是什么错"正是判断它该不该管的唯一依据。
+    ///
+    /// 只留前几条、每条截断：这是给人看的线索，不是完整日志——真要细查还是去 fetch.log。
+    /// </summary>
+    public List<string> LastErrors { get; set; } = [];
+
+    /// <summary>留几条错误。3 条够看出"是同一个错重复还是各不相同"，而 46 项 × 3 条对计划文件的
+    /// 体积影响可以忽略。</summary>
+    public const int MaxKeptErrors = 3;
 
     /// <summary>
     /// 最近几轮**实测**耗时（秒），新的追加在后面，只留 <see cref="MaxDurationSamples"/> 条
@@ -329,6 +366,71 @@ public sealed class FetchPlanItem
     /// </summary>
     public bool FailedSince(DateTime anchor)
         => LastOutcome == RunOutcome.Failed && LastEnd >= anchor;
+
+    /// <summary>
+    /// **上一次成功是几期之前**（2026-09-18，抓取行为健康体检的判据，见 doc/fetch-health-design.md）。
+    ///
+    /// 0＝本期已经成功跑过；3＝最后一次成功落在三期之前，也就是连着三期没成功；
+    /// null＝**不判**（没启用、手动项、或这一项还没轮到过第一期）。
+    ///
+    /// ════ 为什么按"期"不按天数 ════
+    /// 实测生产计划里，季度组有 7 项距上次开跑 14~16 天——**全是正常的**，月度项本期跑完就等下个月。
+    /// 一刀切按天数：阈值给 3 天季度组全误报，给 40 天日更项停两周都不吭声。
+    /// 按期算，两种频率用同一条判据，各自的上限由调用方按 <see cref="RepeatKind"/> 给。
+    ///
+    /// ⚠ 只认 <see cref="RunOutcome.Ok"/>。失败、被跳过（前置垮了）、被手动停止都算"这一期没成功"——
+    /// 它们的**处理方式**不同（所以报的时候要分开措辞），但"这一期数据没到位"是一样的。
+    /// </summary>
+    /// <param name="max">最多往回数几期。超过就返回 <paramref name="max"/>+1，
+    /// 意思是"久到没必要再数了（或从没成功过）"。</param>
+    public int? PeriodsSinceLastOk(DateTime now, int max = 12)
+    {
+        if (!EffectiveEnabled || Owner is not { } g) return null;
+        if (g.PeriodStartAt(now) is null) return null;          // 手动 / 仅一次：没有期
+
+        // 老计划文件没有 LastOkAt 这一列：最近一次就是成功的话，拿它当基准（等价且准确）。
+        var lastOk = LastOkAt ?? (LastOutcome == RunOutcome.Ok ? LastStart ?? LastEnd : null);
+
+        // 没有任何成功记录时**不下结论**，两种情形都是：
+        //   · 刚加进计划、一次都还没跑——那是还没开始，不是不健康；
+        //   · 老计划升级后、最近一次恰好不是成功——基准丢了，等它下次成功把 LastOkAt 记上。
+        // 宁可空窗一轮，也不能升级当天把一堆项报成"从没成功过"（见 LastOkAt 的注释）。
+        if (lastOk is null) return null;
+
+        for (int n = 0; n <= max; n++)
+        {
+            if (g.PeriodStartAt(now, n) is not { } start) break;
+            if (lastOk.Value >= start) return n;
+        }
+        return max + 1;   // 久到没必要再数了
+    }
+
+    /// <summary>
+    /// 这个频率**允许**连着几期没成功（2026-09-18）。
+    ///
+    /// 日更取 3 而不是 2：一项周五失败、周末不跑、周一补跑成功是正常节奏，2 期会在周一早上误报。
+    /// 实测生产计划里日更 28 项当前全是 0 期，余量很大。
+    ///
+    /// ⚠ 放在模型上、不放在 <c>PlanRunner</c> 里：日志告警和计划页的提示要用**同一个**阈值，
+    /// 两处各写一份迟早漂移（这个项目在"同一判据两处各写一份"上栽过好几次）。
+    /// </summary>
+    [JsonIgnore]
+    public int HealthLimitPeriods => Repeat switch
+    {
+        RepeatKind.EveryWorkday => 3,
+        RepeatKind.Weekly => 2,
+        RepeatKind.Monthly => 2,
+        _ => int.MaxValue,          // 手动/仅一次：PeriodsSinceLastOk 本来就返回 null
+    };
+
+    /// <summary>
+    /// **连着几期没成功**——超过 <see cref="HealthLimitPeriods"/> 才有值；
+    /// null＝健康，或者这一项压根不判（见 <see cref="PeriodsSinceLastOk"/>）。
+    ///
+    /// 日志里的健康告警和计划页那一行的提示都走它。
+    /// </summary>
+    public int? UnhealthyPeriods(DateTime now)
+        => PeriodsSinceLastOk(now) is { } n && n > HealthLimitPeriods ? n : null;
 
     /// <summary>今天已经因为前置失败被跳过、并且记过一次了——别再重复记。</summary>
     public bool AlreadySkippedOn(DateTime day) =>
@@ -567,6 +669,59 @@ public sealed class FetchPlanGroup
         return NotBefore.HasValue ? d.Add(NotBefore.Value.ToTimeSpan()) : d;
     }
 
+    /// <summary>
+    /// **当前所处的这一期**是什么时候开始的，往回数 <paramref name="back"/> 期（2026-09-18）。
+    /// <c>back = 0</c> 就是本期的起点。手动项和「仅一次」没有期可言，返回 null。
+    ///
+    /// ════ 跟 <see cref="DueAnchorAt"/> 的两点区别，别混用 ════
+    ///   ① **不带 <see cref="StartedSince"/> 那道闸门**。那道闸门是为排期服务的
+    ///      （"昨晚那轮压根没开工就别回溯，老实等今天 18:00"）；而这里要的是**日历意义上的期**，
+    ///      跟这一组跑没跑过无关——判"上次成功是几期之前"时，中间那些没开工的期
+    ///      恰恰是要数进去的。
+    ///   ② **不算收盘那个补充到点**。<see cref="DueAnchorAt"/> 给每工作日补了 17:00 那一档，
+    ///      于是一天可能有两个锚；这里的"期"就是用户设的那个时刻，一天一期，
+    ///      否则"连着 3 期没成功"到底是一天半还是三天要靠猜。
+    /// </summary>
+    public DateTime? PeriodStartAt(DateTime now, int back = 0)
+    {
+        var offset = NotBefore?.ToTimeSpan() ?? TimeSpan.Zero;
+        switch (Repeat)
+        {
+            case RepeatKind.EveryWorkday:
+            {
+                // 先落到"当前所处那一期"的起点：今天的时刻还没到，就退到上一个工作日。
+                var d = now.Date;
+                while (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) d = d.AddDays(-1);
+                if (d + offset > now) d = PrevWorkday(d);
+                for (int i = 0; i < back; i++) d = PrevWorkday(d);
+                return d + offset;
+            }
+
+            case RepeatKind.Weekly:
+            case RepeatKind.Monthly:
+            {
+                var start = PeriodStartOn(now) + offset;
+                if (start > now)   // 本期还没到点，当前仍处在上一期里
+                    start = PeriodStartOn(Repeat == RepeatKind.Weekly
+                        ? now.Date.AddDays(-7) : now.Date.AddMonths(-1)) + offset;
+                for (int i = 0; i < back; i++)
+                    start = PeriodStartOn(Repeat == RepeatKind.Weekly
+                        ? start.Date.AddDays(-7) : start.Date.AddMonths(-1)) + offset;
+                return start;
+            }
+
+            default:
+                return null;   // 手动 / 仅一次：没有周期
+        }
+    }
+
+    private static DateTime PrevWorkday(DateTime d)
+    {
+        do { d = d.AddDays(-1); }
+        while (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday);
+        return d;
+    }
+
     /// <summary>"每工作日"这类频率说法；到期后怎么跑另看 <see cref="PacingText"/>。</summary>
     public string RepeatText => Repeat switch
     {
@@ -713,6 +868,8 @@ public sealed class FetchPlan
             item.LastErrorCount = old.LastErrorCount;
             item.LastMessage = old.LastMessage;
             item.LastNothingToDo = old.LastNothingToDo;
+            item.LastOkAt = old.LastOkAt;
+            item.LastErrors = [.. old.LastErrors];   // 健康告警的基准，丢了等于重建计划就清零健康历史
             item.RecentDurationsSec = [.. old.RecentDurationsSec];
         }
     }

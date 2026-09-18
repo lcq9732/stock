@@ -41,10 +41,45 @@ public interface IDividendRepository
     int GetCodeCount();
 
     /// <summary>
+    /// 每只票**已实施且有除权日**的除权日集合（2026-09-18，给【分红对账】判重用）。
+    ///
+    /// ⚠ 判重必须按除权日、**不能按主键** <c>(code, announce_date)</c>：
+    /// 新浪那列是页面上的"公告日期"，东财给的是预案公告日，语义不同——
+    /// 按主键插会让同一个方案变成两行，库里凭空多出一次除权，
+    /// 复权序列直接错，比原来缺一条还糟。
+    /// </summary>
+    Dictionary<string, HashSet<DateTime>> GetImplementedExDates();
+
+    /// <summary>
+    /// 补几行进来（2026-09-18，【分红对账】用）——**只加不改**：主键已存在的原样不动。
+    /// 返回真正插进去的行数。
+    /// </summary>
+    int InsertMissing(IReadOnlyList<DividendRow> rows);
+
+    /// <summary>
     /// 逐只的抓取状态（2026-09-18）——【拉取分红送配】的水位线，见
     /// <see cref="DividendFetchState"/>。key 是 code。表空着就返回空字典（首次全抓）。
     /// </summary>
     Dictionary<string, DividendFetchState> GetFetchStates();
+
+    /// <summary>
+    /// 一次性播种水位线（2026-09-18）——**只在 <c>DividendFetchState</c> 整张表是空的时候**
+    /// 做一次，用 <c>Dividend</c> 表里每只票的 <c>max(fetched_at)</c> 当作"上次抓成功的时刻"。
+    /// 返回播种了多少只；表非空时什么都不做、返回 0。
+    ///
+    /// 为什么要它：状态表是随这次迁移新建的，空表意味着全市场 5902 只都算"没抓过"，
+    /// 于是**新版第一轮仍然会全量重抓一遍**——而库里绝大多数票 11 天前刚抓过
+    /// （实测名单里 5825 只有分红行、只有 77 只一行都没有）。播种之后第一轮只剩那几十只。
+    ///
+    /// ⚠ 这是**近似值**，两处不精确，方向都是"宁可多抓"：
+    ///   ① <c>fetched_at</c> 是"最后一次**写进**分红行的时刻"，不是"最后一次抓取的时刻"。
+    ///      某只票今天抓了、但返回空（真没分红），老代码不写行，它的时刻就停在上一次——
+    ///      播种偏早，下一轮会多抓它一次。
+    ///   ② 一行都没有的票没法播种（"无分红"和"没抓过"在 Dividend 表里长得一模一样，
+    ///      这正是要单独建状态表的理由），它们照旧去抓。
+    /// 反过来绝不会把没抓过的票播成"抓过"——那才是会造成静默漏抓的方向。
+    /// </summary>
+    int SeedFetchStatesFromDividends();
 
     /// <summary>
     /// 写回一批抓取状态（整条覆盖，一个事务）。

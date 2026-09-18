@@ -107,7 +107,9 @@ public class FinancialFetchPlanner(FetchPaths paths)
 
         // 自选/底仓/主动仓里的票排最前——它们是真正会被拿来分析的，先补上就能立刻用；
         // 剩下几千只不看的票慢慢磨。
-        var watched = ReadWatchedCodes();
+        // 自选/底仓/主动仓的名单读取 2026-09-18 提成 WatchedCodes 共用——
+        // 【拉取股东数据】也要这份名单，抄第二遍早晚会出现两处不一致。
+        var watched = WatchedCodes.Read(paths);
         int watchedCount = pending.Count(watched.Contains);
         if (watchedCount > 0)
             pending = pending
@@ -134,40 +136,6 @@ public class FinancialFetchPlanner(FetchPaths paths)
         return candidates.Where(c => c.Deadline <= today).Max(c => c.Period);
     }
 
-    /// <summary>
-    /// 读出"用户真正关注的票"——自选股 + 底仓 + 主动仓（2026-08-27）。财务抓取拿它做优先级排序。
-    ///
-    /// 为什么 Fetcher 能读到 Analyzer 的状态文件：两个 exe 装在同一个目录，<see cref="FetchPaths.BaseDir"/>
-    /// 和 AnalyzerPaths.BaseDir 算出来是同一个 data 文件夹。这里只读 code 字段、不反序列化成完整
-    /// 模型（那些模型在 Analyzer 项目里，Data 层引用不到，也没必要）。
-    ///
-    /// 文件不存在（Fetcher 单独部署、或用户还没建过自选）就返回空集合，排序退化成纯代码序。
-    /// </summary>
-    private HashSet<string> ReadWatchedCodes()
-    {
-        var result = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var file in new[] { "watchlist.json", "core-positions.json" })
-        {
-            var path = Path.Combine(paths.BaseDir, file);
-            try
-            {
-                if (!File.Exists(path)) continue;
-                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
-                if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) continue;
-                foreach (var el in doc.RootElement.EnumerateArray())
-                    if (el.TryGetProperty("Code", out var c) || el.TryGetProperty("code", out c))
-                    {
-                        var code = c.GetString();
-                        if (!string.IsNullOrWhiteSpace(code)) result.Add(code);
-                    }
-            }
-            catch (Exception)
-            {
-                // 读不了/格式坏了不影响抓取，只是失去优先级排序
-            }
-        }
-        return result;
-    }
 }
 
 /// <summary>

@@ -16,4 +16,13 @@ public interface IShareholderRepository
 
     /// <summary>已存有股东户数的股票只数（供界面显示"数据状态"）。</summary>
     int GetCodeCount();
+
+    /// <summary>
+    /// 每只票的水位线（2026-09-18）：股东户数的最新报告期 + 最后抓取时刻。
+    /// <c>ShareholderFetchPlanner</c> 靠它判"这只票还要不要抓"，**不发任何请求**。
+    ///
+    /// 一行都没有的票不在返回值里（＝从没抓过，该抓）。
+    /// 报告期取**户数表**的，理由见 <see cref="ShareholderFetchState.ReportDate"/>。
+    /// </summary>
+    Dictionary<string, ShareholderFetchState> GetFetchStateByCode();
 }

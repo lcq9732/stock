@@ -269,7 +269,7 @@ public class CapitalDiagnosisAnalyzer
         double avg = Avg(bars, main.StartIndex, bars.Count, b => b.Amount);
         var spikes = new DiagnosisTable
         {
-            Caption = $"本波放量日（> 区间均值 {Yi(avg)} × {VolumeSpikeFactor}）",
+            Caption = $"本波放量日（> 区间均值 {Yi(avg)} × {VolumeSpikeFactor} = {Yi(avg * VolumeSpikeFactor)}）",
             Columns = { new("日期", 82), new("成交额", 78, true), new("换手", 62, true), new("涨跌", 68, true), new("") },
         };
         int up = 0, total = 0;
@@ -485,7 +485,12 @@ public class CapitalDiagnosisAnalyzer
             Index = 4,
             Title = "融资余额与股价背离、融券变化",
             Tooltip =
-                "融资余额 = 借钱买入尚未偿还的金额，升 = 杠杆资金在加仓；融券余额 = 借券卖出尚未偿还，升 = 做空在加。"
+                "融资余额 = 借钱买入尚未偿还的金额，升 = 杠杆资金在加仓；融券余量 = 借券卖出尚未偿还的**股数**，升 = 做空在加。"
+                + "⚠ 判做空力量看的是**余量**不是余额：融券余额 = 余量 × 当日收盘价，股价一动余额就动。"
+                + "本维度的区间从「近60日最高收盘日」起算，区间内股价必然是跌的，于是余额被价格系统性压低——"
+                + "余量 +5%、价格 −30%，余额就成了 −26.5%，读出来是「做空力量在撤出」，而实际在加。方向判反比虚报更糟。"
+                + "（2026-09-18 改；华域汽车实测余量 +183.9%、余额只 +151.7%，差的 52pct 全是股价那 −10.3% 吃掉的——那次两者同向所以没露馅。）"
+                + "余额留在表里只作规模参考：金额跨股票可比，余量不可比。"
                 + "两者与股价同向为顺势、反向为背离。**只有两融标的有数据**，非标的显示「非两融标的」而不是 0。"
                 + $"交易所按 T+{input.MarginNormalLagDays} 披露，比行情天然晚一日，这是规律不是故障。　"
                 + "**净买入 = 买入额 − 偿还额**，两种算法等价：沪市数据源直接给偿还额，深市不给、"
@@ -531,12 +536,16 @@ public class CapitalDiagnosisAnalyzer
         // 融券余额可空：沪市源头不给（rqylje 恒 null），要靠本地按「余量 × 收盘价」补算。
         // null 不是 0——没补算过就如实说"尚未补算"，不能显示成"融券余额为零"。
         double? s0 = rows[0].ShortBalance, s1 = rows[^1].ShortBalance;
+        // 融券**余量**（股）：两所都直接给，不需要补算、也不含价格因素。判做空力量只认它。
+        double v0 = rows[0].ShortVolume, v1 = rows[^1].ShortVolume;
         double px = Pct(bars[main.StartIndex].Close, bars[^1].Close);
         double mc = b0 > 0 ? Pct(b0, b1) : double.NaN;
+        double svc = v0 > 0 ? Pct(v0, v1) : double.NaN;
+        // 余额变化率只用来跟余量对照（差额=价格因素），不再拿它下任何结论。
         double sc = s0 is > 0 && s1.HasValue ? Pct(s0.Value, s1.Value) : double.NaN;
-        if (!s0.HasValue || !s1.HasValue)
-            d.Warnings.Add("融券余额尚未补算（沪市数据源不提供这一列，需按「融券余量 × 收盘价」本地补）"
-                           + " —— 下方融券一行为空，不代表没有融券");
+        if (v0 > 0 && (!s0.HasValue || !s1.HasValue))
+            d.Warnings.Add("融券余额尚未补算（沪市数据源不给这一列，需按「余量 × 收盘价」本地补）"
+                           + " —— 只影响下方余额那一行的金额显示，做空力量的结论走余量、不受影响");
         double peak = rows.Max(r => r.MarginBalance);
 
         d.Tables.Add(new DiagnosisTable
@@ -548,10 +557,16 @@ public class CapitalDiagnosisAnalyzer
                         new DiagnosisCell($"{bars[^1].Close:F2}"), Signed(px, "F1", "%") },
                 new[] { new DiagnosisCell("融资余额"), new DiagnosisCell(Yi(b0)),
                         new DiagnosisCell(Yi(b1)), double.IsNaN(mc) ? Dash() : Signed(mc, "F1", "%") },
-                new[] { new DiagnosisCell("融券余额"),
-                        s0.HasValue ? new DiagnosisCell(Yi(s0.Value)) : Dash(),
-                        s1.HasValue ? new DiagnosisCell(Yi(s1.Value)) : Dash(),
-                        double.IsNaN(sc) ? Dash() : Signed(sc, "F1", "%") },
+                // 余量在上、余额在下：上面那行是判据，下面那行是规模参考。
+                new[] { new DiagnosisCell("融券余量"), new DiagnosisCell(Shares(v0)),
+                        new DiagnosisCell(Shares(v1)),
+                        double.IsNaN(svc) ? Dash() : Signed(svc, "F1", "%") },
+                // 余额那行的变化率一律 Muted：它含价格因素，不是判据，别让它抢戏。
+                new[] { new DiagnosisCell("融券余额", CellTone.Muted),
+                        s0.HasValue ? new DiagnosisCell(Yi(s0.Value), CellTone.Muted) : Dash(),
+                        s1.HasValue ? new DiagnosisCell(Yi(s1.Value), CellTone.Muted) : Dash(),
+                        double.IsNaN(sc) ? Dash()
+                            : new DiagnosisCell((sc >= 0 ? "+" : "") + sc.ToString("F1") + "%", CellTone.Muted) },
             },
         });
 
@@ -581,9 +596,24 @@ public class CapitalDiagnosisAnalyzer
                 d.Conclusions.Add($"股价 {px:+0.0;-0.0}%、融资余额 {mc:+0.0;-0.0}%，方向一致 —— 杠杆资金顺势"
                                   + (mc < 0 ? "减仓" : "加仓"));
         }
-        if (!double.IsNaN(sc) && Math.Abs(sc) >= 10 && s0.HasValue && s1.HasValue)
-            d.Conclusions.Add($"融券余额同期 {sc:+0.0;-0.0}%（{Yi(s0.Value)} → {Yi(s1.Value)}）—— "
-                              + (sc > 0 ? "做空力量也在增加" : "做空力量在撤出"));
+        // ⚠ 这里判的是**余量**不是余额（2026-09-18 改）。余额 = 余量 × 收盘价，
+        // 拿它当判据会把纯粹的股价变动读成借券行为。
+        //
+        // 本维度的区间从"近60日最高收盘日"起算 —— px 因此恒 ≤ 0，区间内股价只会跌。
+        // 所以价格污染是**单向**的：余额被系统性压低，做空在加会被读成在撤。
+        // 余量 +5%（自己够不着 10% 门槛）碰上价格 −30%，余额 −26.5% 反而触发了，
+        // 结论是"做空力量在撤出"——**方向正好判反**，比虚报一个信号更有害。
+        // 华域汽车 2026-09-18 实测余量 +183.9% / 余额 +151.7% 是同向的温和版，没露馅。
+        if (!double.IsNaN(svc) && Math.Abs(svc) >= 10)
+        {
+            string scale = s0.HasValue && s1.HasValue ? $"，余额 {Yi(s0.Value)} → {Yi(s1.Value)}" : "";
+            d.Conclusions.Add($"融券余量同期 {svc:+0.0;-0.0}%（{Shares(v0)} → {Shares(v1)}{scale}）—— "
+                              + (svc > 0 ? "做空力量也在增加" : "做空力量在撤出"));
+            // 两者符号相反时必须点破，否则看表的人会以为哪个数算错了——差额全在价格上。
+            if (!double.IsNaN(sc) && Math.Sign(sc) != Math.Sign(svc))
+                d.Conclusions.Add($"（同期融券余额 {sc:+0.0;-0.0}% 与余量反向 —— "
+                                  + $"差的是股价那 {px:+0.0;-0.0}%，判做空力量以余量为准）");
+        }
 
         // ── 净买入。**买入额和净买入必须并列**（2026-09-16 用户定）：只给买入额会把"大进大出"
         // 读成"猛加仓"（宁德 09-08 买入 15.9 亿 / 净买入 2.53 亿），只给净买入又看不出流水规模。
@@ -851,6 +881,20 @@ public class CapitalDiagnosisAnalyzer
         if (abs >= 1e8) return $"{yuan / 1e8:F1}亿";
         if (abs >= 1e4) return $"{yuan / 1e4:F0}万";
         return $"{yuan:F0}";
+    }
+
+    /// <summary>
+    /// 股数。跟 <see cref="Yi"/> 同一套分档，但**带单位"股"**——融券余量和融券余额要并排显示，
+    /// 不写单位的话「539万」和「8090万」看着像同一种东西，一个是股数一个是钱。
+    /// ETF 的份额动辄上亿，所以亿档也要有。
+    /// </summary>
+    private static string Shares(double shares)
+    {
+        double abs = Math.Abs(shares);
+        if (double.IsNaN(shares)) return "—";
+        if (abs >= 1e8) return $"{shares / 1e8:F1}亿股";
+        if (abs >= 1e4) return $"{shares / 1e4:F0}万股";
+        return $"{shares:F0}股";
     }
 
     private static string YiSigned(double yuan) => (yuan >= 0 ? "+" : "-") + Yi(Math.Abs(yuan));

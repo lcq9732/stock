@@ -48,68 +48,17 @@ public partial class FetchOrchestrator
 
     // ───────────────────────────── 1. 股票名册与流通市值 ─────────────────────────────
 
-    /// <summary>
-    /// 刷新全市场名册（写 StockMeta）+ 当下的流通市值快照。
-    ///
-    /// **一次扫描办两件事**：新浪那个列表接口一次就同时给出名册和 <c>nmc</c>（流通市值），
-    /// 所以这一项先跑市值扫描、直接拿它带回来的全市场名单刷新名册
-    /// （见 <see cref="MarketCapFetchResult.AllStocks"/>），比【拉取全部】原来的做法省掉
-    /// 约 55 个重复请求——那边是"先扫一遍取名册、市值实现里面再扫一遍"。
-    /// 逐只查询的市值实现（东财/腾讯）给不出全市场名单，这时才回退到单独取一次名册。
-    ///
-    /// 市值是**当下快照**、接口没有历史，所以这一项只有"增量"一种模式。
-    /// </summary>
-    public async Task<FetchResult> RunStepRosterAndMarketCapAsync(
-        NamedBarSource source, IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        void Forward(string m) => progress?.Report(m);
-        _marketCapFetcher.OnStatus += Forward;
-        try
-        {
-            // 传本地已知的代码：市值扫描据此判断谁是"新发现的"。空库时传空表，
-            // 扫描回来的全市场标的会被当成新股一并写进名册。
-            var known = SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).Select(s => s.Code).ToList();
-            var (_, rosterRefreshed) = await FetchMarketCapAsync(source, known, progress, ct);
-
-            if (!rosterRefreshed)
-            {
-                // 这个市值实现看不到全市场名单（逐只查询式），只好单独再取一次名册
-                progress?.Report("市值来源给不出全市场名单，单独获取一次股票列表...");
-                var stocks = await source.StockListProvider.GetAllStocksAsync(progress, ct);
-                SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, stocks.Select(s => (s.Code, s.Name)));
-            }
-
-            progress?.Report($"名册已刷新，本地个股 {SqliteStockMetaUpsert.GetAll(_paths.CurrentDb).Count} 只。");
-        }
-        finally { _marketCapFetcher.OnStatus -= Forward; }
-
-        // attempted 传空：K线失败名单跟这一步无关，别把它清了（市值有自己的失败名单，
-        // 由 FetchMarketCapAsync 内部维护）。
-        return FinishFetchRun(errors, "股票名册与流通市值", Array.Empty<string>(), failed, progress);
-    }
+    // 【股票名册与流通市值】整项 2026-09-18 迁到新任务框架
+    // （StockPlatform.Tasks/RosterMarketCapTask）：整轮扫描、新股发现、
+    // "值属于哪个交易日"的判定都在那儿——后者现在先问本地交易日历，问不出才抓上证指数日线。
+    // 见 doc/index-roster-task-design.md。
 
     // ───────────────────────────── 2. 资金净流入 ─────────────────────────────
-
-    /// <summary>
-    /// 逐只抓主力资金净流入（新浪）。失败名单由 FetchNetInflowAsync 内部维护。
-    /// <paramref name="specificDay"/> 有值＝"只抓那一天"模式（exactDayOnly，原【补指定历史日】的做法）。
-    /// </summary>
-    public async Task<FetchResult> RunStepNetInflowAsync(
-        IProgress<string>? progress, CancellationToken ct = default, DateTime? specificDay = null)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        var codes = LocalStockCodes();
-        void Forward(string m) => progress?.Report(m);
-        _netInflowFetcher.OnStatus += Forward;
-        try
-        {
-            await FetchNetInflowAsync(codes, specificDay ?? DateTime.Today,
-                exactDayOnly: specificDay.HasValue, progress, ct);
-        }
-        finally { _netInflowFetcher.OnStatus -= Forward; }
-        return FinishFetchRun(errors, "资金净流入", Array.Empty<string>(), failed, progress);
-    }
+    //
+    // 整项 2026-09-18 迁到新任务框架（StockPlatform.Tasks/NetInflowTask），本类不再有它的入口。
+    // 三类待办（失败名单/整天缺失/残缺日）现在也都归它自己补——最后那类以前**没有人补**，
+    // 每轮只在日志里喊一句"只能人工处理"。见 doc/netinflow-task-design.md。
+    // 【拉取区间数据】里的资金流那半边仍在 FetchOrchestrator（FetchNetInflowRangeAsync）。
 
     // ───────────────────────────── 3. 中标/订单公告 ─────────────────────────────
 
@@ -300,18 +249,13 @@ public partial class FetchOrchestrator
     }
 
     // ─────────────────────── 11~12. 融资余额 / 龙虎榜 ───────────────────────
-
-    /// <summary>融资余额（交易所）——以指定日为终点回看最近几个交易日、跳过本地已有的。默认今天。</summary>
-    public async Task<FetchResult> RunStepMarginRecentAsync(
-        DateTime? day, IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        void Forward(string m) => progress?.Report(m);
-        _marginProvider.OnStatus += Forward;
-        try { await FetchMarginRecentAsync(day ?? DateTime.Today, errors, progress, ct); }
-        finally { _marginProvider.OnStatus -= Forward; }
-        return FinishFetchRun(errors, "融资余额", Array.Empty<string>(), failed, progress);
-    }
+    //
+    // 两项都已迁到新任务框架，本类不再有它们的入口：
+    //   ·【融资余额】2026-09-18 → StockPlatform.Tasks/MarginTask（见 doc/margin-task-design.md）。
+    //     顺带删掉了 RunStepBackfillDailyOneAsync——龙虎榜 09-17 迁走之后，两融是它唯一的用户。
+    //   ·【龙虎榜】2026-09-17 → StockPlatform.Tasks/LhbTask，落库统一走 LhbDayWriter。
+    // 两项的残缺日待办现在也都归各自的任务补（HandlesBacklog=true），
+    // 见 doc/fill-backlog-to-tasks-design.md。
 
     /// <summary>
     /// 【回填"无更早数据"水位】（2026-09-07）——不联网，把本地已有历史里能推出的水位一次性
@@ -365,55 +309,6 @@ public partial class FetchOrchestrator
         return Task.FromResult(FinishFetchRun(errors, "回填\"无更早数据\"水位", Array.Empty<string>(), failed, progress));
     }
 
-    /// <summary>
-    /// 融资余额 / 龙虎榜的**整段回补**（原【一键补齐每日历史】的两半，2026-09-02 拆开）：
-    /// 从本地K线最早那天补到今天，跳过已有的交易日，幂等、可反复跑、可随时停。
-    ///
-    /// 拆开的理由跟别处一样——两家源（交易所 / 新浪）、两张表、失败互不相干；
-    /// 想只补龙虎榜历史时，不必连着把融资余额也跑一遍。
-    /// </summary>
-    public async Task<FetchResult> RunStepBackfillMarginAsync(
-        IProgress<string>? progress, CancellationToken ct = default) =>
-        await RunStepBackfillDailyOneAsync("融资余额", IDailyFetchNoDataRepository.MarginDataset, _marginProvider.EarliestAvailable,
-            // 扣掉已知残缺日（2026-09-16）：GetTradeDates 只看"这天有没有行"，
-            // 2026-08-21 有 1,998 行沪市就被算作"已有"，深市那一半永远补不回来。
-            ct2 => _marginRepository.GetTradeDates().Except(PartialDaysOf(RetryTaskIds.Margin)).ToHashSet(),
-            async d =>
-            {
-                var rows = await _marginProvider.GetDetailAsync(d, ct);
-                if (rows.Count > 0) { lock (_dbLock) { _marginRepository.InsertOrIgnore(rows); } }
-                return rows.Count;
-            },
-            h => _marginProvider.OnStatus += h, h => _marginProvider.OnStatus -= h,
-            () => _marginRepository.EnsureSchema(), progress, ct);
-
-    private async Task<FetchResult> RunStepBackfillDailyOneAsync(
-        string label,
-        string dataset,
-        DateOnly earliestAvailable,
-        Func<CancellationToken, HashSet<DateOnly>> haveDates,
-        Func<DateOnly, Task<int>> fetchOne,
-        Action<Action<string>> subscribe, Action<Action<string>> unsubscribe,
-        Action ensureSchema,
-        IProgress<string>? progress, CancellationToken ct)
-    {
-        var (repo, errors, failed, _, sw) = BeginStep();
-        void Forward(string s) => progress?.Report(s);
-        subscribe(Forward);
-        try
-        {
-            ensureSchema();
-            var earliest = repo.GetOverallEarliestPeriodStart(Granularity.Day)
-                ?? throw new InvalidOperationException(
-                    "本地还没有K线数据，无法确定补齐起点——请先跑一次【个股日K·前复权】");
-            await BackfillDailyAsync(label, dataset, DateOnly.FromDateTime(earliest),
-                DateOnly.FromDateTime(DateTime.Today), haveDates(ct), fetchOne, errors, progress, sw,
-                earliestAvailable, ct);
-        }
-        finally { unsubscribe(Forward); }
-        return FinishFetchRun(errors, $"{label}·整段回补", Array.Empty<string>(), failed, progress);
-    }
-
     // 【龙虎榜】的 RunStepLhbDayAsync / RunStepBackfillLhbAsync 删于 2026-09-17：
     // 整项迁去了 StockPlatform.Tasks/LhbTask（增量、只抓某一天、整段回补三条路都在那儿，
     // 落库统一走 LhbDayWriter）。补残缺日仍在这边走 PartialDayRepair，按天重抓的动作
@@ -436,154 +331,10 @@ public partial class FetchOrchestrator
     // （成分名单本身就是一种选股全集），所以是两件事；而中证那一侧不稳、失败率高，
     // 合在一起时它会把整项拖成"失败"。ETF↔指数映射是纯本地匹配，按"本地计算单独成项"拆出来。
 
-    /// <summary>指数成分名单（新浪）——逐个指数抓，失败进 FailedIndexConsCodes。</summary>
-    public async Task<FetchResult> RunStepIndexConsOnlyAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, sw) = BeginStep();
-        _indexRepository.EnsureSchema();
-        var indexes = IndexCatalog.All;
-        if (indexes.Count == 0)
-            return new FetchResult { Errors = ["内置指数清单为空（IndexCatalog.csv 未打包？），无法拉取指数成分"] };
-
-        var consFailed = new List<string>();
-        var attempted = indexes.Select(i => i.Code).ToList();
-        var now = DateTime.Now;
-        int ok = 0, empty = 0, done = 0;
-
-        void Forward(string s) => progress?.Report(s);
-        _indexConsProvider.OnStatus += Forward;
-        try
-        {
-            progress?.Report($"开始拉取指数成分名单（新浪），共 {indexes.Count} 个指数...");
-            foreach (var (code, _) in indexes)
-            {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    var members = await _indexConsProvider.GetConsAsync(code, ct);
-                    // 新浪对某些老指数本来就没有成分，返回空不算失败（跟原来的判断一致）
-                    if (members.Count > 0) { lock (_dbLock) _indexRepository.ReplaceCons(code, members, now); ok++; }
-                    else empty++;
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { errors.Add($"指数 {code} 成分抓取失败：{ex.Message}"); consFailed.Add(code); }
-
-                if (++done % 20 == 0 || done == indexes.Count)
-                    progress?.Report($"指数成分 {done}/{indexes.Count}（成功 {ok}，已用时 {FormatElapsed(sw.Elapsed)}）");
-            }
-        }
-        finally { _indexConsProvider.OnStatus -= Forward; }
-
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            SetFailedTodo(manifest, RetryTaskIds.IndexCons, attempted, consFailed);
-            _manifestStore.Save(manifest);
-        }
-        progress?.Report($"指数成分完成：{ok} 个指数有数据、{empty} 个无成分、失败 {consFailed.Count} 个"
-                       + (consFailed.Count > 0 ? "（可点【重新拉取失败】重试）" : ""));
-        return FinishFetchRun(errors, "指数成分名单", Array.Empty<string>(), failed, progress);
-    }
-
-    /// <summary>本地这一期权重多新才算"不用再抓"。中证的 closeweight.xls 是月度更新（基准日=月末交易日），
-    /// 25 天足够覆盖一个更新周期，又不会把月初的新一期漏掉。</summary>
-    private const int IndexWeightFreshDays = 25;
-
-    /// <summary>确认 404 之后隔多久再问一次。中证偶尔会给新指数补上文件，所以不能永久拉黑。</summary>
-    private const int IndexWeightMissingRetryDays = 30;
-
-    /// <summary>
-    /// 指数权重（中证 OSS）。非中证系没有权重文件（404），不算失败。
-    ///
-    /// ════ 为什么要先筛一遍再抓（2026-09-02 改）════
-    /// 内置指数全集 732 个，而 closeweight.xls **只有中证系才有**，其余一律 404；而权重本身是
-    /// **月度**更新的。原来每次跑都把 732 个硬敲一遍，等于每次拿四五百个注定 404 的请求去撞中证的
-    /// 反爬——数据一条也拿不到。现在两道筛子：
-    ///   ① 本地这一期还新鲜（<see cref="IndexWeightFreshDays"/> 天内）→ 跳过，月中跑基本全跳过；
-    ///   ② 上次已经确认没有文件、且没过 <see cref="IndexWeightMissingRetryDays"/> 天 → 跳过。
-    /// 稳态下每次真正发出的请求从 732 降到接近 0，只有月初那一轮才会实抓中证系那两三百个。
-    /// </summary>
-    public async Task<FetchResult> RunStepIndexWeightOnlyAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, sw) = BeginStep();
-        _indexRepository.EnsureSchema();
-        var indexes = IndexCatalog.All;
-        if (indexes.Count == 0)
-            return new FetchResult { Errors = ["内置指数清单为空（IndexCatalog.csv 未打包？），无法拉取指数权重"] };
-
-        // ── 先筛：本地已是最新一期的、以及确认没有文件的，都不用再问 ──
-        var latestByIndex = _indexRepository.GetLatestWeightDateByIndex();
-        Dictionary<string, DateTime> missing;
-        lock (_dbLock) missing = new(_manifestStore.Load().IndexWeightMissing, StringComparer.Ordinal);
-
-        var today = DateTime.Today;
-        var targets = new List<string>();
-        int freshSkip = 0, missingSkip = 0;
-        foreach (var (code, _) in indexes)
-        {
-            if (latestByIndex.TryGetValue(code, out var asOf)
-                && (today - asOf).TotalDays < IndexWeightFreshDays) { freshSkip++; continue; }
-            if (missing.TryGetValue(code, out var confirmedAt)
-                && (today - confirmedAt.Date).TotalDays < IndexWeightMissingRetryDays) { missingSkip++; continue; }
-            targets.Add(code);
-        }
-
-        progress?.Report($"指数权重：全集 {indexes.Count} 个，本轮要问 {targets.Count} 个"
-            + $"（{freshSkip} 个本地已是最新一期、{missingSkip} 个确认没有权重文件——"
-            + "中证是月度更新，这两道筛子是为了少撞它的反爬）。");
-        if (targets.Count == 0)
-        {
-            progress?.Report("　都不用抓，这一轮无事可做。");
-            var idleResult = FinishFetchRun(errors, "指数权重", Array.Empty<string>(), failed, progress);
-            idleResult.NothingToDo = true;
-            return idleResult;
-        }
-
-        var weightFailed = new List<string>();
-        var newlyMissing = new List<string>();
-        int ok = 0, none = 0, done = 0;
-
-        void Forward(string s) => progress?.Report(s);
-        _indexWeightProvider.OnStatus += Forward;
-        try
-        {
-            foreach (var code in targets)
-            {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    var weights = await _indexWeightProvider.GetWeightsAsync(code, ct);
-                    if (weights.Count > 0) { lock (_dbLock) _indexRepository.ReplaceWeights(code, weights); ok++; }
-                    else { none++; newlyMissing.Add(code); }   // 404＝这个指数没有权重文件，记下来别再问
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { errors.Add($"指数 {code} 权重抓取失败：{ex.Message}"); weightFailed.Add(code); }
-
-                if (++done % 20 == 0 || done == targets.Count)
-                    progress?.Report($"指数权重 {done}/{targets.Count}（成功 {ok}，已用时 {FormatElapsed(sw.Elapsed)}）");
-            }
-        }
-        finally { _indexWeightProvider.OnStatus -= Forward; }
-
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            // 失败名单只针对**本轮问过的**那些（跳过的不该被清出名单，也不该被记进去）
-            SetFailedTodo(manifest, RetryTaskIds.IndexWeight, targets, weightFailed);
-            foreach (var code in newlyMissing) manifest.IndexWeightMissing[code] = today;
-            // 这次抓到权重的，把"没有文件"的记录撤掉（中证补上了文件的情况）
-            foreach (var code in targets.Except(newlyMissing, StringComparer.Ordinal))
-                manifest.IndexWeightMissing.Remove(code);
-            _manifestStore.Save(manifest);
-        }
-
-        progress?.Report($"指数权重完成：{ok} 个有权重、{none} 个没有权重文件（已记下、{IndexWeightMissingRetryDays} 天内不再问）、"
-                       + $"失败 {weightFailed.Count} 个"
-                       + (weightFailed.Count > 0 ? "（中证这侧偏不稳，可点【重新拉取失败】重试）" : ""));
-        return FinishFetchRun(errors, "指数权重", Array.Empty<string>(), failed, progress);
-    }
+    // 【指数成分名单】【指数权重】整项 2026-09-18 迁到新任务框架
+    // （StockPlatform.Tasks/IndexConsTask、IndexWeightTask）。权重那两道筛子
+    // （本地这一期还新鲜 / 确认没有权重文件）跟着搬了过去——丢了它们就是每轮拿四五百个
+    // 注定 404 的请求去撞中证的反爬。见 doc/index-roster-task-design.md。
 
     /// <summary>ETF↔指数 名称匹配（本地、不联网）——供"股票→指数→ETF"反查。</summary>
     public async Task<FetchResult> RunStepEtfIndexMapAsync(

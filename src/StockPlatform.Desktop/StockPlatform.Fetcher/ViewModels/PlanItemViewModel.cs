@@ -400,9 +400,24 @@ public sealed class PlanItemViewModel(FetchPlanItem model, Action onChanged) : I
             };
             var span = Model.LastStart.HasValue && Model.LastEnd.HasValue
                 ? "，用时 " + Describe(Model.LastEnd.Value - Model.LastStart.Value) : "";
-            return $"上次：{Model.LastEnd:MM-dd HH:mm} {mark}{span}"
+            // 连着几期没成功（2026-09-18）——摆在**最前面**，因为它是唯一跨轮的信息：
+            // 下面那句"上次 ✘ 失败"分不出这是偶发一次还是连着一周，而那两种要做的事完全不同。
+            // 判据和阈值都在 FetchPlanItem 上，跟一轮收尾那段健康告警共用（见 PlanRunner.LogHealth）。
+            var health = Model.UnhealthyPeriods(DateTime.Now) is { } n
+                ? $"⚠ 连着 {n} 期没成功"
+                  + (Model.LastOkAt is { } okAt ? $"（上次成功 {okAt:MM-dd HH:mm}）" : "")
+                  + "\n"
+                : "";
+            // 错误内容（2026-09-18）：以前只显示"（2 条错误）"，而错什么只在日志里、日志还会滚掉——
+            // 查【指数权重】那 2 条时就是这么查不下去的（上次跑在归档保留期之前）。
+            var errs = Model.LastErrors.Count > 0
+                ? "\n" + string.Join("\n", Model.LastErrors.Select(e => "· " + e))
+                : "";
+            return health
+                 + $"上次：{Model.LastEnd:MM-dd HH:mm} {mark}{span}"
                  + (Model.LastErrorCount > 0 ? $"（{Model.LastErrorCount} 条错误）" : "")
-                 + (Model.LastMessage is { Length: > 0 } m ? $"\n{m}" : "");
+                 + (Model.LastMessage is { Length: > 0 } m ? $"\n{m}" : "")
+                 + errs;
         }
     }
 

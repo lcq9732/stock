@@ -325,7 +325,7 @@ SaveBatchAsync  → 整日替换：DELETE WHERE trade_date=? + INSERT 本批（�
 | `Incremental` | 回看 31 个交易日（滞后字段 `d30_chg` 要 30 个交易日才有值），**按月切片** | 一个月片 |
 | `SpecificDay` | 那一天，绕过空日名单 | 一天 |
 | `FirstBackfill` | 2004-06-25 → 今天，按月切片（268 片） | 一个月片 |
-| `FillBacklog` | 返回空，编排仍在 orchestrator（同席位表） |  |
+| `FillBacklog` | 只补待办里欠着的残缺日（2026-09-18 收口，原先编排在 orchestrator） | 一天 |
 
 ⚠ 跟席位表的差异：**主表保留月片**，不改按日。理由是它本来就没有跨页错位的风险
 （排序键已唯一），而月片让增量从 31 个请求降到 2~3 个。整天替换的粒度不受切片粒度影响——
@@ -356,6 +356,10 @@ SaveBatchAsync  → 整日替换：DELETE WHERE trade_date=? + INSERT 本批（�
 
 **② `FillBacklog` 仍走 orchestrator，不走任务**（同大宗 §7.5②）：`MainViewModel` 在分派给
 新任务**之前**就把它截走了。`DailyRefetcherFor` 的 `LhbSeat` 分支**保留**，内容换成共用的 writer。
+
+> **⚠ 这一条 2026-09-18 已作废**：`FillBacklog` 现在按能力位（`IFetchTask.HandlesBacklog`）分派，
+> 席位和主表的待办都由各自的任务调 `PartialDayRepair` + 各自的 writer 补，
+> `DailyRefetcherFor` 里那两个分支**已删**。见 doc/fill-backlog-to-tasks-design.md。
 
 **③ 排序键最终定成 `TRADE_DATE,SECURITY_CODE,EXPLANATION,NET,OPERATEDEPT_CODE`**
 （设计里写的是 `…,NET,BUY,SELL,OPERATEDEPT_CODE`）。`EXPLANATION` 必须进去——同一天同一只股

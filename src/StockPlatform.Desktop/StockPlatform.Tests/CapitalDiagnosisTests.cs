@@ -642,6 +642,112 @@ public class CapitalDiagnosisTests
         return sb.ToString();
     }
 
+    // ─────────── 维度4：做空力量必须按融券余量判，不能按余额 ───────────
+
+    /// <summary>
+    /// 价格污染的**最坏情形**：余量在涨、余额却在跌，按余额判会把"做空在加"读成"做空在撤"。
+    ///
+    /// 这不是构造出来的极端值 —— 本维度的区间从"近60日最高收盘日"起算，区间内股价只会跌，
+    /// 所以余额被价格压低是**系统性**的，深跌股上随时会撞见。
+    /// </summary>
+    [Fact]
+    public void 做空力量按余量判而不是余额()
+    {
+        var bars = Falling();
+        // 区间是 i=20（收盘 380，近60日最高＝锚点）到 i=79（收盘 321），股价 -15.5%。
+        // 系数 2120 是倒推的：余量要 **+12%** —— 既过得了 10% 的结论门槛，
+        // 又小于股价那 15.5% 的跌幅，于是余额（= 余量 × 收盘价）反而**下降** 5.4%。
+        var r = Leverage(bars, (i, n) => new MarginDetailRow
+        {
+            MarginBalance = 100e8,                  // 融资不动，免得抢戏
+            ShortVolume = 1e6 + i * 2120,
+            ShortBalance = (1e6 + i * 2120) * (400 - i),
+        });
+
+        Assert.Contains(r.Conclusions, c => c.Contains("融券余量") && c.Contains("做空力量也在增加"));
+        Assert.DoesNotContain(r.Conclusions, c => c.Contains("做空力量在撤出"));
+        // 两者反向时必须点破，否则看表的人会以为哪个数算错了
+        Assert.Contains(r.Conclusions, c => c.Contains("与余量反向"));
+    }
+
+    /// <summary>
+    /// 余量一动不动，只有价格在变 —— 一股都没多借，不能报任何做空力量的变化。
+    ///
+    /// 这一条是**旧代码会答错**的最小例子：余额跟着价格跌 15.5%，过了 10% 的门槛，
+    /// 旧版按余额判就会报"做空力量在撤出"。
+    /// </summary>
+    [Fact]
+    public void 余量不变时价格波动不产生做空信号()
+    {
+        var bars = Falling();
+        var r = Leverage(bars, (i, n) => new MarginDetailRow
+        {
+            MarginBalance = 100e8,
+            ShortVolume = 1e6,                      // 恒定
+            ShortBalance = 1e6 * (400 - i),         // 余额跟着价格跌 20%
+        });
+
+        Assert.DoesNotContain(r.Conclusions, c => c.Contains("做空力量"));
+    }
+
+    /// <summary>余额那一行仍要显示（金额有规模意义），但变化率必须弱化 —— 它不是判据。</summary>
+    [Fact]
+    public void 融券余额留在表里但变化率弱化()
+    {
+        var bars = Falling();
+        var r = Leverage(bars, (i, n) => new MarginDetailRow
+        {
+            MarginBalance = 100e8,
+            ShortVolume = 1e6 + i * 1e4,
+            ShortBalance = (1e6 + i * 1e4) * (400 - i),
+        });
+
+        var rows = r.Tables[0].Rows;
+        var vol = rows.Single(x => x[0].Text == "融券余量");
+        var bal = rows.Single(x => x[0].Text == "融券余额");
+        Assert.Contains("股", vol[1].Text);                       // 余量带单位，不会跟金额混
+        Assert.NotEqual(CellTone.Muted, vol[3].Tone);             // 判据行正常着色
+        Assert.Equal(CellTone.Muted, bal[3].Tone);                // 参考行一律弱化
+        // 余量在余额之上：先看判据再看规模
+        Assert.True(rows.IndexOf(vol) < rows.IndexOf(bal));
+    }
+
+    /// <summary>沪市老数据没补算过余额时，结论照出 —— 余量是源头字段，不依赖补算。</summary>
+    [Fact]
+    public void 余额为空时做空结论仍然成立()
+    {
+        var bars = Falling();
+        var r = Leverage(bars, (i, n) => new MarginDetailRow
+        {
+            MarginBalance = 100e8,
+            ShortVolume = 1e6 + i * 1e4,
+            ShortBalance = null,                    // 没补算过
+        });
+
+        Assert.Contains(r.Conclusions, c => c.Contains("融券余量") && c.Contains("做空力量也在增加"));
+        Assert.Contains(r.Warnings, w => w.Contains("不受影响"));
+    }
+
+    private static DiagnosisDimension Leverage(
+        List<Bar> bars, Func<int, int, MarginDetailRow> make)
+    {
+        var rows = bars.Select((b, i) =>
+        {
+            var m = make(i, bars.Count);
+            m.TradeDate = b.PeriodStart;
+            m.Code = "300750";
+            return m;
+        }).ToList();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750", Bars = bars, IsMarginTarget = true,
+            Margins = rows, MarginLatest = rows[^1].TradeDate, MarginNormalLagDays = 1,
+        };
+        var r = new CapitalDiagnosisAnalyzer().Analyze(
+            input, CapitalDiagnosisAnalyzer.ResolveWindows(bars));
+        return r.Dimensions.Single(d => d.Index == 4);
+    }
+
     // ═══════════════════ 造数据 ═══════════════════
 
     private static Bar Bar(int i, double close) => new()

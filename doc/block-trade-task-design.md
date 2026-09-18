@@ -325,6 +325,10 @@ public sealed class PartialDayRepair(string dbPath, IManifestStore store)
 （设计里写的是"删掉"），只是内容换成了共用的 `BlockTradeDayWriter`。
 §6 抽 `PartialDayRepair` 的价值不受影响：编排仍然只有一份，新任务要自己接管待办时直接能用。
 
+> **⚠ 这一条 2026-09-18 已作废**：`FillBacklog` 现在按能力位（`IFetchTask.HandlesBacklog`）分派，
+> 本项的待办由 `BlockTradeTask` 自己调 `PartialDayRepair` + `BlockTradeDayWriter` 补，
+> `DailyRefetcherFor` 里的 `BlockTrade` 分支**已删**。见 doc/fill-backlog-to-tasks-design.md。
+
 **③ 抽了 `IBlockTradeDayFetcher` 接口，`BlockTradeDay` 挪进 `Logic/Models`。**
 不然任务类依赖具体的 `EastMoneyMarketEventProvider`，离线测不了排期、`count` 校验、
 分批收尾这些编排逻辑。

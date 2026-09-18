@@ -147,11 +147,29 @@ public partial class App : Application
         // SinaStockListProvider/doc/data-platform-design.md 3.5节）。代价是"拉取当天"现在也会
         // 完整扫一遍全市场列表（只为了刷新市值，K线抓取本身还是只用本地已知的股票，不受影响）——
         // 用户已确认接受这个变慢（2026-07-08）。TencentMarketCapFetcher 保留在代码里但不再使用。
-        var marketCapFetcher = new SinaListMarketCapFetcher();
         // Own rate limiter, separate from market cap/bar fetching above——资金净流入走的是新浪财经
         // 的资金流向接口（不是东方财富，见 SinaNetInflowFetcher 类注释：东方财富在实际使用环境里
         // 基本连不上，新浪/腾讯才是真正能用的），是完全独立的接口，各自独立限流。
-        var netInflowFetcher = new SinaNetInflowFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+#if DEBUG
+        // 【离线模拟总开关】fetcher-settings.json 里 "OfflineMock": "true" 一次把所有**有模拟源的**
+        // 数据源都换掉（资金净流入、龙虎榜、融资余额；K线另走 BarSource 的 "Mock"）。
+        //
+        // 为什么是一个总开关而不是每类一个：验证要的是"这一轮一个真请求都不发"，
+        // 逐类去配必然漏——2026-09-18 验【拉取历史区间】时就漏过，当场发出了真请求。
+        //
+        // ⚠ 跟 BarSource 的 "Mock" 同款的两道闸：**只在 DEBUG 构建里认这个值**（Release 里
+        //    这段代码根本不存在），加上 Debug 实例的数据目录跟正式实例天然隔离。两道都别拆。
+        bool offlineMock = FetcherSettings.ReadString(paths.SettingsPath, "OfflineMock")
+                               ?.Trim().ToLowerInvariant() is "true" or "1";
+#else
+        const bool offlineMock = false;
+#endif
+        IMarketCapFetcher marketCapFetcher = offlineMock
+            ? new MockMarketCapFetcher()
+            : new SinaListMarketCapFetcher();
+        INetInflowFetcher netInflowFetcher = offlineMock
+            ? new MockNetInflowFetcher()
+            : new SinaNetInflowFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
 
         // Own rate limiters, separate from the bar-fetch sources above — cninfo and EastMoney's
         // announcement API are different endpoints from the bar/list APIs and shouldn't share a
@@ -253,37 +271,47 @@ public partial class App : Application
         // 独立限流，独立按钮触发（见 FetchOrchestrator RunFetchIndexConsAsync / RunFetchLhbAsync），不掺
         // 进主抓取流程。中证权重源偏不稳、失败进 Manifest 可用"重新拉取失败股票"重试。三张表(IndexCons/
         // IndexWeight/Lhb/EtfIndexMap)都写进同一个 current.sqlite。
-        var indexConsProvider = new SinaIndexConsProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        IIndexConsProvider indexConsProvider = offlineMock ? new MockIndexConsProvider() : new SinaIndexConsProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
         // 中证 OSS 很容易触发反爬（2026-09-02 用户反馈）：原来是 2 并发 + 1 秒 ≈ 2 请求/秒，
         // 而这一步一轮要问几百个指数、其中大半是注定 404 的非中证系。降到单并发 + 2 秒 +
         // 每 30 个歇 60 秒 ≈ 0.4 请求/秒；配合 RunStepIndexWeightOnlyAsync 里那两道筛子
         // （本地已是最新一期的、确认没有文件的都不问），稳态下每轮实发请求接近 0。
         // 权重是月度数据，慢一点完全无所谓——撞醒反爬要停一整天才是真损失。
-        var indexWeightProvider = new CsindexWeightProvider(new RateLimiter(
-            maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
-            batchSize: 30, restDuration: TimeSpan.FromSeconds(60)));
+        IIndexWeightProvider indexWeightProvider = offlineMock
+            ? new MockIndexWeightProvider()
+            : new CsindexWeightProvider(new RateLimiter(
+                maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(2),
+                batchSize: 30, restDuration: TimeSpan.FromSeconds(60)));
         // 龙虎榜概要的数据源（2026-09-09 默认切到东财）。两套并存、配置切换，见
         // FetcherSettings.ReadLhbSource：东财给的上榜原因是交易所原文，跟龙虎榜席位表同源、
         // 能 join；新浪那份把原因归并成粗类，且对应值跟原因错配。新浪留着是出事时的退路。
         var lhbSource = FetcherSettings.ReadLhbSource(paths.SettingsPath);
         var emLhbProvider = new EastMoneyLhbProvider(emDataCenter);
-        ILhbProvider lhbProvider = lhbSource == LhbSources.Sina
-            ? new SinaLhbProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)))
-            : emLhbProvider;
+        ILhbProvider lhbProvider = offlineMock
+            ? new MockLhbProvider()                       // 离线模拟，见上面的总开关
+            : lhbSource == LhbSources.Sina
+                ? new SinaLhbProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)))
+                : emLhbProvider;
         var indexRepository = new SqliteIndexRepository(paths.CurrentDb);
         indexRepository.EnsureSchema();
         var lhbRepository = new SqliteLhbRepository(paths.CurrentDb);
         lhbRepository.EnsureSchema();
 
-        // 股东数据(股东户数+十大股东+十大流通股东)——新浪股本股东页,逐只抓,独立按钮。写 ShareholderCount/
-        // TopShareholder 两张表。逐只失败进 Manifest 可重试。
-        var shareholderProvider = new SinaShareholderProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        // 股东数据(股东户数+十大股东+十大流通股东)——新浪股本股东页,逐只抓。写 ShareholderCount/
+        // TopShareholder 两张表；四个模式都在 StockPlatform.Tasks/ShareholderTask 里（2026-09-18 迁）。
+        // 离线模拟走上面那个 OfflineMock 总开关：整条 UI 链能零联网跑一遍（真跑一轮是 11130 个
+        // 新浪请求，还得看它当天让不让抓——2026-09-18 上午整域 456）。
+        IShareholderProvider shareholderProvider = offlineMock
+            ? new MockShareholderProvider()
+            : new SinaShareholderProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
         var shareholderRepository = new SqliteShareholderRepository(paths.CurrentDb);
         shareholderRepository.EnsureSchema();
 
         // 融资余额(融资融券明细)——交易所官方源(上交所JSON+深交所xlsx)。每日数据,已并入"拉取全部/当天",
-        // 另有"回补融资余额"按钮补历史。写 MarginDetail 表。
-        var marginProvider = new ExchangeMarginProvider(new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        // 写 MarginDetail 表；四个模式都在 StockPlatform.Tasks/MarginTask 里（2026-09-18 迁）。
+        IMarginProvider marginProvider = offlineMock
+            ? new MockMarginProvider()                    // 离线模拟，见上面的总开关
+            : new ExchangeMarginProvider(new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1)));
         var marginRepository = new SqliteMarginRepository(paths.CurrentDb);
         marginRepository.EnsureSchema();
 
@@ -321,7 +349,16 @@ public partial class App : Application
 
         // 分红送配(新浪分红派息页 vISSUE_ShareBonus)——库里原本没有分红明细,做股息率因子/核对除权除息日的数据
         // 基础。逐只抓全历史,并入"一键拉取定期数据",也有独立按钮。写 Dividend 表。
-        var dividendProvider = new SinaDividendProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        // 【拉取分红送配】的节奏：**踩在新浪的配额线以下匀速走，不去撞墙**（2026-09-18）。
+        // 凭据是当天凌晨那轮 18 次熔断的完整记录——新浪约每 18 分钟放行 100~150 个请求，
+        // 原来的 (50 个/歇 30 秒) 会在 2~3 分钟内打光额度，然后连拒 15 个、熔断干等 15 分钟，
+        // 一夜 18 个循环、白发约 810 个被拒请求。默认 90 个/歇 13 分钟，吞吐持平但零熔断。
+        // 参数可配（fetcher-settings.json 的 DividendBatchSize / DividendRestMinutes），
+        // 因为那个配额会随时段浮动，得跑两天再定。
+        var dividendPace = FetcherSettings.ReadDividendPace(paths.SettingsPath);
+        var dividendProvider = new SinaDividendProvider(new RateLimiter(
+            maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1),
+            batchSize: dividendPace.BatchSize, restDuration: dividendPace.RestDuration));
         var dividendRepository = new SqliteDividendRepository(paths.CurrentDb);
         dividendRepository.EnsureSchema();
 
@@ -346,7 +383,10 @@ public partial class App : Application
         // 龙虎榜营业部席位明细（2026-09-03，东财）——跟已有的【龙虎榜】(新浪)是不同粒度、不替换它：
         // 那张表没有买卖前五营业部名单，而龙虎榜真正的信息量就在"是谁在买"。
         // 264 万行，走流式回调落库（见 RunFetchLhbSeatAsync），共用同一个 datacenter 客户端。
-        var lhbSeatProvider = new EastMoneyLhbSeatProvider(emDataCenter);
+        var emLhbSeatProvider = new EastMoneyLhbSeatProvider(emDataCenter);
+        // 离线模拟走 OfflineMock 总开关（见 doc/offline-mock-design.md）。只换**按日抓那一路**：
+        // emLhbSeatProvider 这个实例本身不动，别处要用它的其它接口时照旧走真源。
+        ILhbSeatDayFetcher lhbSeatProvider = offlineMock ? new MockLhbSeatProvider() : emLhbSeatProvider;
         var lhbSeatRepository = new SqliteLhbSeatRepository(paths.CurrentDb);
         lhbSeatRepository.EnsureSchema();
 
@@ -394,6 +434,10 @@ public partial class App : Application
         // 共用 datacenter 客户端和它的配额——它们跟业绩预告、龙虎榜席位打的是同一个域名，
         // 各配一个限流器只会互相打架（见 QuotaGroup 的注释：限流器独立 ≠ 配额独立）。
         var marketEventProvider = new EastMoneyMarketEventProvider(emDataCenter);
+        // 离线模拟同上。⚠ 只换大宗那一路——marketEventProvider 还要给机构调研/股东增减持/
+        // 限售解禁用，那几路没有模拟源（见 doc/offline-mock-design.md §6），整体替换会把它们打掉。
+        IBlockTradeDayFetcher blockTradeFetcher = offlineMock
+            ? new MockBlockTradeProvider() : marketEventProvider;
         var marketEventRepository = new SqliteMarketEventRepository(paths.CurrentDb);
         marketEventRepository.EnsureSchema();
 
@@ -580,28 +624,63 @@ public partial class App : Application
         // 【大宗交易】2026-09-17 从【拉取市场事件】拆出来。拆的理由是**批的粒度**：
         // 它改成按交易日整日替换之后是两千多片，另外三张（调研/解禁/增减持）按年切片十几片，
         // 绑在一起会让那三张陪着跑完整个历史回补。
-        // ⚠ 残缺日待办的编排仍在 orchestrator 那边（PartialDayRepair），按天重抓的动作
-        //   两边共用 BlockTradeDayWriter——见 doc/block-trade-task-design.md §6。
+        // 残缺日待办 2026-09-18 起也归它自己补（HandlesBacklog=true，任务内部调
+        //   PartialDayRepair + BlockTradeDayWriter）——见 doc/fill-backlog-to-tasks-design.md。
+        //   paths 是复查要用的：复查跟体检同一套判据，要查库。
         taskRegistry.Register(FetchActionId.FetchBlockTrade,
-            () => new BlockTradeTask(marketEventRepository, marketEventProvider,
-                                     tradingDayRepository, manifestStore));
+            () => new BlockTradeTask(marketEventRepository, blockTradeFetcher,
+                                     tradingDayRepository, manifestStore, paths));
 
         // 【拉取龙虎榜席位】2026-09-17 迁到新任务框架，同时从"按月切片"改成"按交易日整日替换"
         //   ——原来的排序键不唯一，月片深分页会既重复又丢行（见 doc/lhb-seat-task-design.md）。
-        // ⚠ 残缺日待办的编排仍在 orchestrator 那边（PartialDayRepair），按天重抓的动作
-        //   两边共用 LhbSeatDayWriter。
+        // 残缺日待办 2026-09-18 起也归它自己补（HandlesBacklog=true，任务内部调
+        //   PartialDayRepair + LhbSeatDayWriter）——见 doc/fill-backlog-to-tasks-design.md。
         taskRegistry.Register(FetchActionId.FetchLhbSeat,
             () => new LhbSeatTask(lhbSeatRepository, lhbSeatProvider,
-                                  tradingDayRepository, manifestStore));
+                                  tradingDayRepository, manifestStore, paths));
 
         // 【龙虎榜】主表 2026-09-17 一并迁到新任务框架。它**没有**席位表那个重复行的病
         //   （排序键本来就唯一、落库本来就是整天替换），纯框架搬家；顺带把四个入口的落库口径
         //   统一成"派生对应值 + 整天替换"（原来只有日常增量那条会派生）。
+        //   残缺日待办 2026-09-18 起归它自己补（HandlesBacklog=true，任务内部调
+        //   PartialDayRepair + LhbDayWriter）——manifestStore 就是为这个传的。
         taskRegistry.Register(FetchActionId.StepLhb,
             () => new LhbTask(paths.CurrentDb, lhbRepository, lhbProvider,
-                              tradingDayRepository, dailyNoDataRepository));
+                              tradingDayRepository, manifestStore, dailyNoDataRepository));
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, prebookProvider, forecastProvider, forecastRepository, lhbSeatProvider, lhbSeatRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
+        // 【指数成分名单】【指数权重】【股票名册与流通市值】2026-09-18 迁到新任务框架——
+        //   迁完 RunFillBacklogAsync 里就只剩 K线那一块了。见 doc/index-roster-task-design.md。
+        //   前两项一批＝一个指数，732 个的轮次终于能分批跑、能到点收尾。
+        taskRegistry.Register(FetchActionId.StepIndexCons,
+            () => new IndexConsTask(indexConsProvider, indexRepository, manifestStore));
+        taskRegistry.Register(FetchActionId.StepIndexWeight,
+            () => new IndexWeightTask(indexWeightProvider, indexRepository, manifestStore));
+        // 市值那项要一个"判交易日"的退路：先问本地交易日历（稳态下零请求），问不出才抓上证指数日线。
+        taskRegistry.Register(FetchActionId.StepRoster,
+            () => new RosterMarketCapTask(marketCapFetcher, fundamentalRepository, tradingDayRepository,
+                sources[0].StockListProvider,
+                // ⚠ 判交易日的退路也要跟着总开关走——日历为空时它**真的会发请求**
+                //   （2026-09-18 就是漏了这一处，验证时白发了一轮新浪列表请求）。
+                offlineMock
+                    ? new MockBarFetcher()
+                    : new TencentBarFetcher(new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                manifestStore, paths));
+
+        // 【资金净流入】2026-09-18 迁到新任务框架。三类待办（失败名单/整天缺失/残缺日）都归它自己补
+        //   ——最后那类以前**没有人补**，每轮只在日志里喊一句"只能人工处理"。
+        //   一批 30 只、组内并发，于是 1.75 小时的活第一次能分批跑、能中途停。
+        //   见 doc/netinflow-task-design.md。
+        taskRegistry.Register(FetchActionId.StepNetInflow,
+            () => new NetInflowTask(netInflowFetcher, manifestStore, paths));
+
+        // 【融资余额】2026-09-18 迁到新任务框架——它是 DailyRefetcherFor 里最后一个 case，
+        //   迁完那个入口表整个消失（见 doc/margin-task-design.md）。四道闸走共用的
+        //   DailyBackfillGate、空日名单走 DailyNoDataGate、待办走 PartialDayRepair + MarginDayWriter。
+        taskRegistry.Register(FetchActionId.StepMargin,
+            () => new MarginTask(marginRepository, marginProvider, tradingDayRepository,
+                                 manifestStore, paths, dailyNoDataRepository));
+
+        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, prebookProvider, forecastProvider, forecastRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
 
         // 【金融监管指标】2026-09-15 迁到新任务框架。注册放在 orchestrator 之后，
         // 因为它要拿 FetchFinancialsForCodesAsync 做前置补数（金融股的特征科目没抓到
@@ -615,9 +694,34 @@ public partial class App : Application
                 orchestrator.FetchFinancialsForCodesAsync));
 
         // 【拉取分红送配】2026-09-18 迁到新任务框架。注册放在 orchestrator 之后只是就近——
-        // 它不依赖编排层（依赖是 provider + 仓储 + manifest）。
+        // 它不依赖编排层（依赖是 provider + 仓储 + manifest + 公告索引）。
+        //
+        // 公告索引（2026-09-18 下午）：先问东财最近谁出了分红公告，只抓这些 + 到期兜底的，
+        // 一轮从 5902 个请求降到一两百。**值仍取新浪**，东财只当索引（它当值源不合格：
+        // 退市股全空、配股比例只在文本里，实测还有 1% 漏检）。配 "none" 就退回纯水位线。
+        // 索引自己有一份限流器：它跟财务那条 datacenter 线各走各的，别共用——
+        // 一边被熔断不该把另一边一起拖下水。
+        var dividendIndexMode = FetcherSettings.ReadDividendNoticeIndex(paths.SettingsPath);
+        IDividendNoticeIndex? dividendNoticeIndex = dividendIndexMode == "none"
+            ? null
+            : new EastMoneyDividendNoticeIndex(new EastMoneyDataCenterClient(
+                new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1))));
+        // 【拉取股东数据】2026-09-18 迁到新任务框架。判据在 ShareholderFetchPlanner
+        // （按报告期 + 实际披露日，纯查库零请求），所以它软依赖【拉取财报预约日】。
+        taskRegistry.Register(FetchActionId.FetchShareholder,
+            () => new ShareholderTask(paths, shareholderProvider, shareholderRepository, manifestStore));
+
         taskRegistry.Register(FetchActionId.FetchDividend,
-            () => new DividendTask(paths, dividendProvider, dividendRepository, manifestStore));
+            () => new DividendTask(paths, dividendProvider, dividendRepository,
+                                   manifestStore, dividendNoticeIndex));
+
+        // 【分红对账】2026-09-18——分红是复权因子的输入，缺一条除权记录那只票的复权序列
+        // 整段错且不报错，只能拿第二个源比一遍。首次对账查出 1,050 条缺口（1,043 条是北交所，
+        // 新浪对北交所覆盖不全）。跟索引那条各用各的限流器：一边熔断不该把另一边拖下水。
+        taskRegistry.Register(FetchActionId.FetchDividendReconcile,
+            () => new DividendReconcileTask(paths, dividendRepository,
+                new EastMoneyDividendTableProvider(new EastMoneyDataCenterClient(
+                    new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1))))));
 
         // 待办的转交口：【重新拉取失败股票】在 orchestrator 内部按 taskId 循环、不经过界面那一层，
         // 所以声明了"自己补待办"的任务（目前只有分红）要靠这条路回调过来，
