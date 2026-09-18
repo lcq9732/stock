@@ -177,6 +177,26 @@ public class DividendReconcileTaskTests : IDisposable
     }
 
     [Fact]
+    public async Task 派息送转全为0的空记录不补()
+    {
+        // 东财标着"实施分配"但三项全 0，没有任何除权实质（理论跳空就是 0）。
+        // 补进库只是噪音，还会把"有多少条落在 day_adj 区间内"抬高、让日志显得比实情严重
+        // ——2026-09-18 正式实例首轮那句"36 条"里 29 条是这种，真有除权的只有 7 条。
+        var r = await Run(Row("600000", "2025-03-01", "2025-06-10", div: 0, bonus: 0, transfer: 0));
+
+        Assert.Empty(_repo.GetByCode("600000"));
+        Assert.True(r.NothingToDo);
+    }
+
+    [Fact]
+    public async Task 只要有一项不为0就照补()
+    {
+        await Run(Row("600000", "2025-03-01", "2025-06-10", div: 0, bonus: 0, transfer: 5));
+
+        Assert.Single(_repo.GetByCode("600000"));
+    }
+
+    [Fact]
     public async Task 一条都不缺时报无事可做()
     {
         Seed("600000", "2025-04-20", "2025-06-10");

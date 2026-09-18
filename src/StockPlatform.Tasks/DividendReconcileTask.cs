@@ -48,14 +48,14 @@ public sealed class DividendReconcileTask(
 
     public override FetchActionId Id => FetchActionId.FetchDividendReconcile;
 
-    private int _scanned, _missing, _bothSides, _inserted;
+    private int _scanned, _missing, _bothSides, _inserted, _hollow;
     private readonly List<(string Code, DateTime Ex, double Div, double Bonus, double Transfer)> _gaps = [];
     private Dictionary<string, HashSet<DateTime>> _mine = new(StringComparer.Ordinal);
 
     protected override async IAsyncEnumerable<IReadOnlyList<DividendRow>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
-        _scanned = _missing = _bothSides = _inserted = 0;
+        _scanned = _missing = _bothSides = _inserted = _hollow = 0;
         _gaps.Clear();
 
         // 库里已有的除权日——同步重活，推线程池（骨架不替子类推）。
@@ -81,6 +81,11 @@ public sealed class DividendReconcileTask(
                 var missing = new List<DividendRow>();
                 foreach (var r in yearRows)
                 {
+                    // 三项全 0 的不补：东财标着"实施分配"，但派息/送股/转增都是 0，
+                    // 没有任何除权实质（理论跳空就是 0）。补进库只是噪音，更糟的是它会把
+                    // "有多少条落在 day_adj 区间内"抬高——2026-09-18 正式实例首轮那句"36 条"
+                    // 里有 29 条是这种，让日志显得比实情严重（真有除权的只有 7 条）。
+                    if (!HasSubstance(r)) { _hollow++; continue; }
                     if (!IsMissing(r)) continue;
                     missing.Add(r);
                     _gaps.Add((r.Code, r.ExDate!.Value, r.DividendYuan, r.BonusShares, r.TransferShares));
@@ -95,6 +100,10 @@ public sealed class DividendReconcileTask(
         }
         finally { source.OnStatus -= Forward; }
     }
+
+    /// <summary>这条记录有没有除权实质——派息/送股/转增至少一项不为 0。</summary>
+    private static bool HasSubstance(DividendRow r)
+        => r.DividendYuan != 0 || r.BonusShares != 0 || r.TransferShares != 0;
 
     /// <summary>库里这只票有没有除权日相同（或差几天）的记录。</summary>
     private bool IsMissing(DividendRow r)
@@ -142,6 +151,9 @@ public sealed class DividendReconcileTask(
              + (inRange > 0
                  ? "这些票的复权序列此前是错的，**记得跑一次【重算回测序列】**。"
                  : "所以当前回测没受影响；补了是为了将来补更早的历史K线。"));
+
+        if (_hollow > 0)
+            Report($"　（另跳过 {_hollow:N0} 条「实施分配但派息/送转全为 0」的空记录——没有除权实质，补了只是噪音。）");
 
         var byMarket = _gaps.GroupBy(g => g.Code.StartsWith("92") || g.Code.StartsWith('8') ? "北交所" : "沪深")
                             .Select(g => $"{g.Key} {g.Count()} 条");
