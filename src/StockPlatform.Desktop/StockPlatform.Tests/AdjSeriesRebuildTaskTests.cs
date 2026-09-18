@@ -106,6 +106,23 @@ public class AdjSeriesRebuildTaskTests : IDisposable
     // ─────────────────── ① 增量 vs 整段 ───────────────────
 
     [Fact]
+    public async Task 只有一根不复权的票_报成算不出来而不是没轮到()
+    {
+        // 2026-09-18：日志天天说"待算名单里还有 4 只没轮到"，查出来全是当天上市的新股/新ETF——
+        // 只有 1 根不复权K线，而复权至少要两根才能比跳空，**再点多少次都算不出来**。
+        // 混在"没轮到"里会让人一直以为有欠账，所以两者必须分开报。
+        PutRaw("600000", Days);              // 正常票，算得出来
+        PutRaw("601091", Days[0]);           // 新股：只有一根
+
+        var (_, log) = await RunAsync();
+
+        Assert.Contains(log, l => l.Contains("1 只算不出来"));
+        Assert.DoesNotContain(log, l => l.Contains("没轮到"));
+        Assert.Empty(Adj("601091"));
+        Assert.Equal(5, Adj("600000").Count);
+    }
+
+    [Fact]
     public async Task 压根没算过_整段重算并写满全历史()
     {
         PutRaw("600000", Days);

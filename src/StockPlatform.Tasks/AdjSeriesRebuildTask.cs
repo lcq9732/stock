@@ -73,7 +73,7 @@ public sealed class AdjSeriesRebuildTask(string dbPath) : FetchTaskBase<AdjRebui
     private readonly SqliteDividendRepository _dividends = new(dbPath);
 
     // ── 汇总计数：FetchAsync 里累加，OnCompletedAsync 里出那一行报告 ──
-    private int _todo, _written, _incremental, _rebuilt, _applied, _skipped;
+    private int _todo, _written, _incremental, _rebuilt, _applied, _skipped, _uncomputable;
     private long _checkedDays, _minorDrift, _realErrors;
     private readonly List<string> _skipNotes = [];
 
@@ -105,6 +105,7 @@ public sealed class AdjSeriesRebuildTask(string dbPath) : FetchTaskBase<AdjRebui
         }
 
         _todo = plan.Codes.Count;
+        _uncomputable = 0;
         if (_todo == 0)
         {
             Report("回测序列已经跟不复权一样新了，这一轮没什么可做。");
@@ -145,6 +146,10 @@ public sealed class AdjSeriesRebuildTask(string dbPath) : FetchTaskBase<AdjRebui
 
             // ⚠ 算不出来的（不复权不足两根、或者上面抛了）产出**空批**，框架会跳过 SaveBatchAsync
             //   ——不占 MaxItems 额度、不计入 items。语义正好：那些票本来就无从算起。
+            //   但要单独计数：它们跟"本轮没轮到"是两回事，混在一起报会让人以为还有活没干完
+            //   （2026-09-18：日志天天说"还有 4 只没轮到"，查出来全是当天上市的新股/新ETF，
+            //    只有 1 根不复权K线，复权至少要两根才能比跳空——再点多少次都算不出来）。
+            if (one is null) _uncomputable++;
             yield return one is null ? Array.Empty<AdjRebuildOutcome>() : [one];
         }
 
@@ -174,11 +179,14 @@ public sealed class AdjSeriesRebuildTask(string dbPath) : FetchTaskBase<AdjRebui
         // 「还剩几只」用减法算，**不再重扫一遍全库**（2026-09-10）：老代码这里调
         // GetPendingAdjRebuildCount()，为了打印一个数字又对 1300 万行 GROUP BY 一遍、几十秒。
         // 落了账的票五条判据必然都不成立，所以剩下的就是"没轮到的 + 算不出来的"。
-        int left = Math.Max(0, _todo - _written);
+        // 这两者必须分开报（2026-09-18）：算不出来的再点几次也不会变，
+        // 混进"没轮到"里会让人一直以为有欠账。
+        int left = Math.Max(0, _todo - _written - _uncomputable);
         Report($"回测序列更新完成：{_written} 只（其中 {_incremental} 只只追加了新K线、"
              + $"{_rebuilt} 只整段重算），应用除权 {_applied} 次、按价格校验剔除可疑记录 {_skipped} 条"
              + ReturnCheckText()
              + (left > 0 ? $"，待算名单里还有 {left} 只没轮到" : "")
+             + (_uncomputable > 0 ? $"，另有 {_uncomputable} 只算不出来（不复权不足两根，多为当日新上市）" : "")
              + $"，用时 {ElapsedText.Format(stats.Elapsed)}。");
 
         return Task.FromResult<TaskRunResult?>(null);
