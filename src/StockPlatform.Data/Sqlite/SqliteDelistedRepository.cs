@@ -57,6 +57,38 @@ public class SqliteDelistedRepository
         tx.Commit();
     }
 
+    /// <summary>
+    /// 只改 exchange 这一列（2026-09-19 加，给 <c>DelistedSupplementTask</c> 的存量自检用）。
+    ///
+    /// 为什么不能用 <see cref="Upsert"/> 顺手改：那是全量快照写入，要求调用方把 name/list_date/
+    /// delist_date 都带齐；自检时手上只有"这行的 exchange 算错了"这一个事实，拿 <see cref="GetAll"/>
+    /// 读回来的行去 Upsert 会把 <c>fetched_at</c> 刷成今天——那一列是"名单是什么时候取来的"，
+    /// 被本地纠错刷掉就再也看不出这批行的真实来源时间。
+    /// </summary>
+    public int UpdateExchange(IEnumerable<(string Code, string Exchange)> rows)
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "UPDATE DelistedStock SET exchange = $ex WHERE code = $code;";
+        var pEx = cmd.CreateParameter(); pEx.ParameterName = "$ex"; cmd.Parameters.Add(pEx);
+        var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
+
+        var n = 0;
+        foreach (var (code, exchange) in rows)
+        {
+            pCode.Value = code;
+            pEx.Value = exchange;
+            n += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return n;
+    }
+
     /// <summary>还没尝试过补"最后几天"K线的代码（tail_fetched_at IS NULL）。</summary>
     public HashSet<string> GetTailPendingCodes()
     {

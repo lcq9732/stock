@@ -2282,7 +2282,10 @@ public class MainViewModel : INotifyPropertyChanged
             // 只剩机构调研/限售解禁/股东增减持三张——【大宗交易】2026-09-17 拆成独立任务，
             // 走上面那条 _taskRegistry 总分支。
             case FetchActionId.FetchMarketEvents:
-                return _orchestrator.RunFetchMarketEventsAsync(progress, ct);
+                // 「首次整段回补」＝不看水位线、从 2016 重取一遍。改了排序键之后要跑一次：
+                // 排序排不到主键末列时深分页会跨页遗漏，而遗漏那半没有任何告警。
+                return _orchestrator.RunFetchMarketEventsAsync(progress, ct,
+                    fullBackfill: item.EffectiveMode == FetchMode.FirstBackfill);
 
             case FetchActionId.FetchStockBoardMap:
                 return _orchestrator.RunFetchStockBoardMapAsync(progress, ct);

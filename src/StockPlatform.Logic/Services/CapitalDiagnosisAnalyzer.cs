@@ -498,7 +498,14 @@ public class CapitalDiagnosisAnalyzer
                 + "所以余额差分恒等于净买入；实测两种算法在已定稿的历史数据上只差 ±1 元的舍入）。"
                 + "⚠ 看净买入不要只看买入额：买入额是**总流水**，买了又还、还了又买都计在内。"
                 + "宁德 2026-09-08 买入额 15.9 亿排区间第二，净买入却只有 2.53 亿——那天是大进大出，"
-                + "不是单边抄底。⚠ 最新一个交易日的净买入可能随数据定稿而变，别当精确值。",
+                + "不是单边抄底。⚠ 最新一个交易日的净买入可能随数据定稿而变，别当精确值。　"
+                + "**大进大出时另给两个数**：① 周转倍数 = 区间流水 ÷ 区间平均融资余额，说的是融资盘"
+                + "自己换手多快——同样净减 2.5 亿，流水 41.5 亿是「一屋子人换了七轮、人数少了两个」，"
+                + "流水 3 亿是「有人一次性撤了、剩下的没动」，前者筹码不稳定。倍数受区间长短影响，"
+                + "**不可横向比不同的票**。② 融资买入 ÷ 同期总成交额，说的是杠杆资金在这只票的成交里"
+                + "占多大分量，这个才可以横向比；分子分母只取「两融与K线都有数据」的交易日，"
+                + "覆盖不足八成就不给这个数（两融有整天缺数据、K线也有 amount 不全的行）。"
+                + "⚠ 两个数的高/中/低分档是**经验值，本地没有回测支撑**，用来帮着读数，不是信号。",
         };
 
         if (!input.IsMarginTarget)
@@ -548,9 +555,24 @@ public class CapitalDiagnosisAnalyzer
                            + " —— 只影响下方余额那一行的金额显示，做空力量的结论走余量、不受影响");
         double peak = rows.Max(r => r.MarginBalance);
 
+        // 列头直接写日期（2026-09-19 用户定）：光写"起/末"看不出这一波是三天还是两个月。
+        // ⚠ 日期取**K线**口径，跟股价那行严格对应；两融按 T+1 披露，融资/融券三行的实际
+        // 起末可能比表头早一日（锚点日两融缺数据时"起"也会差）。差一天就在下面单独告警，
+        // 不能让人以为表头那个日期对四行都成立。
+        var tStart = bars[main.StartIndex].PeriodStart;
+        var tEnd = bars[^1].PeriodStart;
+        if (rows[0].TradeDate.Date != tStart.Date || rows[^1].TradeDate.Date != tEnd.Date)
+            d.Warnings.Add($"表头日期是K线口径（{tStart:MM-dd} → {tEnd:MM-dd}），"
+                           + $"两融三行实际取的是 {rows[0].TradeDate:MM-dd} → {rows[^1].TradeDate:MM-dd}"
+                           + " —— 披露滞后或当天缺数据所致，只有股价那行跟表头日期严格对应");
+
         d.Tables.Add(new DiagnosisTable
         {
-            Columns = { new("", 76), new("起", 92, true), new("末", 92, true), new("变化", 78, true) },
+            Columns =
+            {
+                new("", 76), new($"起 {tStart:MM-dd}", 92, true),
+                new($"末 {tEnd:MM-dd}", 92, true), new("变化", 78, true),
+            },
             Rows =
             {
                 new[] { new DiagnosisCell("股价"), new DiagnosisCell($"{bars[main.StartIndex].Close:F2}"),
@@ -628,7 +650,8 @@ public class CapitalDiagnosisAnalyzer
                 : withNet.OrderBy(x => x.Net!.Value)).Take(3).ToList();
             var t = new DiagnosisTable
             {
-                Caption = $"本波融资净{(sum >= 0 ? "买入" : "偿还")} Top3（买入额是总流水，净买入才是增仓）",
+                // ⚠ 尾注不能写死"增仓"：净偿还时说"净买入才是增仓"是自相矛盾的。
+                Caption = $"本波融资净{(sum >= 0 ? "买入" : "偿还")} Top3（买入额是总流水，净买入才是真实增减）",
                 Columns = { new("日期", 82), new("融资买入", 82, true), new("净买入", 82, true), new("当日涨跌", 78, true) },
             };
             foreach (var x in top)
@@ -646,8 +669,78 @@ public class CapitalDiagnosisAnalyzer
 
             double buySum = withNet.Sum(x => x.Row.MarginBuy);
             if (buySum > 0 && Math.Abs(sum) < buySum * 0.2)
-                d.Conclusions.Add($"区间融资买入额合计 {Yi(buySum)}，净{(sum >= 0 ? "买入" : "偿还")}仅 {Yi(Math.Abs(sum))}"
-                                  + " —— 融资盘大进大出，真实增仓远小于流水");
+            {
+                // ⚠ **买入/偿还/净额三个数必须同时摆出来**（2026-09-19 用户定）：原先只写
+                // "买入额合计 25.0亿，净偿还仅 1.1亿"，用户读成了"融资 25 亿买进来、卖了 1.1 亿
+                // 还款"——少掉偿还额那一项，"净"字就被一眼扫过去了。写成
+                // "净减 1.1亿（买入 25.0亿 / 偿还 26.1亿）"才能看出是同一笔额度来回滚了好几轮。
+                //
+                // 偿还额**反推**（买入 − 净额）而不取源头的 rzche：withNet 已经排掉了锚点日和
+                // 缺口天，源头偿还额在那些天上对不齐，三个数并排就会出现 25.0 − 26.1 ≠ −1.1。
+                // 两种口径本来就等价（见 NetBuySeries 的注释），反推还顺带让深市也有这一列。
+                double repaySum = buySum - sum;
+                // 区间要写明多久：光说"区间"看的人不知道是三天还是两个月，而「本波」是按
+                // "近60日内最高收盘日"动态定的，各票长短差很多（招行实测 3 日、宁德 31 日）。
+                // ⚠ 尾句的"增/减"必须跟 sum 的符号走（2026-09-19 用户指出）：原先写死
+                // "真实增仓远小于流水"，碰上净减就成了"融资净减 2.5亿 …… 真实增仓远小于流水"，
+                // 前后自相矛盾。大进大出说的是"净变动远小于流水"，方向本身由 sum 决定。
+                d.Conclusions.Add($"{RangeLabel(main)}（{main.Start:yyyy-MM-dd} 起）融资"
+                                  + $"净{(sum >= 0 ? "增" : "减")} {Yi(Math.Abs(sum))}"
+                                  + $"（买入 {Yi(buySum)} / 偿还 {Yi(repaySum)}）"
+                                  + $" —— 融资盘大进大出，真实{(sum >= 0 ? "增" : "减")}仓远小于流水");
+
+                // ── 上面那句只防误读（"41.5亿不是加仓"），它复述的是两个数的大小关系，
+                //    没说出"所以呢"。真正的信息在这里：**同样净减 2.5亿，流水 41.5亿 和
+                //    流水 3亿 是两回事**——前者是一屋子人换了七轮、人数略少了两个，后者是
+                //    有人一次性撤了就走、剩下的持仓没动。前者的筹码不稳定，后者稳定。
+                //    （2026-09-19 用户问"这句想告诉我什么"，确认原句信息量不足后补的。）
+                //
+                //    排版：**数字在前、定性在后，破折号只出现一次**。先写成
+                //    "倍数 —— 定性；占比 —— 定性 —— 风险"，一句话里三个破折号，读不下去。
+                var nums = new List<string>();
+                var words = new List<string>();
+
+                // A. 周转倍数 = 流水 / 平均余额。看融资盘自己换手多快。
+                double avgBal = withNet.Average(x => x.Row.MarginBalance);
+                double turns = avgBal > 0 ? buySum / avgBal : double.NaN;
+                if (!double.IsNaN(turns))
+                {
+                    nums.Add($"流水是平均余额（{Yi(avgBal)}）的 {turns:F1} 倍");
+                    words.Add(TurnoverWord(turns));
+                }
+
+                // B. 融资买入占同期成交额。看杠杆资金在全市场成交里占多大分量；
+                //    跟 A 不重复：A 是融资盘内部的换手速度，B 是它相对整只票的分量，
+                //    也是唯一能横向比不同票的那个（周转倍数受余额基数影响，不可比）。
+                //    ⚠ 分子分母必须同一批交易日：两融有整天缺数据、K线也有 amount 不全的行
+                //    （project_bar_volume_unit_bug），错位相除会把占比算高。覆盖不足八成就不给。
+                double buyMatched = 0, amtMatched = 0;
+                int matched = 0;
+                foreach (var x in withNet)
+                {
+                    int bi = IndexOfDate(bars, x.Row.TradeDate);
+                    if (bi < 0 || bars[bi].Amount <= 0) continue;
+                    buyMatched += x.Row.MarginBuy;
+                    amtMatched += bars[bi].Amount;
+                    matched++;
+                }
+                double share = double.NaN;
+                if (amtMatched > 0 && matched >= withNet.Count * 0.8)
+                {
+                    share = buyMatched / amtMatched * 100;
+                    nums.Add($"融资买入占同期成交额 {share:F1}%");
+                    words.Add($"杠杆参与度{ShareWord(share)}");
+                }
+
+                if (nums.Count > 0)
+                {
+                    // 两个都偏高才给这句：高周转说明持有人短线、高占比说明杠杆在这只票里
+                    // 分量重，两者叠加才是"下跌时容易连锁平仓"的形状。只中一个不够。
+                    if (turns >= 3 && share >= 10)
+                        words.Add("短线杠杆资金主导，筹码不稳，继续下跌容易连锁平仓");
+                    d.Conclusions.Add(string.Join("、", nums) + " —— " + string.Join("，", words));
+                }
+            }
         }
         return d;
     }
@@ -872,6 +965,23 @@ public class CapitalDiagnosisAnalyzer
             if (bars[i].PeriodStart.Date == d.Date) return i;
         return -1;
     }
+
+    /// <summary>
+    /// 融资盘周转倍数（流水 ÷ 平均余额）的定性词。
+    ///
+    /// ⚠ 分档 3 / 1 是**经验值，没有回测支撑**，只用来帮着读那个数，不要当信号使。
+    /// ⚠ 倍数**不能横向比不同的票**：区间越长流水攒得越多，而「本波」的长短本来就各票不一
+    /// （招行实测 3 日、宁德 31 日）。要横向比，看的是占成交额那个比例。
+    /// </summary>
+    private static string TurnoverWord(double turns) =>
+        turns >= 3 ? "融资盘在高频滚动" : turns >= 1 ? "融资盘换手正常" : "融资盘基本没动";
+
+    /// <summary>
+    /// 融资买入占同期成交额的定性词。10% / 5% 是市场上通行的分界，
+    /// **同样是经验值、本地没回测过**，写成"高/中等/偏低"而不是"危险/安全"就是这个原因。
+    /// </summary>
+    private static string ShareWord(double share) =>
+        share >= 10 ? "高" : share >= 5 ? "中等" : "偏低";
 
     /// <summary>元 → "12.3亿" / "4560万"。诊断里的金额跨度从几百万到几百亿，固定单位会很难读。</summary>
     private static string Yi(double yuan)

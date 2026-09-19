@@ -1605,9 +1605,19 @@ public partial class FetchOrchestrator
     /// 增量水位线各表自己的日期列；<b>限售解禁例外，每次全量重取</b>——它含未来的解禁计划
     /// （实测有 2035 年的），按"抓到今天为止"做增量会永远漏掉未来那部分，而未来正是它的价值。
     /// </summary>
+    /// <param name="fullBackfill">
+    /// 「首次整段回补」——不看水位线，三张表都从 <c>floor</c> 重抓一遍（2026-09-19 接上，
+    /// 此前 <c>forceStart</c> 这个参数声明了却没有任何调用方，界面上根本点不到）。
+    ///
+    /// 用途是**改了排序键之后把历史补回来**：排序键排不到主键末列时，深分页会跨页重复 + 遗漏，
+    /// 重复那半会被主键去重自检喊出来，**遗漏那半一声不吭**——只能整段重取。
+    /// 机构调研 2026-09-19 补了 tieBreaker，这一轮就是给它用的。
+    ///
+    /// 回补是 UPSERT 不是删重写，所以**中途停掉不会两头空**，下次接着跑即可。
+    /// </param>
     public async Task<FetchResult> RunFetchMarketEventsAsync(
         IProgress<string>? progress, CancellationToken ct = default,
-        DateTime? forceStart = null)
+        bool fullBackfill = false)
     {
         var result = new FetchResult();
         if (_marketEventProvider == null || _marketEventRepository == null)
@@ -1640,15 +1650,16 @@ public partial class FetchOrchestrator
             {
                 try
                 {
-                    bool first = _marketEventRepository.Count(table) == 0;
+                    int before = _marketEventRepository.Count(table);
+                    bool first = before == 0;
                     DateTime start;
                     string mode;
-                    if (forceStart.HasValue)
+                    if (fullBackfill)
                     {
-                        // 回填：调用方显式指定起点，不看水位线。**不要靠删表来触发回填**——
-                        // 那会先丢数据再重下，中途失败就两头空。
-                        start = forceStart.Value;
-                        mode = "（回填）";
+                        // 整段回补：不看水位线，从 floor 重来一遍。**不要靠删表来触发**——
+                        // 那会先丢数据再重下，中途失败就两头空；这里是 UPSERT，停了再跑就行。
+                        start = floor;
+                        mode = "（整段回补：不看水位线，从头重取一遍）";
                     }
                     else if (first)
                     {
@@ -1664,7 +1675,17 @@ public partial class FetchOrchestrator
                     }
                     progress?.Report($"{label}：从 {start:yyyy-MM-dd} 抓到 {today:yyyy-MM-dd}" + mode);
                     int n = await fetch(start);
-                    progress?.Report($"{label} 写入 {n} 行，本地共 {_marketEventRepository.Count(table)} 行。");
+                    int after = _marketEventRepository.Count(table);
+                    // 整段回补时报"净增了多少行"：这一轮补回来的正是**此前跨页遗漏、而且从来没有
+                    // 任何告警**的那部分（重复那半有主键自检喊，遗漏那半没有）。净增 0 就说明
+                    // 之前没漏——这个数本身就是结论，值得留在日志里。
+                    progress?.Report($"{label} 写入 {n} 行，本地共 {after} 行。"
+                        + (fullBackfill
+                            ? $"　整段回补对账：回补前 {before} 行 → 现在 {after} 行，"
+                              + (after > before
+                                  ? $"**补回此前遗漏的 {after - before} 行**（{(after - before) * 100.0 / Math.Max(after, 1):F3}%）"
+                                  : "没有净增，说明此前没有跨页遗漏")
+                            : ""));
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)

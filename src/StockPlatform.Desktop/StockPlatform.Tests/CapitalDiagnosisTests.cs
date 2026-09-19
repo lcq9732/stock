@@ -748,9 +748,209 @@ public class CapitalDiagnosisTests
         return r.Dimensions.Single(d => d.Index == 4);
     }
 
+    /// <summary>
+    /// 「大进大出」那句要把**买入、偿还、净额三个数一起摆出来**，并写明区间多久。
+    ///
+    /// 2026-09-19 用户读旧文案"买入额合计 25.0亿，净偿还仅 1.1亿"，理解成了
+    /// "融资 25 亿买进来、卖了 1.1 亿还款"——少掉偿还额那一项，"净"字就被一眼扫过去，
+    /// 25 亿被当成了净流入。三个数并排（25.0 买 / 26.1 还 / 净减 1.1）才看得出
+    /// 是同一笔额度来回滚了好几轮。区间也必须带天数：光说"区间"分不清三天还是两个月。
+    /// </summary>
+    [Fact]
+    public void 大进大出的结论要给出买入偿还净额三个数和区间天数()
+    {
+        // 60 根单调下跌 → 锚点落在 index 0，本波 = 全部 60 日
+        var bars = Enumerable.Range(0, 60).Select(i => Bar(i, 400 - i)).ToList();
+        // 余额 6.4亿 → 5.3亿（净减 1.1亿），每天买入 0.5亿 → 流水远大于净额
+        var margins = bars.Select((b, i) => new MarginDetailRow
+        {
+            TradeDate = b.PeriodStart,
+            MarginBalance = 6.4e8 - i * (1.1e8 / 59),
+            ShortBalance = 1e8,
+            ShortVolume = 1e6,
+            MarginBuy = 0.5e8,
+        }).ToList();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750", Bars = bars, IsMarginTarget = true, Margins = margins,
+        };
+        var w = CapitalDiagnosisAnalyzer.ResolveWindows(bars);
+        Assert.Equal(0, w.AnchorIndex);                    // 前提：锚点在第一根
+
+        var lev = new CapitalDiagnosisAnalyzer().Analyze(input, w)
+            .Dimensions.Single(d => d.Index == 4);
+        var c = Assert.Single(lev.Conclusions, x => x.Contains("大进大出"));
+        _out.WriteLine(c);
+
+        // 锚点日不计入 → 59 天 × 0.5亿 = 29.5亿 流水，净减 1.1亿，反推偿还 30.6亿
+        Assert.Contains("买入 29.5亿", c);
+        Assert.Contains("偿还 30.6亿", c);
+        Assert.Contains("净减 1.1亿", c);
+        // 三个数必须自洽：买入 − 偿还 = 净额，不能各取各的口径
+        Assert.Equal(-1.1, 29.5 - 30.6, 1);
+        // 区间写明多久
+        Assert.Contains("本波 60日", c);
+        Assert.Contains("2026-01-05 起", c);
+        // 尾句方向要跟净额符号一致：净减了还说"增仓"是自相矛盾（2026-09-19 用户指出）
+        Assert.Contains("真实减仓远小于流水", c);
+        Assert.DoesNotContain("增仓", c);
+        // Top3 表的尾注同理，不能写死"增仓"
+        var cap = lev.Tables.Single(x => x.Caption.Contains("Top3")).Caption;
+        Assert.Contains("净偿还", cap);
+        Assert.DoesNotContain("增仓", cap);
+    }
+
+    /// <summary>净增方向的镜像用例——同一句话在融资净增时要说"增仓"。</summary>
+    [Fact]
+    public void 大进大出在净增时说增仓()
+    {
+        var bars = Enumerable.Range(0, 60).Select(i => Bar(i, 400 - i)).ToList();
+        var margins = bars.Select((b, i) => new MarginDetailRow
+        {
+            TradeDate = b.PeriodStart,
+            MarginBalance = 5.3e8 + i * (1.1e8 / 59),      // 余额反过来，净增 1.1亿
+            ShortBalance = 1e8,
+            ShortVolume = 1e6,
+            MarginBuy = 0.5e8,
+        }).ToList();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750", Bars = bars, IsMarginTarget = true, Margins = margins,
+        };
+        var lev = new CapitalDiagnosisAnalyzer()
+            .Analyze(input, CapitalDiagnosisAnalyzer.ResolveWindows(bars))
+            .Dimensions.Single(d => d.Index == 4);
+
+        var c = Assert.Single(lev.Conclusions, x => x.Contains("大进大出"));
+        _out.WriteLine(c);
+        // 净增 1.1亿：买入 29.5亿，反推偿还 28.4亿
+        Assert.Contains("净增 1.1亿", c);
+        Assert.Contains("买入 29.5亿", c);
+        Assert.Contains("偿还 28.4亿", c);
+        Assert.Contains("真实增仓远小于流水", c);
+        Assert.Contains("净买入", lev.Tables.Single(x => x.Caption.Contains("Top3")).Caption);
+    }
+
+    /// <summary>
+    /// 首末对照表的列头要直接写日期，不能只写"起/末"——看的人分不清跨度。
+    /// 日期取K线口径；两融滞后时三行的实际日期会跟表头差一天，那必须单独告警。
+    /// </summary>
+    [Fact]
+    public void 首末表列头写日期_两融口径不一致时告警()
+    {
+        var bars = Falling();                              // 80 根 → 本波从 index 20 起
+        var margins = bars.Select((b, i) => new MarginDetailRow
+        {
+            TradeDate = b.PeriodStart,
+            MarginBalance = 200e8 - i * 1e8,
+            ShortBalance = 1e8,
+            ShortVolume = 1e6,
+        }).ToList();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750", Bars = bars, IsMarginTarget = true, Margins = margins,
+        };
+        var w = CapitalDiagnosisAnalyzer.ResolveWindows(bars);
+        var lev = new CapitalDiagnosisAnalyzer().Analyze(input, w)
+            .Dimensions.Single(d => d.Index == 4);
+
+        var head = lev.Tables.First(t => t.Columns.Any(col => col.Header.StartsWith("起"))).Columns;
+        Assert.Equal($"起 {bars[w.AnchorIndex].PeriodStart:MM-dd}", head[1].Header);
+        Assert.Equal($"末 {bars[^1].PeriodStart:MM-dd}", head[2].Header);
+        // 两融逐日齐全 → 口径一致，不该有那条告警
+        Assert.DoesNotContain(lev.Warnings, x => x.Contains("表头日期是K线口径"));
+
+        // 砍掉最后一天两融（模拟 T+1 披露滞后）→ 必须告警
+        input = new CapitalDiagnosisInput
+        {
+            Code = "300750", Bars = bars, IsMarginTarget = true,
+            Margins = margins.Take(margins.Count - 1).ToList(),
+            MarginLatest = margins[^2].TradeDate, MarginNormalLagDays = 1,
+        };
+        var lev2 = new CapitalDiagnosisAnalyzer().Analyze(input, w)
+            .Dimensions.Single(d => d.Index == 4);
+        Assert.Contains(lev2.Warnings, x => x.Contains("表头日期是K线口径"));
+    }
+
+    /// <summary>
+    /// 「大进大出」后面要跟上**周转倍数**和**融资买入占成交额比**。
+    ///
+    /// 2026-09-19 用户问"真实减仓远小于流水这句想告诉我什么"——原句只复述了两个数的大小
+    /// 关系，没有"所以呢"。同样净减 2.5亿，流水 41.5亿 是"一屋子人换了七轮"、流水 3亿 是
+    /// "有人一次性撤了就走"，前者筹码不稳定。两个数分别回答"融资盘自己换手多快"和
+    /// "杠杆在这只票的成交里占多大分量"，后者才可以横向比不同的票。
+    /// </summary>
+    [Fact]
+    public void 大进大出要给出周转倍数和占成交额比()
+    {
+        // 每天成交额 4亿 → 59天 236亿，融资买入 29.5亿 → 占比 12.5%
+        var bars = Enumerable.Range(0, 60).Select(i => Bar(i, 400 - i, 4e8)).ToList();
+        var margins = bars.Select((b, i) => new MarginDetailRow
+        {
+            TradeDate = b.PeriodStart,
+            MarginBalance = 6.4e8 - i * (1.1e8 / 59),      // 平均 ≈ 5.8亿
+            ShortBalance = 1e8,
+            ShortVolume = 1e6,
+            MarginBuy = 0.5e8,
+        }).ToList();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750", Bars = bars, IsMarginTarget = true, Margins = margins,
+        };
+        var lev = new CapitalDiagnosisAnalyzer()
+            .Analyze(input, CapitalDiagnosisAnalyzer.ResolveWindows(bars))
+            .Dimensions.Single(d => d.Index == 4);
+
+        // 防误读那句要**保留**，新的结构判断是**另起一条**，不是替换
+        Assert.Contains(lev.Conclusions, x => x.Contains("真实减仓远小于流水"));
+        var c = Assert.Single(lev.Conclusions, x => x.Contains("流水是平均余额"));
+        _out.WriteLine(c);
+
+        // A：29.5亿 ÷ 平均余额 5.8亿 ≈ 5 倍 → 高频滚动
+        Assert.Contains("倍", c);
+        Assert.Contains("高频滚动", c);
+        // B：占成交额 12.5%（分子分母同一批交易日）
+        Assert.Contains("融资买入占同期成交额 12.5%", c);
+        Assert.Contains("杠杆参与度高", c);
+        // 高周转 + 高占比叠加才给风险提示
+        Assert.Contains("连锁平仓", c);
+    }
+
+    /// <summary>
+    /// 占成交额比的分子分母必须同一批交易日。K线有 amount 不全的行
+    /// （project_bar_volume_unit_bug），错位相除会把占比算高——覆盖不足八成就不给这个数，
+    /// 宁可没有也不给个错的。周转倍数不依赖成交额，照给。
+    /// </summary>
+    [Fact]
+    public void 成交额覆盖不足八成时不给占比()
+    {
+        // 只有前 30 天有成交额，其余为 0 → 覆盖 ≈ 49%
+        var bars = Enumerable.Range(0, 60).Select(i => Bar(i, 400 - i, i < 30 ? 4e8 : 0)).ToList();
+        var margins = bars.Select((b, i) => new MarginDetailRow
+        {
+            TradeDate = b.PeriodStart,
+            MarginBalance = 6.4e8 - i * (1.1e8 / 59),
+            ShortBalance = 1e8,
+            ShortVolume = 1e6,
+            MarginBuy = 0.5e8,
+        }).ToList();
+        var input = new CapitalDiagnosisInput
+        {
+            Code = "300750", Bars = bars, IsMarginTarget = true, Margins = margins,
+        };
+        var lev = new CapitalDiagnosisAnalyzer()
+            .Analyze(input, CapitalDiagnosisAnalyzer.ResolveWindows(bars))
+            .Dimensions.Single(d => d.Index == 4);
+
+        var c = Assert.Single(lev.Conclusions, x => x.Contains("流水是平均余额"));
+        Assert.DoesNotContain("占同期成交额", c);
+        Assert.DoesNotContain("连锁平仓", c);           // 缺一个数就不下这个判断
+        Assert.Contains("高频滚动", c);                 // 周转倍数不受影响
+    }
+
     // ═══════════════════ 造数据 ═══════════════════
 
-    private static Bar Bar(int i, double close) => new()
+    private static Bar Bar(int i, double close, double amount = 1e9) => new()
     {
         Code = "300750",
         Granularity = Granularity.Day,
@@ -759,7 +959,7 @@ public class CapitalDiagnosisTests
         // 资金流按日期建字典时直接抛重复键——真库有主键约束不会这样，是造数据的锅。
         PeriodStart = new DateTime(2026, 1, 5).AddDays(i),
         Close = close,
-        Amount = 1e9,
+        Amount = amount,
         Turnover = 0.5,
     };
 

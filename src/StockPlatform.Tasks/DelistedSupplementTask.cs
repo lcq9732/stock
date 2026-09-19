@@ -64,6 +64,8 @@ namespace StockPlatform.Tasks;
 ///
 /// ① **给不出日K ⇒ 从未上市**（<c>688688 蚂蚁集团</c>、<c>603361 浙江国祥</c> 这类过会后撤回/暂缓的）。
 ///    把它们写进退市表是错的——退市表会被分红抓取和 FactorLab 的选池用到。
+///    ⚠ 这一条的前提是**探测区间覆盖到全部历史**，否则退得早的老股会整类被它误判——
+///    见 <see cref="ProbeStart"/>，那里踩过一次。
 ///
 /// ② ⚠ **最后一根K线还很新 ⇒ 它还在交易，不是退市**。"给得出日K"只能证明**交易过**。
 ///    第一版漏了这条，于是：
@@ -90,8 +92,20 @@ public sealed class DelistedSupplementTask(
     ICompanyProfileRepository profiles,
     IBarDataFetcher fetcher) : FetchTaskBase<DelistedStockRow>
 {
-    /// <summary>探测用的窗口——只要能回一根就说明交易过，不需要全历史。</summary>
-    private static readonly TimeSpan ProbeWindow = TimeSpan.FromDays(3650);
+    /// <summary>
+    /// 探测的起点。⚠ <b>必须是固定日期，不能是"今天往前 N 年"的滚动窗口</b>（2026-09-19 修）。
+    ///
+    /// 原来是 <c>TimeSpan.FromDays(3650)</c>，于是探测区间只有最近十年，而
+    /// <b>2016 年以前退市的老股在那个区间里必然一根K线都没有</b>——判据"给不出日K ⇒ 从未上市"
+    /// 于是把它们整类误判。实机跑时撞上的正是这个：<c>600087 退市长油</c>（2014 年退）和
+    /// <c>600849 上海医药</c>老号（2010 年换代码）双双落进"从未上市"被跳过，而后者恰恰是
+    /// 类注释里点名"两所名单给不出、要靠这一项补进来"的那类。两只都是档案
+    /// <c>listing_state='2'</c> 的真退市股，却因为退得太早而永远补不进名单。
+    ///
+    /// 代价是零：K线接口一次请求返回整段，请求数不变，只是多返回几千根（探测完就丢）。
+    /// 1990-12-19 是上交所开市日，没有比它更早的 A 股K线。
+    /// </summary>
+    private static readonly DateTime ProbeStart = new(1990, 12, 19);
 
     /// <summary>
     /// 最后一根K线距今超过这么久，才算"已经不交易了"。
@@ -130,14 +144,21 @@ public sealed class DelistedSupplementTask(
         }
 
         // 读库是同步重活，推线程池（feedback_task_must_offload_heavy_sync）
-        var (live, known, profileDelisted) = await Task.Run(() =>
+        var (live, known, profileDelisted, fixedExchanges) = await Task.Run(() =>
         {
             var l = SqliteStockMetaUpsert.GetAll(paths.CurrentDb).Select(x => x.Code).ToHashSet(StringComparer.Ordinal);
-            var k = new SqliteDelistedRepository(paths.CurrentDb).GetAll().Select(x => x.Code).ToHashSet(StringComparer.Ordinal);
+            var repo = new SqliteDelistedRepository(paths.CurrentDb);
+            var rows = repo.GetAll();
+            var k = rows.Select(x => x.Code).ToHashSet(StringComparer.Ordinal);
+            var fixes = FixStaleExchanges(repo, rows);
             profiles.EnsureSchema();
             var p = profiles.GetDelistedCodes();
-            return (l, k, p);
+            return (l, k, p, fixes);
         }, ct);
+        if (fixedExchanges.Count > 0)
+            Report($"存量 exchange 自检：改对 {fixedExchanges.Count} 行——"
+                   + string.Join("、", fixedExchanges.Take(12))
+                   + (fixedExchanges.Count > 12 ? $" 等 {fixedExchanges.Count} 行" : ""));
 
         // ① 巨潮差集：名册和退市名单都没有的（巨潮那份在 provider 里已按 A 股号段过滤过）
         var fromList = all.Where(x => !live.Contains(x.Code) && !known.Contains(x.Code))
@@ -175,7 +196,7 @@ public sealed class DelistedSupplementTask(
             List<Bar> bars;
             try
             {
-                (_, bars) = await fetcher.FetchAsync(code, Granularity.Day, end - ProbeWindow, end, ct);
+                (_, bars) = await fetcher.FetchAsync(code, Granularity.Day, ProbeStart, end, ct);
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
@@ -224,9 +245,35 @@ public sealed class DelistedSupplementTask(
     }
 
     /// <summary>
+    /// 存量 exchange 自检（2026-09-19 加）——**纯本地、零请求**。
+    ///
+    /// 为什么光修 <see cref="ExchangeTag"/> 不够：候选集第一步就减掉了"已知退市"，
+    /// <b>已经在名单里的行永远不会再被走一遍</b>，写错的值不会自愈。实测
+    /// <c>920680 广道退</c> 09-17 被旧规则写成了 <c>szse</c>，09-19 修完再跑也纹丝不动——
+    /// 修了判据却没人回头看存量，等于没修。
+    ///
+    /// ⚠ 只动 <see cref="MarketClassifier"/> <b>认得出</b>交易所的行。<see cref="ExchangeTag"/>
+    /// 的兜底分支把未知号段也写成 <c>szse</c>，那是"写新行时总得给个值"的将就；
+    /// 拿它来覆盖存量就成了把没根据的猜测写进库里，反而可能改坏本来对的值。
+    /// </summary>
+    private static List<string> FixStaleExchanges(SqliteDelistedRepository repo, List<DelistedStockRow> rows)
+    {
+        var stale = rows
+            .Where(r => MarketClassifier.ExchangeOf(r.Code) != Exchange.Unknown)
+            .Select(r => (r.Code, r.Name, Want: ExchangeTag(r.Code), Had: r.Exchange))
+            .Where(x => !string.Equals(x.Want, x.Had, StringComparison.Ordinal))
+            .ToList();
+        if (stale.Count == 0) return [];
+
+        repo.UpdateExchange(stale.Select(x => (x.Code, x.Want)));
+        return [.. stale.Select(x => $"{x.Code} {x.Name} {x.Had}→{x.Want}")];
+    }
+
+    /// <summary>
     /// 交易所标记。⚠ 原来是 <c>== Exchange.Shanghai ? "sse" : "szse"</c>，**北交所会被写成深市**
     /// （2026-09-19 修）——920 号段走 <see cref="MarketClassifier"/>，别自己拼前缀规则
     /// （feedback_market_prefix_via_classifier）。
+    /// 存量里写错的由 <see cref="FixStaleExchanges"/> 回头改。
     /// </summary>
     private static string ExchangeTag(string code) => MarketClassifier.ExchangeOf(code) switch
     {
@@ -262,7 +309,11 @@ public sealed class DelistedSupplementTask(
                    + string.Join("、", _stillTradingCodes.Take(12))
                    + (_stillTradingCodes.Count > 12 ? $" 等 {_stillTradingCodes.Count} 只" : ""));
         if (_neverTradedCodes.Count > 0)
-            Report("　跳过的（数据源一根日K都给不出，多半是过会后撤回/暂缓上市）："
+            // ⚠ 措辞只说事实、不下结论（2026-09-19 改）：原来写的是"多半是过会后撤回/暂缓上市"，
+            //   而 600087 退市长油被十年滚动窗口误判成这一类时，这句话让日志读起来完全正常。
+            //   "给不出日K"只是数据源的回答，不等于"从未上市"。
+            Report("　跳过的（探测区间内数据源一根日K都给不出，通常是过会后撤回/暂缓上市；"
+                   + "如果里面有你认得的老退市股，那是探测没覆盖到它的年代，要查）："
                    + string.Join("、", _neverTradedCodes.Take(12))
                    + (_neverTradedCodes.Count > 12 ? $" 等 {_neverTradedCodes.Count} 只" : ""));
         return Task.FromResult<TaskRunResult?>(null);

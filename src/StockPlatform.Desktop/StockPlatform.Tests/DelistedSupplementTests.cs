@@ -199,6 +199,75 @@ public class DelistedSupplementTests : IDisposable
         Assert.Empty(new SqliteDelistedRepository(_dbPath).GetAll());
     }
 
+    /// <summary>
+    /// ⭐ **很久以前退市的老股不许被判成"从未上市"**（2026-09-19 加）。
+    ///
+    /// 探测起点原来是"今天往前 3650 天"的滚动窗口，于是 2016 年以前退市的票在探测区间里
+    /// 必然一根K线都没有，整类落进"给不出日K ⇒ 从未上市"被跳过。实机跑时
+    /// <c>600087 退市长油</c>（2014 退）和 <c>600849 上海医药</c>老号（2010 换代码）双双中招——
+    /// 后者恰恰是这一项存在的理由之一（两所终止上市名单给不出"已换代码的老号"）。
+    /// 日志里它们混在"多半是过会后撤回/暂缓上市"那句里，读起来完全正常，**没有任何地方会报**。
+    /// </summary>
+    [Fact]
+    public async Task 很久以前退市的老股不能被判成从未上市()
+    {
+        var list = new FakeList(
+            new StockListEntry("600087", "退市长油"),      // 2014 退，十年滚动窗口刚好够不着
+            new StockListEntry("600849", "上海医药"));     // 2010 换代码，更早
+        var fetcher = new FakeFetcher(code => code == "600087"
+            ? new DateTime(2014, 4, 11)
+            : new DateTime(2010, 3, 1));
+
+        var (_, log) = await RunAsync(list, fetcher);
+
+        var rows = new SqliteDelistedRepository(_dbPath).GetAll();
+        Assert.Equal(["600087", "600849"], rows.Select(r => r.Code).OrderBy(x => x));
+        Assert.Contains(log, m => m.Contains("跳过 0 只（从未上市）"));
+        // 钉死起点是固定日期，不是滚动窗口——否则这个测试会随时间推移悄悄失效
+        Assert.All(fetcher.AskedStart, s => Assert.True(s <= new DateTime(1990, 12, 19),
+                                                       $"探测起点 {s:yyyy-MM-dd} 晚于上交所开市日"));
+    }
+
+    /// <summary>
+    /// ⭐ **存量里写错的 exchange 要回头改对**（2026-09-19 加）。
+    ///
+    /// 光修 <c>ExchangeTag</c> 不够：候选第一步就减掉"已知退市"，已经在名单里的行永远不会再
+    /// 被走一遍，错值不会自愈。实测 <c>920680 广道退</c> 09-17 被旧规则写成 <c>szse</c>，
+    /// 09-19 修完判据再跑也纹丝不动。自检是纯本地的，不许因此多发一次探测请求。
+    /// </summary>
+    [Fact]
+    public async Task 存量里写错的exchange会被改对()
+    {
+        new SqliteDelistedRepository(_dbPath).Upsert([
+            new DelistedStockRow { Code = "920680", Name = "广道退", Exchange = "szse" },   // 旧规则写的，错
+            new DelistedStockRow { Code = "600000", Name = "退市浦发", Exchange = "sse" }]); // 本来就对
+        var fetcher = FakeFetcher.ByHasBars(_ => true);
+
+        var (_, log) = await RunAsync(new FakeList(), fetcher);
+
+        var rows = new SqliteDelistedRepository(_dbPath).GetAll().ToDictionary(r => r.Code);
+        Assert.Equal("bse", rows["920680"].Exchange);
+        Assert.Equal("sse", rows["600000"].Exchange);   // 对的那行不动
+        Assert.Empty(fetcher.Asked);                    // 纯本地，零请求
+        Assert.Contains(log, m => m.Contains("920680") && m.Contains("szse→bse"));
+    }
+
+    /// <summary>
+    /// 自检只动 <c>MarketClassifier</c> 认得出交易所的行。<c>ExchangeTag</c> 的兜底分支把未知号段
+    /// 也写成 szse，那是"写新行时总得给个值"的将就；拿它覆盖存量就成了把没根据的猜测写进库。
+    /// </summary>
+    [Fact]
+    public async Task 自检不碰认不出交易所的号段()
+    {
+        new SqliteDelistedRepository(_dbPath).Upsert([
+            new DelistedStockRow { Code = "123456", Name = "认不出的号段", Exchange = "sse" }]);
+
+        var (_, log) = await RunAsync(new FakeList(), FakeFetcher.ByHasBars(_ => true));
+
+        Assert.Equal("sse", new SqliteDelistedRepository(_dbPath).GetAll().Single().Exchange);
+        Assert.DoesNotContain(log, m => m.Contains("存量 exchange 自检"));
+    }
+
     /// <summary>深市代码要标成 szse——退市表按交易所分，分红/公告那几条路会用到。</summary>
     [Fact]
     public async Task 深市代码标成szse()
@@ -377,6 +446,9 @@ public class DelistedSupplementTests : IDisposable
     /// <summary>
     /// 按代码决定"最后一根K线在哪天"（null＝一根都给不出），并记下被探测过哪些。
     /// 候选筛选和两道判据对不对，全看这个。
+    ///
+    /// ⚠ **只返回落在请求区间里的**——真实数据源就是这样，探测起点定得太晚就会拿回空数组。
+    /// 这正是 <c>600087 退市长油</c> 被十年滚动窗口误判成"从未上市"的机制，不模拟出来就测不到。
     /// </summary>
     private sealed class FakeFetcher(Func<string, DateTime?> lastBar) : IBarDataFetcher
     {
@@ -385,6 +457,8 @@ public class DelistedSupplementTests : IDisposable
             new(code => hasBars(code) ? new DateTime(2023, 8, 1) : null);
 
         public List<string> Asked { get; } = new();
+        /// <summary>每次探测请求的起点——用来钉死"起点是固定日期，不是滚动窗口"。</summary>
+        public List<DateTime> AskedStart { get; } = new();
         public bool SupportsHfq => true;
         public event Action<string>? OnStatus { add { } remove { } }
 
@@ -392,10 +466,12 @@ public class DelistedSupplementTests : IDisposable
             string code, string granularity, DateTime? start, DateTime? end, CancellationToken ct = default)
         {
             Asked.Add(code);
+            if (start is not null) AskedStart.Add(start.Value);
             var d = lastBar(code);
-            var bars = d is null
+            var inRange = d is not null && (start is null || d >= start) && (end is null || d <= end);
+            var bars = !inRange
                 ? new List<Bar>()
-                : new List<Bar> { new() { Code = code, Granularity = granularity, PeriodStart = d.Value, Close = 1.0 } };
+                : new List<Bar> { new() { Code = code, Granularity = granularity, PeriodStart = d!.Value, Close = 1.0 } };
             return Task.FromResult((code, bars));
         }
     }

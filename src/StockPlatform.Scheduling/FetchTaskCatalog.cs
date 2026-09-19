@@ -1237,8 +1237,12 @@ public static class FetchTaskCatalog
             + "⚠ **大宗交易 2026-09-17 拆成独立的【大宗交易】一项**——它改成了按交易日整日替换"
             + "（东财的 DAILY_RANK 跨抓取会变，原来当主键用，重抓一次就多一份副本），"
             + "切片从十几片变成两千多片，跟这三张的节奏对不上。\n"
-            + "⚠ 没有回退源——这三份数据新浪/腾讯/交易所/巨潮都不提供结构化版本。",
-            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
+            + "⚠ 没有回退源——这三份数据新浪/腾讯/交易所/巨潮都不提供结构化版本。\n"
+            + "**「首次整段回补」**（2026-09-19 开放）＝不看水位线、从 2016 抓起（机构调研实际只有"
+            + "滚动一年）。用在**改了排序键之后**：排序键定不出唯一序时深分页会跨页重复 + 遗漏，"
+            + "而遗漏那半没有任何告警，只能整段重取一遍才补得回来。跑完记得改回「增量」。\n"
+            + "⏳ 机构调研有时效：接口只保留滚动一年，漏掉的行会逐日滚出窗口，那之后再补也补不回来。",
+            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog | FetchMode.FirstBackfill,
             SupportsPartialRun: false,
             Sources: [DataSourceId.EmDataCenter]),
 
