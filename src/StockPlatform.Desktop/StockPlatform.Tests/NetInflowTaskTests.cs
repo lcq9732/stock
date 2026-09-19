@@ -54,12 +54,16 @@ public class NetInflowTaskTests : IDisposable
         public HashSet<string> Throws = [];
         public DateOnly EarliestAvailable => new(2010, 3, 1);
 
-        public Task<List<NetInflow>> FetchAsync(
+        /// <summary>每只票磨这么久——给"一批很快、整轮很慢"那类看门狗场景用。</summary>
+        public TimeSpan Delay;
+
+        public async Task<List<NetInflow>> FetchAsync(
             string code, DateTime? start, DateTime? end, CancellationToken ct = default)
         {
             OnStatus?.Invoke("");
             lock (Asked) Asked.Add((code, start ?? DateTime.MinValue, end ?? DateTime.MaxValue));
             if (Throws.Contains(code)) throw new HttpRequestException("连不上");
+            if (Delay > TimeSpan.Zero) await Task.Delay(Delay, ct);
 
             var rows = new List<NetInflow>();
             for (var d = (start ?? Today).Date; d <= (end ?? Today).Date; d = d.AddDays(1))
@@ -71,7 +75,7 @@ public class NetInflowTaskTests : IDisposable
                     FetchedAt = d.AddHours(20),
                 });
             }
-            return Task.FromResult(rows);
+            return rows;
         }
     }
 
@@ -97,19 +101,51 @@ public class NetInflowTaskTests : IDisposable
         Assert.All(f.Asked, a => Assert.Equal(Today.AddDays(-NetInflowTask.InitialLookbackDays), a.Start));
     }
 
-    /// <summary>第二轮从水位线的下一天续抓，不重抓已有的。</summary>
+    /// <summary>
+    /// 水位线早于今天 ⇒ 从**水位线的下一天**续抓，已有的那几天不重抓。
+    ///
+    /// ⚠ 前提是**直接塞进库的**，不靠"先跑一轮"来造（2026-09-19 改）：假源跟真源一样不给
+    ///   周末的行（A股周末没行情），所以周末跑的时候"先跑一轮"根本抓不到今天那一行，
+    ///   水位线会停在上周五——旧写法把这个当成"水位线就是今天"来断言，于是**每个周末红一次**。
+    ///   这两条（续抓 / 跳过）现在都只依赖库里的行，跟今天是周几无关。
+    /// </summary>
     [Fact]
-    public async Task 增量_第二轮从水位线续抓()
+    public async Task 增量_第二轮从水位线的下一天续抓()
     {
-        await NewTask(new FakeFetcher()).RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
-        int before = RowsOf("600000");
+        var mark = Today.AddDays(-3);
+        _repo.Upsert([new NetInflow
+        {
+            Code = "600000", PeriodStart = mark, MainNetInflow = 1, FetchedAt = mark.AddHours(20),
+        }]);
 
         var f = new FakeFetcher();
         await NewTask(f).RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
 
-        // 水位线就是今天：今天那行是 20:00 抓的（收盘后），所以整只跳过、一个请求都不发
-        Assert.Empty(f.Asked);
-        Assert.Equal(before, RowsOf("600000"));
+        Assert.Equal(mark.AddDays(1), f.Asked.Single(a => a.Code == "600000").Start);
+        // 从没抓过的那几只仍然是回看 60 天——水位线是**逐只**算的
+        Assert.All(f.Asked.Where(a => a.Code != "600000"),
+                   a => Assert.Equal(Today.AddDays(-NetInflowTask.InitialLookbackDays), a.Start));
+    }
+
+    /// <summary>
+    /// 水位线就是今天、而且那一行是**收盘后**抓的 ⇒ 整只跳过，一个请求都不发。
+    /// 跟下面"盘中抓的要重抓"那条合起来才是完整判据（见类注释 ①）。
+    /// </summary>
+    [Fact]
+    public async Task 增量_水位线是今天且收盘后抓的_整只跳过()
+    {
+        _repo.Upsert([new NetInflow
+        {
+            Code = "600000", PeriodStart = Today, MainNetInflow = 1,
+            FetchedAt = Today.AddHours(20),      // 收盘后
+        }]);
+
+        var f = new FakeFetcher();
+        await NewTask(f).RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
+
+        Assert.DoesNotContain("600000", f.Asked.Select(a => a.Code));   // 整只跳过
+        Assert.Equal(Codes.Length - 1, f.Asked.Count);                  // 别的票照抓
+        Assert.Equal(1, RowsOf("600000"));                              // 那一行没被重写、也没多出行
     }
 
     /// <summary>
@@ -153,6 +189,68 @@ public class NetInflowTaskTests : IDisposable
             new TaskRunArgs(FetchMode.Incremental, MaxItems: 1), CancellationToken.None);
 
         Assert.Equal(2, f.Asked.Count);        // 一批 2 只，只跑 1 批
+    }
+
+    // ── 心跳密度（2026-09-19）──────────────────────────────────────
+    //  这一项 09-18、09-19 连着两轮被静默看门狗判成"卡死"掐断，实际它一路在正常抓：
+    //  日志每 300 只才一行，而 300 只要 5 分半，比默认静默上限（5 分钟）还长。
+    //  修法是心跳和日志分开：每批都喂狗（Quiet 的进展），日志仍每 10 批一行。
+
+    /// <summary>每一批都要报一条进展，中间那些标成 Quiet（只喂狗、不写日志）。</summary>
+    [Fact]
+    public async Task 每批都报进展_中间批只喂心跳不写日志()
+    {
+        var seen = new List<TaskProgress>();
+        var task = NewTask(new FakeFetcher(), batchSize: 1);
+        task.OnProgress += p => { lock (seen) seen.Add(p); };
+
+        await task.RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
+
+        // 四只票、一批一只＝四批，每批都有一条带进度数字的进展
+        var steps = seen.Where(p => p.Done.HasValue).ToList();
+        Assert.Equal([1, 2, 3, 4], steps.Select(p => p.Done!.Value));
+        // 前三批只喂狗；末批（做完了）照常落一行日志
+        Assert.All(steps.Take(3), p => Assert.True(p.Quiet));
+        Assert.False(steps[^1].Quiet);
+    }
+
+    /// <summary>
+    /// 端到端：任务 + registry 的桥接 + 真的看门狗。整轮跑得比静默上限久、每批远快于上限，
+    /// 就该一路活着——修之前这种形状必被掐（而且日志里连"掐在哪"都看不出来）。
+    /// </summary>
+    [Fact]
+    public async Task 整轮比静默上限还久_但每批都喂了狗_所以不被掐()
+    {
+        // 12 只票、一批一只、每只磨 40 毫秒 ⇒ 整轮约 0.5 秒，是静默上限（0.3 秒）的一倍半，
+        // 而单批只占上限的 1/7——正是【资金净流入】全市场那一轮的缩小版。
+        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb,
+            Enumerable.Range(1, 8).Select(i => ($"60010{i}", $"票60010{i}")));
+        var f = new FakeFetcher { Delay = TimeSpan.FromMilliseconds(40) };
+
+        var reg = new FetchTaskRegistry();
+        reg.Register(FetchActionId.StepNetInflow, () => NewTask(f, batchSize: 1));
+
+        var logs = new List<string>();
+        using var dog = new QuietWatchdog(
+            TimeSpan.FromMilliseconds(300), CancellationToken.None,
+            checkInterval: TimeSpan.FromMilliseconds(20));
+
+        var r = await reg.RunAsync(FetchActionId.StepNetInflow,
+            new TaskRunArgs(FetchMode.Incremental),
+            dog.Wrap(s => { lock (logs) logs.Add(s); }), dog.Token);
+
+        Assert.False(dog.Starved);                 // 没被判成卡死
+        Assert.False(r.Failed);
+        Assert.Equal(12, f.Asked.Count);           // 12 只全抓完了，没在中途被掐断
+
+        await Task.Delay(300);                     // 日志走 Progress<T>，异步派发
+        lock (logs)
+        {
+            // 日志密度不变：每 10 批一行 + 末批那一行，中间的批不该出现
+            Assert.DoesNotContain(logs, l => l.Contains("已抓 3 只"));
+            Assert.Contains(logs, l => l.Contains("已抓 10 只"));
+            Assert.Contains(logs, l => l.Contains("已抓 12 只"));
+        }
     }
 
     // ── 失败名单 ──────────────────────────────────────────────────

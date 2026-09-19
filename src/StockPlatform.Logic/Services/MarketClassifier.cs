@@ -47,6 +47,35 @@ public enum Exchange
 /// </summary>
 public static class MarketClassifier
 {
+    /// <summary>
+    /// A 股号段**白名单**（2026-09-19 从 <c>CninfoStockListProvider</c> 提上来共用）。
+    ///
+    /// ⚠ 跟 <see cref="Classify"/> 方向相反，别拿它俩互推：
+    /// · <see cref="Classify"/> 是"这个代码该用哪个前缀去抓"——**尽量认**，没见过的号段也给个
+    ///   最接近的板块（606xxx 会落进 ShanghaiMain）。抓错前缀只是这一只票抓不到。
+    /// · 这里是"要不要把它放进我们的名单"——**只放行确定的**。漏一个号段只是少几只票、
+    ///   下次加上就行；放进一个不该来的却会静默污染整个抓取清单。
+    ///
+    /// 所以 **43/83/87 故意不在里面**：那是新三板（几百只），而 <see cref="Classify"/> 把它们
+    /// 判成 <see cref="MarketBoard.Beijing"/>——那是 920 代码迁移前的近似，对抓K线够用，
+    /// 拿来当"是不是 A 股"就会把整个新三板放进来。200/900 的 B 股同理不在里面。
+    /// </summary>
+    private static readonly string[] AShareSegments =
+    {
+        "000", "001", "002", "003",          // 深市主板
+        "300", "301", "302",                 // 创业板
+        "600", "601", "603", "605",          // 沪市主板
+        "688", "689",                        // 科创板（含 CDR）
+        "920",                               // 北交所（2025-10-09 起全部是这个号段）
+    };
+
+    /// <summary>是不是我们要收的 A 股代码。判据是白名单，理由见 <see cref="AShareSegments"/>。</summary>
+    public static bool IsAShareCode(string code)
+    {
+        code = code.Trim();
+        return code.Length == 6 && code.All(char.IsDigit) && AShareSegments.Any(code.StartsWith);
+    }
+
     public static MarketBoard Classify(string code)
     {
         code = code.Trim();

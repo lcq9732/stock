@@ -80,7 +80,18 @@ public sealed class FetchTaskRegistry : IFetchTaskRegistry, ITaskBacklogRunner
 
         if (progress != null)
         {
-            task.OnProgress += p => progress.Report(p.ToString());
+            // Quiet 的进展只喂静默看门狗、不进日志（2026-09-19，见 TaskProgress.Quiet）。
+            //
+            // ⚠ 拿不到那条通道时是**整条丢掉**，不是"退化成写日志"：喂心跳的只有
+            //    QuietWatchdog（它 Wrap 出来的 progress 就实现了这个接口），拿不到就说明
+            //    这条路上根本没有看门狗——手动点【执行】那条路就是这样——那里丢掉没有代价，
+            //    而"退化成写日志"会让同一个任务手动跑时日志密度变成十倍（实测 186 行一轮）。
+            //    真进展该有的那几行仍由任务用非 Quiet 的 Report 打出来，两条路一样密。
+            task.OnProgress += p =>
+            {
+                if (!p.Quiet) progress.Report(p.ToString());
+                else if (progress is QuietWatchdog.IBeatOnlySink beat) beat.BeatOnly(p.ToString());
+            };
             task.OnLiveness += l => progress.Report(l.Text);
         }
         subscribe?.Invoke(task);

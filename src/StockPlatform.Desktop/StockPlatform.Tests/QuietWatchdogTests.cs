@@ -101,6 +101,34 @@ public class QuietWatchdogTests
         lock (收到的) Assert.Contains("处理中 1/10", 收到的);
     }
 
+    /// <summary>
+    /// <see cref="QuietWatchdog.IBeatOnlySink"/>：喂心跳但**不写日志**（2026-09-19 加）。
+    ///
+    /// 【资金净流入】每 300 只才吐一句、而 300 只要 5 分半，比静默上限还长——它一路正常
+    /// 抓着却被判成卡死。这条通道让任务能"每批喂狗、日志照旧稀疏"。
+    /// </summary>
+    [Fact]
+    public async Task 只喂心跳的进度_不进日志但能免于被掐()
+    {
+        var 收到的 = new List<string>();
+        using var dog = new QuietWatchdog(Quiet, CancellationToken.None, checkInterval: Tick);
+
+        var progress = dog.Wrap(s => { lock (收到的) 收到的.Add(s); });
+        var beat = Assert.IsAssignableFrom<QuietWatchdog.IBeatOnlySink>(progress);
+
+        // 跑满 3 倍阈值，期间只用 BeatOnly 出声
+        for (int i = 0; i < 18; i++)
+        {
+            beat.BeatOnly($"已抓 {i * 30} 只");
+            await Task.Delay(50);
+        }
+
+        Assert.False(dog.Starved);                       // 心跳算数：没被掐
+        Assert.Equal("已抓 510 只", dog.LastMessage);     // 最后一句照样留着，失败原因要用
+        await Task.Delay(200);                           // 日志是异步派发的，等一等再断言"没有"
+        lock (收到的) Assert.Empty(收到的);                // 但一行日志都没写
+    }
+
     // ── 看门狗自己不能把进程掀了 ──────────────────────────────────
 
     /// <summary>

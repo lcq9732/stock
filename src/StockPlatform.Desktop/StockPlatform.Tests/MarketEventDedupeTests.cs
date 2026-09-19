@@ -55,6 +55,30 @@ public class MarketEventDedupeTests : IDisposable
             FetchedAt = DateTime.Now,
         };
 
+    /// <summary>库里的 survey_no 升序——顺延有没有生效、有没有盖掉别人，看它最直接。</summary>
+    private List<int> SurveyNos()
+    {
+        using var conn = new SqliteConnection($"Data Source={_dbPath}");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT survey_no FROM OrgSurvey ORDER BY survey_no";
+        var list = new List<int>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) list.Add(r.GetInt32(0));
+        return list;
+    }
+
+    /// <summary>主键三列固定的限售解禁行——差异只在解禁股数上。</summary>
+    private static ShareLift Lift(double shares) => new()
+    {
+        Code = "600609",
+        Name = "云赛智联",
+        FreeDate = new DateTime(2026, 9, 16),
+        ShareType = "首发原股东限售股份",
+        LiftShares = shares,
+        FetchedAt = DateTime.Now,
+    };
+
     [Fact]
     public void 接口原样重复返回_去重但不报错()
     {
@@ -82,13 +106,65 @@ public class MarketEventDedupeTests : IDisposable
     }
 
     [Fact]
-    public void 主键撞了而内容不同_照样要报()
+    public void 主键撞了而内容不同_顺延区分列两行都留下()
     {
-        // 这才是"主键少了区分列"：两次调研的接待人员不一样，覆盖就真丢了一条。
+        // 两次调研的接待人员不一样 ⇒ 这是**两条真记录**，覆盖掉一条就真丢了。
+        // 2026-09-19 改成顺延 survey_no：两行都落库，一条都不少。
         var a = Survey(receptionist: "公司董事长 冯圣良");
         var b = Survey(receptionist: "董事会秘书 孙学龙");
 
         int written = _repo.UpsertOrgSurveys([a, b]);
+
+        Assert.Equal(2, written);
+        Assert.Equal(2, _repo.Count("OrgSurvey"));
+        Assert.Equal([1, 2], SurveyNos());
+        Assert.Empty(_warnings);           // 没丢数据就不该报错
+    }
+
+    [Fact]
+    public void 顺延过的批次重抓一次_不长副本()
+    {
+        // 顺延号是"批内第几次撞"，靠抓取侧的排序唯一键保证两次抓取顺序一致（见
+        // EastMoneyMarketEventProvider 的 tieBreaker）。顺序一致 ⇒ 顺延结果一致 ⇒
+        // INSERT OR REPLACE 覆盖回同样两行。这条是整个方案幂等性的落脚点，必须钉住。
+        List<OrgSurvey> Batch() =>
+        [
+            Survey(receptionist: "公司董事长 冯圣良"),
+            Survey(receptionist: "董事会秘书 孙学龙"),
+        ];
+
+        _repo.UpsertOrgSurveys(Batch());
+        _repo.UpsertOrgSurveys(Batch());
+        _repo.UpsertOrgSurveys(Batch());
+
+        Assert.Equal(2, _repo.Count("OrgSurvey"));
+        Assert.Equal([1, 2], SurveyNos());
+    }
+
+    [Fact]
+    public void 顺延时跳过接口已占用的序号()
+    {
+        // 同一天同一机构本来就可能有多次调研（实测中信证券对 600177 有 NUM=1/7/22）。
+        // 第二行顺延到 2 时若 2 已被真实记录占着，必须继续往后挪，不能盖掉人家。
+        var a = Survey(receptionist: "甲", surveyNo: 1);
+        var b = Survey(receptionist: "乙", surveyNo: 2);   // 接口真给的 2
+        var c = Survey(receptionist: "丙", surveyNo: 1);   // 跟 a 撞，顺延时要跳过 2
+
+        int written = _repo.UpsertOrgSurveys([a, b, c]);
+
+        Assert.Equal(3, written);
+        Assert.Equal([1, 2, 3], SurveyNos());
+    }
+
+    [Fact]
+    public void 顺延不了的表_照样报丢数据()
+    {
+        // 只有机构调研给得起顺延（survey_no 的语义本来就是"记录序号"）。其余三张表的主键
+        // 每一列都是实打实的业务值，撞了只能覆盖 —— 那条"静默丢数据"的告警得留着。
+        var a = Lift(shares: 100);
+        var b = Lift(shares: 200);
+
+        int written = _repo.UpsertShareLifts([a, b]);
 
         Assert.Equal(1, written);
         var w = Assert.Single(_warnings);

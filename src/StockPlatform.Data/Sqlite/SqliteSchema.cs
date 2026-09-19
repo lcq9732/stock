@@ -1137,6 +1137,8 @@ public static class SqliteSchema
         // 只对**以后抓的**生效，已有的 177 万行历史这三列是 NULL：为两个比例字段重抓 264 万行
         // 不划算（那是所有抓取项里最慢的一个），用户明确说了历史不补。
         AddColumnIfMissing(conn, "LhbSeat", "buy_ratio", "REAL");
+        // 上一轮抓财报时冲着哪个报告期去的（2026-09-19）——见 FinancialFetchState.TargetDate。
+        AddColumnIfMissing(conn, "FinancialFetchState", "target_date", "TEXT");
         AddColumnIfMissing(conn, "LhbSeat", "sell_ratio", "REAL");
         AddColumnIfMissing(conn, "LhbSeat", "change_type", "TEXT");
 

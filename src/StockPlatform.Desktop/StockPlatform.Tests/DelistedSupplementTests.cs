@@ -232,6 +232,86 @@ public class DelistedSupplementTests : IDisposable
     }
 
     /// <summary>反过来要能生效：真判成退市时，'stock' → 'delisted' 必须写得进去。</summary>
+    /// <summary>
+    /// ⭐ **差集的盲区**：还挂在在市名册里的已退市票，永远不会是巨潮差集的候选
+    /// （候选要减去在市名册），于是名册说在市、档案说退市，谁也纠正不了谁。
+    /// 实测 920305 云创退就这么卡了半年：K线停在 2026-07-29、名字都带"退"，
+    /// <c>type</c> 还是 <c>'stock'</c>，每天的K线/资金流/名册轮询都在白抓它。
+    /// 档案那一路**不减在市名册**，补的就是这个。
+    /// </summary>
+    [Fact]
+    public async Task 档案说退市_名册却还当它在市_照样补进来()
+    {
+        PutLive("920305", "云创退");                       // 名册还当它在市
+        var list = new FakeList(new StockListEntry("920305", "云创退"));   // 巨潮也当它在市 ⇒ 差集里没有它
+        var fetcher = FakeFetcher.ByHasBars(_ => true);    // 最后一根K线在很久以前
+
+        var (result, log) = await RunAsync(list, fetcher, new FakeProfiles(("920305", "云创退")));
+
+        Assert.Equal(TaskState.Completed, result.State);
+        var row = Assert.Single(new SqliteDelistedRepository(_dbPath).GetAll());
+        Assert.Equal("920305", row.Code);
+        // ⚠ 920 是北交所——原来写死 "Shanghai ? sse : szse"，会把它记成深市
+        Assert.Equal("bse", row.Exchange);
+        Assert.Null(row.DelistDate);                       // 档案不给终止日，也不许拿K线去推
+        // 标成 delisted 才会退出日常轮询
+        Assert.DoesNotContain(SqliteStockMetaUpsert.GetAll(_dbPath), x => x.Code == "920305");
+        Assert.Contains(log, m => m.Contains("名册还当它在市"));
+    }
+
+    /// <summary>
+    /// 档案那一路要**自己过号段白名单**：巨潮那份在 provider 里过过了，这份没有。
+    /// 实测库里 41 只"档案说退市、名单没有"的票，40 只是 B股(200/900)和老三板(83x)，
+    /// 放进来会污染分红抓取和选池。
+    /// </summary>
+    [Fact]
+    public async Task 档案来源也要过号段白名单()
+    {
+        var fetcher = FakeFetcher.ByHasBars(_ => true);
+        var profiles = new FakeProfiles(
+            ("200002", "万科B"),        // B股
+            ("900951", "退市大化"),     // B股
+            ("832317", "观典防务"),     // 老三板（MarketClassifier 会把 83x 判成北交所，但那是抓K线用的近似）
+            ("688086", "退市紫晶"));    // 这只才该进来
+
+        await RunAsync(new FakeList(), fetcher, profiles);
+
+        var rows = new SqliteDelistedRepository(_dbPath).GetAll();
+        Assert.Equal(["688086"], rows.Select(r => r.Code));
+    }
+
+    /// <summary>
+    /// 档案来源同样要走"还在交易就不算退市"那道确认。实测东财的 <c>listing_state</c> 只在
+    /// 真摘牌后才置 2（319 只有K线的退市票，最后一根全都在 30 天以前），但万一哪天它把
+    /// 退市整理期也标成 2，挡住的就是这一道——标错的代价是那只票被踢出日常轮询、
+    /// K线从此不再更新，而且没有任何地方会报。
+    /// </summary>
+    [Fact]
+    public async Task 档案说退市但还在交易的_不补()
+    {
+        var fetcher = new FakeFetcher(code => code == "600000" ? DateTime.Today : DateTime.Today.AddYears(-1));
+        var profiles = new FakeProfiles(("600000", "浦发银行"), ("688086", "退市紫晶"));
+
+        var (_, log) = await RunAsync(new FakeList(), fetcher, profiles);
+
+        var rows = new SqliteDelistedRepository(_dbPath).GetAll();
+        Assert.Equal(["688086"], rows.Select(r => r.Code));
+        Assert.Contains(log, m => m.Contains("还在交易"));
+    }
+
+    /// <summary>两个来源都指向同一只票时只处理一次（否则会多发一次探测请求）。</summary>
+    [Fact]
+    public async Task 两个来源撞上同一只票_不重复处理()
+    {
+        var list = new FakeList(new StockListEntry("688086", "退市紫晶"));
+        var fetcher = FakeFetcher.ByHasBars(_ => true);
+
+        var (_, log) = await RunAsync(list, fetcher, new FakeProfiles(("688086", "退市紫晶")));
+
+        Assert.Single(new SqliteDelistedRepository(_dbPath).GetAll());
+        Assert.Contains(log, m => m.Contains("候选 1 只"));
+    }
+
     [Fact]
     public void 在市股可以被标成退市()
     {
@@ -261,13 +341,23 @@ public class DelistedSupplementTests : IDisposable
         SqliteStockMetaUpsert.Upsert(_dbPath, [(code, name)], SqliteStockMetaUpsert.TypeStock);
 
     private async Task<(TaskRunResult Result, List<string> Log)> RunAsync(
-        IStockListProvider list, IBarDataFetcher fetcher)
+        IStockListProvider list, IBarDataFetcher fetcher, FakeProfiles? profiles = null)
     {
-        var task = new DelistedSupplementTask(_paths, list, fetcher);
+        var task = new DelistedSupplementTask(_paths, list, profiles ?? new FakeProfiles(), fetcher);
         var log = new List<string>();
         task.OnProgress += p => log.Add(p.Text);
         var result = await task.RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
         return (result, log);
+    }
+
+    /// <summary>本地公司档案——只有"档案说已终止上市"这一份名单是这一项要读的。</summary>
+    private sealed class FakeProfiles(params (string Code, string Name)[] delisted) : ICompanyProfileRepository
+    {
+        public void EnsureSchema() { }
+        public int Upsert(IEnumerable<(CompanyProfile Profile, CompanyNarrative Narrative)> items) => 0;
+        public List<(string Code, string FullName, string? Abbr)> GetAllNames() => [];
+        public List<(string Code, string Name)> GetDelistedCodes() => [.. delisted];
+        public (int Profiles, int Narratives) GetCounts() => (0, 0);
     }
 
     private sealed class FakeList(params StockListEntry[] rows) : IStockListProvider

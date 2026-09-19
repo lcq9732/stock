@@ -45,24 +45,29 @@ public class SqliteMarketEventRepository : IMarketEventRepository
     /// 之所以是"告警+去重"而不是"抛异常"：抓了几十万行不该因为主键差一列就整轮失败，
     /// 但也绝不能让它悄悄发生——龙虎榜那次就是悄悄丢了 7.5%。
     ///
-    /// ════ 主键撞了分两种，只有一种是问题（2026-09-18 拆开）════
+    /// ════ 主键撞了分三种（2026-09-18 拆前两种，2026-09-19 加第三种）════
     ///   · **内容也一样**——接口自己把同一条记录返回了两遍，覆盖掉一条什么都没丢。
     ///     实测：机构调研里东财把"2 家投资者"展开成两行，而区分列 <c>NUM</c> 两行都给 1，
     ///     个人投资者又没有机构代码和参与人员，于是两行逐字段相同。真实家数在 <c>SUM</c>
     ///     （<c>OrgTotal</c>）里存着，一条都没少。
-    ///   · **内容不一样**——那才是"主键少了区分列"，覆盖会静默丢数据，必须报。
+    ///   · **内容不一样、但区分列能顺延**——两条真记录撞在一起，把区分列往后挪一格就都留下了
+    ///     （<paramref name="bumpKey"/>，目前只有机构调研给得起，见 <see cref="UpsertOrgSurveys"/>）。
+    ///     不丢数据，所以不按错误报。
+    ///   · **内容不一样、又顺延不了**——那才是"主键少了区分列"，覆盖会静默丢数据，必须报。
     ///
-    /// 拆开之前这两种都报同一句"会静默丢数据"，于是【拉取市场事件】每轮都带着 1 条错误、
+    /// 拆开之前这三种都报同一句"会静默丢数据"，于是【拉取市场事件】每轮都带着 1 条错误、
     /// 连着十几天，而它其实零影响——**天天喊的告警等于没有告警**。
     ///
     /// 内容相同的那批不报错，但**占比过高时提一句**（见 <see cref="EchoNoticeRatio"/>）：
     /// 接口哪天开始大批量重复返回，仍然该有人知道，只是那不叫"丢数据"。
     /// </summary>
-    private List<T> DedupeAndWarn<T>(List<T> list, Func<T, string> keyOf, string table)
+    private List<T> DedupeAndWarn<T>(List<T> list, Func<T, string> keyOf, string table,
+        Action<T>? bumpKey = null)
     {
         var seen = new Dictionary<string, T>(list.Count);
-        int lost = 0;      // 主键撞了、而且内容不同 —— 真的丢了东西
+        int lost = 0;      // 主键撞了、内容不同、又没法顺延 —— 真的丢了东西
         int echo = 0;      // 主键撞了、内容也完全一样 —— 接口自己的重复返回
+        int bumped = 0;    // 主键撞了、内容不同，靠顺延区分列两行都留下了
         var samples = new List<string>();
         foreach (var x in list)
         {
@@ -72,6 +77,15 @@ public class SqliteMarketEventRepository : IMarketEventRepository
                 if (SameContent(prev, x))
                 {
                     echo++;
+                }
+                else if (bumpKey != null)
+                {
+                    // 内容不同就是**两条不同的记录**，两条都该留下。给得起顺延的表（见
+                    // UpsertOrgSurveys）就把区分列往后挪一格，挪到不撞为止——覆盖掉一条是
+                    // 真丢数据，顺延最多让序号跟接口原值对不上，而那一列的语义本来就是
+                    // "该次调研活动的记录序号"，不是接口值的镜像。
+                    do { bumpKey(x); k = keyOf(x); } while (seen.ContainsKey(k));
+                    bumped++;
                 }
                 else
                 {
@@ -83,6 +97,14 @@ public class SqliteMarketEventRepository : IMarketEventRepository
             }
             seen[k] = x;      // 后来的覆盖先前的，跟 INSERT OR REPLACE 行为一致
         }
+
+        // 顺延没丢数据，所以**不按错误报**；但量大到异常时仍要有人知道，下限跟"原样重复返回"
+        // 那档共用——理由一样：小样本里的比例是噪声，天天喊的告警等于没有告警。
+        if (bumped >= EchoNoticeMin && bumped >= list.Count * EchoNoticeRatio)
+            OnWarning?.Invoke(
+                $"（{table}：本批 {list.Count} 行里有 {bumped} 行主键撞了但内容不同" +
+                $"（{bumped * 100.0 / list.Count:F1}%），已顺延区分列全部保留，没有丢数据。" +
+                "占比这么高值得看一眼接口是不是变了。）");
 
         if (lost > 0)
             OnWarning?.Invoke(
@@ -209,8 +231,16 @@ public class SqliteMarketEventRepository : IMarketEventRepository
     // ── 机构调研 ───────────────────────────────────────────────────
     public int UpsertOrgSurveys(IEnumerable<OrgSurvey> items)
     {
+        // ⚠ 这张表**撞键要顺延、不能覆盖**：主键第三列 org_name 取的是接口的 RECEIVE_OBJECT，
+        // 而它可以是"投资者""投资者网上提问"这种不具名的笼统值（库里分别 1927 / 1659 行），
+        // 这类行的 OBJECT_CODE 为空、NUM 又都给 1 ⇒ 同一天同一股接待两批不具名投资者时五列全撞。
+        // 内容逐字段相同的那种由 SameContent 认出来去重（东财把"2 家投资者"展开成两行的情形），
+        // 内容不同的就是**两条真记录**，顺延 survey_no 让它们都落库。
+        // 幂等性靠抓取侧的排序唯一键保证：排序键已排到主键末列（见 EastMoneyMarketEventProvider
+        // 的 tieBreaker），重抓一次顺延结果一样，INSERT OR REPLACE 覆盖回同样的行，不会长副本。
         var list = DedupeAndWarn(items.ToList(),
-            x => $"{x.Code}|{x.NoticeDate:yyyyMMdd}|{x.OrgName}|{x.ReceiveStartDate:yyyyMMdd}|{x.SurveyNo}", "OrgSurvey");
+            x => $"{x.Code}|{x.NoticeDate:yyyyMMdd}|{x.OrgName}|{x.ReceiveStartDate:yyyyMMdd}|{x.SurveyNo}", "OrgSurvey",
+            bumpKey: x => x.SurveyNo++);
         if (list.Count == 0) return 0;
 
         using var conn = Open();

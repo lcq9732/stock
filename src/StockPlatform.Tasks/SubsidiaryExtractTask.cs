@@ -351,8 +351,14 @@ public sealed class SubsidiaryExtractTask : FetchTaskBase<ParsedReport>
             if (items.Count > 0) _found += items.Count; else _empty++;
             batch.Add(new ParsedReport(code, date, items));
 
-            if (++n % 20 == 0)
+            // ⚠ 心跳**每份**一次、日志仍每 20 份（2026-09-19）：实测（09-16 日志）单份约 27 秒，
+            //   20 份就哑 9 分 06 秒——这一项的 MaxQuiet 是 10 分钟，只差一分多钟就被判成卡死。
+            //   见 QuietWatchdog.IBeatOnlySink。
+            n++;
+            if (n % 20 == 0)
                 Report($"  已解析 {n}/{todo.Count} 份，累计 {_found} 家子公司");
+            else
+                ReportQuiet($"  已解析 {n}/{todo.Count} 份，累计 {_found} 家子公司");
 
             if (batch.Count >= BatchSize)
             {

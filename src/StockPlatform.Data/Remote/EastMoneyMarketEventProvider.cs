@@ -96,7 +96,10 @@ public class EastMoneyMarketEventProvider : IBlockTradeDayFetcher
                     OrgTotal = (int?)Num(el, "SUM"),
                     FetchedAt = DateTime.Now,
                 };
-            }, onBatch, progress, ct);
+            }, onBatch, progress, ct,
+            // 主键是 (code, notice_date, org_name, receive_start_date, survey_no)：同一天同一股
+            // 常有十几家机构、同一家又可能有多次调研，后三列都得进排序键，否则分页边界上顺序不稳
+            tieBreaker: "RECEIVE_OBJECT,RECEIVE_START_DATE,NUM");
 
     /// <summary>
     /// 限售解禁。⚠ <b>含未来的解禁计划</b>（样例里有 2035 年的），所以不做日期切片、
@@ -135,7 +138,10 @@ public class EastMoneyMarketEventProvider : IBlockTradeDayFetcher
             ct.ThrowIfCancellationRequested();
             var filter = EastMoneyQuerySlicer.DateFilter("FREE_DATE", s.Start, s.End);
             var rows = new List<ShareLift>();
-            await foreach (var el in _dc.QueryAsync("RPT_LIFT_STAGE", filter, "FREE_DATE,SECURITY_CODE", ct: ct))
+            // 排序键要排到主键末列：主键第三列是 share_type（同一天同一股可以有多类限售股份同时
+            // 解禁），不带它的话这些行在分页边界上顺序不稳——跨页重复 + 遗漏，遗漏那半没有告警。
+            await foreach (var el in _dc.QueryAsync(
+                "RPT_LIFT_STAGE", filter, "FREE_DATE,SECURITY_CODE,FREE_SHARES_TYPE", ct: ct))
             {
                 var code = Str(el, "SECURITY_CODE");
                 var d = Date(el, "FREE_DATE");

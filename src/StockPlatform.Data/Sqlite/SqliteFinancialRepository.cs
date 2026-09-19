@@ -23,12 +23,32 @@ public class SqliteFinancialRepository : IFinancialRepository
         SqliteSchema.EnsureSchema(conn);
     }
 
-    public void ReplaceByCode(string code, IEnumerable<FinancialValue> rows)
+    /// <param name="target">
+    /// 这一轮**冲着哪个报告期**来抓的（见 <see cref="FinancialFetchState.TargetDate"/>）。
+    /// 传 null 表示调用方没有目标概念（补抓金融股科目那条路），这一列保持原值不动。
+    /// </param>
+    public void ReplaceByCode(string code, IEnumerable<FinancialValue> rows, DateTime? target = null)
     {
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
         SqliteSchema.EnsureSchema(conn);
 
+        // ⚠ 内容没变就别重写（2026-09-19）：整只票是 DELETE + 逐行 INSERT，一只票 2000+ 行。
+        //   抓回来的最新期没有前进、科目集版本也没变 ⇒ 跟库里那份是同一份数据，重写一遍只是在
+        //   25GB 的库上白白制造写放大（实测 13 只票每 20 分钟重写 29263 行，连着四天）。
+        //   状态列仍然要更新——**"什么时候问的、冲着哪期问的"正是下一轮判断要不要再问的依据**。
+        var incoming = rows as IReadOnlyCollection<FinancialValue> ?? rows.ToList();
+        DateTime? incomingMax = null;
+        foreach (var r in incoming)
+            if (incomingMax == null || r.ReportDate > incomingMax.Value) incomingMax = r.ReportDate;
+
+        if (incomingMax != null && IsSameAsStored(conn, code, incomingMax.Value))
+        {
+            TouchFetchState(conn, code, incomingMax.Value, target);
+            return;
+        }
+
+        rows = incoming;
         using var tx = conn.BeginTransaction();
         using (var del = conn.CreateCommand())
         {
@@ -71,18 +91,76 @@ public class SqliteFinancialRepository : IFinancialRepository
         {
             st.Transaction = tx;
             st.CommandText = """
-                INSERT OR REPLACE INTO FinancialFetchState (code, keys_version, report_date, fetched_at)
-                VALUES ($code, $ver, $date, $fetched);
+                INSERT OR REPLACE INTO FinancialFetchState (code, keys_version, report_date, target_date, fetched_at)
+                VALUES ($code, $ver, $date, $target, $fetched);
                 """;
             st.Parameters.AddWithValue("$code", code);
             st.Parameters.AddWithValue("$ver", FinancialKeys.Version);
             st.Parameters.AddWithValue("$date",
                 maxDate.HasValue ? maxDate.Value.ToString("yyyy-MM-dd") : (object)DBNull.Value);
+            st.Parameters.AddWithValue("$target",
+                target.HasValue ? target.Value.ToString("yyyy-MM-dd") : (object)DBNull.Value);
             st.Parameters.AddWithValue("$fetched", now);
             st.ExecuteNonQuery();
         }
 
         tx.Commit();
+    }
+
+    /// <summary>
+    /// 问过了、但数据源一行都没给——只记"什么时候问的、冲着哪期问的"，不碰数据。
+    ///
+    /// 没有这一笔的话，"接口对这只票返回空"会绕开 <see cref="ReplaceByCode"/> 的整条写入路径，
+    /// 状态永远停在旧值、下一轮照样把它算成待抓，又是一个空转循环。
+    ///
+    /// ⚠ 只更新已有行（<c>UPDATE ... WHERE code</c>）：一次都没抓成功过的票没有 report_date，
+    ///   写进去也会被 <see cref="GetFetchStateByCode"/> 过滤掉。那种票目前仍会每轮重试一次
+    ///   （一只票 3 个请求），量级可以忽略，真变多了再单开"从没抓到过"的水位线。
+    /// </summary>
+    public void MarkAsked(string code, DateTime? target)
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE FinancialFetchState SET target_date = $target, fetched_at = $fetched WHERE code = $code;";
+        cmd.Parameters.AddWithValue("$code", code);
+        cmd.Parameters.AddWithValue("$target",
+            target.HasValue ? target.Value.ToString("yyyy-MM-dd") : (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("$fetched", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>库里这只票已经是同一份数据了吗——最新报告期没前进、科目集版本也是当前版。</summary>
+    private static bool IsSameAsStored(SqliteConnection conn, string code, DateTime incomingMax)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT keys_version, report_date FROM FinancialFetchState WHERE code = $code;";
+        cmd.Parameters.AddWithValue("$code", code);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read() || r.IsDBNull(1)) return false;
+        if (r.IsDBNull(0) || r.GetInt32(0) != FinancialKeys.Version) return false;
+        return DateTime.TryParseExact(r.GetString(1), "yyyy-MM-dd",
+                   CultureInfo.InvariantCulture, DateTimeStyles.None, out var stored)
+               && incomingMax <= stored;
+    }
+
+    /// <summary>数据没动，只把"什么时候问的、冲着哪期问的"记下来。</summary>
+    private static void TouchFetchState(SqliteConnection conn, string code, DateTime reportDate, DateTime? target)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO FinancialFetchState (code, keys_version, report_date, target_date, fetched_at)
+            VALUES ($code, $ver, $date, $target, $fetched);
+            """;
+        cmd.Parameters.AddWithValue("$code", code);
+        cmd.Parameters.AddWithValue("$ver", FinancialKeys.Version);
+        cmd.Parameters.AddWithValue("$date", reportDate.ToString("yyyy-MM-dd"));
+        cmd.Parameters.AddWithValue("$target",
+            target.HasValue ? target.Value.ToString("yyyy-MM-dd") : (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("$fetched", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+        cmd.ExecuteNonQuery();
     }
 
     public List<FinancialSnapshot> GetAllByCode(string code)
@@ -117,25 +195,41 @@ public class SqliteFinancialRepository : IFinancialRepository
         return order.Select(d => byDate[d]).ToList();
     }
 
-    public Dictionary<string, (DateTime ReportDate, int KeysVersion)> GetFetchStateByCode()
+    public Dictionary<string, FinancialFetchState> GetFetchStateByCode()
     {
         using var conn = new SqliteConnection(_connectionString);
         conn.Open();
         SqliteSchema.EnsureSchema(conn);
 
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT code, keys_version, report_date FROM FinancialFetchState WHERE report_date IS NOT NULL;";
-        var result = new Dictionary<string, (DateTime, int)>(StringComparer.Ordinal);
+        cmd.CommandText = """
+            SELECT code, keys_version, report_date, target_date, fetched_at
+            FROM FinancialFetchState WHERE report_date IS NOT NULL;
+            """;
+        var result = new Dictionary<string, FinancialFetchState>(StringComparer.Ordinal);
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
             if (reader.IsDBNull(2)) continue;
             if (!DateTime.TryParseExact(reader.GetString(2), "yyyy-MM-dd",
                     CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
-            result[reader.GetString(0)] = (d, reader.IsDBNull(1) ? 0 : reader.GetInt32(1));
+            result[reader.GetString(0)] = new FinancialFetchState(
+                d,
+                reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                ParseDay(reader, 3),
+                ParseTime(reader, 4));
         }
         return result;
     }
+
+    private static DateTime? ParseDay(SqliteDataReader r, int i)
+        => !r.IsDBNull(i) && DateTime.TryParseExact(r.GetString(i), "yyyy-MM-dd",
+               CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : null;
+
+    /// <summary>fetched_at 存的是 "yyyy-MM-dd HH:mm:ss"，但老行里可能只有日期——两种都收。</summary>
+    private static DateTime? ParseTime(SqliteDataReader r, int i)
+        => !r.IsDBNull(i) && DateTime.TryParse(r.GetString(i),
+               CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : null;
 
     public Dictionary<string, FinancialSnapshot> GetLatestSnapshotByCode()
     {

@@ -124,11 +124,31 @@ public sealed class NetInflowTask(
             // ⚠ 这里**不报写入行数**：骨架是"先 yield、再 SaveBatchAsync"，
             //   _rows 要等这一批存完才涨，在这儿读永远差一批（第一批会显示"写入 0 行"）。
             //   行数留给收尾那句汇总。
-            if (_done % (_batchSize * 10) == 0 || _done >= plan.Count)
-                Report($"资金净流入：已抓 {_done} 只", _done, plan.Count);
+            //
+            // ⚠ 日志每 300 只一行，心跳**每批**一次（2026-09-19 修）：一批 30 只实测约 32 秒，
+            //   300 只要 5 分半——比默认静默上限（5 分钟）还长，只在日志那个间隔出声的话，
+            //   任务一路正常抓着也会被静默看门狗判成卡死掐断（09-18、09-19 各被掐一次，
+            //   分别死在第 180、360 行）。见 QuietWatchdog.IBeatOnlySink。
+            ReportProgress($"资金净流入：已抓 {_done} 只", _done, plan.Count);
             yield return got;
         }
     }
+
+    /// <summary>
+    /// 报一步进展：**每批都喂看门狗**，日志每 <see cref="LogEveryBatches"/> 批才写一行。
+    ///
+    /// 全市场一轮 186 批、1.75 小时，每批写一行日志太吵；可只按日志间隔出声又会被
+    /// 5 分钟静默上限误判成卡死（这一项 2026-09-18、09-19 就是这么被掐的）。
+    /// 分开之后日志密度不变、心跳变密十倍。见 <see cref="QuietWatchdog.IBeatOnlySink"/>。
+    /// </summary>
+    private void ReportProgress(string text, int done, int total)
+    {
+        if (done % (_batchSize * LogEveryBatches) == 0 || done >= total) Report(text, done, total);
+        else ReportQuiet(text, done, total);
+    }
+
+    /// <summary>日志每多少批写一行（心跳不受它影响，每批都有）。</summary>
+    private const int LogEveryBatches = 10;
 
     /// <summary>抓一批（组内并发）。单只失败不拖垮整批——进失败名单，下轮再来。</summary>
     private async Task<List<CodeResult>> FetchBatchAsync(IReadOnlyList<(string Code, DateTime Start, DateTime End)> batch,
@@ -301,6 +321,9 @@ public sealed class NetInflowTask(
                 ct.ThrowIfCancellationRequested();
                 var got = await FetchBatchAsync(batch, ct);
                 _done += batch.Length;
+                // 2026-09-19：这一段以前**整段不报任何进展**——名单一长（几百只、十几分钟）
+                // 就会被静默看门狗判成卡死掐断，而且掐在哪儿日志里一个字都没有。
+                ReportProgress($"资金净流入·补失败名单：已抓 {_done}/{plan.Count} 只", _done, plan.Count);
                 yield return got;
             }
             lines.Add($"失败名单 {failedCodes.Count} 只");
@@ -367,9 +390,9 @@ public sealed class NetInflowTask(
             var got = await Task.WhenAll(tasks);
             await SaveBatchAsync(got, ct);          // 这一路不走骨架的流式落库，自己存
             processed += batch.Length;
-            if (processed % (_batchSize * 10) == 0 || processed >= codes.Count)
-                Report($"资金净流入·补缺失日：已处理 {processed}/{codes.Count} 只、写入 {_rows - before} 行"
-                     + (failed > 0 ? $"（失败 {failed} 只）" : ""), processed, codes.Count);
+            // 同主循环：日志每 300 只一行、心跳每批一次（这一路更长，整轮 1.75 小时）。
+            ReportProgress($"资金净流入·补缺失日：已处理 {processed}/{codes.Count} 只、写入 {_rows - before} 行"
+                         + (failed > 0 ? $"（失败 {failed} 只）" : ""), processed, codes.Count);
         }
 
         // 大面积失败＝被限流，不是"数据源没有"：一个 Tries 都不加（见 ThrottledFailRatio）。

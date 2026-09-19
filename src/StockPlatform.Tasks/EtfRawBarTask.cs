@@ -90,9 +90,15 @@ public sealed class EtfRawBarTask(
             ct.ThrowIfCancellationRequested();
             var batch = await OneAsync(code, withEvents.Contains(code), whole, today, ct);
             done++;
+            // ⚠ 心跳**每只**一次、日志仍按上面的间隔（2026-09-19）：只按日志间隔出声的话，
+            //   单位一慢就顶上静默看门狗的 5 分钟上限，一路正常跑也会被判成卡死
+            //   （【资金净流入】09-18/09-19 就是这么被掐的，见 QuietWatchdog.IBeatOnlySink）。
             if (done % 100 == 0 || done == codes.Count)
                 Report($"{done}/{codes.Count}（抓 {_fetched} 只、复制 {_copied} 只、跳过 {_skipped} 只）",
                        done, codes.Count);
+            else
+                ReportQuiet($"{done}/{codes.Count}（抓 {_fetched} 只、复制 {_copied} 只、跳过 {_skipped} 只）",
+                            done, codes.Count);
             if (batch.Count > 0) { _rows += batch.Count; yield return batch; }
         }
     }

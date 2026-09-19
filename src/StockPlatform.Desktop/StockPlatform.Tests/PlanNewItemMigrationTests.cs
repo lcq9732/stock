@@ -31,6 +31,68 @@ public class PlanNewItemMigrationTests
         return plan;
     }
 
+    /// <summary>
+    /// ⭐ **换过组的动作要搬家**（2026-09-19）。<see cref="FetchPlan.Normalize"/> 只补计划里没有的
+    /// 动作，已有的一律保持原位；而界面上又没有"移到别的组"这个操作（2026-09-02 做了又撤）。
+    /// 所以模板改了组而老计划不动的话，这一项会永远留在旧组里，且界面上看不出任何异常——
+    ///【补全退市名单】就会每月才跑一轮，而它的产出是后面所有"逐只抓"的项的输入名单。
+    /// </summary>
+    [Fact]
+    public void 老计划里换过组的项会被挪到新组()
+    {
+        // 造一份"老"计划：它还在季度组（2026-09-19 之前的模板就是这样）
+        var plan = FetchPlan.CreateDefault();
+        plan.Normalize();
+        var daily = plan.GroupOf(PlanGroupKind.Daily);
+        var periodic = plan.GroupOf(PlanGroupKind.Periodic);
+        var item = daily.Items.Single(i => i.Action == FetchActionId.StepDelistedSupplement);
+        daily.Items.Remove(item);
+        periodic.Items.Insert(4, item);
+
+        var notes = plan.MigrateRetired();
+        plan.Normalize();
+
+        Assert.DoesNotContain(FetchActionId.StepDelistedSupplement, periodic.Items.Select(i => i.Action));
+        Assert.Contains(FetchActionId.StepDelistedSupplement, daily.Items.Select(i => i.Action));
+        Assert.Contains(notes, n => n.Contains("补全退市名单"));
+    }
+
+    /// <summary>
+    /// 搬过去要落在**模板该在的位置**，不能图省事追加到末尾——顺序即执行顺序，
+    /// 追加到末尾正好让它跑在所有"逐只抓"的项后面，那是它最该避免的位置
+    /// （它的产出是那些项的输入名单）。
+    /// </summary>
+    [Fact]
+    public void 挪过去的项落在模板顺序上而不是末尾()
+    {
+        var plan = FetchPlan.CreateDefault();
+        plan.Normalize();
+        var daily = plan.GroupOf(PlanGroupKind.Daily);
+        var item = daily.Items.Single(i => i.Action == FetchActionId.StepDelistedSupplement);
+        daily.Items.Remove(item);
+        plan.GroupOf(PlanGroupKind.Periodic).Items.Add(item);
+
+        plan.MigrateRetired();
+
+        var order = daily.Items.Select(i => i.Action).ToList();
+        int at = order.IndexOf(FetchActionId.StepDelistedSupplement);
+        _out.WriteLine("日更组前 6 项：" + string.Join("、", order.Take(6)));
+        Assert.True(at > order.IndexOf(FetchActionId.FetchTotalShares), "要排在总股本之后（名册刷新完才算得准）");
+        Assert.True(at < order.IndexOf(FetchActionId.StepStockDayBars), "要排在K线族之前（新摘牌的票当晚就别再抓）");
+    }
+
+    /// <summary>搬完之后再加载一次是空操作——迁移不能每次都重排一遍用户的表。</summary>
+    [Fact]
+    public void 已经在新组的不再重复搬()
+    {
+        var plan = FetchPlan.CreateDefault();
+        plan.Normalize();
+
+        var notes = plan.MigrateRetired();
+
+        Assert.DoesNotContain(notes, n => n.Contains("补全退市名单"));
+    }
+
     [Fact]
     public void 老计划升级后能补上行业景气指标()
     {

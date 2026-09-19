@@ -417,7 +417,7 @@ manifest 里现有待办键继续认得出来）。
 | `ShareholderFetchPlan` | 加 `DelistedPending`——日志里报"其中退市股 N 只（消除回测的幸存者偏差）" |
 | `FetchTaskCatalog` | `SoftDependsOn` 加 `StepDelistedSupplement`；Note 写清纳入理由和那一档 |
 | 测试 | 新增 4 条：退市股在名单里且首轮就抓、365 天才重刷、抓过之后不因报告期重抓、**没有日K也不会每轮重抓** |
-| `FetchTaskCatalog.PeriodicOrder` | 【补全退市名单】前移到股东和分红**之前**，见 §12.6 |
+| `FetchTaskCatalog.PeriodicOrder` | 【补全退市名单】前移到股东和分红**之前**，见 §12.6。**2026-09-19 起它整个挪进了日更组**——这个依赖因此变强而不是变弱：原来同组顺序只保证"这一轮里它先跑"，而季度组几天才转一轮；现在每个工作日都刷新一遍，股东/分红无论什么时候跑，用的名单至多隔一天 |
 
 ### 12.6 顺带修掉计划顺序（`PlanTemplateTests` 抓出来的）
 

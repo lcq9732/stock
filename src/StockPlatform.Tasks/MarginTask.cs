@@ -148,8 +148,13 @@ public sealed class MarginTask(
             if (rows == null) continue;
 
             // ⚠ 文本里**不要**再写一遍进度数字：TaskProgress.ToString() 已经会拼 "（done/total）"。
+            // ⚠ 心跳**每天**一次、日志仍按上面的间隔（2026-09-19）：只按日志间隔出声的话，
+            //   单位一慢就顶上静默看门狗的 5 分钟上限，一路正常跑也会被判成卡死
+            //   （【资金净流入】09-18/09-19 就是这么被掐的，见 QuietWatchdog.IBeatOnlySink）。
             if (rows.Count > 0 || done % 20 == 0 || done == days.Count)
                 Report($"融资余额 {day:yyyy-MM-dd}：{rows.Count} 条", done, days.Count);
+            else
+                ReportQuiet($"融资余额 {day:yyyy-MM-dd}：{rows.Count} 条", done, days.Count);
 
             yield return [new MarginDay(day, rows)];
         }

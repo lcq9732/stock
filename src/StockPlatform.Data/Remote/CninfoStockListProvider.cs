@@ -1,5 +1,6 @@
 using System.Text.Json;
 using StockPlatform.Logic.Abstractions;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Remote;
 
@@ -25,7 +26,7 @@ namespace StockPlatform.Data.Remote;
 ///    43/83/87 判成**北交所**（那是 920 代码迁移前的近似，见它的类注释），于是几百只新三板
 ///    会被按北交所去抓 K 线。北交所自 2025-10-09 已全部迁到 920，所以排除 43/83/87 是安全的。
 ///
-/// 过滤用的是**白名单**（<see cref="AShareSegments"/>）而不是黑名单：漏掉一个新号段只是少几只票、
+/// 过滤用的是**白名单**（<see cref="MarketClassifier.IsAShareCode"/>）而不是黑名单：漏掉一个新号段只是少几只票、
 /// 下次加上就行；放进一个不该来的号段却会静默污染整个抓取清单。
 ///
 /// ════ 已知副作用 ════
@@ -40,18 +41,9 @@ public class CninfoStockListProvider : IStockListProvider
 
     private static readonly TimeSpan[] RetryDelays = { TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10) };
 
-    /// <summary>
-    /// A 股号段白名单。**故意不含 43/83/87**（那是新三板，见类注释），
-    /// 也不含 200/900（B 股，另外还有 <c>category</c> 那道过滤兜着）。
-    /// </summary>
-    private static readonly string[] AShareSegments =
-    {
-        "000", "001", "002", "003",          // 深市主板
-        "300", "301", "302",                 // 创业板
-        "600", "601", "603", "605",          // 沪市主板
-        "688", "689",                        // 科创板（含 CDR）
-        "920",                               // 北交所（2025-10-09 起全部是这个号段）
-    };
+    // A 股号段白名单在 MarketClassifier.IsAShareCode（2026-09-19 提上去共用）——
+    // 【补全退市名单】的第二个候选来源也要这一份，抄第二份早晚会分叉。
+    // 那份注释里写明了为什么故意不含 43/83/87（新三板）和 200/900（B股）。
 
     private readonly HttpClient _http;
 
@@ -105,7 +97,7 @@ public class CninfoStockListProvider : IStockListProvider
             if (code.Length != 6 || !code.All(char.IsDigit)) continue;
 
             if (Str(item, "category") == "B股") { bShares++; continue; }        // ① 源自己给的分类
-            if (!AShareSegments.Any(p => code.StartsWith(p, StringComparison.Ordinal)))
+            if (!MarketClassifier.IsAShareCode(code))
             {
                 offBoard++;                                                     // ② 新三板等，见类注释
                 continue;

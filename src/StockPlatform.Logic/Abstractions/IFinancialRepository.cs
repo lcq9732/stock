@@ -30,8 +30,11 @@ public interface IFinancialRepository
     /// 版本落后就必须重抓，见 <see cref="Models.FinancialKeys.Version"/>。
     ///
     /// 没有状态记录的票（旧库里抓过但那时还没这张表）返回 version=0，一律视为需要重抓。
+    ///
+    /// 2026-09-19 从元组换成 <see cref="FinancialFetchState"/>：多出来的 TargetDate/FetchedAt
+    /// 是"上次冲着哪个报告期问的、什么时候问的"，抓取端靠它认出"问过了但数据源就是没有"。
     /// </summary>
-    Dictionary<string, (DateTime ReportDate, int KeysVersion)> GetFetchStateByCode();
+    Dictionary<string, FinancialFetchState> GetFetchStateByCode();
 
     /// <summary>
     /// 单只股票的**全部报告期、全部科目**，按报告期降序（最新在前）。给"财务分析"用——它要同期

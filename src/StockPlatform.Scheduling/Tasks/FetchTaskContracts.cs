@@ -76,7 +76,16 @@ public interface IFetchTask
 /// <param name="Done">已完成多少（不适用就留空）。</param>
 /// <param name="Total">总共多少（事先不知道就留空）。</param>
 /// <param name="Phase">当前阶段名，比如"官方日历"/"本地归纳"/"对账"。</param>
-public sealed record TaskProgress(string Text, int? Done = null, int? Total = null, string? Phase = null)
+/// <param name="Quiet">
+/// 真进展，但**不必单独写一行日志**（2026-09-19）——喂静默看门狗就够了，界面进度条照收。
+/// 用在"一批很快、但要跑几百批"的活上：日志按原来的稀疏间隔打，心跳按批打，
+/// 于是它既不刷屏、也不会被判成卡死。详见 <see cref="QuietWatchdog.IBeatOnlySink"/>。
+///
+/// ⚠ 只影响**日志密度**，不影响"算不算进展"：Quiet 的进展照样喂狗。真正不喂狗的是
+/// <see cref="IFetchTask.OnLiveness"/> 那一路，两者别混。
+/// </param>
+public sealed record TaskProgress(string Text, int? Done = null, int? Total = null, string? Phase = null,
+                                  bool Quiet = false)
 {
     public override string ToString() => Done is { } d && Total is { } t ? $"{Text}（{d}/{t}）" : Text;
 }

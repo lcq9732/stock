@@ -640,16 +640,27 @@ public static class FetchTaskCatalog
             FetchActionParams.GlobalFetchOptions,
             Sources: [DataSourceId.Exchange, DataSourceId.Tencent]),
 
-        new(FetchActionId.StepDelistedSupplement, "补全退市名单", "巨潮 + 腾讯K线", QuotaGroup.Mixed,
-            TimeSpan.FromMinutes(2), "季度",
-            "两所官网的终止上市名单漏两类，这一项用巨潮的全市场名单补上：\n"
+        new(FetchActionId.StepDelistedSupplement, "补全退市名单", "巨潮 + 本地档案 + 腾讯K线", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(2), "每工作日",
+            "**退市名单是全库公共设施**：财报/股东/分红的待抓判据、日常轮询的过滤、全库体检、"
+            + "FactorLab 选池都只读 DelistedStock 和 StockMeta.type，谁都不该自己去拼退市判据——"
+            + "名单不全就在这一项补。\n"
+            + "两所官网的终止上市名单漏三类，这一项补上：\n"
             + "① **科创板退市股整类缺失**——上交所终止上市名单(stockType=5)里 68 开头的是 0 只，"
             + "688086 紫晶存储/688555 泽达易盛/688287 观典防务 在它家所有 stockType 里都查不到；\n"
-            + "② 已换代码的老号（600849 上海医药、601313 江南嘉捷这类），原代码不再交易、实质等同退市。\n"
-            + "判据＝巨潮 − 在市名单 − 已知退市，再逐只向数据源要一次日K：**给得出才算交易过**。"
+            + "② 已换代码的老号（600849 上海医药、601313 江南嘉捷这类），原代码不再交易、实质等同退市；\n"
+            + "③ **还挂在在市名册里的已退市票**（2026-09-19）——巨潮那条差集要减去在市名册，"
+            + "于是\"名册说在市、档案说退市\"的票永远不是候选，两边谁也纠正不了谁。920305 云创退就这么"
+            + "卡着：K线停在 2026-07-29、名字都带\"退\"，type 还是 stock，每天的K线/资金流/名册轮询都在"
+            + "白抓它。第三路读**本地公司档案的 listing_state='2'**（东财给的上市状态），不减名册、"
+            + "零新增请求。⚠ 只认 '2'：9 是待上市/暂缓（有几只还在正常交易）、10 是换代码吸收合并。\n"
+            + "判据＝[巨潮 − 在市名单] ∪ [档案说已退市] − 已知退市，再逐只向数据源要一次日K：**给得出才算交易过**。"
             + "候选里混着从未上市的（蚂蚁集团、浙江国祥那类过会后撤回的），写进退市表会污染分红抓取和选池。\n"
             + "⚠ 巨潮**不能**直接并进在市名单：Upsert 默认写 type=stock 且是 INSERT OR REPLACE，"
-            + "会把几百行 delisted 冲成 stock，退市股重新进日常轮询。",
+            + "会把几百行 delisted 冲成 stock，退市股重新进日常轮询。\n"
+            + "⚠ 终止日一律留空，**不拿最后一根K线去推**：实测 318 只有官方终止日的票，"
+            + "\"终止日 − 最后K线\"中位数 15 天、尾部到 2525 天（摘牌在退市整理期结束之后），"
+            + "推出来会偏早，可能把该有的一期财报判成\"不该有\"——那是静默漏抓。",
             SoftDependsOn: [FetchActionId.StepRoster],
             Sources: [DataSourceId.Tencent]),
 
@@ -755,7 +766,13 @@ public static class FetchTaskCatalog
             + "**幂等**：改完的行比值变成 ≈100，再跑不会被选中。中断了直接重跑，不用记断点。\n"
             + "指数、板块合成、ETF **不动**：它们的\"成交量\"是汇总值或按份计，量额比没有物理意义。\n"
             + "⚠ 跑完**要再跑一次【板块指数合成】**——它存的成交量是按旧单位加总出来的。",
-            FetchActionParams.None),
+            FetchActionParams.None,
+            // 实测（2026-09-10 日志）这一项开头那句"开始扫描"之后**哑了 17 分 31 秒**：
+            // Bar 表 2540 万行、granularity 无索引，第一步就是一条走全表的查询——
+            // 它是**一条 SQL，没有可切分的心跳单位**，喂不了狗（对比：按只/按天的循环都改成
+            // 每单位喂狗了，见 QuietWatchdog.IBeatOnlySink）。所以这一项只能抬阈值。
+            // 手动点的时候没事（那条路没有看门狗），但它是可以被排进计划的。
+            MaxQuiet: TimeSpan.FromMinutes(30)),
 
         new(FetchActionId.StepFillShortBalance, "融券余额补算", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(6), "每日",
@@ -787,7 +804,11 @@ public static class FetchTaskCatalog
             // 缺哪个都不该拦住它（它本来就是"能算多少算多少、算不出来留 NULL"），
             // 但日志里得留一行，否则某天沪市又出现一批空值时没人知道是前置没跑。
             SoftDependsOn: [FetchActionId.StepMargin, FetchActionId.StepStockRawBars],
-            SupportedModes: FetchMode.Incremental | FetchMode.Thorough),
+            SupportedModes: FetchMode.Incremental | FetchMode.Thorough,
+            // 实测最长静默 3 分钟（4001 个交易日、每 100 天一句），对 5 分钟的默认阈值余量太薄，
+            // 而"彻底重查"整段要 48 分钟、库越大越慢。它跟上面那项一样是本地大查询，
+            // 心跳粒度归 Data 层的 filler 管，这里抬阈值兜住。
+            MaxQuiet: TimeSpan.FromMinutes(15)),
 
         new(FetchActionId.StepFillProbeFloor, "回填\"无更早数据\"水位", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(1), "一次性",
@@ -1464,7 +1485,10 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.FetchEarningsSchedule],
             // PDF 有几 MB，单个下载的 HttpClient 超时就设到 3 分钟（BankReportFetcher）；
             // 再叠上解析一个大 PDF 的时间，5 分钟的默认阈值太贴脸。
-            MaxQuiet: TimeSpan.FromMinutes(10)),
+            // 2026-09-19 从 10 分钟抬到 30：实测（09-15 日志）它开工前**哑了 16 分 42 秒**——
+            // 那是认机构类型要读的两次全库查询（GetLatestSnapshotByCode / GetFetchStateByCode，
+            // 25GB 库上就是这么慢），一条 SQL 没有可切分的心跳单位，10 分钟照样掐。
+            MaxQuiet: TimeSpan.FromMinutes(30)),
 
         new(FetchActionId.ImportManual, "导入手工数据", "本地文件", QuotaGroup.Local,
             TimeSpan.FromSeconds(5), "人填完 CSV 后",
@@ -1610,6 +1634,10 @@ public static class FetchTaskCatalog
         // 事后只能靠逐股那条通道 5500 个请求换回一天。59 个请求、一两分钟，放日更毫无负担。
         FetchActionId.FetchMoneyFlowSnapshot => PlanGroupKind.Daily,
 
+        // 【补全退市名单】（2026-09-19 从季度组挪过来）：它的产出是后面所有"逐只抓"的项的输入
+        // 名单，晚一个月认出一只退市票 = 那一个月里每天都在白抓它。成本是候选 0~3 只、28 秒。
+        FetchActionId.StepDelistedSupplement => PlanGroupKind.Daily,
+
         // 【总股本】归日更：股本本身不常动（增发/回购/送转才变），但一动就直接改 PE/PB，
         // 而一个请求一两秒，放日更毫无负担。不放季度组是因为"季度才跑一次"意味着
         // 送转之后最长两三个月里 PE 都是错的，代价和收益完全不成比例。
@@ -1626,10 +1654,6 @@ public static class FetchTaskCatalog
         // 【基金除权除息】归周期组：它读的是东财终端自己更新的本地文件，不定期变；
         // 而且一次 20 秒、不发请求，晚几天补上毫无代价。
         FetchActionId.ImportFundExDividend => PlanGroupKind.Periodic,
-
-        // 【补全退市名单】归周期组：退市这件事本身不常发生，而且它要先有最新的在市名册
-        // 才算得出差集（SoftDependsOn StepRoster）。
-        FetchActionId.StepDelistedSupplement => PlanGroupKind.Periodic,
 
         // 【观察指标映射】（2026-09-11）跟着【行业景气指标】走日更。它本身变得很慢（规则改了才变），
         // 但重算是纯本地、毫秒级、幂等，每天白跑一次的成本可以忽略；而放到季度组的话，
@@ -1781,6 +1805,14 @@ public static class FetchTaskCatalog
     ///      前面那些步骤产生的名单（失败名单、漂移名单、待重算量）。
     /// 改顺序前先对一遍这四条，单元测试也守着它们。
     /// </summary>
+    /// <summary>某一组的模板顺序。给"换过组的动作该插在第几位"用，见 FetchPlan.TemplateIndexIn。</summary>
+    public static IReadOnlyList<FetchActionId> OrderOf(PlanGroupKind kind) => kind switch
+    {
+        PlanGroupKind.Daily => DailyOrder,
+        PlanGroupKind.Periodic => PeriodicOrder,
+        _ => OnDemandOrder,
+    };
+
     public static readonly IReadOnlyList<FetchActionId> DailyOrder =
     [
         // ── K线族 ──
@@ -1789,6 +1821,12 @@ public static class FetchTaskCatalog
         // 排在名册之后是因为覆盖护栏要拿库里在市名册当基准——名册先刷新，护栏才不会因为
         // "接口有新股、本地名册还没有"而误报。
         FetchActionId.FetchTotalShares,
+        // 【补全退市名单】紧跟名册（2026-09-19 从季度组挪进日更）：它要拿刚刷新的在市名册当输入，
+        // 而它的产出——StockMeta.type='delisted'——是**后面所有"逐只抓"的项的输入名单**。
+        // 排在K线族前面，新摘牌的票当晚就不再被白抓（K线/资金流/名册每天几百个必然落空的请求）。
+        // 为什么值得每天跑：它平时候选 0~3 只、28 秒、一个巨潮请求打底；而搁在季度组的代价是
+        // 一只票退市后最长要等一个月才被认出来，这期间所有日更项都在陪跑。
+        FetchActionId.StepDelistedSupplement,
         FetchActionId.StepStockDayBars,
         FetchActionId.StepStockRawBars,
         FetchActionId.StepStockHfqBars,
@@ -1889,11 +1927,10 @@ public static class FetchTaskCatalog
         // 指数那两项是拆开的：成分名单（新浪）/ ETF映射（本地）；权重排到最后，理由见末尾
         FetchActionId.StepIndexCons,
         FetchActionId.StepEtfIndexMap,
-        // 【补全退市名单】排在股东和分红**前面**（2026-09-18）：那两项的名单都含退市股
-        // （分红 09-06 纳入、股东 09-18 纳入），而退市名单正是这一项往 StockMeta 写的。
-        // 排在后面的话，同一轮里它们用的永远是上一轮的旧名单——**新退市的票会少抓一整轮**，
-        // 而且不报错、只是少。目录里股东那条挂了 SoftDependsOn，PlanTemplateTests 会守住这个顺序。
-        FetchActionId.StepDelistedSupplement,
+        // 【股东数据】【分红送配】的名单都含退市股（分红 09-06 纳入、股东 09-18 纳入），
+        // 而退市名单是【补全退市名单】往 StockMeta 写的。那一项 2026-09-19 从这一组挪进了日更——
+        // **这个依赖因此变强而不是变弱**：原来同组顺序只保证"这一轮里它先跑"，而这一组几天才转
+        // 一轮；现在每个工作日都刷新一遍，这两项无论什么时候跑，用的名单至多隔一天。
         FetchActionId.FetchShareholder,
         FetchActionId.FetchDividend,
         // 【基金除权除息】紧跟个股分红（2026-09-17）：同一族数据（除权除息事件），

@@ -59,6 +59,19 @@ public abstract class FetchTaskBase<TItem> : IFetchTask
     protected void Report(string text, int? done = null, int? total = null, string? phase = null)
         => Raise(OnProgress, new TaskProgress(text, done, total, phase));
 
+    /// <summary>
+    /// 报一条真进展，但**只喂看门狗、不写日志**（2026-09-19）。
+    ///
+    /// 给"一批 30 秒、要跑几百批"的活用：每批都报这个，日志文本仍按稀疏间隔用
+    /// <see cref="Report"/> 打。不这么分开的话只有两个坏选择——日志刷屏，
+    /// 或者像【资金净流入】那样每 300 只才出声、被 5 分钟静默上限误判成卡死。
+    ///
+    /// ⚠ 不是 <see cref="ReportLiveness"/>：那个是定时播报、不证明有前进、看门狗不吃。
+    ///    这里的前提仍然是"真的做完了一批"。
+    /// </summary>
+    protected void ReportQuiet(string text, int? done = null, int? total = null, string? phase = null)
+        => Raise(OnProgress, new TaskProgress(text, done, total, phase, Quiet: true));
+
     /// <summary>报一条"我还活着"（看门狗**不**吃这个，见 <see cref="IFetchTask.OnLiveness"/>）。</summary>
     protected void ReportLiveness(string text, TimeSpan elapsed)
         => Raise(OnLiveness, new TaskLiveness(text, elapsed));

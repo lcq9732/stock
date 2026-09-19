@@ -323,4 +323,35 @@ public class FetchTaskCatalogTests
                 $"{spec.Table} 归属的 {id} 不支持 FillBacklog，残缺日补不了");
         }
     }
+    /// <summary>
+    /// **有一段长哑期、而且没法喂心跳的任务，必须自己配 MaxQuiet**（2026-09-19）。
+    ///
+    /// 这几项的静默不是"抓一批慢"，而是一条走全表的大查询/大 UPDATE——没有可切分的心跳单位，
+    /// 喂不了狗（按只/按天的循环都改成每单位 ReportQuiet 了，见 QuietWatchdog.IBeatOnlySink）。
+    /// 括号里是实测静默，来自 publish 的历史 fetch 日志：
+    ///   · 统一成交量单位   17 分 31 秒（Bar 表 2540 万行、granularity 无索引）
+    ///   · 金融监管指标     16 分 42 秒（认机构类型要读两次全库财务快照）
+    ///   · 融券余额补算     3 分钟（4001 个交易日，"彻底重查"整段 48 分钟）
+    /// 谁把这几个 MaxQuiet 删了或调回默认，它们就会在"一路正常跑"的状态下被判成卡死掐断——
+    /// 而掐断走的是失败分支，日志上只留一句"最后一句是…"，看不出是误判。
+    /// </summary>
+    [Fact]
+    public void 长哑期任务_必须配够用的MaxQuiet()
+    {
+        var floors = new Dictionary<FetchActionId, TimeSpan>
+        {
+            [FetchActionId.StepFixVolumeUnit] = TimeSpan.FromMinutes(25),
+            [FetchActionId.BankRegulatory] = TimeSpan.FromMinutes(25),
+            [FetchActionId.StepFillShortBalance] = TimeSpan.FromMinutes(10),
+        };
+
+        foreach (var (id, floor) in floors)
+        {
+            var q = FetchTaskCatalog.Info(id).MaxQuiet;
+            Assert.True(q.HasValue, $"{id} 有一段长哑期，必须配 MaxQuiet（默认 5 分钟会误杀）");
+            Assert.True(q.Value >= floor,
+                $"{id} 的 MaxQuiet 是 {q.Value.TotalMinutes:0} 分钟，实测静默已经接近或超过它——"
+                + $"至少要 {floor.TotalMinutes:0} 分钟");
+        }
+    }
 }

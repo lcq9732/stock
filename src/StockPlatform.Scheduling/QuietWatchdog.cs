@@ -105,6 +105,24 @@ public sealed class QuietWatchdog : IDisposable
     /// </summary>
     public IProgress<string> Wrap(Action<string> log) => new BeatingProgress(this, new Progress<string>(log));
 
+    /// <summary>
+    /// 心跳和日志分开的口子（2026-09-19）——"我往前走了一步，但这一步不值得单独写一行日志"。
+    ///
+    /// 起因：【资金净流入】每 300 只才吐一句进度，而 300 只实测要 5 分半，比默认静默上限
+    /// （5 分钟）还长——它一路正常抓着，却每天被判成卡死掐断（09-18、09-19 两轮）。
+    /// 把日志打密十倍（每 30 只一行、186 行一轮）不合适，把 <see cref="DefaultMaxQuiet"/>
+    /// 放宽又等于把"发现真卡死"一起推迟；所以让任务能报**只喂狗的进展**：
+    /// 每批都喂，日志文本仍按原来的间隔打。
+    ///
+    /// ⚠ 这跟 <c>IFetchTask.OnLiveness</c> 不是一回事：那个是定时播报、**不能**喂狗
+    /// （卡在写锁上时它照样每 30 秒吐一句）。这里喂的前提仍然是"真的做完了一批"。
+    /// </summary>
+    public interface IBeatOnlySink
+    {
+        /// <summary>记一次心跳，不写日志。</summary>
+        void BeatOnly(string? message = null);
+    }
+
     /// <summary>记一次心跳。任务每说一句话就是一次。</summary>
     public void Beat(string? message = null)
     {
@@ -187,12 +205,16 @@ public sealed class QuietWatchdog : IDisposable
         _quietCts.Dispose();
     }
 
-    private sealed class BeatingProgress(QuietWatchdog dog, IProgress<string> inner) : IProgress<string>
+    private sealed class BeatingProgress(QuietWatchdog dog, IProgress<string> inner)
+        : IProgress<string>, IBeatOnlySink
     {
         public void Report(string value)
         {
             dog.Beat(value);
             inner.Report(value);
         }
+
+        /// <summary>只喂狗，不往日志走（见 <see cref="IBeatOnlySink"/>）。</summary>
+        public void BeatOnly(string? message = null) => dog.Beat(message);
     }
 }

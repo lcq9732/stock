@@ -173,8 +173,13 @@ public sealed class BlockTradeTask(
 
             // ⚠ 文本里**不要**再写一遍进度数字：TaskProgress.ToString() 已经会拼 "（done/total）"，
             // 写了就成 "（1/1）（1/1）"。
+            // ⚠ 心跳**每天**一次、日志仍按上面的间隔（2026-09-19）：只按日志间隔出声的话，
+            //   单位一慢就顶上静默看门狗的 5 分钟上限，一路正常跑也会被判成卡死
+            //   （【资金净流入】09-18/09-19 就是这么被掐的，见 QuietWatchdog.IBeatOnlySink）。
             if (done % 20 == 0 || done == days.Count)
                 Report($"大宗交易：{day:yyyy-MM-dd}", done, days.Count);
+            else
+                ReportQuiet($"大宗交易：{day:yyyy-MM-dd}", done, days.Count);
 
             yield return [one];
         }

@@ -874,6 +874,30 @@ public sealed class FetchPlan
         }
     }
 
+    /// <summary>
+    /// 按模板顺序算 <paramref name="action"/> 该插在 <paramref name="group"/> 的第几位：
+    /// 找组里**按模板排在它前面**的最后一项，插在那一项之后。组里已有的相对顺序不动
+    /// （用户拖过的顺序是权威的），认不出的项直接跳过。
+    /// </summary>
+    private static int TemplateIndexIn(FetchPlanGroup group, FetchActionId action)
+    {
+        var order = FetchTaskCatalog.OrderOf(FetchTaskCatalog.DefaultGroupOf(action));
+        static int Pos(IReadOnlyList<FetchActionId> list, FetchActionId a)
+        {
+            for (int i = 0; i < list.Count; i++) if (list[i] == a) return i;
+            return -1;
+        }
+
+        int want = Pos(order, action);
+        if (want < 0) return group.Items.Count;
+        for (int i = group.Items.Count - 1; i >= 0; i--)
+        {
+            int at = Pos(order, group.Items[i].Action);
+            if (at >= 0 && at < want) return i + 1;
+        }
+        return 0;
+    }
+
     /// <summary>把每个任务的 <see cref="FetchPlanItem.Owner"/> 指回它所在的组。加载/改动结构之后都要调。</summary>
     public void LinkOwners()
     {
@@ -957,9 +981,40 @@ public sealed class FetchPlan
     ///   · 展开目标要是已经在表里了（用户自己排过），就不动它，只把原来那行删掉——
     ///     绝不覆盖用户已有的设置。
     /// </summary>
+    /// <summary>
+    /// 换过组的动作（2026-09-19）——老计划里它们还在旧组，要搬到现在的默认组。
+    ///
+    /// 为什么需要：<see cref="Normalize"/> 只**补**计划里没有的动作，已有的一律保持原位；
+    /// 而界面上又没有"移到别的组"这个操作（2026-09-02 做了又撤，见 MainViewModel 末尾），
+    /// 所以计划里的分组完全来自模板——模板改了组而老计划不动的话，这一项会永远留在旧组里，
+    /// 且界面上看不出任何异常。
+    ///
+    /// ⚠ **名单要显式列**，不要对所有动作都按默认组归位：那等于以后每次微调模板都把用户
+    ///   自己排过的顺序冲掉一遍。搬完就该从这里删掉（下一次加载时它已经在对的组里，
+    ///   这段是空操作，留着只是给下一个改模板的人当样板）。
+    /// </summary>
+    private static readonly FetchActionId[] Regrouped = [FetchActionId.StepDelistedSupplement];
+
     public List<string> MigrateRetired()
     {
         var notes = new List<string>();
+
+        // ── 换过组的动作搬家（2026-09-19，见 Regrouped）──
+        foreach (var action in Regrouped)
+        {
+            var want = FetchTaskCatalog.DefaultGroupOf(action);
+            var target = GroupOf(want);
+            var from = Groups.FirstOrDefault(g => g.Items.Any(i => i.Action == action));
+            if (from == null || ReferenceEquals(from, target)) continue;
+
+            var item = from.Items.First(i => i.Action == action);
+            from.Items.Remove(item);
+            // 插到模板顺序该在的位置，而不是简单追加到末尾——顺序即执行顺序，
+            // 追加到末尾会让它跑在所有"逐只抓"的项**后面**，那正好是它该避免的。
+            target.Items.Insert(TemplateIndexIn(target, action), item);
+            notes.Add($"【{FetchTaskCatalog.Info(action).Name}】已从「{from.Name}」挪到「{target.Name}」"
+                    + "（它的产出是后面各项的输入名单，晚一轮就白抓一轮）");
+        }
 
         // 【全库数据体检】的「彻底体检」勾 2026-09-09 收成了 FetchMode.Thorough（那一项迁到新任务
         // 框架时顺手统一的，见 doc/full-audit-task-migration-design.md §4）。老计划里勾着的项

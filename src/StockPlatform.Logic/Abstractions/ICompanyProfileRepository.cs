@@ -26,6 +26,20 @@ public interface ICompanyProfileRepository
     /// </summary>
     List<(string Code, string FullName, string? Abbr)> GetAllNames();
 
+    /// <summary>
+    /// 档案里**已终止上市**（<c>listing_state='2'</c>）的票，(代码, 简称)。
+    ///
+    /// 东财 <c>RPT_HSF9_BASIC_ORGINFO</c> 的 <c>LISTING_STATE</c>：<c>0</c>=在市、<c>2</c>=已退市、
+    /// <c>9</c>=待上市/暂缓上市（蚂蚁集团那批，有几只还在正常交易）、<c>10</c>=换代码吸收合并
+    /// （深赤湾A→招商港口）。**只有 2 算退市**，9 和 10 各有各的语义，混进来会把在交易的票
+    /// 踢出日常轮询。
+    ///
+    /// 给【补全退市名单】当第二个候选来源用：它原来的候选集要减去在市名册，于是**还挂在在市
+    /// 名册里的已退市票永远不是候选**——920305 云创退就是这么漏了半年的（名册说在市、
+    /// 档案说退市，谁也纠正不了谁）。这一份不受名册限制。
+    /// </summary>
+    List<(string Code, string Name)> GetDelistedCodes();
+
     /// <summary>(档案条数, 长文本条数)。两者应该相等，不等就是有半拉记录。</summary>
     (int Profiles, int Narratives) GetCounts();
 }

@@ -521,7 +521,7 @@ public partial class App : Application
         // 修的是两所官网名单的两个洞：科创板退市股整类缺失、已换代码的老号没有。
         // 限流器 1 并发：候选通常几十只，一只一个探测请求。
         taskRegistry.Register(FetchActionId.StepDelistedSupplement,
-            () => new DelistedSupplementTask(paths, new CninfoStockListProvider(),
+            () => new DelistedSupplementTask(paths, new CninfoStockListProvider(), companyProfileRepository,
                 new TencentBarFetcher(new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1)))));
         taskRegistry.Register(FetchActionId.StepCompanyProfile,
             () => new CompanyProfileTask(companyProfileRepository, companyProfileProvider));

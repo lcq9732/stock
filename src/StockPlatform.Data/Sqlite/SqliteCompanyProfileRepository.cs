@@ -156,6 +156,21 @@ public class SqliteCompanyProfileRepository : ICompanyProfileRepository
         return list;
     }
 
+    public List<(string Code, string Name)> GetDelistedCodes()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        // ⚠ 只认 '2'。9（待上市/暂缓）和 10（换代码吸收合并）不是退市，见接口注释。
+        cmd.CommandText = """
+            SELECT code, COALESCE(NULLIF(abbr, ''), full_name, code)
+            FROM CompanyProfile WHERE listing_state = '2';
+            """;
+        var list = new List<(string, string)>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) list.Add((r.GetString(0), r.GetString(1)));
+        return list;
+    }
+
     public (int Profiles, int Narratives) GetCounts()
     {
         using var conn = Open();

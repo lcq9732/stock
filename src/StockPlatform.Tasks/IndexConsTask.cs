@@ -80,10 +80,15 @@ public sealed class IndexConsTask(
                 _errors.Add($"指数 {code} 成分抓取失败：{ex.Message}");
             }
 
+            // ⚠ 心跳**每只**一次、日志仍按上面的间隔（2026-09-19）：只按日志间隔出声的话，
+            //   单位一慢就顶上静默看门狗的 5 分钟上限，一路正常跑也会被判成卡死
+            //   （【资金净流入】09-18/09-19 就是这么被掐的，见 QuietWatchdog.IBeatOnlySink）。
             if (++done % 20 == 0 || done == codes.Count)
                 // ⚠ 不报"成功 N"：骨架先 yield 再 SaveBatchAsync，_ok 要等这一批存完才涨，
                 //   在这儿读永远差一批。计数留给收尾那句汇总。
                 Report($"指数成分：{done}/{codes.Count}", done, codes.Count);
+            else
+                ReportQuiet($"指数成分：{done}/{codes.Count}", done, codes.Count);
 
             if (members != null) yield return [new IndexCons(code, members)];
         }

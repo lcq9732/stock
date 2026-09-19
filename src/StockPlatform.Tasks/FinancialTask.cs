@@ -42,6 +42,9 @@ public sealed class FinancialTask(
 
     private readonly SqliteFinancialRepository _repo = new(paths.CurrentDb);
 
+    /// <summary>本轮的待抓清单——落库时要回头问它"这只票冲的是哪一期"（<c>TargetOf</c>）。</summary>
+    private FinancialFetchPlan? _plan;
+
     /// <summary>本轮统计。</summary>
     private int _targetCount, _done, _wrote, _empty;
     private readonly List<string> _errors = [];
@@ -57,6 +60,7 @@ public sealed class FinancialTask(
 
         int cap = args.MaxItems is > 0 ? args.MaxItems.Value : FinancialFetchPlanner.MaxPerRun;
         var plan = new FinancialFetchPlanner(paths).Plan(cap);
+        _plan = plan;
         var targets = plan.ThisRun;
         _targetCount = targets.Count;
         Report(plan.Describe(cap));
@@ -90,22 +94,33 @@ public sealed class FinancialTask(
                 {
                     // 请求成功但一行都没解析出来——多半是该股没有这些报表（新上市/特殊标的），
                     // 单独计数：这个数一大就说明映射出问题了，不能静默混在"成功"里。
+                    //
+                    // ⚠ 这条路不经过 SaveBatchAsync，所以得自己记一笔"问过了"，
+                    //   否则这只票每轮都会被重新算进待抓名单（见 MarkAsked 的注释）。
+                    _repo.MarkAsked(code, plan.TargetOf(code));
                     _empty++;
                 }
 
                 _done++;
-                // 每 20 只报一次（顺序处理下单只约 12 秒，20 只≈4 分钟）。原来是 50 只，
+                // 日志每 20 只一行（顺序处理下单只约 12 秒，20 只≈4 分钟）。原来是 50 只，
                 // 降速后那是 10 分钟一报，太稀疏，看着像卡住了。
-                if (_done % 20 == 0 || _done == targets.Count)
+                //
+                // ⚠ 心跳是**每只**一次（2026-09-19 补）：20 只在降速下是 4~6 分钟，正顶着
+                //   静默看门狗的 5 分钟上限——只按日志那个间隔出声，一轮抓满 300 只时就会
+                //   在"一路正常抓"的状态下被判成卡死掐断。【资金净流入】09-18/09-19 连着
+                //   被掐两轮就是这个原因，见 QuietWatchdog.IBeatOnlySink。
                 {
                     var per = _sw.Elapsed.TotalSeconds / _done;
                     var left = TimeSpan.FromSeconds(per * (targets.Count - _done));
-                    Report($"财务报表进度 ({_done}/{targets.Count})，已写入 {_wrote:N0} 条"
-                           + (_errors.Count > 0 ? $"，失败 {_errors.Count} 只" : "")
-                           + (_empty > 0 ? $"，{_empty} 只无报表数据" : "")
-                           + $"，已用时 {Fmt(_sw.Elapsed)}"
-                           + (_done < targets.Count ? $"，预计还需 {Fmt(left)}" : ""),
-                           _done, targets.Count);
+                    var text = $"财务报表进度 ({_done}/{targets.Count})，已写入 {_wrote:N0} 条"
+                             + (_errors.Count > 0 ? $"，失败 {_errors.Count} 只" : "")
+                             + (_empty > 0 ? $"，{_empty} 只无报表数据" : "")
+                             + $"，已用时 {Fmt(_sw.Elapsed)}"
+                             + (_done < targets.Count ? $"，预计还需 {Fmt(left)}" : "");
+                    if (_done % 20 == 0 || _done == targets.Count)
+                        Report(text, _done, targets.Count);
+                    else
+                        ReportQuiet(text, _done, targets.Count);
                 }
             }
         }
@@ -119,7 +134,9 @@ public sealed class FinancialTask(
     protected override Task SaveBatchAsync(IReadOnlyList<FinancialValue> batch, CancellationToken ct)
     {
         var code = batch[0].Code;
-        _repo.ReplaceByCode(code, batch);
+        // 带上"这一轮冲的是哪一期"：抓回来的报告期追不上它，就说明数据源那边就是没有，
+        // 下一轮的 FinancialFetchPlanner 靠这一列把它冷却掉，不再每 20 分钟问一遍。
+        _repo.ReplaceByCode(code, batch, _plan?.TargetOf(code));
         _wrote += batch.Count;
         return Task.CompletedTask;
     }

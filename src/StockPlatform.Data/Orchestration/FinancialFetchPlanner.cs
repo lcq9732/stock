@@ -29,6 +29,19 @@ public class FinancialFetchPlanner(FetchPaths paths)
     private static readonly TimeSpan DormantAfterNoTrading = TimeSpan.FromDays(365);
 
     /// <summary>
+    /// "上一轮就是冲着这个报告期去问的、数据源当时就是没有"——隔多久再问一次（2026-09-19）。
+    ///
+    /// 这是最后一层兜底，接在退市日封顶和"退市且无K线"之后：前两层靠的是**名单**，
+    /// 而名单永远会有赶不上现实的时候——实测 920305「云创退」名字都带退了，DelistedStock 里
+    /// 却没有它（退市名单只有沪深两所官网，北交所那一路没有来源）；002731「*ST萃华」还在交易，
+    /// 把披露日从 04-29 一路改到 08-22 至今没出。这类票任何名单都证明不了"它这期就是没有"，
+    /// 只能靠"问过了、没有、隔阵子再问"。
+    ///
+    /// 取 7 天：公司延期披露后补上一般在一周内，而这批常年只有个位数只票，代价可以忽略。
+    /// </summary>
+    private static readonly TimeSpan RetryAfterMiss = TimeSpan.FromDays(7);
+
+    /// <summary>
     /// 算出财务数据还有哪些票要抓。
     ///
     /// 增量判断有**两个**条件，缺一不可（2026-08-27 修）：
@@ -44,11 +57,19 @@ public class FinancialFetchPlanner(FetchPaths paths)
         repo.EnsureSchema();
 
         // 目标：在市个股 + 2016年后退市的（回测池同款；更早退市的没有K线、抓了也用不上）
-        var codes = SqliteStockMetaUpsert.GetAll(paths.CurrentDb).Select(s => s.Code).ToList();
+        var live = SqliteStockMetaUpsert.GetAll(paths.CurrentDb)
+            .Select(s => s.Code).ToHashSet(StringComparer.Ordinal);
+        // ⚠ 退市日要留着，不能只取 Code：它是"这只票最多可能有哪一期财报"的上界，见下面 target 封顶。
+        //   注意 DelistDate 可以为 null（名单只给了代码、没给日期），那种票下面单独有一条判据。
         var delisted = new SqliteDelistedRepository(paths.CurrentDb).GetAll()
             .Where(r => r.DelistDate == null || r.DelistDate.Value.Year >= 2016)
-            .Select(r => r.Code);
-        codes = codes.Concat(delisted).Distinct(StringComparer.Ordinal).OrderBy(c => c, StringComparer.Ordinal).ToList();
+            .ToList();
+        var delistDateByCode = delisted
+            .Where(r => r.DelistDate != null)
+            .GroupBy(r => r.Code, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Min(r => r.DelistDate!.Value), StringComparer.Ordinal);
+        var codes = live.Concat(delisted.Select(r => r.Code))
+            .Distinct(StringComparer.Ordinal).OrderBy(c => c, StringComparer.Ordinal).ToList();
 
         var stateByCode = repo.GetFetchStateByCode();
         var expected = LatestExpectedReportPeriod(DateTime.Today);
@@ -73,10 +94,27 @@ public class FinancialFetchPlanner(FetchPaths paths)
         var marketLatest = lastBarByCode.TryGetValue("sh000001", out var mkt) ? mkt : DateTime.Today;
         var dormantBefore = marketLatest - DormantAfterNoTrading;
 
-        int stale = 0, outdatedPeriod = 0, dormant = 0;
+        int stale = 0, outdatedPeriod = 0, dormant = 0, unusable = 0, asked = 0;
         var pending = new List<string>();
+        var targetByCode = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         foreach (var c in codes)
         {
+            // 该抓到哪一期：这只票已经披露的最新一期；没有披露记录的退回法定截止日。
+            // ⚠ 兜底方向只能是"多取"——查不到就按老判据来，绝不能因为查不到而漏掉一只。
+            var target = disclosed.TryGetValue(c, out var d) ? d : expected;
+
+            // ══ 退市日封顶（2026-09-19）══
+            // 退市公司不会再披露退市日之后的报告期，所以"应该有哪一期"要按它自己的退市日算，
+            // 不能拿全市场统一的法定截止日一刀切——截止日每季往前走一格，这批票就被判"落后"
+            // 一次，抓回来的最新期却永远追不上，于是每轮重抓、永远出不来（实测 8 只票空转四天）。
+            // LatestExpectedReportPeriod 本来就是"到这一天为止法定该披露的最后一期"，正好复用。
+            if (delistDateByCode.TryGetValue(c, out var delistDate))
+            {
+                var lastPossible = LatestExpectedReportPeriod(delistDate);
+                if (lastPossible < target) target = lastPossible;
+            }
+            targetByCode[c] = target;
+
             if (!stateByCode.TryGetValue(c, out var st))
             {
                 // 没有状态记录：要么从没抓过，要么是这张表出现之前抓的（版本按 0 算）
@@ -84,21 +122,36 @@ public class FinancialFetchPlanner(FetchPaths paths)
                 stale++;
                 continue;
             }
-            // 该抓到哪一期：这只票已经披露的最新一期；没有披露记录的退回法定截止日。
-            // ⚠ 兜底方向只能是"多取"——查不到就按老判据来，绝不能因为查不到而漏掉一只。
-            var target = disclosed.TryGetValue(c, out var d) ? d : expected;
             bool periodOld = st.ReportDate.Date < target;
             bool versionOld = st.KeysVersion < FinancialKeys.Version;
             if (!periodOld && !versionOld) continue;
 
-            // ⚠ 只有"报告期落后"这一条才认停牌豁免。科目集版本落后的照抓不误——
+            // ⚠ 下面三条豁免都只认"报告期落后"。科目集版本落后的照抓不误——
             //    那是本地数据不全（旧版代码抓的科目少），历史财报还在数据源上，
             //    补回来对回测有用，跟这只票现在还交不交易没关系。
-            if (periodOld && !versionOld
-                && lastBarByCode.TryGetValue(c, out var lastBar) && lastBar < dormantBefore)
+            if (periodOld && !versionOld)
             {
-                dormant++;
-                continue;
+                bool hasBar = lastBarByCode.TryGetValue(c, out var lastBar);
+
+                // ① 一年没有过任何成交：退市/长期停牌，公司本身不再出新报告期。
+                if (hasBar && lastBar < dormantBefore) { dormant++; continue; }
+
+                // ② 已经退市、本地却一根K线都没有（2026-09-19 补）——回测池根本用不到它，
+                //    问也是白问。这类票原先两道闸门全穿：退市名单只给了代码没给退市日，
+                //    躲过①要"有K线且早于一年前"的前提（TryGetValue 取不到值就不豁免）。
+                //    实测 5 只（603388 *ST元成、688086 退市紫晶、688287 退市观典、
+                //    688555 退市泽达、920680 广道退）。**只排除不在在市名册里的**，
+                //    在市新股哪天有了K线自己会回到名单里。
+                if (!hasBar && !live.Contains(c)) { unusable++; continue; }
+
+                // ③ 上一轮就是冲着同一个目标期问的、数据源当时就是没有 ⇒ 冷却期内不再问。
+                //    名单赶不上现实时的最后一层兜底，见 RetryAfterMiss。
+                if (st.TargetDate is { } askedFor && askedFor >= target
+                    && st.FetchedAt is { } at && DateTime.Now - at < RetryAfterMiss)
+                {
+                    asked++;
+                    continue;
+                }
             }
 
             pending.Add(c);
@@ -118,7 +171,8 @@ public class FinancialFetchPlanner(FetchPaths paths)
                 .ToList();
 
         var thisRun = pending.Take(cap is > 0 ? cap.Value : MaxPerRun).ToList();
-        return new FinancialFetchPlan(codes.Count, pending, thisRun, outdatedPeriod, stale, watchedCount, expected, dormant);
+        return new FinancialFetchPlan(codes.Count, pending, thisRun, outdatedPeriod, stale, watchedCount,
+            expected, dormant, unusable, asked, targetByCode);
     }
 
     /// <summary>今天应该已经能拿到的最新报告期——按法定披露截止日：一季报 4-30、半年报 8-31、
@@ -151,20 +205,35 @@ public record FinancialFetchPlan(
     int StaleVersion,
     int WatchedCount,
     DateTime ExpectedPeriod,
-    int Dormant = 0)
+    int Dormant = 0,
+    int Unusable = 0,
+    int AskedRecently = 0,
+    IReadOnlyDictionary<string, DateTime>? TargetByCode = null)
 {
     /// <summary>还剩多少只没补（本轮之外的）。</summary>
     public int Remaining => AllPending.Count - ThisRun.Count;
+
+    /// <summary>这只票这一轮是**冲着哪个报告期**去抓的——落库时要记进
+    /// <c>FinancialFetchState.target_date</c>，下一轮靠它认出"问过了但数据源没有"。</summary>
+    public DateTime? TargetOf(string code)
+        => TargetByCode != null && TargetByCode.TryGetValue(code, out var d) ? d : null;
 
     public string Describe(int cap) =>
         $"财务报表：目标 {TotalCodes} 只，需要抓 {AllPending.Count} 只" +
         $"——其中 {OutdatedPeriod} 只报告期落后（按各自的**实际披露日**判断；" +
         $"查不到披露记录的那些按法定截止日算，当前是 {ExpectedPeriod:yyyy-MM-dd}）、" +
         $"{StaleVersion} 只科目集版本落后（本地数据是旧版代码抓的、科目不全，当前 v{FinancialKeys.Version}）；" +
-        $"{TotalCodes - AllPending.Count - Dormant} 只已是最新、跳过。" +
+        $"{TotalCodes - AllPending.Count - Dormant - Unusable - AskedRecently} 只已是最新、跳过。" +
         (Dormant > 0
             ? $"另有 {Dormant} 只报告期虽然落后，但已经一年多没有过任何成交（退市/长期停牌），" +
               "公司本身不再披露新报告期，不再反复去问；哪天恢复交易，K线一到它自己会回到名单里。"
+            : "") +
+        (Unusable > 0
+            ? $"{Unusable} 只已退市且本地一根K线都没有（回测池里用不到），不抓。"
+            : "") +
+        (AskedRecently > 0
+            ? $"{AskedRecently} 只上一轮就是冲着同一期问的、数据源当时没有，冷却几天再问" +
+              "（多半是退市名单还没收录、或公司延期披露）。"
             : "") +
         (WatchedCount > 0 ? $"你关注的 {WatchedCount} 只（自选/底仓/主动仓）已排到最前。" : "") +
         (Remaining > 0 ? $"⚠ 本轮上限 {cap} 只，其余 {Remaining} 只下轮自动继续（抓过的不会重抓）。" : "") +
