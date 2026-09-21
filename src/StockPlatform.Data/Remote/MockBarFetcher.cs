@@ -85,3 +85,23 @@ public sealed class MockStockListProvider : IStockListProvider
         return Task.FromResult(list);
     }
 }
+
+/// <summary>
+/// 跟 <see cref="MockBarFetcher"/> 配套的退市名单（2026-09-21）——直接读**本地库里已有的**
+/// DelistedStock，不联网。
+///
+/// 为什么要它：【退市股收尾】原来是"零联网验证"的一个漏洞——名单那一步照样会真去两所官网要一次
+/// （同 ETF 名单那个漏洞，见 App.xaml.cs 里 etfListProvider 那段）。造一份假名单是不行的：
+/// 名单会 Upsert 进 DelistedStock、并把 StockMeta 标成 delisted，假代码会一直留在库里。
+/// </summary>
+public sealed class MockDelistedListProvider(Func<List<DelistedStockRow>> local) : IDelistedListProvider
+{
+    public event Action<string>? OnStatus;
+
+    public Task<List<DelistedStockRow>> GetAllAsync(CancellationToken ct = default)
+    {
+        var list = local();
+        OnStatus?.Invoke($"[模拟源] 退市名单直接取本地已有的 {list.Count} 只，未发任何请求");
+        return Task.FromResult(list);
+    }
+}

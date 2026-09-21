@@ -50,7 +50,21 @@ public class MainViewModel : INotifyPropertyChanged
     /// 回退实测只触发过 1 次，却让两种成交量口径混进同一只票的历史）。三次重试都失败的票
     /// 进【重新拉取失败】名单。
     /// </summary>
-    public NamedBarSource SelectedSource { get => _selectedSource; private set => Set(ref _selectedSource, value); }
+    public NamedBarSource SelectedSource
+    {
+        get => _selectedSource;
+        // 写回持有者（2026-09-21）：新框架的K线任务是启动时注册的，拿不到这个属性，
+        // 它们读的是 BarSourceHolder.Current——改完配置点【重新读取配置】要能跟着换源。
+        private set { Set(ref _selectedSource, value); SyncBarSourceHolder(value); }
+    }
+
+    /// <summary>把当前源写给新框架的K线任务。见 <see cref="StockPlatform.Tasks.BarSourceHolder"/>。</summary>
+    private void SyncBarSourceHolder(NamedBarSource source)
+    {
+        if (_barSourceHolder != null) _barSourceHolder.Current = source;
+    }
+
+    private readonly StockPlatform.Tasks.BarSourceHolder? _barSourceHolder;
 
     private readonly Services.WebView2JsonFetcher? _browserChannel;
 
@@ -355,11 +369,15 @@ public class MainViewModel : INotifyPropertyChanged
     public MainViewModel(FetchPaths paths, FetchOrchestrator orchestrator, List<NamedBarSource> availableSources,
                          Services.WebView2JsonFetcher? browserChannel = null,
                          Func<IBoardFetcher>? recreateBoardFetcher = null,
-                         FetchTaskRegistry? taskRegistry = null)
+                         FetchTaskRegistry? taskRegistry = null,
+                         StockPlatform.Tasks.BarSourceHolder? barSourceHolder = null)
     {
         _browserChannel = browserChannel;
         _recreateBoardFetcher = recreateBoardFetcher;
         _taskRegistry = taskRegistry;
+        // K线源是运行期可变的（改配置 + 【重新读取配置】），而任务是启动时注册的——
+        // 所以给任务的是这个可变持有者，由 SelectedSource 写回（见 BarSourceHolder）。
+        _barSourceHolder = barSourceHolder;
         _orchestrator = orchestrator;
         // 「我还活着」的旁路（2026-09-08）：黑盒步骤（建索引那种一句 SQL 跑十几分钟的）
         // 靠它定时说一声，免得界面看着像死了。⚠ 只写日志，**不进 progress**——
@@ -371,6 +389,7 @@ public class MainViewModel : INotifyPropertyChanged
         // faster on some machines (see doc/data-platform-design.md), Tencent+新浪 has proven
         // stable in practice. Falls back to the first source if "Tencent" isn't in the list.
         _selectedSource = ResolveBarSource(availableSources);
+        SyncBarSourceHolder(_selectedSource);   // 字段直赋绕开了属性 setter，这里补一次
         // 记下启动时这两项的值。【重新读取配置】拿它们跟新读到的比，日志才写得出"从什么变成什么"
         // ——只报当前值的话，人分不清"我刚改的那下生效了没有"。App 造 boardFetcher 跟这里读的
         // 是同一份文件、同一时刻，所以这份"已应用值"跟实际造出来的对象是对得上的。
@@ -2251,7 +2270,9 @@ public class MainViewModel : INotifyPropertyChanged
             var args = new TaskRunArgs(
                 Mode: item.EffectiveMode,
                 Day: ParseOptionalDate(item.DateText) is { } d ? DateOnly.FromDateTime(d) : null,
-                Deadline: deadline);
+                Deadline: deadline,
+                // 「新标的补 N 年」（2026-09-21 随K线任务迁移加）。不吃这个参数的任务忽略它即可。
+                LookbackYears: ParseLookbackYears(item.LookbackYearsText));
             return _taskRegistry.RunAsync(item.Action, args, progress, ct);
         }
 
@@ -2349,39 +2370,20 @@ public class MainViewModel : INotifyPropertyChanged
                 return _orchestrator.RunStepAnnouncementsAsync(
                     ParseAnnouncementKeywords(item), progress, ct, specificDay: SpecificDayOf(item));
 
-            case FetchActionId.StepIndexBars:
-                // 「首次整段回补」＝不看水位线、从开市首日抓起。加了新指数之后必须跑一次，
-                // 否则它永远停在第一次被增量抓到的那几年（见 FetchIndexBarsAsync 里的注释）。
-                return _orchestrator.RunStepIndexBarsAsync(
-                    SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct,
-                    fullBackfill: item.EffectiveMode == FetchMode.FirstBackfill);
+            // 【指数日K】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/IndexBarTask，
+            // 走上面那条 _taskRegistry 总分支（增量和整段回补都在任务里）。
 
-            case FetchActionId.StepStockDayBars:
-                // 「只抓某一天」＝原【补指定历史日】那一路（不看水位线、不补断档）
-                return item.EffectiveMode == FetchMode.SpecificDay
-                    ? _orchestrator.RunStepStockDayBarsForDayAsync(
-                        SelectedSource, SpecificDayOf(item) ?? DateTime.Today, progress, ct)
-                    : _orchestrator.RunStepStockDayBarsAsync(
-                        SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
+            // 【个股日K】三个口径的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks
+            // （StockDayBarTask / StockAdjustedBarTask ×2），走上面那条 _taskRegistry 总分支。
+            // 三个模式都在任务里：前复权的「只抓某一天」、不复权的「首次整段回补」
+            // （原来那条路调的是 RunFetchRawBarsAsync，现在靠框架的 Deadline 在批边界收尾，
+            //   不再按"每只约 4 秒"估个数来限量）。
 
-            case FetchActionId.StepStockHfqBars:
-                return _orchestrator.RunStepStockHfqBarsAsync(
-                    SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
+            // 【ETF日K】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/EtfBarTask，
+            // 走上面那条 _taskRegistry 总分支（名单那道半截闸也跟着搬进 EtfListGuard）。
 
-            case FetchActionId.StepStockRawBars:
-                // 「首次整段回补」＝原【补不复权历史】：把每只补到跟前复权一样长，支持按空窗限量分批
-                return item.EffectiveMode == FetchMode.FirstBackfill
-                    ? _orchestrator.RunFetchRawBarsAsync(
-                        SelectedSource, progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(4)))
-                    : _orchestrator.RunStepStockRawBarsAsync(
-                        SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
-
-            case FetchActionId.StepEtfBars:
-                return _orchestrator.RunStepEtfBarsAsync(
-                    SelectedSource, ParseLookbackYears(item.LookbackYearsText), progress, ct);
-
-            case FetchActionId.StepDelistedTails:
-                return _orchestrator.RunStepDelistedTailsAsync(SelectedSource, progress, ct);
+            // 【退市股收尾】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/DelistedTailTask，
+            // 走上面那条 _taskRegistry 总分支。
 
             case FetchActionId.StepBoardIndex:
                 return _orchestrator.RunStepSynthesizeBoardIndexAsync(progress, ct);

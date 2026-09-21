@@ -1,4 +1,6 @@
 using StockPlatform.Data.Orchestration;
+using StockPlatform.Logic.Abstractions;
+using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Scheduling.Tasks;
 
@@ -25,7 +27,17 @@ public interface IFetchTaskRegistry
 }
 
 /// <inheritdoc cref="IFetchTaskRegistry"/>
-public sealed class FetchTaskRegistry : IFetchTaskRegistry, ITaskBacklogRunner
+/// <param name="manifestStore">
+/// 用来记"这一项什么时候跑完的"（<see cref="Manifest.LastRunByTask"/>）——【数据状态】页那份
+/// "最近任务运行"清单读的就是它。
+///
+/// ⚠ 2026-09-21 补：老路每项跑完都会写一条（<c>FetchOrchestrator.FinishFetchRun</c>），
+/// 而骨架一直没做这件事，于是**每迁走一项，那一页就少一行**（迁走的 32 项全都不见了）。
+/// 记在这里而不是每个任务里：所有新任务都从 <see cref="RunAsync"/> 过，一处写、34 项全覆盖，
+/// 任务本身一行都不用改。传 null 就是不记（测试里用）。
+/// </param>
+public sealed class FetchTaskRegistry(IManifestStore? manifestStore = null)
+    : IFetchTaskRegistry, ITaskBacklogRunner
 {
     private readonly Dictionary<FetchActionId, Func<IFetchTask>> _factories = new();
 
@@ -97,6 +109,34 @@ public sealed class FetchTaskRegistry : IFetchTaskRegistry, ITaskBacklogRunner
         subscribe?.Invoke(task);
 
         var result = await task.RunAsync(args, ct);
+        RecordRun(id, result);
         return result.ToFetchResult();
+    }
+
+    /// <summary>
+    /// 记一条"这一项刚跑完"。键用**目录里的中文名**，跟老路
+    /// （<c>FinishFetchRun</c> 里的 <c>fetchKind</c>）一致——两边写同一个键，
+    /// 【数据状态】页才不会把同一项显示成两行。
+    ///
+    /// 取消不记（那一路是抛 <see cref="OperationCanceledException"/> 出去的，根本走不到这里）；
+    /// 写 manifest 失败也不许影响任务结果——记录是给人看的，不该把一轮成功的抓取判成失败。
+    /// </summary>
+    private void RecordRun(FetchActionId id, TaskRunResult result)
+    {
+        if (manifestStore == null) return;
+        try
+        {
+            var manifest = manifestStore.Load();
+            manifest.LastRunByTask[FetchTaskCatalog.Info(id).Name] = new TaskRunRecord
+            {
+                At = DateTime.Now,
+                ErrorCount = result.Errors.Count,
+            };
+            manifestStore.Save(manifest);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[FetchTaskRegistry] 记 LastRunByTask 失败已忽略：{ex.Message}");
+        }
     }
 }

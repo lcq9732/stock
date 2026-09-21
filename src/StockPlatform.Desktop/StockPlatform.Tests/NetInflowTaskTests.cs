@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
@@ -301,7 +301,10 @@ public class NetInflowTaskTests : IDisposable
         var r = await NewTask(f).RunAsync(new TaskRunArgs(FetchMode.FillBacklog), CancellationToken.None);
 
         Assert.Empty(f.Asked);
-        Assert.NotNull(r.SkippedReason);
+        // 「没有待办」是**没活可干**，不是「没开工」：2026-09-21 起返回 NothingToDo。
+        // 写成 Skipped 的话计划引擎会立刻再排一次，而条件根本不会变，空转到被护栏拦下。
+        Assert.True(r.NothingToDo);
+        Assert.Null(r.SkippedReason);
     }
 
     /// <summary>失败名单那一类：只抓名单里的票，不是全市场。</summary>

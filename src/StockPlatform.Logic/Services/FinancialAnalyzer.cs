@@ -805,8 +805,11 @@ public class FinancialAnalyzer
                     // 那一列是 Auto 宽又不换行，带上它就要占掉三百多像素，把说明列挤没
                     Change = $"每股净资产 {bps:F2} 元",
                     Verdict = Verdict.Neutral,
+                    // fallback 那一支必须自己带上"没有总股本"这个警示（2026-09-19）：
+                    // 原先它靠 Change 列尾巴上的 shareNote 提醒，而 shareNote 2026-09-19 挪进了
+                    // 说明列；PB 这一支的说明只说"用的是实收资本"，读起来像在交代口径而不是示警。
                     Note = shareIsFallback
-                        ? "股本用报表的实收资本，不是流通市值倒推"
+                        ? "⚠ 没有总股本，股本用报表的实收资本（那是金额不是股数），不是流通市值倒推"
                         : "总股本含限售股和 H/B 股，不是流通市值倒推",
                 });
             }

@@ -27,7 +27,8 @@ public sealed record ValueFixPlan(
 
 /// <summary>
 /// 【重新拉取失败股票】里"修体检报出的值问题"那一步的**计划**（2026-09-11 从
-/// <c>FetchOrchestrator.FillValueIssuesAsync</c> 抽出来）。纯计算、无 IO——抽出来的理由跟
+/// <c>FetchOrchestrator.FillValueIssuesAsync</c> 抽出来，那段编排 2026-09-21 又搬进了
+/// <c>StockPlatform.Tasks/BarFetchTaskBase.FillValueAsync</c>）。纯计算、无 IO——抽出来的理由跟
 /// <see cref="ValueIssueRecheck"/> 一样：orchestrator 有三十多个构造参数、没法单测，
 /// 而这里错一点就是"每轮都发请求、每轮都修不掉"，且不报任何错。
 ///

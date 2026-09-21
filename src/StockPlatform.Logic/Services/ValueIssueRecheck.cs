@@ -5,7 +5,7 @@ namespace StockPlatform.Logic.Services;
 /// <summary>
 /// 值问题补过一轮之后**还在不在**的判定（2026-09-09）。纯计算、无 IO——抽出来的理由跟
 /// <see cref="YearGapCalculator"/>、<see cref="IncrementalWindowCalculator"/> 一样：
-/// 这类判据出错是静默的，而它所在的 <c>FetchOrchestrator.FillValueIssuesAsync</c> 没法单测
+/// 这类判据出错是静默的，而它所在的那段编排（现在是 <c>BarFetchTaskBase.FillValueAsync</c>）没法单测
 /// （orchestrator 有三十多个构造参数）。
 ///
 /// ════ 为什么不能沿用缺行那套判定 ════

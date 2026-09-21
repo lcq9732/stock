@@ -265,7 +265,14 @@ public partial class App : Application
 
         // ETF 列表走新浪的 ETF 节点（node=etf_hq_fund），跟股票列表同一个接口不同 node；东财在用户
         // 环境不可用，所以固定用新浪（ETF 日K本身仍走上面所选数据源的 BarFetcher）。见 SinaEtfListProvider。
-        var etfListProvider = new SinaEtfListProvider();
+        // ⚠ 2026-09-21 补进离线总开关：它原来漏在外面，于是【ETF日K】哪怕在"零联网验证"里
+        //    也会真去新浪要一次名单（这正是那段注释说的"逐类去配必然漏"）。
+        //    模拟版直接读库里 type='etf' 的存量名单，一个请求都不发。
+        IStockListProvider etfListProvider = offlineMock
+            ? new MockStockListProvider(() =>
+                SqliteStockMetaUpsert.GetByTypes(paths.CurrentDb, SqliteStockMetaUpsert.TypeEtf)
+                    .Select(x => new StockListEntry(x.Code, x.Name)).ToList())
+            : new SinaEtfListProvider();
 
         // 指数成分名单(新浪 vII_NewestComponent)、成分权重(中证 closeweight.xls)、龙虎榜(新浪)——各自
         // 独立限流，独立按钮触发（见 FetchOrchestrator RunFetchIndexConsAsync / RunFetchLhbAsync），不掺
@@ -316,7 +323,11 @@ public partial class App : Application
         marginRepository.EnsureSchema();
 
         // 退市名单(沪深两所官网)——"拉取退市股"用，一次性快照、量小，不需要限流器。
-        var delistedListProvider = new ExchangeDelistedListProvider();
+        // ⚠ 同 etfListProvider：2026-09-21 补进离线总开关，否则【退市股收尾】在"零联网验证"里
+        //    照样会真去两所官网要一次名单。模拟版读库里已有的 DelistedStock，一个请求都不发。
+        IDelistedListProvider delistedListProvider = offlineMock
+            ? new MockDelistedListProvider(() => new SqliteDelistedRepository(paths.CurrentDb).GetAll())
+            : new ExchangeDelistedListProvider();
 
         // 财务报表(新浪，三张表全历史)——基本面因子的数据基础，并入"一键拉取定期数据"，也有独立按钮。
         // 财务报表**单独用一套保守得多的限速**（2026-08-27）——不能跟其它抓取共用 3并发/1秒。
@@ -495,7 +506,15 @@ public partial class App : Application
         var dailyNoDataRepository = new SqliteDailyFetchNoDataRepository(paths.CurrentDb);
         dailyNoDataRepository.EnsureSchema();
 
-        var taskRegistry = new FetchTaskRegistry();
+        // manifestStore 是给"记一条这一项刚跑完"用的（2026-09-21 补上的骨架漏项，
+        // 见 FetchTaskRegistry.RecordRun）——不传的话【数据状态】页上新式任务全是空白。
+        var taskRegistry = new FetchTaskRegistry(manifestStore);
+        // K线源是运行期可变的（改 fetcher-settings.json 的 BarSource + 点【重新读取配置】），
+        // 而任务在这里就注册死了——所以传给任务的是这个可变持有者，真正的值由 MainViewModel
+        // 解析完写回来（见 BarSourceHolder / MainViewModel.SelectedSource）。
+        // 这里的初值只是个占位，界面一造出来就被覆盖。
+        var barSourceHolder = new StockPlatform.Tasks.BarSourceHolder(
+            sources.FirstOrDefault(s => s.Name == "Tencent") ?? sources[0]);
         taskRegistry.Register(FetchActionId.StepTradingCalendar,
             () => new TradingCalendarTask(tradingDayRepository, tradingCalendarProvider, localTradingDays));
         // 【总股本】2026-09-14。一个请求拿全市场，修的是 PE/PB 拿财报 share_capital（实收资本，
@@ -516,7 +535,9 @@ public partial class App : Application
         // 没除权过的那 1336 只是从库里的 day 复制的。
         taskRegistry.Register(FetchActionId.StepEtfRawBars,
             () => new EtfRawBarTask(paths, new SqliteBarRepository(paths.CurrentDb), dividendRepository,
-                new TencentBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)))));
+                new TencentBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                // manifestStore 是给【只补待办】用的（2026-09-21）：它只会有 missing_day 那一类。
+                manifestStore));
         // 【补全退市名单】2026-09-17。巨潮的全市场名单减去在市名单，差集里确实交易过的补进 DelistedStock。
         // 修的是两所官网名单的两个洞：科创板退市股整类缺失、已换代码的老号没有。
         // 限流器 1 并发：候选通常几十只，一只一个探测请求。
@@ -648,6 +669,35 @@ public partial class App : Application
             () => new LhbTask(paths.CurrentDb, lhbRepository, lhbProvider,
                               tradingDayRepository, manifestStore, dailyNoDataRepository));
 
+        // 【指数日K】【ETF日K】2026-09-21 迁到新任务框架（K线六项的第②步，
+        //   见 doc/bar-tasks-migration-design.md）。写入判据两边共用 BarWritePlanner，
+        //   所以跟仍走老路的个股三口径不会分叉。
+        //   · 指数：一批＝一条（一共九条），整段回补从开市首日起；它还是全库的交易日锚。
+        //   · ETF：一批＝30 只；名单那道"半截就改用存量"的闸搬进了 EtfListGuard。
+        taskRegistry.Register(FetchActionId.StepIndexBars,
+            () => new IndexBarTask(paths, barSourceHolder, manifestStore));
+        taskRegistry.Register(FetchActionId.StepEtfBars,
+            () => new EtfBarTask(paths, barSourceHolder, etfListProvider, manifestStore));
+
+        // 【个股日K】三个口径 2026-09-21 迁到新任务框架（第③步）。三项各有各的水位线、
+        // 各记各的失败名单（taskId 分域），所以是三个独立任务而不是一个带开关的。
+        //   · 前复权：唯一开漂移检测的一路，顺带维护【重取前复权】的待办名单。
+        //   · 后复权/不复权：同一个类注册两次（口径参数化），带"探一只 + 失败率熔断"两道闸；
+        //     不复权多一个「首次整段回补」模式，判据走 RawBarCompletenessRule。
+        taskRegistry.Register(FetchActionId.StepStockDayBars,
+            () => new StockDayBarTask(paths, barSourceHolder, manifestStore));
+        taskRegistry.Register(FetchActionId.StepStockHfqBars,
+            () => new StockAdjustedBarTask(paths, barSourceHolder, manifestStore,
+                                           FetchActionId.StepStockHfqBars, Granularity.DayHfq));
+        taskRegistry.Register(FetchActionId.StepStockRawBars,
+            () => new StockAdjustedBarTask(paths, barSourceHolder, manifestStore,
+                                           FetchActionId.StepStockRawBars, Granularity.DayRaw));
+
+        // 【退市股收尾】2026-09-21（第④步，K线六项迁完）。刷名单 + 给新退市的票补最后几天，
+        // 三个口径各补一段；"已尝试过"的标记只给没失败的打（见 DelistedTailTask 的 ⚠）。
+        taskRegistry.Register(FetchActionId.StepDelistedTails,
+            () => new DelistedTailTask(paths, barSourceHolder, manifestStore, delistedListProvider));
+
         // 【指数成分名单】【指数权重】【股票名册与流通市值】2026-09-18 迁到新任务框架——
         //   迁完 RunFillBacklogAsync 里就只剩 K线那一块了。见 doc/index-roster-task-design.md。
         //   前两项一批＝一个指数，732 个的轮次终于能分批跑、能到点收尾。
@@ -732,7 +782,8 @@ public partial class App : Application
         // 传委托而不是把 App 的方法暴露出去，是为了让 MainViewModel 不用知道 browserChannel
         // 和限流参数这些装配细节——它只管"按现在的配置再给我一个"。
         var viewModel = new MainViewModel(paths, orchestrator, sources, browserChannel,
-                                          () => CreateBoardFetcher(paths, browserChannel), taskRegistry);
+                                          () => CreateBoardFetcher(paths, browserChannel), taskRegistry,
+                                          barSourceHolder);
         var window = new MainWindow { DataContext = viewModel };
         // 显式认定主窗口：ShutdownMode=OnMainWindowClose 全靠它认对是哪一个。
         // 不设的话 WPF 会拿"第一个 Show 出来的窗口"当主窗口——现在还轮得到它，

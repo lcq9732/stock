@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using StockPlatform.Data.Orchestration;
@@ -211,8 +211,12 @@ public sealed class NetInflowTask(
     {
         SaveFailedTodo();
 
+        // ⚠ 这是「没活可干」，不是「没开工」（2026-09-21 统一改过来）——Skipped 的语义是
+        //    "这轮被挡住了、今天恢复了还该再来"，于是计划引擎立刻再排一次，而条件根本不会变，
+        //    空转到被"连着 5 轮瞬间跑完"那道护栏拦下。见 TaskRunResult.Skipped 的注释。
         if (_skipped is { } why)
-            return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, _errors));
+            return Task.FromResult<TaskRunResult?>(
+                new TaskRunResult(TaskState.Completed, _errors, NothingToDo: true, why));
 
         var summary = _backlogLine
             ?? $"资金净流入：{_done} 只写入 {_rows} 行"
@@ -449,14 +453,9 @@ public sealed class NetInflowTask(
     {
         if (_attempted.Count == 0) return;
         var manifest = manifestStore.Load();
-        var current = (manifest.Todo(RetryTaskIds.NetInflow, RetryTodoKind.Failed)?.Targets ?? [])
-            .Select(t => t.Code).ToList();
-        var stillFailed = new HashSet<string>(current, StringComparer.Ordinal);
-        stillFailed.ExceptWith(_attempted);
-        stillFailed.UnionWith(_failed);
-        manifest.SetTodo(RetryTaskIds.NetInflow, RetryTodoKind.Failed,
-                         stillFailed.OrderBy(c => c, StringComparer.Ordinal)
-                                    .Select(c => new RetryTarget { Code = c }).ToList());
+        // 判据本体在 FailedTodoRule（2026-09-21 抽走）——在那之前这里和 FetchOrchestrator
+        // 各写了一份同样的三行，没分叉纯属运气。
+        FailedTodoRule.SetFailed(manifest, RetryTaskIds.NetInflow, _attempted, _failed.ToList());
         manifestStore.Save(manifest);
     }
 

@@ -60,6 +60,13 @@ public class ShareCountTests
         return report.Sections.SelectMany(s => s.Lines).First(l => l.Label == label);
     }
 
+    /// <summary>
+    /// 这一行摆给人看的全部文字。断言标识时用它，**不要钉死在某一列**——
+    /// 2026-09-19 界面重排就把这个标识从「变化」列挪进了「说明」列，
+    /// 契约是"必须让人看见"，不是"必须在第几列"。
+    /// </summary>
+    private static string VisibleText(AnalysisLine l) => l.Change + l.Note;
+
     [Fact]
     public void 有总股本时_PE按真实股数算()
     {
@@ -67,7 +74,7 @@ public class ShareCountTests
 
         // 20 元 × 265.91 亿股 ÷ 400 亿 = 13.3
         Assert.Equal("13.3", line.Value);
-        Assert.DoesNotContain("没有总股本", line.Change);
+        Assert.DoesNotContain("没有总股本", VisibleText(line));
     }
 
     [Fact]
@@ -78,15 +85,15 @@ public class ShareCountTests
         // 20 元 × 26.59 亿 ÷ 400 亿 = 1.3 —— 错了 10 倍，而且是"看起来白菜价"的方向。
         // 回退本身是有意为之（总比不显示强），但必须让人看见它不可信。
         Assert.Equal("1.3", line.Value);
-        Assert.Contains("没有总股本", line.Change);
+        Assert.Contains("没有总股本", VisibleText(line));
     }
 
     [Fact]
     public void 总股本为零或负数当作没有()
     {
         // 抓取那一侧约定"拿不到就不写行"，但消费端不该依赖上游永远守约。
-        Assert.Contains("没有总股本", Line("PE (TTM)", 0).Change);
-        Assert.Contains("没有总股本", Line("PE (TTM)", -1).Change);
+        Assert.Contains("没有总股本", VisibleText(Line("PE (TTM)", 0)));
+        Assert.Contains("没有总股本", VisibleText(Line("PE (TTM)", -1)));
     }
 
     [Fact]
@@ -98,11 +105,11 @@ public class ShareCountTests
 
         // 1000 亿净资产 ÷ 265.91 亿股 = 3.76 元/股 → PB 5.32
         Assert.Equal("5.32", right.Value);
-        Assert.DoesNotContain("没有总股本", right.Change);
+        Assert.DoesNotContain("没有总股本", VisibleText(right));
 
         // 回退口径：1000 亿 ÷ 26.59 亿 = 37.61「元/股」→ PB 0.53
         Assert.Equal("0.53", wrong.Value);
-        Assert.Contains("没有总股本", wrong.Change);
+        Assert.Contains("没有总股本", VisibleText(wrong));
     }
 
     [Fact]

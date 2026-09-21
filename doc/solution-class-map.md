@@ -64,6 +64,33 @@ flowchart TD
 
 ---
 
+## 0.1 分层职责原则（2026-09-21 用户定）
+
+**新写和迁移的代码一律按这条原则落位**；存量不一次性重构，**碰到哪一块就把那一块搬对**。
+
+| 层 | 只做这件事 | 不该出现在这里的 |
+|---|---|---|
+| `Data/Remote`（含现在的 `Local/`） | **数据从哪来**——外部接口、终端落盘文件、离线模拟，加限流 | 判据、落库 |
+| `Data/Sqlite` | **操作本地库**——读和写，仅此两样 | 判据（体检规则、修复规则、完整性规则） |
+| `Logic`（`Models`/`Abstractions`/`Services`） | **模型、端口接口、纯算法判据**，零 IO | 任何 File / SqliteConnection / HttpClient |
+| `StockPlatform.Tasks` | **一项任务干什么活**——把"读库 → 算判据 → 抓 → 算写入方案 → 写库"串起来 | 判据本体、SQL |
+| `StockPlatform.Scheduling` | **什么时候跑什么**——计划、准入、占用、看门狗、任务契约 | 具体任务实现 |
+
+两条推论，迁移时按它验收：
+
+1. **判据不许住在 Sqlite 类里**。现在 `SqliteBarValueAuditor`、`SqliteDayCompletenessAuditor`、
+   `SqliteAdjSeriesAuditor`、`SqliteMarginShortBalanceFiller` 这类"体检/修复"把**规则和 SQL 焊在一起**，
+   正确形状是：Sqlite 读出原料 → Logic 的纯函数判 → Sqlite 写回结论。
+   这样规则能单测、能被两个调用方共用，而不是"谁想复用就复制一份"。
+2. **同一条判据全 Solution 只有一份**。老编排层和新任务可以各自编排，但**不能各判各的**——
+   两份判据必然分叉，而这类分叉是静默的（见
+   [盘中K线固化](bar-value-audit-design.md)、成交量单位两次事故）。
+
+`Data/Remote` 与 `Data/Local` 按这条原则**应当合并**（`Local/` 只有一个文件，而 `Remote/` 里
+本来就躺着三个读东财终端本地文件的类，分家纯属历史遗留）。合并本身不急，先记在这里。
+
+---
+
 ## 1. Fetcher 方向
 
 四层：**界面**（Fetcher）→ **调度**（Scheduling / Tasks）→ **编排**（Data.Orchestration）→

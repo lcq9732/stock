@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Logic.Abstractions;
@@ -235,8 +235,10 @@ public sealed class BlockTradeTask(
         if (args.Mode == FetchMode.FillBacklog)
         {
             if (_backlog is not { } r)
+                // 「没活可干」不是「没开工」——写成 Skipped 会让计划引擎立刻再排一次、空转
+                // （2026-09-21 统一改过来，见 TaskRunResult.Skipped 的注释）。
                 return Task.FromResult<TaskRunResult?>(
-                    TaskRunResult.Skipped("大宗交易没有欠着的残缺日", _errors));
+                    new TaskRunResult(TaskState.Completed, _errors, NothingToDo: true, "大宗交易没有欠着的残缺日"));
 
             var line = $"大宗交易残缺日：{r.Days} 天里补上 {r.Fixed} 天、写入 {r.Rows} 行"
                      + (r.Failed > 0 ? $"，{r.Failed} 天重抓失败" : "")
@@ -250,8 +252,12 @@ public sealed class BlockTradeTask(
                     : new TaskRunResult(TaskState.Completed, _errors, NothingToDo: false, line));
         }
 
+        // ⚠ 这是「没活可干」，不是「没开工」（2026-09-21 统一改过来）——Skipped 的语义是
+        //    "这轮被挡住了、今天恢复了还该再来"，于是计划引擎立刻再排一次，而条件根本不会变，
+        //    空转到被"连着 5 轮瞬间跑完"那道护栏拦下。见 TaskRunResult.Skipped 的注释。
         if (_skipped is { } why)
-            return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, _errors));
+            return Task.FromResult<TaskRunResult?>(
+                new TaskRunResult(TaskState.Completed, _errors, NothingToDo: true, why));
 
         SaveIncompleteTodo();
 

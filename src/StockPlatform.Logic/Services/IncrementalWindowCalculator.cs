@@ -19,6 +19,19 @@ public static class IncrementalWindowCalculator
     /// </summary>
     public const int MarketCloseHour = 16;
 
+    /// <summary>
+    /// A股开市首日（上交所第一个交易日）。**"整段回补"的起点就是它**——不看水位线、也不看回看年数
+    /// 的那个模式，要的就是"把这条标的的历史一次补到底"。
+    ///
+    /// ⚠ 用硬常量，不用"日历自己的首日"：日历是从库里归纳出来的，**缺哪段就瞎哪段**，
+    /// 拿它当"市场起点"会把"日历不知道"误读成"确实没开市"——2026-09-06 静默漏抓 2360 只老股
+    /// 就是这么来的（见 project_trading_calendar_pitfall）。开市日是事实，不是推断。
+    ///
+    /// 2026-09-21 从 <c>FetchOrchestrator</c> 抽到这里：指数日K迁进新框架之后两边都要用它，
+    /// 各写一个日期就是等着哪天只改一边。
+    /// </summary>
+    public static readonly DateTime AShareMarketOpen = new(1990, 12, 19);
+
     /// <summary>某个交易日的数据是不是"收盘后确认过"的最终值：抓取时刻晚于那天 16:00 就算
     /// （隔了几天才补的天然满足）。早于它就是盘中抓的半成品。</summary>
     public static bool IsConfirmedFinal(DateTime fetchedAt, DateTime tradingDay) =>

@@ -281,7 +281,7 @@ public static class SqliteSchema
                 list_date TEXT,
                 delist_date TEXT,           -- 终止上市日（上交所转板/合并的行缺失为NULL）
                 fetched_at TEXT,
-                -- 已经尝试过补"最后几天"K线的时间（见 FetchOrchestrator.CatchUpDelistedTailsAsync）。
+                -- 已经尝试过补"最后几天"K线的时间（见 StockPlatform.Tasks/DelistedTailTask）。
                 -- 必须有这个标记：停牌后才退市的股票（K线止于停牌日、早于终止日）永远满足"本地最后一根
                 -- 早于终止日"，没有标记就会每天徒劳重抓一次。成功尝试过即置位，之后永久跳过。
                 tail_fetched_at TEXT

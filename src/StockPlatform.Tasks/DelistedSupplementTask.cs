@@ -83,7 +83,7 @@ namespace StockPlatform.Tasks;
 /// 候选通常只有几十只，一只一个请求，代价可以忽略。
 ///
 /// <c>delist_date</c> 一律留 <c>null</c>——巨潮不给终止日，而这一列本来就允许缺失
-/// （上交所那边转板/吸收合并的行也是 null）。<c>CatchUpDelistedTailsAsync</c> 的"补最后几天"
+/// （上交所那边转板/吸收合并的行也是 null）。<see cref="DelistedTailTask"/> 的"补最后几天"
 /// 只处理有终止日的行，所以留空不会让它去做无意义的重抓。
 /// </summary>
 public sealed class DelistedSupplementTask(
@@ -285,7 +285,7 @@ public sealed class DelistedSupplementTask(
     protected override Task SaveBatchAsync(IReadOnlyList<DelistedStockRow> batch, CancellationToken ct)
     {
         new SqliteDelistedRepository(paths.CurrentDb).Upsert(batch);
-        // 跟 CatchUpDelistedTailsAsync 一样，同时把 StockMeta 标成 delisted——
+        // 跟 DelistedTailTask 一样，同时把 StockMeta 标成 delisted——
         // 不标的话它们不在任何名单里，分红抓取（GetByTypes(stock+delisted)）也看不到
         SqliteStockMetaUpsert.Upsert(paths.CurrentDb, batch.Select(r => (r.Code, r.Name)),
                                      SqliteStockMetaUpsert.TypeDelisted);

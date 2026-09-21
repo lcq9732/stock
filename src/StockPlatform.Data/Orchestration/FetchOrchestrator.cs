@@ -31,7 +31,7 @@ namespace StockPlatform.Data.Orchestration;
 ///   database) up to today. This makes it safe to stop and re-run at any time — an interrupted
 ///   run or a handful of per-stock failures just get retried/caught up on the next run, since
 ///   nothing advances a stock's watermark unless that stock's fetch actually succeeded.
-///   末尾还会刷新退市名单、补新退市股缺失的最后几天K线（<see cref="CatchUpDelistedTailsAsync"/>，
+///   末尾还会刷新退市名单、补新退市股缺失的最后几天K线（2026-09-21 起在 StockPlatform.Tasks/DelistedTailTask，
 ///   "拉取当天"末尾同样会跑）——股票一退市数据源就不再有它的新数据，那几天不补就永久缺失了。
 /// - <see cref="RunFetchDayAsync"/> ("补指定历史日"，界面按钮2026-07-31从"拉取当天"改名而来，原因见
 ///   本条末尾的复核结论): re-fetches exactly one caller-specified calendar
@@ -106,9 +106,6 @@ public partial class FetchOrchestrator
     private readonly Remote.EastMoneySideMenuBoardListProvider? _sideMenuBoardList;
     private readonly IStockListProvider? _etfListProvider;
 
-    /// <summary>ETF 名单比库里存量少这个比例以上就判定为"半截名单"、改用存量兜底。
-    /// 5% 这个阈值沿用 <c>TotalSharesTask.MinKeepRatio</c>。</summary>
-    private const double EtfListMinKeepRatio = 0.95;
     private readonly IIndexConsProvider _indexConsProvider;
     private readonly IIndexWeightProvider _indexWeightProvider;
     private readonly ILhbProvider _lhbProvider;
@@ -166,7 +163,13 @@ public partial class FetchOrchestrator
     /// 传 null 就是这一项没数据——层级树只是让板块能往上卷成一级行业，缺了不影响任何现有功能。
     /// </summary>
     private readonly Local.EastMoneyTerminalHierarchyProvider? _boardHierarchy;
-    private readonly object _dbLock = new();
+    /// <summary>
+    /// 本地库的写闸。2026-09-21 从"本类私有的一把 new object()"改成指向
+    /// <see cref="SqliteWriteGate.Local"/>——**闸本身归 Sqlite 层**（分层职责原则，
+    /// 见 doc/solution-class-map.md §0.1），这样新框架里的任务也能拿到同一把，
+    /// 而不是像迁走的那些任务一样各写各的。本类里 46 处 <c>lock (_dbLock)</c> 一行不用改。
+    /// </summary>
+    private readonly object _dbLock = SqliteWriteGate.Local;
 
     // 拉取全部对同一批关键词、同一天窗口重复扫描是安全的（OrderWinAnnouncement 主键去重），所以
     // 不需要像K线那样维护"上次抓到哪"的水位线，固定回看这么多天足够覆盖两次拉取全部之间的间隔，
@@ -198,31 +201,26 @@ public partial class FetchOrchestrator
     /// ⚠ 为什么用硬常量而不是"日历自己的首日"：那正是 2026-09-06 漏抓 2360 只老股的成因——日历
     /// 缺哪段就瞎哪段，拿它当"市场起点"会把"日历不知道"误读成"确实没开市"。开市日是事实，不是推断。
     /// </summary>
-    private static readonly DateTime AShareMarketOpen = new(1990, 12, 19);
+    /// 2026-09-21 常量本体挪到了 <see cref="IncrementalWindowCalculator.AShareMarketOpen"/>
+    /// （指数日K迁进新框架之后两边都要用），这里只转发。
+    private static readonly DateTime AShareMarketOpen = IncrementalWindowCalculator.AShareMarketOpen;
 
     /// <summary>后复权阶段的熔断门槛：完成这么多只之后才开始判断失败率（样本太少容易被偶发失败误伤）。</summary>
     private const int HfqAbortCheckAfter = 30;
 
-    /// <summary>
-    /// 复权基准漂移的比对回看天数（2026-07-30新增）。数据源一页固定返回 640 根K线（≈2.5年），
-    /// 不管我们请求几天——所以把"确实要抓"的窗口向前放宽到这个天数**不增加任何网络请求**，
-    /// 却能拿回几百根"数据源当前基准下的正确值"用来跟库里比对。注意只在本来就要发请求时放宽，
-    /// 水位线判定的跳过逻辑不变（否则每只股票每天都要发一次请求，"拉取全部/当天"会全面变慢）。
-    /// </summary>
-    private const int DriftCheckLookbackDays = 400;
+    /// <summary>复权基准漂移的比对回看天数。本体在 <see cref="BarWritePlanner.DriftCheckLookbackDays"/>
+    /// （2026-09-21 抽走，理由见那个类）——这里只转发，别在这儿再写一个数。</summary>
+    private const int DriftCheckLookbackDays = BarWritePlanner.DriftCheckLookbackDays;
 
     /// <summary>财务报表每轮最多抓多少只（2026-08-27）。新浪的 vDOWN 报表接口配额很严（见
     /// Fetcher/App.xaml.cs 里那段限速注释），降速后约 10 请求/分钟、每只 3 个请求，所以 300 只
     /// 差不多要 1.5 小时。没抓完的下轮自动继续——靠 FinancialFetchState 记录的报告期和科目集
     /// 版本断点续传，抓过的不会重抓。全市场 5780 只分几天补齐，而不是一次跑 24 小时。</summary>
 
-    /// <summary>
-    /// 判定某根K线是否发生了复权基准漂移：库里存的值与数据源当前给出的值不一致。
-    /// 阈值取"相对 0.2% 与绝对 0.005 元的较大者"——足够小以捕捉几分钱的现金分红调整，
-    /// 又不会被浮点噪声和低价股的分位误差误判。
-    /// </summary>
+    /// <summary>判据本体在 <see cref="BarWritePlanner.IsDrifted"/>（Logic 层纯函数，有单测覆盖）
+    /// ——这里只是转发，别在这儿再写一份。2026-09-21 抽走的理由见那个类的注释。</summary>
     private static bool IsDrifted(double stored, double fresh) =>
-        Math.Abs(stored - fresh) > Math.Max(0.005, Math.Abs(fresh) * 0.002);
+        BarWritePlanner.IsDrifted(stored, fresh);
 
     /// <summary>判据本体在 <see cref="IncrementalWindowCalculator"/>（Logic 层纯函数，有单测覆盖）——
     /// 这里只是转发，别在这儿再写一份。2026-09-09 抽走的理由见那个类的注释。</summary>
@@ -925,60 +923,10 @@ public partial class FetchOrchestrator
     /// 改用库里 <c>type='etf'</c> 的存量名单跑增量（名单取不到时同样兜底）。
     /// 代价只是"这一轮发现不了新上市的 ETF"，比静默少抓一批K线好得多。
     /// </summary>
-    private async Task<List<string>> FetchEtfBarsAsync(
-        NamedBarSource source, DateTime end, int lookbackYears, SqliteBarRepository currentRepo,
-        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, FetchStats stats,
-        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
-    {
-        if (_etfListProvider == null) return new List<string>();
-        progress?.Report("正在获取全市场ETF列表...");
+    // FetchEtfBarsAsync 删于 2026-09-21：整项迁去了 StockPlatform.Tasks/EtfBarTask。
+    // 名单半截那道闸搬进了 Logic 层的 EtfListGuard，写入判据走 BarWritePlanner。
+    // 【拉取区间数据】用的是另一个方法 FetchEtfBarsForYearAsync，那个还在。
 
-        // 库里的存量名单——既是护栏的标尺，也是名单取不到时的兜底
-        var local = SqliteStockMetaUpsert.GetByTypes(_paths.CurrentDb, SqliteStockMetaUpsert.TypeEtf)
-            .Select(x => new StockListEntry(x.Code, x.Name)).ToList();
-
-        List<StockListEntry> etfs;
-        try { etfs = await _etfListProvider.GetAllStocksAsync(progress, ct); }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { errors.Add($"获取ETF列表失败：{ex.Message}"); etfs = new List<StockListEntry>(); }
-
-        // 护栏：空名单、或比库里存量少 5% 以上，都判定为"半截名单"，不拿它去跑
-        bool fromLocal = false;
-        if (etfs.Count < local.Count * EtfListMinKeepRatio)
-        {
-            if (local.Count == 0)
-            {
-                progress?.Report("ETF列表为空且库里也没有存量（接口可能不可达/被限流），本轮跳过ETF。");
-                return new List<string>();
-            }
-            errors.Add($"ETF名单只拿到 {etfs.Count} 只、库里存量有 {local.Count} 只，判定为半截名单——"
-                       + "本轮改用库里存量名单跑增量（这一轮发现不了新上市的ETF）");
-            progress?.Report($"⚠ ETF名单疑似被截断（{etfs.Count} < {local.Count}），改用库里存量 {local.Count} 只。");
-            etfs = local;
-            fromLocal = true;
-        }
-
-        progress?.Report($"共 {etfs.Count} 只 ETF，开始抓取日K（已用时 {FormatElapsed(sw.Elapsed)}）...");
-        // ETF 名称写进 StockMeta（type=etf）——让"查询"页能搜到 ETF（不影响个股选股）。
-        // 走兜底时名字本来就是从这张表读出来的，没必要再写回去。
-        if (!fromLocal)
-            SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, etfs.Select(e => (e.Code, e.Name)), SqliteStockMetaUpsert.TypeEtf);
-
-        int completed = 0;
-        var tasks = etfs.Select(etf =>
-        {
-            // 跟个股/大盘指数一样的逐标的水位线：没抓过从回看窗口起点(首次补历史)，抓过从上次+1，"今天"看是否收盘确认。
-            DateTime start;
-            lock (_dbLock)
-            {
-                start = IncrementalStart(currentRepo.GetLatestBarInfo(etf.Code, Granularity.Day), end, lookbackYears);
-            }
-            return ProcessOneStockAsync(etf.Code, source, start, end, currentRepo, errors, failedCodes, stats, progress, etfs.Count, () => Interlocked.Increment(ref completed), sw, ct);
-        });
-        await Task.WhenAll(tasks);
-        progress?.Report($"ETF 日K抓取完成（{etfs.Count} 只）。");
-        return etfs.Select(e => e.Code).ToList();
-    }
 
     /// <summary>
     /// 本地合成板块指数日K（2026-07-15新增）——**不联网**：用本地已有的成分股(BoardMember)+个股日K，按
@@ -1371,13 +1319,10 @@ public partial class FetchOrchestrator
     {
         if (driftedCodes.Count == 0) return;
 
+        // 判据（"只有历史比手上那一页更长的才需要重取"）2026-09-21 抽去了
+        // Logic 层的 QfqRepairPlanner——这里只负责查库和写名单。
         var earliestByCode = currentRepo.GetEarliestPeriodStartByCode(Granularity.Day);
-        // 只有历史比"手上那一页"更长的才需要重取——短历史的股票刚才已经整段覆盖好了
-        var pageCovered = DateTime.Today.AddDays(-DriftCheckLookbackDays).Date;
-        var targets = driftedCodes.Distinct(StringComparer.Ordinal)
-            .Where(c => earliestByCode.TryGetValue(c, out var e) && e.Date < pageCovered)
-            .OrderBy(c => c, StringComparer.Ordinal)
-            .ToList();
+        var targets = QfqRepairPlanner.SelectForRepair(driftedCodes, earliestByCode, DateTime.Today);
         if (targets.Count == 0)
         {
             progress?.Report($"复权基准：{driftedCodes.Distinct().Count()} 只在抓取时已就地覆盖完毕，无需重取更早历史。");
@@ -1801,43 +1746,27 @@ public partial class FetchOrchestrator
     /// 指数不除权（三种复权返回同一序列）、ETF 暂不进回测、板块指数是本地合成的——
     /// 给它们抓不复权纯属浪费（实测全库 7658 个标的里有 2000 个是这类）。
     /// </summary>
-    private static bool NeedsRawBars(string? type) =>
-        type is null or SqliteStockMetaUpsert.TypeStock or SqliteStockMetaUpsert.TypeDelisted;
-
+    /// <summary>
+    /// 要补不复权的标的：只有**个股和退市股**（指数不除权、ETF 走自己那一项、板块指数是本地合成的）。
+    /// 老库 type=NULL 的行算个股——这条口径由 <see cref="SqliteStockMetaUpsert.GetByTypes"/> 带着。
+    /// 2026-09-21 从手写 SQL 改成调它，跟 <c>StockAdjustedBarTask</c> 用的是同一个读法。
+    /// </summary>
     private HashSet<string> RawBarTargetCodes()
     {
-        var set = new HashSet<string>(StringComparer.Ordinal);
         try
         {
-            using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_paths.CurrentDb}");
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT code, type FROM StockMeta;";
-            using var r = cmd.ExecuteReader();
-            while (r.Read())
-                if (NeedsRawBars(r.IsDBNull(1) ? null : r.GetString(1)))
-                    set.Add(r.GetString(0));
+            return SqliteStockMetaUpsert
+                .GetByTypes(_paths.CurrentDb, SqliteStockMetaUpsert.TypeStock, SqliteStockMetaUpsert.TypeDelisted)
+                .Select(x => x.Code).ToHashSet(StringComparer.Ordinal);
         }
-        catch { /* 读不到就当没有，调用方自然什么都不做 */ }
-        return set;
+        catch { return new HashSet<string>(StringComparer.Ordinal); }   // 读不到就当没有，调用方自然什么都不做
     }
 
-    /// <summary>
-    /// 判断一只标的的不复权日线补齐了没有。**两头都要比**：
-    /// 尾巴要跟前复权一样新，**开头也要跟前复权一样早**。
-    ///
-    /// ⚠ 只比尾巴会出大事（2026-09-01 实测踩到）：不复权并进「拉取全部」之后，它走的是水位线窗口——
-    /// 库里没有就按回看年数（3 年）抓。于是它抢在【补不复权历史】前头把最近 3 年填上，
-    /// 判据一看"最新日期追上了"就归零、界面显示「已补齐」，前面 7 年**再也没人去补**。
-    /// 当时 5781 只里有 5232 只就这么卡在 3 年上，而 day_hfq 是完整的 10 年。
-    ///
-    /// 30 天容差是给数据源留的余地：个别标的的不复权历史本来就比前复权短几天，
-    /// 不留容差会让它们每一轮都被当成"没补齐"反复重抓。
-    /// </summary>
+    /// <summary>判据本体在 <see cref="RawBarCompletenessRule.IsComplete"/>（Logic 层纯函数，有单测覆盖）
+    /// ——2026-09-21 抽走，这里只转发。**两头都要比**那条教训写在那个类上。</summary>
     private static bool RawBarsComplete(DateTime dayEarliest, DateTime dayLatest,
                                         DateTime? rawEarliest, DateTime? rawLatest)
-        => rawLatest is { } rl && rl.Date >= dayLatest.Date
-        && rawEarliest is { } re && re.Date <= dayEarliest.Date.AddDays(30);
+        => RawBarCompletenessRule.IsComplete(dayEarliest, dayLatest, rawEarliest, rawLatest);
 
     /// <summary>本地还有多少只个股缺不复权日线（给界面显示待办量）。</summary>
     public int GetPendingRawBarCount()
@@ -1882,7 +1811,7 @@ public partial class FetchOrchestrator
 
         var rawEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayRaw);
 
-        var targets = RawBarTargetCodes();          // 只要个股和退市股，见 NeedsRawBars
+        var targets = RawBarTargetCodes();          // 只要个股和退市股
         var todo = dayLatest
             .Where(kv => targets.Contains(kv.Key)
                       && dayEarliest.TryGetValue(kv.Key, out var de)
@@ -2199,103 +2128,9 @@ public partial class FetchOrchestrator
         }
     }
 
-    /// <summary>
-    /// 退市股收尾（2026-07-29新增，"拉取当天"与"拉取全部"末尾各跑一次）——补的是一个真实存在的数据黑洞：
-    /// 某只股票一旦退市，"拉取当天"的本地清单里它还在（type 还是 stock），但数据源已经不再有它的新数据；
-    /// 而它**最后几个交易日**（退市整理期，往往正是跌得最惨那段、对回测最关键）如果那几天没抓到，
-    /// 之后就永久缺失了。放在两个日常入口的**末尾**是刻意的：本轮的抓取清单在开头就取好了，
-    /// 这里把它们标成 type='delisted' 不会影响本轮；下一轮起它们不再被日常轮询（省掉几百个必然落空的请求），
-    /// 缺的尾巴由这里补。
-    ///
-    /// 只补满足"**本地已有历史** 且 **本地最后一根K线早于终止日** 且 **没尝试过**"的那几只——正常情况下
-    /// 0 只，偶尔 1~2 只新退市的。`tail_fetched_at` 标记不可少：停牌后才退市的股票（K线止于停牌日、
-    /// 永远早于终止日）没有标记就会每天徒劳重抓；抓取失败的不打标记，留待下次重试。
-    /// 故意**不**在这里做全量回补（那是"拉取区间数据"的活；退市股历史补过就不会再变，每天重扫毫无意义）。
-    /// 名单抓取失败只记 error、不影响本轮K线。
-    /// </summary>
-    private async Task<List<string>> CatchUpDelistedTailsAsync(
-        NamedBarSource source, SqliteBarRepository currentRepo,
-        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, FetchStats stats,
-        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
-    {
-        if (_delistedListProvider == null) return new List<string>();
-
-        List<DelistedStockRow> all;
-        try
-        {
-            progress?.Report("刷新退市名单（顺带补新退市股缺失的最后几天K线）...");
-            all = await _delistedListProvider.GetAllAsync(ct);
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex)
-        {
-            errors.Add($"刷新退市名单失败（跳过，不影响本轮K线）：{ex.Message}");
-            return new List<string>();
-        }
-
-        var delistedRepo = new SqliteDelistedRepository(_paths.CurrentDb);
-        delistedRepo.Upsert(all);
-        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, all.Select(r => (r.Code, r.Name)), SqliteStockMetaUpsert.TypeDelisted);
-
-        var tailPending = delistedRepo.GetTailPendingCodes();
-        var latestByCode = currentRepo.GetLatestPeriodStartByCode(Granularity.Day);
-        var latestHfq = currentRepo.GetLatestPeriodStartByCode(Granularity.DayHfq);
-        var latestRaw = currentRepo.GetLatestPeriodStartByCode(Granularity.DayRaw);
-        var pending = all
-            .Where(r => r.DelistDate is { } dd
-                        && tailPending.Contains(r.Code)
-                        && latestByCode.TryGetValue(r.Code, out var latest)
-                        && latest.Date < dd.Date)
-            .ToList();
-        if (pending.Count == 0)
-        {
-            progress?.Report($"退市名单已刷新（{all.Count} 只），没有需要补最后几天的退市股。");
-            return new List<string>();
-        }
-
-        progress?.Report($"退市名单已刷新（{all.Count} 只），其中 {pending.Count} 只本地缺最后几天，正在补...");
-        int done = 0;
-        await Task.WhenAll(pending.Select(r =>
-        {
-            var start = latestByCode[r.Code].AddDays(1);
-            return ProcessOneStockAsync(r.Code, source, start, r.DelistDate!.Value, currentRepo, errors, failedCodes,
-                stats, progress, pending.Count, () => Interlocked.Increment(ref done), sw, ct);
-        }));
-
-        // 后复权的尾巴也要补（回测吃的是它）。窗口按 day_hfq 自己的最后一根算：完全没有后复权历史的
-        // 就从终止日往前回看 DefaultLookbackYears 年，一次把这只退市股的后复权历史抓够。
-        await FetchHfqBarsAsync(source, pending.Select(r => r.Code).ToList(),
-            code =>
-            {
-                var row = pending.First(x => x.Code == code);
-                var end = row.DelistDate!.Value;
-                var start = latestHfq.TryGetValue(code, out var lh) ? lh.AddDays(1) : end.AddYears(-DefaultLookbackYears);
-                return (start, end);
-            },
-            currentRepo, errors, failedCodes, stats, progress, sw, ct, "退市股");
-
-        // 不复权的尾巴同样要补：day_adj 是拿它算的，缺了这几天，这只退市股的回测序列就断在这儿。
-        // 而退市整理期恰恰是回测最需要的那一段（跌得最惨、也最能检验风控规则）。
-        await FetchHfqBarsAsync(source, pending.Select(r => r.Code).ToList(),
-            code =>
-            {
-                var row = pending.First(x => x.Code == code);
-                var end = row.DelistDate!.Value;
-                var start = latestRaw.TryGetValue(code, out var lr) ? lr.AddDays(1) : end.AddYears(-DefaultLookbackYears);
-                return (start, end);
-            },
-            currentRepo, errors, failedCodes, stats, progress, sw, ct, "退市股", Granularity.DayRaw);
-
-        // 成功尝试过的打标记（哪怕"没有更多数据"——停牌到退市的股票本来就不会再有K线）；失败的留到下次。
-        // 前复权或后复权任一失败都不打标记，下次重试。
-        var failed = failedCodes.ToHashSet(StringComparer.Ordinal);
-        var attempted = pending.Select(r => r.Code).ToList();
-        delistedRepo.MarkTailFetched(attempted.Where(c => !failed.Contains(c)));
-
-        progress?.Report($"退市股收尾完成（{pending.Count} 只）：" + string.Join("、", pending.Take(5).Select(r => $"{r.Code} {r.Name}")) +
-                         (pending.Count > 5 ? " 等" : ""));
-        return attempted;
-    }
+    // CatchUpDelistedTailsAsync 删于 2026-09-21：整项迁去了 StockPlatform.Tasks/DelistedTailTask
+    // （筛选判据搬进 Logic 的 DelistedTailPlanner）。下面那个 FetchDelistedForRangeAsync 是
+    // 【拉取区间数据】用的另一条路，跟它不是一回事，还在。
 
     /// <summary>
     /// 退市股阶段（2026-07-29新增，并入"拉取区间数据"）——消除回测幸存者偏差的关键一步：日常抓取只覆盖
@@ -2720,7 +2555,7 @@ public partial class FetchOrchestrator
     ///
     /// 跟这一项的日常入口（<c>RunStepXxxAsync</c>）的分界是**目标从哪来**：日常是按每只标的的
     /// 水位线往后续抓，这里是照着待办清单补。两者不能互相替代——历史空洞在水位线**之下**，
-    /// 跑一整轮增量也补不上一段（见 <see cref="FillGapTodoAsync"/>）。
+    /// 跑一整轮增量也补不上一段（见 StockPlatform.Tasks/BarFetchTaskBase.Audit.cs 的 FillGapAsync）。
     ///
     /// 【重新拉取失败】就是拿它把有待办的任务挨个跑一遍；单独给某一项设成这个模式也行。
     /// </summary>
@@ -2732,14 +2567,9 @@ public partial class FetchOrchestrator
 
         var (repo, errors, failed, _, sw) = BeginStep();
         var done = new List<string>();
-        void Forward(string m) => progress?.Report(m);
-        source.Fetcher.OnStatus += Forward;
-        List<string> attempted;
-        try
-        {
-            attempted = await RunFillBacklogAsync(taskId, source, repo, errors, failed, done, progress, sw, ct);
-        }
-        finally { source.Fetcher.OnStatus -= Forward; }
+        // ⚠ 这里**不订阅** source.Fetcher.OnStatus（2026-09-21 去掉）：待办现在全由任务自己补，
+        //    而任务开跑时自己订了一份（ForwardSourceStatus），两边都订就是每条状态打两遍。
+        var attempted = await RunFillBacklogAsync(taskId, source, repo, errors, failed, done, progress, sw, ct);
 
         if (done.Count == 0)
         {
@@ -2760,7 +2590,7 @@ public partial class FetchOrchestrator
     ///
     /// ⚠ 别把它接到任务的**日常入口**上（RunStepXxxAsync）：那些是按水位线跑的，
     /// 而历史空洞正好在水位线**之下**——那样跑不仅慢，而且一段也补不上
-    /// （FillGapTodoAsync 存在的理由就是这个）。
+    /// （BarFetchTaskBase.FillGapAsync 存在的理由就是这个）。
     /// </summary>
     /// <returns>本轮真的去抓过的代码（收尾时用来更新失败名单）。</returns>
     private async Task<List<string>> RunFillBacklogAsync(
@@ -2769,8 +2599,9 @@ public partial class FetchOrchestrator
         IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
     {
         // ── 这一项的待办由任务自己补？转交，立刻返回 ──
-        // ⚠ 必须在 Load() **之前**判、并且直接 return：任务会自己写自己的那条待办，
-        //   而这里往下走的话，收尾时保存的是转交之前读到的那份 manifest，
+        // 2026-09-21 起**所有**有待办的任务都走这条（K线那六项 + ETF不复权是最后一批接管的），
+        // 所以这个方法只剩这一段了。⚠ 必须在读 manifest **之前**判并直接 return：
+        //   任务会自己写自己的那条待办，这里若继续往下走，收尾时保存的是转交之前读到的那份，
         //   会把任务刚写进去的名单覆盖掉。
         if (BacklogRunner?.Handles(taskId) == true)
         {
@@ -2780,145 +2611,15 @@ public partial class FetchOrchestrator
             return new List<string>();
         }
 
-        var attempted = new List<string>();
-        var manifest = _manifestStore.Load();
-
-        List<string> CodesOf(string kind) =>
-            manifest.Todo(taskId, kind)?.Targets.Select(t => t.Code).ToList() ?? new List<string>();
-
-        // ── 逐只失败：各类用各自的补法 ──
-        var failed = CodesOf(RetryTodoKind.Failed);
-        if (failed.Count > 0)
-        {
-            switch (taskId)
-            {
-                // 【股东数据】的 case 删于 2026-09-18：它的待办由 ShareholderTask 自己补，
-                // 上面 BacklogRunner 那一段已经转交走了，到不了这里。
-                // 【分红送配】的 case 删于 2026-09-18：它的待办由 DividendTask 自己补，
-                // 上面 BacklogRunner 那一段已经转交走了，到不了这里。
-                default:
-                    // K线：**按这个任务自己的口径**重抓（2026-09-13 二期修的就是这条）。
-                    // 以前所有K线失败挤在一个 FailedCodes 里，重试一律走 Granularity.Day，
-                    // 后复权/不复权任务失败的票走这条路补不回自己的口径，得绕一轮体检。
-                    attempted.AddRange(await RefetchFailedBarsAsync(
-                        taskId, failed, source, currentRepo, errors, failedCodes, done, progress, sw, ct));
-                    break;
-            }
-        }
-
-        // ── 当天日线还缺着（不是失败，是数据源当时还没出这些股票的当天数据）──
-        var missingDay = manifest.Todo(taskId, RetryTodoKind.MissingDay);
-        if (missingDay is { Targets.Count: > 0 } && missingDay.Day is { } missDate)
-        {
-            var codes = missingDay.Targets.Select(t => t.Code).ToList();
-            var missStats = new FetchStats();
-            int missDone = 0;
-            var today = DateTime.Today;
-            // **按任务决定补哪些口径**（2026-09-16 当日体检扩到 ETF/指数时加，09-17 补上 ETF 不复权）：
-            // 名单是体检按标的类型 × 口径分开记的，补的时候也得分开——拿 ETF 去跑后复权
-            // 是白发一轮请求，而数据源多半直接给空；反过来，ETF 的 day_raw 待办要是走成前复权，
-            // 补了半天那条线还是缺的（而且复查会说"已补齐"）。
-            //   · 个股：三个口径并成一份名单，三条线各按自己的水位线补，齐了的直接跳过；
-            //   · ETF/指数（前复权）：只有 day 这一路；
-            //   · ETF·不复权：只有 day_raw 这一路。
-            bool qfq = taskId is not RetryTaskIds.EtfRawBars;
-            bool hfq = taskId is RetryTaskIds.StockDayBars or RetryTaskIds.StockHfqBars
-                               or RetryTaskIds.StockRawBars;
-            bool raw = hfq || taskId is RetryTaskIds.EtfRawBars;
-            string missLabel = TaskLabel(taskId);
-            progress?.Report($"补 {missDate:yyyy-MM-dd} 还缺的{missLabel}，共 {codes.Count} 只"
-                           + $"（上一轮不是失败，是数据源当时还没出这些标的的当天数据），数据源：{source.Name}");
-            // 窗口取"缺的那个交易日 → 今天"。前复权走 ProcessOneStockAsync，后复权/不复权走
-            // FetchHfqBarsAsync（它自己按各口径的水位线算缺口）——已经补齐的那条线会在水位线
-            // 判定里跳过、不发请求。
-            if (qfq)
-                await Task.WhenAll(codes.Select(code =>
-                    ProcessOneStockAsync(code, source, missDate, today, currentRepo,
-                        errors, failedCodes, missStats, progress, codes.Count,
-                        () => Interlocked.Increment(ref missDone), sw, ct)));
-            if (hfq)
-                await FetchHfqBarsAsync(source, codes,
-                    code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears),
-                    currentRepo, errors, failedCodes, missStats, progress, sw, ct);
-            if (raw)
-                await FetchHfqBarsAsync(source, codes,
-                    code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears, Granularity.DayRaw),
-                    currentRepo, errors, failedCodes, missStats, progress, sw, ct, gran: Granularity.DayRaw);
-            progress?.Report($"当天日线重补汇总：{missStats.Summarize()}");
-            done.Add($"{missDate:MM-dd}{missLabel} {codes.Count} 只");
-            attempted.AddRange(codes);
-        }
-
-        // ── 全库体检查出来的：历史空洞 / 值问题（各自的复查方式，见方法注释）──
-        await FillGapTodoAsync(taskId, source, currentRepo, errors, failedCodes, done, progress, sw, ct);
-        await FillValueTodoAsync(taskId, source, currentRepo, errors, failedCodes, done, progress, sw, ct);
-
-        // 【整天缺失】和【残缺日】两类的分支删于 2026-09-18：它们只属于资金净流入和那几个
-        // 日频项，而那些项现在都自己补待办（HandlesBacklog=true），分派在转交那一步就走掉了。
-        // 资金净流入把两类合并成一轮全市场抓（见 NetInflowTask 的类注释：一次请求返回整只票
-        // 全历史，补几天跟补一天一样贵），复查仍分开——整天缺失看"有没有行"，
-        // 残缺日走 PartialDayRepair.RunBatchAsync（体检同判据）。
-
-        return attempted;
+        // 走到这儿说明有个任务没声明 HandlesBacklog、却挂着待办——那是配置错，说清楚别静默。
+        progress?.Report($"⚠【{TaskLabel(taskId)}】没有声明自己补待办（HandlesBacklog=false），"
+                       + "它欠着的那些补不了——这是个配置问题，见 IFetchTask.HandlesBacklog。");
+        return new List<string>();
     }
 
-    /// <summary>
-    /// 重抓某个K线任务失败的那些票，**用它自己的口径**。
-    ///
-    /// 前复权走 <see cref="ProcessOneStockAsync"/>（并发，水位线没有时用默认回看年数兜底）；
-    /// 后复权/不复权走 <see cref="FetchHfqBarsAsync"/>——它按那个口径自己的水位线算缺口，
-    /// 已经齐的票一个请求都不发。
-    /// </summary>
-    private async Task<List<string>> RefetchFailedBarsAsync(
-        string taskId, List<string> codes, NamedBarSource source, SqliteBarRepository currentRepo,
-        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, List<string> done,
-        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
-    {
-        var gran = taskId switch
-        {
-            RetryTaskIds.StockHfqBars => Granularity.DayHfq,
-            RetryTaskIds.StockRawBars => Granularity.DayRaw,
-            _ => Granularity.Day,
-        };
-        string label = TaskLabel(taskId);
-        var today = DateTime.Today;
-        var stats = new FetchStats();
-
-        if (gran != Granularity.Day && !source.Fetcher.SupportsHfq)
-        {
-            progress?.Report($"（{label} {codes.Count} 只先留着：数据源 {source.Name} 不提供这个口径，"
-                           + "要补请把数据源切到 Tencent 再跑一次）");
-            done.Add($"{label} {codes.Count} 只跳过（数据源不支持）");
-            return new List<string>();
-        }
-
-        progress?.Report($"重新拉取上次失败的{label}K线，共 {codes.Count} 只，数据源：{source.Name}");
-
-        if (gran == Granularity.Day)
-        {
-            int completed = 0;
-            await Task.WhenAll(codes.Select(code =>
-            {
-                // 失败的票水位线可能很旧（一直失败），也可能压根没有（第一次就失败）——
-                // 后一种用跟【拉取全部】默认一样的回看年数兜底，这里没有单独的输入框。
-                DateTime start;
-                lock (_dbLock)
-                    start = IncrementalStart(currentRepo.GetLatestBarInfo(code, Granularity.Day), today, 3);
-                return ProcessOneStockAsync(code, source, start, today, currentRepo, errors, failedCodes,
-                    stats, progress, codes.Count, () => Interlocked.Increment(ref completed), sw, ct);
-            }));
-        }
-        else
-        {
-            await FetchHfqBarsAsync(source, codes,
-                code => HfqWatermarkWindow(currentRepo, code, today, DefaultLookbackYears, gran),
-                currentRepo, errors, failedCodes, stats, progress, sw, ct, gran: gran);
-        }
-
-        progress?.Report($"{label}K线本轮汇总：{stats.Summarize()}");
-        done.Add($"{label}K线 {codes.Count} 只");
-        return codes;
-    }
+    // RefetchFailedBarsAsync 删于 2026-09-21：K线六项 + ETF不复权都自己补待办了
+    // （StockPlatform.Tasks/BarFetchTaskBase.Backlog.cs）。顺带修掉一个错：
+    // 那里按 taskId 猜口径，StepEtfRawBars 落进 `_ => day`，于是它的失败票被按前复权重抓。
 
     /// <summary>
     /// 回填成交额/换手率（2026-07-13新增）——一次性修复历史数据：2026-07-10 TencentBarFetcher
@@ -3023,13 +2724,6 @@ public partial class FetchOrchestrator
     }
 
     /// <summary>
-    /// 大盘指数日K（2026-07-13新增，见 <see cref="MarketIndexCatalog"/>）——"拉取全部"和"拉取
-    /// 当天"都会先跑这一步，给分析/回测提供大盘环境数据（指数MA20、两市成交额热度）。指数在
-    /// Bar 表里用带前缀的8位符号（"sh000001"）存，水位线/收盘后确认/失败重试逻辑与个股完全一致
-    /// （失败进 Manifest.FailedCodes，"重新拉取失败股票"会连指数一起重试——ProcessOneStockAsync
-    /// 及各抓取器对带前缀符号原生支持）。总共就几个指数，串行跑完也只多花几秒。
-    /// </summary>
-    /// <summary>
     /// 个股日K（**前复权**）那一趟：按每只自己的水位线续抓到 <paramref name="end"/>，写库时顺带重算该股
     /// 周/月线（见 <see cref="ProcessOneStockAsync"/>），并把抓取中发现的复权基准漂移记进待重取名单。
     ///
@@ -3132,58 +2826,8 @@ public partial class FetchOrchestrator
         RecordDriftedForRepair(driftedCodes.ToList(), currentRepo, progress);
     }
 
-    private async Task FetchIndexBarsAsync(
-        NamedBarSource source, DateTime end, int lookbackYears, SqliteBarRepository currentRepo,
-        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, FetchStats stats,
-        IProgress<string>? progress, Stopwatch sw, CancellationToken ct, bool fullBackfill = false)
-    {
-        progress?.Report(fullBackfill
-            ? $"正在**整段回补**大盘指数K线（{MarketIndexCatalog.All.Count} 个，从 {AShareMarketOpen:yyyy-MM-dd} 起，不看水位线）..."
-            : $"正在抓取大盘指数K线（{MarketIndexCatalog.All.Count} 个：{string.Join("、", MarketIndexCatalog.All.Select(i => i.Name))}）...");
-        // 指数名称写进 StockMeta（type=index）——让"查询"页能按名称/代码搜到指数（不影响个股选股，选股扫的是6位纯数字）。
-        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, MarketIndexCatalog.All.Select(i => (i.Symbol, i.Name)), SqliteStockMetaUpsert.TypeIndex);
-        int completed = 0;
-        foreach (var (symbol, _) in MarketIndexCatalog.All)
-        {
-            DateTime start;
-            if (fullBackfill)
-            {
-                // 整段回补：忽略水位线、也忽略回看年数，直接从开市首日要起。
-                //
-                // 为什么忽略回看年数：这个模式存在的意义就是"把这条指数的历史一次补到底"，
-                // 还要人先去把那个格子改成 25、跑完再改回 3，正是它要消灭的麻烦。
-                // 数据源只会返回该指数实际存在的日期，早于发布日的部分自然是空
-                // （创业板综 2010 才有、北证50 2021 才有），不会写进任何垃圾。
-                //
-                // 重复抓的代价可以忽略：入库走 InsertOrRefreshUnconfirmed，已确认的行原样跳过，
-                // 所以**不会覆盖已有历史、也不会动复权基准**；多花的只是翻页请求
-                // （每条指数按 640 行/页算十几页，九条合计一两分钟）。
-                start = AShareMarketOpen;
-            }
-            else
-            {
-                // 跟"拉取全部"的个股水位线同一套规则：没抓过的从回看窗口起点开始（数据源只会返回
-                // 指数实际存在的日期），抓过的从上次的下一天继续，"今天"要看是否已收盘后确认。
-                lock (_dbLock)
-                {
-                    start = IncrementalStart(currentRepo.GetLatestBarInfo(symbol, Granularity.Day), end, lookbackYears);
-                }
-            }
-            await ProcessOneStockAsync(symbol, source, start, end, currentRepo, errors, failedCodes, stats, progress, MarketIndexCatalog.All.Count, () => Interlocked.Increment(ref completed), sw, ct);
-        }
-
-        if (fullBackfill)
-        {
-            // 回补完把每条的实际覆盖报出来——这个模式多半是"加了新指数"之后跑的，
-            // 人要的就是"它到底补到哪年了"这个答案，翻日志数行数太费劲。
-            foreach (var (symbol, name) in MarketIndexCatalog.All)
-            {
-                DateTime? earliest;
-                lock (_dbLock) earliest = currentRepo.GetEarliestPeriodStart(symbol, Granularity.Day);
-                progress?.Report($"　{name}（{symbol}）：本地最早 {earliest:yyyy-MM-dd}");
-            }
-        }
-    }
+    // FetchIndexBarsAsync 删于 2026-09-21：整项迁去了 StockPlatform.Tasks/IndexBarTask
+    // （含"整段回补从开市首日起"和跑完逐条报本地最早日期那两段）。
 
     /// <summary>
     /// Fetches one stock's bars for the given [start, end] range from the single given source (no
@@ -3259,41 +2903,21 @@ public partial class FetchOrchestrator
             stats.FetchedWithNewData();
             lock (_dbLock)
             {
-                // "今天"这一天单独走覆盖写入（可能是第二次抓到，用来把盘中抓的旧值换成收盘后的准确
-                // 值）；更早的日期永远是第一次见到的新事实，走InsertOrIgnore（跟以前一样）。
-                var todaysBars = newDayBars.Where(b => b.PeriodStart.Date == DateTime.Today).ToList();
-                var olderBars = newDayBars.Where(b => b.PeriodStart.Date != DateTime.Today).ToList();
+                // 「哪几根该插、哪几根该覆盖、算不算漂移」的判据 2026-09-21 抽去了
+                // Logic 层的 BarWritePlanner（分层职责原则，见 doc/solution-class-map.md §0.1）——
+                // 这里只剩"读出比对样本 → 让它判 → 按结论落库"。新框架的K线任务调的是同一份判据，
+                // 所以两条路不可能分叉（见 doc/bar-tasks-migration-design.md §1）。
+                // 覆盖重抓那一路不需要比对样本（整段以数据源当前基准为准），所以不查库。
+                var stored = overwrite
+                    ? EmptyCloses
+                    : StoredClosesFor(currentRepo, code, granularity, newDayBars);
+                var plan = BarWritePlanner.Plan(
+                    newDayBars, DateTime.Today, stored, overwrite, driftCheck: driftedCodes != null);
 
-                if (overwrite)
-                {
-                    // "覆盖重抓"模式：整段以数据源当前基准为准，全部覆盖——用来一次性抹平历史上
-                    // 分批入库造成的复权基准接缝（见 doc/factorlab-design.md 的复权基准说明）。
-                    if (olderBars.Count > 0) SqliteBarUpsert.Upsert(_paths.CurrentDb, olderBars);
-                }
-                else if (olderBars.Count > 0)
-                {
-                    // 常规模式：库里没有的才插；已有的逐根比对，值对不上说明数据源那边的复权基准
-                    // 变了（该股分红或送转了），把这一段覆盖成新基准，并记下这只股票待做全历史修正。
-                    var existing = currentRepo
-                        .Query(code, granularity, olderBars[0].PeriodStart, olderBars[^1].PeriodStart)
-                        .ToDictionary(b => b.PeriodStart.Date, b => b.Close);
-
-                    var toInsert = new List<Bar>();
-                    var toOverwrite = new List<Bar>();
-                    foreach (var b in olderBars)
-                    {
-                        if (!existing.TryGetValue(b.PeriodStart.Date, out var storedClose)) toInsert.Add(b);
-                        else if (driftedCodes != null && IsDrifted(storedClose, b.Close)) toOverwrite.Add(b);
-                    }
-                    if (toInsert.Count > 0) currentRepo.InsertOrRefreshUnconfirmed(toInsert);
-                    if (toOverwrite.Count > 0)
-                    {
-                        SqliteBarUpsert.Upsert(_paths.CurrentDb, toOverwrite);
-                        driftedCodes!.Add(code);
-                    }
-                }
-
-                if (todaysBars.Count > 0) SqliteBarUpsert.Upsert(_paths.CurrentDb, todaysBars);
+                if (plan.ToInsert.Count > 0) currentRepo.InsertOrRefreshUnconfirmed(plan.ToInsert);
+                if (plan.ToOverwrite.Count > 0) SqliteBarUpsert.Upsert(_paths.CurrentDb, plan.ToOverwrite);
+                if (plan.Drifted) driftedCodes!.Add(code);
+                if (plan.Today.Count > 0) SqliteBarUpsert.Upsert(_paths.CurrentDb, plan.Today);
 
                 // ⚠ 这里原本要重算并写回周/月线（读全历史日线 → 聚合 → 两次 upsert）。
                 // **2026-09-10 去掉了：周/月线不再落库**，读的时候由
@@ -3320,6 +2944,34 @@ public partial class FetchOrchestrator
         }
 
         ReportCompareProgress(reportCompleted(), totalCount, progress, sw, stats);
+    }
+
+    private static readonly Dictionary<DateTime, double> EmptyCloses = new();
+
+    /// <summary>
+    /// 取"抓回来这一段里、除今天以外的那几天"在库里已有的收盘价，喂给
+    /// <see cref="BarWritePlanner.Plan"/> 当比对样本。
+    ///
+    /// ⚠ 只查**这一段**、不查全历史：漂移比对的窗口本来就只有手上这一页
+    /// （见 <see cref="BarWritePlanner.DriftCheckLookbackDays"/>），查多了纯属拖慢。
+    /// </summary>
+    private static IReadOnlyDictionary<DateTime, double> StoredClosesFor(
+        SqliteBarRepository repo, string code, string granularity, IReadOnlyList<Bar> fetched)
+    {
+        var today = DateTime.Today;
+        DateTime? from = null, to = null;
+        foreach (var b in fetched)
+        {
+            if (b.PeriodStart.Date == today) continue;
+            if (from is null || b.PeriodStart < from) from = b.PeriodStart;
+            if (to is null || b.PeriodStart > to) to = b.PeriodStart;
+        }
+        if (from is null) return EmptyCloses;      // 抓回来的全是今天那几根
+
+        var stored = new Dictionary<DateTime, double>();
+        foreach (var b in repo.Query(code, granularity, from.Value, to!.Value))
+            stored[b.PeriodStart.Date] = b.Close;
+        return stored;
     }
 
     /// <summary>"正在对比数据"这一条只是给用户看整体进度用的粗粒度心跳（跳过的/真的发了请求的
@@ -3519,13 +3171,10 @@ public partial class FetchOrchestrator
     /// 三份名单（Manifest.FailedCodes/FailedMarketCapCodes/FailedNetInflowCodes）共用这同一套
     /// 计算逻辑，各自独立维护自己的名单。
     /// </summary>
+    /// 判据本体在 <see cref="FailedTodoRule.Update"/>（Logic 层纯函数，有单测覆盖）——
+    /// 2026-09-21 抽走，这里只转发。在那之前同一条规则还在 <c>NetInflowTask</c> 里写了第二份。
     private static List<string> ComputeUpdatedFailedCodes(List<string> currentFailed, IReadOnlyCollection<string> attemptedCodes, IReadOnlyCollection<string> failedCodesThisRun)
-    {
-        var stillFailed = new HashSet<string>(currentFailed);
-        stillFailed.ExceptWith(attemptedCodes);
-        stillFailed.UnionWith(failedCodesThisRun);
-        return stillFailed.OrderBy(c => c).ToList();
-    }
+        => FailedTodoRule.Update(currentFailed, attemptedCodes, failedCodesThisRun);
 
     /// <summary>
     /// 把一份失败名单写进统一待办（2026-09-13 二期）——七类失败名单共用这一套，
@@ -3537,11 +3186,7 @@ public partial class FetchOrchestrator
     /// </summary>
     private static void SetFailedTodo(Manifest m, string taskId,
         IReadOnlyCollection<string> attemptedCodes, IReadOnlyCollection<string> failedThisRun)
-    {
-        var current = m.Todo(taskId, RetryTodoKind.Failed)?.Targets.Select(t => t.Code).ToList() ?? new List<string>();
-        var updated = ComputeUpdatedFailedCodes(current, attemptedCodes, failedThisRun);
-        m.SetTodo(taskId, RetryTodoKind.Failed, updated.Select(c => new RetryTarget { Code = c }).ToList());
-    }
+        => FailedTodoRule.SetFailed(m, taskId, attemptedCodes, failedThisRun);
 
     /// <summary>
     /// "拉取指数成分/权重"（2026-07-16新增）——遍历内置指数全集(<see cref="IndexCatalog"/>，732个)：先向

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
@@ -128,8 +128,12 @@ public sealed class IndexWeightTask(
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
         SaveManifest();
+        // ⚠ 这是「没活可干」，不是「没开工」（2026-09-21 统一改过来）——Skipped 的语义是
+        //    "这轮被挡住了、今天恢复了还该再来"，于是计划引擎立刻再排一次，而条件根本不会变，
+        //    空转到被"连着 5 轮瞬间跑完"那道护栏拦下。见 TaskRunResult.Skipped 的注释。
         if (_skipped is { } why)
-            return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, _errors));
+            return Task.FromResult<TaskRunResult?>(
+                new TaskRunResult(TaskState.Completed, _errors, NothingToDo: true, why));
 
         var summary = $"指数权重完成：{_ok} 个有权重、{_none} 个没有权重文件"
                     + $"（已记下、{MissingRetryDays} 天内不再问）、失败 {_failed.Count} 个"

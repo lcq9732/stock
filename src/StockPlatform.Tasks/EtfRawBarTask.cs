@@ -48,7 +48,8 @@ public sealed class EtfRawBarTask(
     FetchPaths paths,
     SqliteBarRepository bars,
     IDividendRepository dividends,
-    IBarDataFetcher fetcher) : FetchTaskBase<Bar>
+    IBarDataFetcher fetcher,
+    IManifestStore? manifestStore = null) : FetchTaskBase<Bar>
 {
     /// <summary>闸门那一页往回取多久——腾讯一页硬顶 640 根，700 个自然日约 480 个交易日，
     /// 稳稳落在一页内（只发一个请求）。</summary>
@@ -59,13 +60,58 @@ public sealed class EtfRawBarTask(
 
     public override FetchActionId Id => FetchActionId.StepEtfRawBars;
 
+    /// <summary>
+    /// 待办由本任务自己补（2026-09-21）。它**只会有 <c>missing_day</c> 这一类**：
+    /// 失败名单这一项从来不写；空洞和值问题按标的类型/口径归属，ETF 的落在
+    /// <c>StepEtfBars</c> 和 <c>StepStockRawBars</c> 名下（见 <c>FullAuditTask.TaskIdOfScope</c>）。
+    ///
+    /// 在这之前它走的是编排层那条默认分支，而那里按 taskId 猜口径时
+    /// <c>StepEtfRawBars</c> 落进了 <c>_ =&gt; day</c>——也就是拿**前复权**去补 day_raw，
+    /// 补完复查还是缺。自己接管之后口径是本任务的属性，不用猜。
+    /// </summary>
+    public override bool HandlesBacklog => manifestStore != null;
+
     private int _copied, _fetched, _probeFailed, _skipped, _rows;
+    private string? _skippedReason;
+    private DateTime? _backlogDay;
 
     protected override async IAsyncEnumerable<IReadOnlyList<Bar>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
         _copied = _fetched = _probeFailed = _skipped = _rows = 0;
+        _backlogDay = null;
         bool whole = args.Mode.HasFlag(FetchMode.FirstBackfill);
+
+        // ── 【只补待办】：把体检记下的"那天还缺的 ETF"补上 ──
+        // 窗口取"缺的那天 → 今天"，口径固定 day_raw（本任务自己的口径）。
+        if (args.Mode == FetchMode.FillBacklog)
+        {
+            var todo = manifestStore is null ? null
+                     : await Task.Run(() => manifestStore.Load()
+                           .Todo(RetryTaskIds.EtfRawBars, RetryTodoKind.MissingDay), ct);
+            if (todo is not { Targets.Count: > 0 } || todo.Day is not { } missDate)
+            {
+                _skippedReason = "ETF日K·不复权没有欠着的待办";
+                Report($"{_skippedReason}。");
+                yield break;
+            }
+
+            _backlogDay = missDate;
+            var codes0 = todo.Targets.Select(t => t.Code).ToList();
+            Report($"补 {missDate:yyyy-MM-dd} 还缺的 ETF 不复权日K，共 {codes0.Count} 只"
+                 + "（上一轮不是失败，是数据源当时还没出这些标的的当天数据）...");
+            int n = 0;
+            foreach (var code in codes0)
+            {
+                ct.ThrowIfCancellationRequested();
+                var got = await FetchAsync(code, missDate, DateTime.Today, ct);
+                n++;
+                if (n % 100 == 0 || n == codes0.Count) Report($"{n}/{codes0.Count}", n, codes0.Count);
+                else ReportQuiet($"{n}/{codes0.Count}", n, codes0.Count);
+                if (got.Count > 0) { _rows += got.Count; yield return got; }
+            }
+            yield break;
+        }
 
         // 名单和"哪些有除权事件"都要读库——同步重活，推线程池（feedback_task_must_offload_heavy_sync）
         var (codes, withEvents) = await Task.Run(() =>
@@ -201,6 +247,20 @@ public sealed class EtfRawBarTask(
     protected override Task<TaskRunResult?> OnCompletedAsync(
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
+        // 【只补待办】的结局单独翻译：一类都没补 → NothingToDo（不是 Skipped，那会让
+        // 计划引擎立刻再排一次、空转，见 TaskRunResult.Skipped 的注释）。
+        if (args.Mode == FetchMode.FillBacklog)
+        {
+            if (_skippedReason is { } idle)
+                return Task.FromResult<TaskRunResult?>(
+                    new TaskRunResult(TaskState.Completed, [], NothingToDo: true, idle));
+
+            var line = $"ETF日K·不复权·补待办：{_backlogDay:MM-dd} 当天，抓了 {_fetched} 只、写入 {_rows:N0} 行。";
+            Report(line);
+            return Task.FromResult<TaskRunResult?>(
+                new TaskRunResult(TaskState.Completed, [], NothingToDo: false, line));
+        }
+
         Report($"完成：写入 {_rows:N0} 行——抓了 {_fetched} 只、从 day 复制 {_copied} 只、"
                + $"无事可做 {_skipped} 只");
         if (_probeFailed > 0)

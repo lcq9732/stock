@@ -79,7 +79,7 @@ public sealed record RetryItem(
 /// 免得出现**点一次不降、再点还不降**的数字（比漏报更让人上火）。
 /// 【全库数据体检】那行的 tooltip 用 <see cref="Items"/>，看得到全貌。
 ///
-/// ⚠ **目前所有类别都是可执行的**（含值问题——FillValueIssuesAsync 真的会去抓去改）。
+/// ⚠ **目前所有类别都是可执行的**（含值问题——BarFetchTaskBase.FillValueAsync 真的会去抓去改）。
 /// 这个机制先留着：以后再挂进来"只报不补"的待办时，登记时标一下就行，
 /// 不用再回头改显示、按钮、early-return 三处。
 ///
@@ -170,8 +170,8 @@ public sealed class RetryBacklog
     private static (RetryKind Kind, string Label, string Unit, bool Actionable) Describe(RetryTodo t)
         => (t.Kind, t.TaskId) switch
         {
-            (RetryTodoKind.Gap, _) => (RetryKind.Gaps, GranLabelOf(t) + "空洞", "段", true),
-            // ⚠ 值问题**也是可执行的**——FillValueIssuesAsync（2026-09-09 加）真的会去抓去改，
+            (RetryTodoKind.Gap, _) => (RetryKind.Gaps, BarLabelOf(t) + "空洞", "段", true),
+            // ⚠ 值问题**也是可执行的**——BarFetchTaskBase.FillValueAsync（2026-09-09 加，2026-09-21 搬进任务）真的会去抓去改，
             //   只是补法和复查方式跟缺行不同（见 doc/bar-value-audit-design.md §5）。
             //   FillAuditedGapsAsync 里"值类记录这一轮先原样留着"那句注释说的是**缺行那个循环**里
             //   先不动它们、等缺行跑完再单独处理，不是整轮不补（2026-09-13 一期照那句话
@@ -194,15 +194,31 @@ public sealed class RetryBacklog
             (_, RetryTaskIds.IndexWeight) => (RetryKind.IndexWeight, "指数权重", "个", true),
             (_, RetryTaskIds.Shareholder) => (RetryKind.Shareholder, "股东", "只", true),
             (_, RetryTaskIds.Dividend) => (RetryKind.Dividend, "分红", "只", true),
-            // K线失败按口径报：后复权/不复权失败的票以前跟前复权混在**一个**名单里，
-            // 重试时只能一律按前复权补——二期修掉的就是这个。
-            _ => (RetryKind.BarCodes, GranLabelOf(t) + "K线失败", "只", true),
+            // K线失败按**任务**报（2026-09-13 二期起按任务分域记，2026-09-21 起连名字也按任务叫）：
+            // 后复权/不复权失败的票以前跟前复权混在一个名单里，重试时只能一律按前复权补。
+            _ => (RetryKind.BarCodes, BarLabelOf(t) + "K线失败", "只", true),
         };
 
-    private static string GranLabelOf(RetryTodo t) => t.TaskId switch
+    /// <summary>
+    /// K线类待办（空洞 / 失败名单）显示成什么名字。
+    ///
+    /// **按任务叫，不按口径叫**（2026-09-21 改）：原来只分前/后/不复权三档、其余一律"前复权"，
+    /// 于是 ETF 和指数的待办也顶着"前复权"显示——同一句提示里会出现两遍
+    /// 「前复权K线失败 N 只」，看着像重复了一行。它们本来就只有前复权一路，按标的类型叫才读得顺。
+    /// 跟任务那侧的 <c>BarFetchTaskBase.BacklogLabel</c> 是同一套措辞。
+    ///
+    /// 兜底仍是"前复权"：老记录里 taskId 认不出来时按前复权算，跟
+    /// <see cref="RetryTaskIds.ForGranularity"/> 的口径一致。
+    /// </summary>
+    private static string BarLabelOf(RetryTodo t) => t.TaskId switch
     {
+        RetryTaskIds.StockDayBars => "前复权",
         RetryTaskIds.StockHfqBars => "后复权",
         RetryTaskIds.StockRawBars => "不复权",
+        RetryTaskIds.EtfBars => "ETF",
+        RetryTaskIds.EtfRawBars => "ETF不复权",
+        RetryTaskIds.IndexBars => "指数",
+        RetryTaskIds.DelistedTails => "退市股",
         _ => "前复权",
     };
 

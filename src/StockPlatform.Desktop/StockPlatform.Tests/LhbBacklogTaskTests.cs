@@ -152,7 +152,10 @@ public class LhbBacklogTaskTests : IDisposable
             new TaskRunArgs(FetchMode.FillBacklog), CancellationToken.None);
 
         Assert.Empty(p.Asked);
-        Assert.NotNull(r.SkippedReason);
+        // 「没有待办」是**没活可干**，不是「没开工」：2026-09-21 起返回 NothingToDo。
+        // 写成 Skipped 的话计划引擎会立刻再排一次，而条件根本不会变，空转到被护栏拦下。
+        Assert.True(r.NothingToDo);
+        Assert.Null(r.SkippedReason);
     }
 
     /// <summary>抓不动的时候整项判失败——名单和 Tries 由 PartialDayRepair 原样留着。</summary>

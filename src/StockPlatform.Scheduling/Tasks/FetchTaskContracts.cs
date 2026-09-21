@@ -1,4 +1,5 @@
 ﻿using StockPlatform.Data.Orchestration;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Scheduling.Tasks;
 
@@ -120,12 +121,19 @@ public sealed record TaskStateChanged(FetchActionId Id, TaskState State, string?
 /// <param name="Deadline">空闲窗口要在这个点前收尾；null＝不限。</param>
 /// <param name="MaxItems">分批跑：本轮最多做多少批；null＝不限。</param>
 /// <param name="Manual">手动触发（影响日志措辞，也留给将来"要不要弹框问"用）。</param>
+/// <param name="LookbackYears">
+/// 「新标的补 N 年」（2026-09-21 随K线任务迁移加）——**只决定"本地一根都没有的标的第一次抓多久历史"**。
+/// 已经抓过的永远从自己上次抓到那天续，跟它无关；「首次整段回补」那个模式也不看它
+/// （那个模式从开市首日抓起，见 <see cref="IncrementalWindowCalculator.AShareMarketOpen"/>）。
+/// null＝任务自己用默认值（3 年）。计划里那一行填的值由界面传进来。
+/// </param>
 public sealed record TaskRunArgs(
     FetchMode Mode = FetchMode.Incremental,
     DateOnly? Day = null,
     DateTime? Deadline = null,
     int? MaxItems = null,
-    bool Manual = false);
+    bool Manual = false,
+    int? LookbackYears = null);
 
 /// <summary>跑完之后的统计，给 <c>OnCompletedAsync</c> 用。</summary>
 /// <param name="Batches">抓了几批。</param>
@@ -153,6 +161,11 @@ public sealed record TaskRunResult(
     /// 必须跟「完成」分开（2026-09-11 补上，老编排层一直有这个字段、新框架漏了）：
     /// 记成完成的话界面上是个绿勾，而且 <c>FetchPlanItem.AlreadyRanOn</c> 只认完成——
     /// **今天就不会再来了**，等熔断过去也白搭。记成跳过，今天恢复之后还有机会补上。
+    ///
+    /// ⚠ **反过来也别滥用**（2026-09-21 实测踩到）："今天还会再来"意味着计划引擎**立刻**
+    /// 再排一次。所以只有**条件可能变**的情形才配用它（数据源熔断、要等收盘清算、接口探测失败）。
+    /// 「所有标的都已是最新」「没有欠着的待办」这类**今天再来也是同一个结果**的，
+    /// 用 <see cref="NothingToDo"/>——写成 Skipped 会空转到被"连着 5 轮瞬间跑完"那道护栏拦下。
     /// </summary>
     public static TaskRunResult Skipped(string reason, IReadOnlyList<string>? errors = null)
         => new(TaskState.Completed, errors ?? Array.Empty<string>(), SkippedReason: reason);

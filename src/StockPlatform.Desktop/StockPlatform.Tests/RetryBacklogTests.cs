@@ -98,7 +98,7 @@ public class RetryBacklogTests
 
         var b = Backlog(m);
 
-        // ⚠ 值问题**是可执行的**：FillValueIssuesAsync（2026-09-09 加）真的会去抓去改。
+        // ⚠ 值问题**是可执行的**：BarFetchTaskBase.FillValueAsync 真的会去抓去改。
         //   FillAuditedGapsAsync 里"值类记录这一轮先原样留着"那句说的是缺行那个循环里先不动，
         //   等缺行跑完再单独处理——不是整轮不补。
         Assert.Single(b.Items);
@@ -222,4 +222,35 @@ public class RetryBacklogTests
             Assert.True(Enum.TryParse<FetchActionId>(item.TaskId, out _),
                 $"{item.Label} 的归属任务 \"{item.TaskId}\" 不是一个有效的 FetchActionId");
     }
+    /// <summary>
+    /// K线类待办**按任务叫名字**（2026-09-21）。原来只分前/后/不复权三档、其余一律"前复权"，
+    /// 于是同一句提示里会出现两遍「前复权K线失败 N 只」——ETF 和指数顶着前复权的名字。
+    /// </summary>
+    [Theory]
+    [InlineData(RetryTaskIds.StockDayBars, "前复权K线失败")]
+    [InlineData(RetryTaskIds.StockHfqBars, "后复权K线失败")]
+    [InlineData(RetryTaskIds.StockRawBars, "不复权K线失败")]
+    [InlineData(RetryTaskIds.EtfBars, "ETFK线失败")]
+    [InlineData(RetryTaskIds.EtfRawBars, "ETF不复权K线失败")]
+    [InlineData(RetryTaskIds.IndexBars, "指数K线失败")]
+    [InlineData(RetryTaskIds.DelistedTails, "退市股K线失败")]
+    public void 失败名单按任务叫名字(string taskId, string expected)
+    {
+        var m = new Manifest();
+        m.SetTodo(taskId, RetryTodoKind.Failed, [new RetryTarget { Code = "600000" }]);
+
+        Assert.Equal(expected, RetryBacklog.From(m).Items.Single().Label);
+    }
+
+    /// <summary>空洞那一类同样按任务叫。</summary>
+    [Fact]
+    public void 空洞也按任务叫名字()
+    {
+        var m = new Manifest();
+        m.SetTodo(RetryTaskIds.EtfBars, RetryTodoKind.Gap,
+            [new RetryTarget { Code = "sh510300", Gran = Granularity.Day, Days = 3 }]);
+
+        Assert.Equal("ETF空洞", RetryBacklog.From(m).Items.Single().Label);
+    }
+
 }

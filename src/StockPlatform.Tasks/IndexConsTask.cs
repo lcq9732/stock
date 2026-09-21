@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using StockPlatform.Logic.Services;
 using StockPlatform.Logic.Abstractions;
@@ -118,8 +118,12 @@ public sealed class IndexConsTask(
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
         SaveFailedTodo();
+        // ⚠ 这是「没活可干」，不是「没开工」（2026-09-21 统一改过来）——Skipped 的语义是
+        //    "这轮被挡住了、今天恢复了还该再来"，于是计划引擎立刻再排一次，而条件根本不会变，
+        //    空转到被"连着 5 轮瞬间跑完"那道护栏拦下。见 TaskRunResult.Skipped 的注释。
         if (_skipped is { } why)
-            return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, _errors));
+            return Task.FromResult<TaskRunResult?>(
+                new TaskRunResult(TaskState.Completed, _errors, NothingToDo: true, why));
 
         var summary = $"指数成分完成：{_ok} 个指数有数据、{_empty} 个无成分、失败 {_failed.Count} 个"
                     + (_failed.Count > 0 ? "（可点【重新拉取失败】重试）" : "")
