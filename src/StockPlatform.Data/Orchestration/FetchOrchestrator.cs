@@ -1611,14 +1611,9 @@ public partial class FetchOrchestrator
     ///
     /// ⚠ 也不再要 NamedBarSource 参数：这里一个请求都不发，源由各任务自己从
     ///   BarSourceHolder 取（换源要能跟着换，见那个类）。
-    public async Task<FetchResult> RunRetryFailedAsync(
-        NamedBarSource source, IProgress<string>? progress, CancellationToken ct = default)
-    {
-        void ForwardStatus(string msg) => progress?.Report(msg);
-        source.Fetcher.OnStatus += ForwardStatus;
-        try { return await RunRetryFailedInternalAsync(progress, ct); }
-        finally { source.Fetcher.OnStatus -= ForwardStatus; }
-    }
+    public Task<FetchResult> RunRetryFailedAsync(
+        IProgress<string>? progress, CancellationToken ct = default)
+        => RunRetryFailedInternalAsync(progress, ct);
 
     /// <summary>重试结束时的一句话总结（2026-08-19新增）。
     ///

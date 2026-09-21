@@ -2305,7 +2305,7 @@ public class MainViewModel : INotifyPropertyChanged
         switch (item.Action)
         {
             case FetchActionId.RetryFailed:
-                return _orchestrator.RunRetryFailedAsync(SelectedSource, progress, ct);
+                return _orchestrator.RunRetryFailedAsync(progress, ct);
 
             case FetchActionId.FetchRawBars:
                 // 一只补十年约 4 秒（多页），按空窗剩余时间估本轮补几只
