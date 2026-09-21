@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Abstractions;
+﻿using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
 using Xunit;
@@ -27,6 +27,7 @@ public class FoundationAnalysisEngineTests
         private readonly List<Bar> _bars;
         public FakeBarRepository(List<Bar> bars) => _bars = bars;
         public List<Bar> Query(string code, string granularity, DateTime? start = null, DateTime? end = null) => _bars;
+        public List<Bar> QueryForAppend(string code, string granularity, DateTime from) => _bars;
         public Bar? GetLatestBar(string code, string granularity) => _bars.Count > 0 ? _bars[^1] : null;
         public List<string> GetAllCodes() => new() { Code };
         public void EnsureSchema() => throw new NotSupportedException();

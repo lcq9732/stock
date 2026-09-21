@@ -23,3 +23,19 @@ public interface ITaskBacklogRunner
     /// <summary>让那个任务以 <c>FetchMode.FillBacklog</c> 跑一轮。</summary>
     Task<FetchResult> RunAsync(string taskId, IProgress<string>? progress, CancellationToken ct);
 }
+
+/// <summary>
+/// 让编排层能**触发一个新框架任务**（2026-09-21）。
+///
+/// 起因：【板块指数合成】迁去 StockPlatform.Tasks 之后，【拉取区间数据】末尾那句"按新补齐的
+/// 个股日K重新合成板块指数"就调不到了——编排层在 Data、任务在 Tasks，依赖方向是
+/// Tasks → Data，反过来引用不到。
+///
+/// 跟 <see cref="ITaskBacklogRunner"/> 同一个套路：**端口定义在 Data、实现是
+/// <c>FetchTaskRegistry</c>、由组合根接上**。没接上时调用方要说一句，别静默少干活。
+/// </summary>
+public interface ITaskRunner
+{
+    /// <summary>跑一个任务（<paramref name="actionId"/> 是 <c>FetchActionId</c> 的枚举名）。</summary>
+    Task<FetchResult> RunAsync(string actionId, IProgress<string>? progress, CancellationToken ct);
+}

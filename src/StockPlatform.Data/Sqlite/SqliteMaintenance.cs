@@ -74,7 +74,28 @@ public class SqliteMaintenance
     }
 
     /// <summary>
-    /// 回收 WAL 并把结果说成人话，给日志用。没什么可说的（WAL 本来就小、又全回收了）就返回 null。
+    /// 超过这么大才值得报警。**不是随便挑的**：busy 本身很常见（下面那段说了为什么），
+    /// 而 2026-09-10 那次事故的特征不是"某一轮没回收成功"，是**WAL 一轮比一轮大、一直涨到 162GB**。
+    /// 低于这个量级的 busy 是噪声，报出来只会让人去关一堆根本没开的程序。
+    /// </summary>
+    private const int WarnMegabytes = 64;
+
+    /// <summary>
+    /// 回收 WAL 并把结果说成人话，给日志用。没什么可说的就返回 null。
+    ///
+    /// ════ 为什么 busy 不等于出事（2026-09-21 查清）════
+    /// 【板块指数合成】改成增量之后一轮只跑 19 秒，于是**每轮收尾都 busy**，而全量那轮（38 分钟）
+    /// 从来不 busy。查下来握着库的是**本进程界面自己的全表扫描**：
+    /// <c>MainViewModel.RefreshFailedCodeCount</c> 要对 Bar 表做六遍全表 GROUP BY
+    /// （其中两遍按 <c>fetched_at</c>，没有索引能用），25GB 库上要好几分钟，
+    /// 而它在**程序启动时**和**每项任务跑完后**各跑一轮。短任务收尾时它还在 ExecuteReader 里，
+    /// 长任务收尾时它早跑完了——时间差就是这么来的。
+    ///
+    /// 那种连接是**正在用**的，不在连接池里，所以 <c>ClearAllPools</c> 对它无效
+    /// （实测：清完再 checkpoint，busy 依旧）。
+    ///
+    /// 所以判据从"busy 就报"改成"**busy 且 WAL 已经大到该管了**才报"。
+    /// 小 WAL 的 busy 下一轮 autocheckpoint 或下次开库就收掉了，不用惊动人。
     /// </summary>
     public string? CheckpointWalAndDescribe()
     {
@@ -82,12 +103,24 @@ public class SqliteMaintenance
         try { r = CheckpointWal(); }
         catch (Exception ex) { return $"⚠ 回收 WAL 失败：{ex.Message}"; }
 
+        if (r.Busy != 0 && r.LogMegabytes >= WarnMegabytes)
+        {
+            // 已经大到要报警了，报之前再尽力试一次：清掉**本进程的空闲连接池**，
+            // 排除"自己的空闲连接占着自己"这一类。正在用的连接不受影响，所以并发跑别的任务也安全。
+            try { SqliteConnection.ClearAllPools(); r = CheckpointWal(); }
+            catch (Exception ex) { return $"⚠ 回收 WAL 失败：{ex.Message}"; }
+        }
+
         if (r.Busy != 0)
-            return $"⚠ **WAL 没能回收**（还有 {r.LogPages} 页 / {r.LogMegabytes:F0} MB，"
-                 + $"这次只搬回 {r.CheckpointedPages} 页）——**有别的连接握着这个库**。"
-                 + "不处理的话它会一直涨：2026-09-10 那次涨到 162GB、C 盘可用归零。"
-                 + "先看还有谁开着（Analyzer、或者调试起的程序），关掉再跑一次。";
-        return r.LogMegabytes >= 64 ? $"已回收 WAL（{r.LogMegabytes:F0} MB）" : null;
+            return r.LogMegabytes < WarnMegabytes
+                ? null                                   // 小 WAL 的 busy 是常态，见上面那段
+                : $"⚠ **WAL 涨到 {r.LogMegabytes:F0} MB 且回收不掉**（还有 {r.LogPages} 页，"
+                + $"这次只搬回 {r.CheckpointedPages} 页）——有连接一直握着这个库。"
+                + "本进程的空闲连接已经清过一遍了，所以要么是界面那几个全表扫描还没跑完（跑完就好），"
+                + "要么是**别的程序或残留进程**开着库——后者不处理会一直涨："
+                + "2026-09-10 那次涨到 162GB、C 盘可用归零。先看还有谁开着（Analyzer、或者调试起的程序）。";
+
+        return r.LogMegabytes >= WarnMegabytes ? $"已回收 WAL（{r.LogMegabytes:F0} MB）" : null;
     }
 
     /// <summary>还没建的索引名；空 = 已经都建好了。</summary>

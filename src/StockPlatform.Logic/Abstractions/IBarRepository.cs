@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Models;
+﻿using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Abstractions;
 
@@ -28,6 +28,17 @@ public interface IBarRepository
     /// 周/月线不落库、由日线现算，传进来会抛 <see cref="ArgumentException"/>。
     /// </summary>
     Bar? GetLatestBar(string code, string granularity);
+    /// <summary>
+    /// 给【板块指数合成】的**只追加**那一路用（2026-09-21）：返回
+    /// <paramref name="from"/> 那天**之前的最后一根**（作为算涨幅的基准），加上 from 及以后的全部。
+    ///
+    /// ⚠ 为什么不能"按天数往前切一段"：基准必须是这只票**自己**的上一根，而停牌可以长达几百天
+    /// （见 <c>BoardIndexSynthesizer</c> 里那句"用各成分股自己的上一根算涨幅，天然处理停牌缺口"）。
+    /// 切固定窗口会在长停牌票上漏掉基准，那一天它就被悄悄排除在均值之外——跟全量算出来的不一样。
+    /// 没有任何早于 from 的数据时只返回 from 及以后的，调用方自己会因为"不足两根"跳过它。
+    /// </summary>
+    List<Bar> QueryForAppend(string code, string granularity, DateTime from);
+
     /// <summary>Bar表里所有"个股"代码（6位纯数字）——Analyzer各选股Tab的扫描全集。大盘指数
     /// （带前缀的8位符号如"sh000001"，见 MarketIndexCatalog）故意排除在外：指数K线只是给大盘
     /// 环境过滤/回测用的参照数据，不参与选股。</summary>

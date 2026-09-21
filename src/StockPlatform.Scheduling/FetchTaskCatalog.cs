@@ -667,10 +667,15 @@ public static class FetchTaskCatalog
         new(FetchActionId.StepBoardIndex, "板块指数合成", "本地计算·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(3), "每工作日",
             "用本地板块成分股 + 个股日K**等权合成**板块指数日K（非官方指数），做板块热度/宽度。\n"
-            + "每次全量重算（成分股和个股数据都会变）。要读当天的个股K线，所以排在个股日K之后；"
+            + "平时**只追加新交易日**；成分股名单变了、或 day_adj 被【重算回测序列】重写过，那个板块才整段重算。\n"
+            + "要读当天的个股K线，所以排在个股日K之后；"
             + "【拉取板块】更新了成分之后也该跑一次。",
             // 两份输入都要：板块成分（谁在这个板块里）+ 当天个股K线（拿什么价算）
-            SoftDependsOn: [FetchActionId.StepBoardMembers, FetchActionId.StepBoardList, FetchActionId.StepStockDayBars]),
+            SoftDependsOn: [FetchActionId.StepBoardMembers, FetchActionId.StepBoardList, FetchActionId.StepStockDayBars],
+            // 「首次整段回补」＝不看合成状态、所有板块重算一遍（2026-09-21 加）。
+            // 日常那一路改成增量之后，这一项是**唯一的兜底**：增量判据万一漏了某种失效来源，
+            // 错的历史会一直留着——板块指数只有本地这一份，没有官方值可对。
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
 
         new(FetchActionId.StepTradingCalendar, "交易日历", "深交所官网", QuotaGroup.Exchange,
             TimeSpan.FromSeconds(20), "每工作日",

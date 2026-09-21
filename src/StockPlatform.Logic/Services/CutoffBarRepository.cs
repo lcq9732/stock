@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Abstractions;
+﻿using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Services;
@@ -27,6 +27,19 @@ public class CutoffBarRepository : IBarRepository
     {
         var bars = Query(code, granularity);
         return bars.Count > 0 ? bars[^1].PeriodStart : null;
+    }
+
+    /// <summary>
+    /// ⚠ 同 <see cref="GetLatestBar"/>：**必须**走截断后的 <see cref="Query"/>，
+    /// 直接转发会把截止日之后的数据泄回来。板块指数合成在分析端用不到，但接口实现不能留后门。
+    /// </summary>
+    public List<Bar> QueryForAppend(string code, string granularity, DateTime from)
+    {
+        var bars = Query(code, granularity);
+        int firstAtOrAfter = bars.FindIndex(b => b.PeriodStart.Date >= from.Date);
+        if (firstAtOrAfter < 0) return bars.Count > 0 ? [bars[^1]] : [];   // 全在 from 之前：只给基准
+        int start = Math.Max(0, firstAtOrAfter - 1);                        // 带上基准那一根
+        return bars.GetRange(start, bars.Count - start);
     }
 
     /// <summary>

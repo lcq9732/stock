@@ -72,7 +72,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host ("=== 编译成功（{0}），正在复制到 publish 目录（不会动 publish\data） ===" -f (($projects | ForEach-Object { $_.Name }) -join "、")) -ForegroundColor Cyan
+    Write-Host ("=== Compiled {0}），Copying to publish folder（不会动 publish\data） ===" -f (($projects | ForEach-Object { $_.Name }) -join "、")) -ForegroundColor Cyan
     $suffixed = @()
     $copyFailed = @()
     foreach ($p in $projects) {
@@ -125,7 +125,7 @@ try {
         Write-Host "（或者干脆等关掉程序后再跑一次这个脚本：正名能写了，它会自动覆盖并清掉那个带 1 的文件。）"
         exit 0
     }
-    Write-Host "发布完成。如果 Fetcher/Analyzer 正在运行，请完全关闭再重新打开才能看到新版本（换掉磁盘上的exe不会影响已经在跑的进程）。" -ForegroundColor Green
+    Write-Host "Success" -ForegroundColor Green
 }
 finally {
     Remove-Item -Recurse -Force $scratchRoot -ErrorAction SilentlyContinue

@@ -322,6 +322,42 @@ public class SqliteBarRepository : IBarRepository
         "code, granularity, period_start, open, close, high, low, volume, amount, turnover, fetched_at";
 
     /// <summary>真正读表的那一半（<see cref="Query"/> 对周/月线会绕开它）。</summary>
+    /// <inheritdoc cref="IBarRepository.QueryForAppend"/>
+    public List<Bar> QueryForAppend(string code, string granularity, DateTime from)
+    {
+        if (granularity is Granularity.Week or Granularity.Month)
+            throw new ArgumentException("周/月线不落库、由日线现算，这个方法只服务落库的粒度", nameof(granularity));
+
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        // 两段并起来：① from 之前的**最后一根**（算第一天涨幅的基准，可能因停牌远在几百天前）
+        //             ② from 及以后的全部
+        // 走的都是主键 (code, granularity, period_start) 的有序前缀，是索引定位不是扫表。
+        //
+        // ⚠ 第一段必须**套在子查询里**：SQLite 不允许 UNION ALL 的分支自带 ORDER BY/LIMIT
+        //   （"ORDER BY clause should come after UNION ALL not before"）。末尾那个 ORDER BY
+        //   是作用在整个复合结果上的，合法，两段合起来天然有序。
+        cmd.CommandText = $"""
+            SELECT * FROM (
+                SELECT {BarColumns} FROM Bar
+                WHERE code = $code AND granularity = $granularity AND period_start < $from
+                ORDER BY period_start DESC LIMIT 1
+            )
+            UNION ALL
+            SELECT {BarColumns} FROM Bar
+            WHERE code = $code AND granularity = $granularity AND period_start >= $from
+            ORDER BY period_start;
+            """;
+        cmd.Parameters.AddWithValue("$code", code);
+        cmd.Parameters.AddWithValue("$granularity", granularity);
+        cmd.Parameters.AddWithValue("$from", from.ToString(DateFormat, CultureInfo.InvariantCulture));
+
+        var result = new List<Bar>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) result.Add(ReadBar(reader));
+        return result;
+    }
+
     private List<Bar> QueryStored(string code, string granularity, DateTime? start, DateTime? end)
     {
         using var conn = Open();

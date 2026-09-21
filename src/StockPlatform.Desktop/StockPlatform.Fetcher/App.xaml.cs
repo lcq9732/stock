@@ -617,7 +617,8 @@ public partial class App : Application
         // 【重算回测序列】2026-09-10 从 orchestrator 迁过来：依赖只有一个 db 路径，
         // 不碰 manifest、不占数据源、调用点只有一个——老任务里最容易迁的一类。
         taskRegistry.Register(FetchActionId.RebuildAdjSeries,
-            () => new AdjSeriesRebuildTask(paths.CurrentDb));
+            // manifestStore 是给"重写了 day_adj 就标记板块指数要整段重算"用的（2026-09-21）
+            () => new AdjSeriesRebuildTask(paths.CurrentDb, manifestStore));
         // 【当日完整性体检】2026-09-17 迁过来：它 09-16 从"只查个股K线"扩成三段之后正在长大，
         // 跟【全库数据体检】那次破例是同一条判据。判据本体在 SqliteDayCompletenessAuditor，
         // 【重新拉取失败】收尾时的那次重建跟它共用同一份。
@@ -742,6 +743,12 @@ public partial class App : Application
             taskRegistry.Register(FetchActionId.FetchEarningsSchedule,
                 () => new EarningsScheduleTask(paths, prebookProvider));
 
+        // 【板块指数合成】2026-09-21（⑧-1，见 doc/board-index-synth-design.md）。不联网，
+        //   一批＝一个板块；末尾主动回收 WAL（这条路是全库写得最重的一条）。
+        taskRegistry.Register(FetchActionId.StepBoardIndex,
+            // manifestStore：读/清"day_adj 被重写过，要整段重算"那个标记（见 BoardIndexTask）
+            () => new BoardIndexTask(paths, boardRepository, manifestStore));
+
         // 【指数成分名单】【指数权重】【股票名册与流通市值】2026-09-18 迁到新任务框架——
         //   迁完 RunFillBacklogAsync 里就只剩 K线那一块了。见 doc/index-roster-task-design.md。
         //   前两项一批＝一个指数，732 个的轮次终于能分批跑、能到点收尾。
@@ -821,6 +828,9 @@ public partial class App : Application
         // 所以声明了"自己补待办"的任务（目前只有分红）要靠这条路回调过来，
         // 否则那一项会被静默跳过。见 ITaskBacklogRunner。
         orchestrator.BacklogRunner = taskRegistry;
+        // 【拉取区间数据】末尾要重合成板块指数，而那一项 2026-09-21 迁进了 Tasks——
+        // 编排层引用不到它，走这个端口触发（见 ITaskRunner）。
+        orchestrator.TaskRunner = taskRegistry;
 
         // 最后那个委托是给【重新读取配置】用的：按下时照当时的配置文件重造板块通道。
         // 传委托而不是把 App 的方法暴露出去，是为了让 MainViewModel 不用知道 browserChannel

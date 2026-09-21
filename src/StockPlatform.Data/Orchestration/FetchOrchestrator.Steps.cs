@@ -96,17 +96,9 @@ public partial class FetchOrchestrator
 
     // ─────────────────────── 10. 板块指数合成（本地计算） ───────────────────────
 
-    /// <summary>
-    /// 用本地成分股 + 个股日K 等权合成板块指数日K。**不联网、纯 CPU**，所以推到线程池上跑，
-    /// 免得在 UI 线程上把界面冻住（同 RunFetchBankRegulatoryAsync 的理由）。
-    /// </summary>
-    public async Task<FetchResult> RunStepSynthesizeBoardIndexAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (repo, errors, failed, _, _) = BeginStep();
-        await Task.Run(() => SynthesizeBoardIndexCore(repo, errors, progress, ct), ct);
-        return FinishFetchRun(errors, "板块指数合成", Array.Empty<string>(), failed, progress);
-    }
+    // 整项 2026-09-21 迁到新任务框架（StockPlatform.Tasks/BoardIndexTask），本类不再有它的入口。
+    // 合成判据本来就在 Logic 的 BoardIndexSynthesizer，搬的只是编排。
+
 
     // ─────────────────────── 11~12. 融资余额 / 龙虎榜 ───────────────────────
     //

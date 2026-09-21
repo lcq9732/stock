@@ -155,6 +155,18 @@ public static class SqliteSchema
             --
             -- status: ok=成功  empty=接口返回空(可能是已下架板块)  failed=取不到
             -- 只有 ok 会在下一轮被跳过；failed/empty 下轮继续重试。
+            -- 【板块指数合成】上一次合成时的状态（2026-09-21）——判断这一轮能不能只追加。
+            -- 判据在 Logic 的 BoardIndexIncrementalRule；三种失效来源（名单变了 / day_adj 被重写 /
+            -- 成分股补了更早历史）任一命中就整段重算。
+            -- ⚠ 这张表**丢了也不会错**：读不到状态就当没合成过、整段重算，只是慢一轮。
+            CREATE TABLE IF NOT EXISTS BoardIndexState (
+                board_code TEXT PRIMARY KEY,
+                member_hash TEXT,        -- 成分股名单指纹（排序后哈希）
+                last_bar_date TEXT,      -- 合成出来的最后一根日K
+                member_earliest TEXT,    -- 当时成分股 day_adj 的最早日期
+                synthesized_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS BoardMemberFetchState (
                 board_code TEXT PRIMARY KEY,
                 fetched_at TEXT,

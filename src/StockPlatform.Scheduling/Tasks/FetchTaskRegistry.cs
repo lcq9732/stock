@@ -1,4 +1,4 @@
-using StockPlatform.Data.Orchestration;
+﻿using StockPlatform.Data.Orchestration;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
@@ -37,7 +37,7 @@ public interface IFetchTaskRegistry
 /// 任务本身一行都不用改。传 null 就是不记（测试里用）。
 /// </param>
 public sealed class FetchTaskRegistry(IManifestStore? manifestStore = null)
-    : IFetchTaskRegistry, ITaskBacklogRunner
+    : IFetchTaskRegistry, ITaskBacklogRunner, ITaskRunner
 {
     private readonly Dictionary<FetchActionId, Func<IFetchTask>> _factories = new();
 
@@ -72,6 +72,15 @@ public sealed class FetchTaskRegistry(IManifestStore? manifestStore = null)
         if (!Enum.TryParse<FetchActionId>(taskId, out var id))
             throw new InvalidOperationException($"待办里的任务 id 解析不出动作：{taskId}");
         return RunAsync(id, new TaskRunArgs(Mode: FetchMode.FillBacklog), progress, ct);
+    }
+
+    // ── ITaskRunner：给编排层触发一个任务用（眼下只有【拉取区间数据】末尾重合成板块指数）──
+
+    Task<FetchResult> ITaskRunner.RunAsync(string actionId, IProgress<string>? progress, CancellationToken ct)
+    {
+        if (!Enum.TryParse<FetchActionId>(actionId, out var id))
+            throw new InvalidOperationException($"认不出的动作：{actionId}");
+        return RunAsync(id, new TaskRunArgs(), progress, ct);
     }
 
     /// <summary>

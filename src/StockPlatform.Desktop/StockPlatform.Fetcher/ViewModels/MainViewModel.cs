@@ -2276,7 +2276,7 @@ public class MainViewModel : INotifyPropertyChanged
         // "没有欠着的"，待办永远补不上而且一声不吭。见 doc/dividend-task-design.md §9。
         if (item.EffectiveMode == FetchMode.FillBacklog
             && _taskRegistry?.HandlesBacklog(item.Action) != true)
-            return _orchestrator.RunFillBacklogAsync(item.Action.ToString(), SelectedSource, progress, ct);
+            return _orchestrator.RunFillBacklogAsync(item.Action.ToString(), progress, ct);
 
         // ── 新式任务走这一条总分支（2026-09-08）──
         // 加过这一次之后，**再新增任务就不用碰这个 switch 了**：写一个类（继承 FetchTaskBase，
@@ -2403,8 +2403,8 @@ public class MainViewModel : INotifyPropertyChanged
             // 【退市股收尾】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/DelistedTailTask，
             // 走上面那条 _taskRegistry 总分支。
 
-            case FetchActionId.StepBoardIndex:
-                return _orchestrator.RunStepSynthesizeBoardIndexAsync(progress, ct);
+            // 【板块指数合成】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/BoardIndexTask，
+            // 走上面那条 _taskRegistry 总分支（一批＝一个板块）。
 
             // 【融资余额】的 case 删于 2026-09-18：迁去了 StockPlatform.Tasks/MarginTask，
             // 走上面那条 _taskRegistry 总分支（四个模式都在任务里，待办也自己补）。

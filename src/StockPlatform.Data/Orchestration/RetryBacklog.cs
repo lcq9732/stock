@@ -186,6 +186,10 @@ public sealed class RetryBacklog
             (RetryTodoKind.PartialDay, RetryTaskIds.Lhb) => (RetryKind.PartialDays, "龙虎榜残缺日", "天", true),
             (RetryTodoKind.PartialDay, RetryTaskIds.LhbSeat) => (RetryKind.PartialDays, "席位残缺日", "天", true),
             (RetryTodoKind.PartialDay, RetryTaskIds.BlockTrade) => (RetryKind.PartialDays, "大宗残缺日", "天", true),
+            // ⚠ 这一行目前**没有写入方**（2026-09-21 查）：日频体检的 OwnerTaskId 名单里没有
+            //   资金流明细，全代码库也没有别处写这一格。留着是因为它不占成本、而且标明了意图。
+            //   ⚠ 真要加资金流残缺日体检的话，得先给 MoneyFlowBackfillTask 声明 HandlesBacklog——
+            //   它现在是 false，【重新拉取失败】会报一句"没有声明自己补待办"然后跳过（会报，不是静默）。
             (RetryTodoKind.PartialDay, RetryTaskIds.MoneyFlowDetail) => (RetryKind.PartialDays, "资金流残缺日", "天", true),
             (RetryTodoKind.PartialDay, _) => (RetryKind.PartialDays, "残缺日", "天", true),
             (RetryTodoKind.Round, _) => (RetryKind.MarketCap, "市值", "轮", true),

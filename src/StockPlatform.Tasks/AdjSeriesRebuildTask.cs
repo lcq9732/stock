@@ -1,6 +1,7 @@
 ﻿using System.Runtime.CompilerServices;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
+using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
 using StockPlatform.Scheduling;
@@ -62,7 +63,9 @@ public sealed record AdjRebuildOutcome(
 ///      Microsoft.Data.Sqlite 默认有 30 秒的重试窗口，够等。
 /// 所以**别把落账合并成大事务**——那会把"毫秒级冲突"变成"分钟级互等"。
 /// </summary>
-public sealed class AdjSeriesRebuildTask(string dbPath) : FetchTaskBase<AdjRebuildOutcome>
+public sealed class AdjSeriesRebuildTask(
+    string dbPath,
+    IManifestStore? manifestStore = null) : FetchTaskBase<AdjRebuildOutcome>
 {
     public override FetchActionId Id => FetchActionId.RebuildAdjSeries;
 
@@ -175,6 +178,30 @@ public sealed class AdjSeriesRebuildTask(string dbPath) : FetchTaskBase<AdjRebui
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
         foreach (var n in _skipNotes) Report("  ⚠ " + n);
+
+        // ⚠ 重写了 day_adj 就得让【板块指数合成】整段重来（2026-09-21）：板块指数是拿成分股的
+        //    day_adj 累乘出来的，因子一变**整条历史**都失效，而合成那一项自己看不出来
+        //    （它只比得出名单变没变、成分股有没有补更早的历史）。这条通路漏了就是静默的错值。
+        if (_written > 0 && manifestStore != null)
+        {
+            try
+            {
+                var m = manifestStore.Load();
+                if (!m.BoardIndexNeedsFullRebuild)
+                {
+                    m.BoardIndexNeedsFullRebuild = true;
+                    manifestStore.Save(m);
+                }
+                Report($"　已标记【板块指数合成】下一轮整段重算（本轮重写了 {_written} 只的 day_adj）。");
+            }
+            catch (Exception ex)
+            {
+                // 标记写不上不该让一轮成功的重算判成失败，但必须说出来——
+                // 人得知道板块指数这一轮可能还是旧的
+                Report($"　⚠ 没能标记【板块指数合成】需要整段重算（{ex.Message}）——"
+                     + "板块指数可能还按旧因子算着，手动跑一次它的「首次整段回补」即可。");
+            }
+        }
 
         // 「还剩几只」用减法算，**不再重扫一遍全库**（2026-09-10）：老代码这里调
         // GetPendingAdjRebuildCount()，为了打印一个数字又对 1300 万行 GROUP BY 一遍、几十秒。

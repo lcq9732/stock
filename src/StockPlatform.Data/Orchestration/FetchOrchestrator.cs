@@ -88,6 +88,12 @@ public partial class FetchOrchestrator
     /// </summary>
     public ITaskBacklogRunner? BacklogRunner { get; set; }
 
+    /// <summary>
+    /// 触发新框架任务的口子（2026-09-21）——眼下只有【拉取区间数据】末尾要重合成板块指数。
+    /// 端口的理由见 <see cref="ITaskRunner"/>：任务在 Tasks 层，编排层引用不到它。
+    /// </summary>
+    public ITaskRunner? TaskRunner { get; set; }
+
     private readonly FetchPaths _paths;
     private readonly IManifestStore _manifestStore;
     private readonly IFundamentalMetricRepository _fundamentalRepository;
@@ -492,72 +498,10 @@ public partial class FetchOrchestrator
     // 【拉取区间数据】用的是另一个方法 FetchEtfBarsForYearAsync，那个还在。
 
 
-    /// <summary>
-    /// 本地合成板块指数日K（2026-07-15新增）——**不联网**：用本地已有的成分股(BoardMember)+个股日K，按
-    /// 等权累乘出每个板块的指数日K（见 <see cref="BoardIndexSynthesizer"/>），存进 Bar 表、code 用板块
-    /// 代码(gn_xxx/new_xxx)。每次全量重算（先删该板块旧bar再写），因为成分股和个股数据会变。
-    /// "拉取全部"/"拉取当天"末尾会自动跑（放在个股+ETF抓完之后，因为要读当天个股K线）；此外"合成板块
-    /// 指数"按钮也调它——用于"拉取板块"更新了成分股之后、不重抓个股、单独按新成分重算一次。</summary>
-    private void SynthesizeBoardIndexCore(SqliteBarRepository currentRepo, ConcurrentBag<string> errors,
-        IProgress<string>? progress, CancellationToken ct)
-    {
-        var boards = _boardRepository.QueryBoards();
-        if (boards.Count == 0)
-        {
-            progress?.Report("（本地还没有板块数据，跳过板块指数合成——先点一次\"拉取板块\"才有成分股可算）");
-            return;
-        }
-        var asOf = DateTime.Now;
-        var synthesizedMeta = new List<(string Code, string Name)>();
-        // 板块的涨跌幅/成交额从这里回填（2026-09-03）：合成出来的板块指数最后一根就是当日板块行情，
-        // 成交额本身就是成分股求和。以前这两个值是从数据源的板块榜直接抓的，现在改成本地算——
-        // 既不依赖只能人工过验证的 push2，口径也跟板块K线一致。
-        var quotes = new List<(string BoardCode, double ChangePct, double Amount)>();
-        var tick = new ProgressThrottle(progress);
-        int done = 0, withBars = 0, totalBars = 0;
-        foreach (var board in boards)
-        {
-            ct.ThrowIfCancellationRequested();
-            try
-            {
-                var members = _boardRepository.QueryMembers(board.BoardCode);
-                var bars = BoardIndexSynthesizer.Synthesize(board.BoardCode, members, currentRepo, asOf);
-                lock (_dbLock)
-                {
-                    currentRepo.DeleteByCode(board.BoardCode, Granularity.Day);
-                    if (bars.Count > 0) currentRepo.InsertOrRefreshUnconfirmed(bars);
-                }
-                if (bars.Count > 0)
-                {
-                    withBars++; totalBars += bars.Count; synthesizedMeta.Add((board.BoardCode, board.Name));
-                    var last = bars[^1];
-                    // 只有一根K时没有前收，涨跌幅按 0 处理（新板块或成分股数据太短）
-                    var prevClose = bars.Count >= 2 ? bars[^2].Close : 0;
-                    var pct = prevClose > 0 ? (last.Close / prevClose - 1) * 100 : 0;
-                    quotes.Add((board.BoardCode, pct, last.Amount));
-                }
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { errors.Add($"板块「{board.Name}」({board.BoardCode}) 合成失败：{ex.Message}"); }
-            // 按时间报而不是按个数（2026-09-08）：板块之间的成分股数量差一个量级，
-            // 按 40 个一报实测能哑到 2 分 35 秒，那是全程最长的一段静默。
-            done++;
-            tick.Report(() => $"合成板块指数：{done}/{boards.Count}（已生成 {withBars} 个板块、{totalBars} 根日K）");
-        }
-        // 有指数K的板块名称写进 StockMeta（type=board）——让"查询"页能搜到板块、看行情（不影响个股选股）。
-        if (quotes.Count > 0) _boardRepository.UpdateQuotes(quotes);
-        if (synthesizedMeta.Count > 0)
-            SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, synthesizedMeta, SqliteStockMetaUpsert.TypeBoard);
-        // ⚠ 主动回收 WAL（2026-09-12 加）——这条路是全库写得最重的一条（950 个板块 × 约 4900 根
-        // ≈ 468 万行）。SQLite 的 autocheckpoint 是**被动**的，只要有任何读连接活着就跳过；
-        // 2026-09-10 就是因为一个残留进程握着库两个多小时，这 468 万行全堆在 WAL 里、涨到 162GB，
-        // C 盘 931G 用到 0 可用。拿到 busy 会明确报出来——那是"有人握着库"的唯一早期信号。
-        // （当时记的"单事务写 468 万行"是误判：这个循环一直是一个板块一个事务。）
-        var walNote = new SqliteMaintenance(_paths.CurrentDb).CheckpointWalAndDescribe();
-        if (walNote != null) progress?.Report(walNote);
+    // SynthesizeBoardIndexCore 删于 2026-09-21：整项迁去了 StockPlatform.Tasks/BoardIndexTask。
+    // 那句"单事务写 468 万行"的旧判断 09-12 已更正——循环一直是一个板块一个事务，
+    // WAL 涨到 162 GB 的真实成因是残留进程握着库、被动 checkpoint 被跳过。
 
-        progress?.Report($"板块指数合成完成：{boards.Count} 个板块，其中 {withBars} 个成分股数据足够、已写入 {totalBars} 根日K（code=板块代码，不进个股选股）。");
-    }
 
     /// <summary>
     /// "拉取指定年份区间"（2026-07-29新增，同日从单年扩展为区间）——往回补 **[起始年, 结束年]** 的历史数据，
@@ -778,7 +722,20 @@ public partial class FetchOrchestrator
             errors, progress, sw, _lhbProvider.EarliestAvailable, ct);
 
         // ── 板块指数按新补齐的个股日K重新合成（本地计算、不联网）——让板块指数历史跟着一起变长 ──
-        SynthesizeBoardIndexCore(currentRepo, errors, progress, ct);
+        // 2026-09-21 起这一步由新框架的任务干（BoardIndexTask），这里通过端口触发。
+        if (TaskRunner != null)
+        {
+            // 写字面量而不是 nameof(FetchActionId.StepBoardIndex)：那个枚举在 Scheduling，
+            // 依赖方向是 Scheduling → Data，这里引用不到它。端口本来就按字符串定义。
+            var synth = await TaskRunner.RunAsync("StepBoardIndex", progress, ct);
+            foreach (var e in synth.Errors) errors.Add(e);
+        }
+        else
+        {
+            // 没接上就说一句，别静默少干一步（组合根忘了接线时，人得看得见）
+            progress?.Report("⚠ 没接上任务运行器，板块指数这一轮没有重新合成——"
+                           + "手动跑一次【板块指数合成】即可（本地计算、不联网）。");
+        }
 
         // ── 把"接缝可能对不上"的票交给【重取前复权】（2026-09-02 补上的通路）──
         // 这一轮补的是**更早**的空缺段，用的是数据源**当前**的前复权基准；而库里较新的那段是当时
@@ -1647,23 +1604,20 @@ public partial class FetchOrchestrator
     /// 正常跑一次更快，但至少能正确清零失败名单；资金净流入跟K线一样是逐只精确重试。可以反复
     /// 点击：只要重试完三份名单里任何一份还有剩，下次再点还是只处理剩下的那些。
     /// </summary>
+    /// ⚠ 这里**不订阅**任何 fetcher 的 OnStatus（2026-09-21 去掉）：待办现在全由任务自己补，
+    ///   而任务开跑时自己订了一份（BarFetchTaskBase.ForwardSourceStatus 等），订的还是同一个
+    ///   fetcher 实例（BarSourceHolder.Current 就是界面的 SelectedSource）——两边都订就是
+    ///   每条状态打两遍。单项【只补待办】入口早先已经去掉了，这条路漏了。
+    ///
+    /// ⚠ 也不再要 NamedBarSource 参数：这里一个请求都不发，源由各任务自己从
+    ///   BarSourceHolder 取（换源要能跟着换，见那个类）。
     public async Task<FetchResult> RunRetryFailedAsync(
         NamedBarSource source, IProgress<string>? progress, CancellationToken ct = default)
     {
         void ForwardStatus(string msg) => progress?.Report(msg);
         source.Fetcher.OnStatus += ForwardStatus;
-        _marketCapFetcher.OnStatus += ForwardStatus;
-        _netInflowFetcher.OnStatus += ForwardStatus;
-        try
-        {
-            return await RunRetryFailedInternalAsync(source, progress, ct);
-        }
-        finally
-        {
-            source.Fetcher.OnStatus -= ForwardStatus;
-            _marketCapFetcher.OnStatus -= ForwardStatus;
-            _netInflowFetcher.OnStatus -= ForwardStatus;
-        }
+        try { return await RunRetryFailedInternalAsync(progress, ct); }
+        finally { source.Fetcher.OnStatus -= ForwardStatus; }
     }
 
     /// <summary>重试结束时的一句话总结（2026-08-19新增）。
@@ -1694,7 +1648,7 @@ public partial class FetchOrchestrator
     /// 显示、按钮、这里的分派全读同一份，加一类待办漏不掉。
     /// </summary>
     private async Task<FetchResult> RunRetryFailedInternalAsync(
-        NamedBarSource source, IProgress<string>? progress, CancellationToken ct)
+        IProgress<string>? progress, CancellationToken ct)
     {
         if (!File.Exists(_paths.CurrentDb))
             throw new InvalidOperationException("本地还没有任何数据，无法重新拉取，请先执行一次\"拉取全部\"");
@@ -1710,29 +1664,23 @@ public partial class FetchOrchestrator
             return new FetchResult();
         }
 
-        var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
-        currentRepo.EnsureSchema();
-        var sw = Stopwatch.StartNew();
         var errors = new ConcurrentBag<string>();
-        var failedCodes = new ConcurrentBag<string>();
         var done = new List<string>();
 
         progress?.Report($"本轮要补：{backlog.Describe()}");
 
-        var taskIds = DispatchOrder(backlog);
-        var attempted = new List<string>();
-        foreach (var taskId in taskIds)
+        foreach (var taskId in DispatchOrder(backlog))
         {
             ct.ThrowIfCancellationRequested();
-            attempted.AddRange(await RunFillBacklogAsync(
-                taskId, source, currentRepo, errors, failedCodes, done, progress, sw, ct));
+            await RunFillBacklogAsync(taskId, errors, done, progress, ct);
         }
 
-        // 收尾：本轮碰过的代码里这次没失败的一律移出失败名单（"之前失败、这次成功了"），
-        // 并顺手再体检一次当天覆盖情况——上面刚补过的话名单得重建。
+        // 收尾：再体检一次当天覆盖情况——上面刚补过的话名单得重建。
+        // ⚠ 失败名单这里**不动**（传空）：待办全由任务自己补，谁失败了谁自己记（SetFailedTodo
+        //   在各任务里按自己的 taskId 写）。这里若攒一份"碰过的代码"交给 FinishFetchRun，
+        //   它没有 taskId 会默认记到前复权那一格——正是 2026-09-13 拆分失败名单要解决的老问题。
         var result = FinishFetchRun(errors, "重新拉取失败股票",
-            attempted.Distinct(StringComparer.Ordinal).ToList(), failedCodes,
-            progress, checkDayCoverage: true);
+            [], new ConcurrentBag<string>(), progress, checkDayCoverage: true);
         ReportRetrySummary(done, progress);
         return result;
     }
@@ -1773,16 +1721,16 @@ public partial class FetchOrchestrator
     /// 【重新拉取失败】就是拿它把有待办的任务挨个跑一遍；单独给某一项设成这个模式也行。
     /// </summary>
     public async Task<FetchResult> RunFillBacklogAsync(
-        string taskId, NamedBarSource source, IProgress<string>? progress, CancellationToken ct = default)
+        string taskId, IProgress<string>? progress, CancellationToken ct = default)
     {
         if (!File.Exists(_paths.CurrentDb))
             throw new InvalidOperationException("本地还没有任何数据，无法补待办，请先执行一次\"拉取全部\"");
 
-        var (repo, errors, failed, _, sw) = BeginStep();
+        var errors = new ConcurrentBag<string>();
         var done = new List<string>();
         // ⚠ 这里**不订阅** source.Fetcher.OnStatus（2026-09-21 去掉）：待办现在全由任务自己补，
         //    而任务开跑时自己订了一份（ForwardSourceStatus），两边都订就是每条状态打两遍。
-        var attempted = await RunFillBacklogAsync(taskId, source, repo, errors, failed, done, progress, sw, ct);
+        await RunFillBacklogAsync(taskId, errors, done, progress, ct);
 
         if (done.Count == 0)
         {
@@ -1790,8 +1738,9 @@ public partial class FetchOrchestrator
             return new FetchResult { NothingToDo = true };
         }
         progress?.Report("本轮补完：" + string.Join("、", done));
+        // 失败名单不在这里动，理由同 RunRetryFailedInternalAsync 收尾那段。
         return FinishFetchRun(errors, $"{TaskLabel(taskId)}·补待办",
-            attempted.Distinct(StringComparer.Ordinal).ToList(), failed, progress, taskId: taskId);
+            [], new ConcurrentBag<string>(), progress, taskId: taskId);
     }
 
     /// <summary>
@@ -1806,10 +1755,9 @@ public partial class FetchOrchestrator
     /// （BarFetchTaskBase.FillGapAsync 存在的理由就是这个）。
     /// </summary>
     /// <returns>本轮真的去抓过的代码（收尾时用来更新失败名单）。</returns>
-    private async Task<List<string>> RunFillBacklogAsync(
-        string taskId, NamedBarSource source, SqliteBarRepository currentRepo,
-        ConcurrentBag<string> errors, ConcurrentBag<string> failedCodes, List<string> done,
-        IProgress<string>? progress, Stopwatch sw, CancellationToken ct)
+    private async Task RunFillBacklogAsync(
+        string taskId, ConcurrentBag<string> errors, List<string> done,
+        IProgress<string>? progress, CancellationToken ct)
     {
         // ── 这一项的待办由任务自己补？转交，立刻返回 ──
         // 2026-09-21 起**所有**有待办的任务都走这条（K线那六项 + ETF不复权是最后一批接管的），
@@ -1821,13 +1769,12 @@ public partial class FetchOrchestrator
             var handed = await BacklogRunner.RunAsync(taskId, progress, ct);
             foreach (var e in handed.Errors) errors.Add(e);
             if (!handed.NothingToDo) done.Add($"{TaskLabel(taskId)}（任务自补）");
-            return new List<string>();
+            return;
         }
 
         // 走到这儿说明有个任务没声明 HandlesBacklog、却挂着待办——那是配置错，说清楚别静默。
         progress?.Report($"⚠【{TaskLabel(taskId)}】没有声明自己补待办（HandlesBacklog=false），"
                        + "它欠着的那些补不了——这是个配置问题，见 IFetchTask.HandlesBacklog。");
-        return new List<string>();
     }
 
     // RefetchFailedBarsAsync 删于 2026-09-21：K线六项 + ETF不复权都自己补待办了

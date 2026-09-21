@@ -1,4 +1,4 @@
-using StockPlatform.Logic.Abstractions;
+﻿using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Logic.Services;
@@ -28,6 +28,24 @@ public static class BoardIndexSynthesizer
     /// <paramref name="asOf"/> 写进每根bar的 FetchedAt（合成时刻），默认调用方传入。</summary>
     public static List<Bar> Synthesize(string boardCode, IReadOnlyList<string> memberCodes,
         IBarRepository barRepository, DateTime asOf)
+        => Synthesize(boardCode, memberCodes, barRepository, asOf, from: null, baseLevel: BaseLevel);
+
+    /// <summary>
+    /// **只追加**：从 <paramref name="from"/> 那天起往后算，接在已有序列的
+    /// <paramref name="baseLevel"/>（上一根的收盘点位）后面。
+    ///
+    /// 2026-09-21 加。跟全量走的是**同一段计算**（下面那个私有重载），只是少读了历史、
+    /// 起始点位不是基点 1000 而是接上去——两套口径分开写迟早漂移。
+    ///
+    /// ⚠ 能不能走这条路由 <see cref="BoardIndexIncrementalRule"/> 判：成分名单变了、
+    /// <c>day_adj</c> 被重写了、成分股补了更早历史，这三种情况下历史整体失效，必须整段重算。
+    /// </summary>
+    public static List<Bar> Append(string boardCode, IReadOnlyList<string> memberCodes,
+        IBarRepository barRepository, DateTime asOf, DateTime from, double baseLevel)
+        => Synthesize(boardCode, memberCodes, barRepository, asOf, from, baseLevel);
+
+    private static List<Bar> Synthesize(string boardCode, IReadOnlyList<string> memberCodes,
+        IBarRepository barRepository, DateTime asOf, DateTime? from, double baseLevel)
     {
         // 每只成分股：日期 → 当天相对自身上一交易日的涨幅（收/开/高/低），以及量、额。
         // 用各成分股"自己的"上一根bar算涨幅，天然处理停牌造成的日期缺口。
@@ -54,7 +72,12 @@ public static class BoardIndexSynthesizer
             // （见 AdjustFactorCalculator）。覆盖也够：板块成分股 5651 只里 day 和 day_adj
             // 都是 5559 只有 >=2 根（缺的 92 只是 B 股 200xxx，两边都没有），换口径后
             // **没有任何板块的可用成分股掉到 MinMembersPerDay 以下**。
-            var bars = barRepository.Query(code, Granularity.DayAdj);
+            // 只追加那一路只读"从上一根基准起"的一小段——全量那一路读全历史。
+            // ⚠ 基准必须是这只票**自己**在 from 之前的最后一根（可能因为停牌远在几百天前），
+            //    所以不能简单地按天数往前切一段；由仓储按"≤ 这一天的最后一根"精确取。
+            var bars = from is { } f
+                ? barRepository.QueryForAppend(code, Granularity.DayAdj, f)
+                : barRepository.Query(code, Granularity.DayAdj);
             if (bars.Count < 2) continue;
             var map = new Dictionary<DateTime, DayReturn>();
             for (int i = 1; i < bars.Count; i++)
@@ -70,9 +93,11 @@ public static class BoardIndexSynthesizer
         }
         if (perMemberDailyReturn.Count == 0) return new List<Bar>();
 
-        var allDates = perMemberDailyReturn.SelectMany(m => m.Keys).Distinct().OrderBy(d => d).ToList();
+        var allDates = perMemberDailyReturn.SelectMany(m => m.Keys)
+            .Where(d => from is not { } f || d.Date >= f.Date)
+            .Distinct().OrderBy(d => d).ToList();
         var result = new List<Bar>();
-        double level = BaseLevel;
+        double level = baseLevel;
         foreach (var date in allDates)
         {
             double sumC = 0, sumO = 0, sumH = 0, sumL = 0, vol = 0, amt = 0;
