@@ -133,7 +133,12 @@ public sealed record TaskRunArgs(
     DateTime? Deadline = null,
     int? MaxItems = null,
     bool Manual = false,
-    int? LookbackYears = null);
+    int? LookbackYears = null,
+    /// <summary>
+    /// 中标/订单公告的关键词（2026-09-21 随公告任务迁移加）——计划里那一行自己填的，逗号分隔。
+    /// 留空**不是错**，是"这一轮不抓公告"，任务会在日志里说清楚原因。只有那一项用得上。
+    /// </summary>
+    IReadOnlyList<string>? Keywords = null);
 
 /// <summary>跑完之后的统计，给 <c>OnCompletedAsync</c> 用。</summary>
 /// <param name="Batches">抓了几批。</param>

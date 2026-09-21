@@ -513,6 +513,8 @@ public partial class App : Application
         // 而任务在这里就注册死了——所以传给任务的是这个可变持有者，真正的值由 MainViewModel
         // 解析完写回来（见 BarSourceHolder / MainViewModel.SelectedSource）。
         // 这里的初值只是个占位，界面一造出来就被覆盖。
+        // 板块通道也是运行期可变的（【重新读取配置】会现造一个新的），同 BarSourceHolder 的理由。
+        var boardFetcherHolder = new StockPlatform.Tasks.BoardFetcherHolder(boardFetcher);
         var barSourceHolder = new StockPlatform.Tasks.BarSourceHolder(
             sources.FirstOrDefault(s => s.Name == "Tencent") ?? sources[0]);
         taskRegistry.Register(FetchActionId.StepTradingCalendar,
@@ -698,6 +700,48 @@ public partial class App : Application
         taskRegistry.Register(FetchActionId.StepDelistedTails,
             () => new DelistedTailTask(paths, barSourceHolder, manifestStore, delistedListProvider));
 
+        // 【板块成分股】2026-09-21 迁到新任务框架（剩余 7 项的第①步，
+        //   见 doc/remaining-tasks-migration-design.md §2.1）。一批＝一个板块，
+        //   于是这个跨好几轮才抓得完的活终于能按 MaxItems/Deadline 干净收尾。
+        taskRegistry.Register(FetchActionId.StepBoardMembers,
+            () => new BoardMemberTask(boardFetcherHolder, boardRepository));
+
+        // 【拉取个股行业与题材】2026-09-21（第②步）。快照语义：拿到第一批才清表——
+        //   接口挂了的话库里旧的行业分类还在，分析侧每天都在读它。
+        if (boardMapProvider != null && boardMapRepository != null)
+            taskRegistry.Register(FetchActionId.FetchStockBoardMap,
+                () => new StockBoardMapTask(boardMapProvider, boardMapRepository));
+
+        // 【拉取市场事件】2026-09-21（第③步）。一批＝一张表；主键重复告警照旧收进 errors
+        //   （那是"数据静默丢失"的唯一早期信号）。
+        if (marketEventProvider != null && marketEventRepository != null)
+            taskRegistry.Register(FetchActionId.FetchMarketEvents,
+                () => new MarketEventTask(marketEventProvider, marketEventRepository));
+
+        // 【中标/订单公告】2026-09-21（第④步）。一批＝一个自然年切片——窗口不按年切会被
+        //   搜索源的翻页上限静默截断（见 CalendarYearSlicer）。
+        taskRegistry.Register(FetchActionId.StepAnnouncements,
+            () => new AnnouncementTask(announcementOrchestrator));
+
+        // 【拉取业绩预告/快报】2026-09-21（第⑤步）。一批＝一段；两段各自 try——
+        //   快报是非强制披露、覆盖面小，它失败不该把已经抓好的预告一起算失败。
+        if (forecastProvider != null && forecastRepository != null)
+            taskRegistry.Register(FetchActionId.FetchEarningsForecast,
+                () => new EarningsForecastTask(forecastProvider, forecastRepository));
+
+        // 【概念和行业板块】2026-09-21（第⑥步）。三级回退（终端本地文件 → 菜单 JSON → push2 分页）
+        //   和暂存区那套语义是**原样搬过来**的，没有重写——半截名单绝不能进正表，
+        //   那会把板块当成已下架、连成分股一起删掉。
+        taskRegistry.Register(FetchActionId.StepBoardList,
+            () => new BoardListTask(boardFetcherHolder, boardRepository, sideMenuBoardList,
+                                    boardHierarchy, boardMapRepository));
+
+        // 【拉取财报预约日】2026-09-21（第⑦步）。一批＝一个报告期；
+        //   "改期对账"（抓前记旧日期、抓后比对报出来）是这一项最该报的事。
+        if (prebookProvider != null)
+            taskRegistry.Register(FetchActionId.FetchEarningsSchedule,
+                () => new EarningsScheduleTask(paths, prebookProvider));
+
         // 【指数成分名单】【指数权重】【股票名册与流通市值】2026-09-18 迁到新任务框架——
         //   迁完 RunFillBacklogAsync 里就只剩 K线那一块了。见 doc/index-roster-task-design.md。
         //   前两项一批＝一个指数，732 个的轮次终于能分批跑、能到点收尾。
@@ -783,7 +827,7 @@ public partial class App : Application
         // 和限流参数这些装配细节——它只管"按现在的配置再给我一个"。
         var viewModel = new MainViewModel(paths, orchestrator, sources, browserChannel,
                                           () => CreateBoardFetcher(paths, browserChannel), taskRegistry,
-                                          barSourceHolder);
+                                          barSourceHolder, boardFetcherHolder);
         var window = new MainWindow { DataContext = viewModel };
         // 显式认定主窗口：ShutdownMode=OnMainWindowClose 全靠它认对是哪一个。
         // 不设的话 WPF 会拿"第一个 Show 出来的窗口"当主窗口——现在还轮得到它，

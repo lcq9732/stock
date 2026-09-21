@@ -62,35 +62,8 @@ public partial class FetchOrchestrator
 
     // ───────────────────────────── 3. 中标/订单公告 ─────────────────────────────
 
-    /// <summary>
-    /// 按关键词抓中标/订单公告（巨潮检索 → 正文）。关键词为空就是空跑（跟原来一致）。
-    /// 回看窗口默认沿用【拉取全部】的 AnnouncementLookbackDaysForFetchAll 天。
-    /// </summary>
-    public async Task<FetchResult> RunStepAnnouncementsAsync(
-        IReadOnlyList<string> keywords, IProgress<string>? progress, CancellationToken ct = default,
-        int? lookbackDays = null, DateTime? specificDay = null)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        if (keywords.Count == 0)
-        {
-            progress?.Report("（公告关键词为空，这一项跳过）");
-            return new FetchResult { NothingToDo = true };
-        }
-        // "只抓某一天"就把窗口收成那一天（原【补指定历史日】的做法）；否则按回看窗口。
-        DateOnly start, end;
-        if (specificDay is { } day)
-        {
-            start = end = DateOnly.FromDateTime(day);
-        }
-        else
-        {
-            var today = DateTime.Today;
-            start = DateOnly.FromDateTime(today.AddDays(-(lookbackDays ?? AnnouncementLookbackDaysForFetchAll)));
-            end = DateOnly.FromDateTime(today);
-        }
-        await FetchAnnouncementsAsync(keywords, start, end, progress, ct);
-        return FinishFetchRun(errors, "中标/订单公告", Array.Empty<string>(), failed, progress);
-    }
+    // 整项 2026-09-21 迁到新任务框架（StockPlatform.Tasks/AnnouncementTask），本类不再有它的入口。
+    // 关键词通过 TaskRunArgs.Keywords 传进去；按自然年切片那条规矩跟着搬走了。
 
     // ───────────────────────────── 4. 指数日K ─────────────────────────────
 
@@ -244,59 +217,13 @@ public partial class FetchOrchestrator
     /// （<see cref="RunStepSynthesizeBoardIndexAsync"/>），排在它后面即可。
     /// 老按钮【拉取板块】仍旧是"抓完顺带合成"，行为不变。
     /// </summary>
-    public async Task<FetchResult> RunStepBoardsOnlyAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        var skipped = await FetchBoardsCoreAsync(errors, progress, ct);
-        if (skipped != null)
-            return new FetchResult { Errors = errors.ToList(), SkippedReason = skipped };
-        return FinishFetchRun(errors, "板块行情与成分", Array.Empty<string>(), failed, progress);
-    }
-
-    /// <summary>
-    /// 只抓板块**名单和行情快照**（2026-09-04 拆分）。约 10 个请求，日更。
-    /// 拆分理由见 <see cref="FetchBoardListCoreAsync"/>：这 10 个请求原来跟 2500 个成分股
-    /// 请求抢同一批配额，而限流器每 15 个就要主动歇一次。
-    /// </summary>
-    public async Task<FetchResult> RunStepBoardListAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        var skipped = await FetchBoardListCoreAsync(errors, progress, ct);
-        if (skipped != null)
-            return new FetchResult { Errors = errors.ToList(), SkippedReason = skipped };
-        return FinishFetchRun(errors, "概念和行业板块", Array.Empty<string>(), failed, progress);
-    }
-
-    /// <summary>
-    /// 只抓板块**成分股**（2026-09-04 拆分）。约 2500 个请求，空闲时补、跑不完下轮接着来。
-    /// 名单从库里读，所以【板块列表】没跑也能干活（软依赖）。
-    /// </summary>
-    public async Task<FetchResult> RunStepBoardMembersAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        _memberProgressText = null;
-        var skipped = await FetchBoardMembersCoreAsync(errors, progress, ct);
-        if (skipped != null)
-            return new FetchResult { Errors = errors.ToList(), SkippedReason = skipped };
-        var r = FinishFetchRun(errors, "板块成分股", Array.Empty<string>(), failed, progress);
-        r.Progress = _memberProgressText;   // 让界面显示"已抓 144/1000，还剩 856"
-        return r;
-    }
+    // RunStepBoardsOnlyAsync（退役项【板块行情与成分】）删于 2026-09-21：它的后半段
+    // 成分股迁去了 StockPlatform.Tasks/BoardMemberTask，老实现跟着删，这个壳就没用了。
 
 
-    // ─────────────── 体检查出的空洞：补回来（【重新拉取失败】的一部分）───────────────
-    //
-    // 体检本身 2026-09-09 迁到了 StockPlatform.Tasks/FullAuditTask（判据见
-    // doc/full-audit-task-migration-design.md），这里只剩"拿着名单去补"这一半，
-    // 以及它跟体检共用的几个常量/小工具。
+    // 【概念和行业板块】整项 2026-09-21 迁到新任务框架（StockPlatform.Tasks/BoardListTask），
+    // 本类不再有它的入口。三级回退、护栏、暂存区提交、层级树导入整段**原样搬走**。
 
-    /// <summary>一次补多少段。太大一次 join 上千万行、内存和时间都难看；太小则来回开连接。</summary>
-    private const int AuditBatchSize = 500;
-
-    /// <summary>老 manifest 里的记录没有口径字段（2026-09-04 之前只体检前复权），一律按前复权算。</summary>
     /// <summary>任务 id → 中文名，只用在日志里。</summary>
     private static string TaskLabel(string taskId) => taskId switch
     {
@@ -317,30 +244,13 @@ public partial class FetchOrchestrator
     };
 
     // ════════════════════════════════════════════════════════════════════════
-    //  补待办那一整块删于 2026-09-21（FillGapTodoAsync / FillValueTodoAsync /
-    //  FillValueIssuesAsync / NormalizeGran / ReasonLabel / GranLabel / 两个格式转换）：
-    //  K线六项 + ETF不复权都自己补待办了，实现搬到了
+    //  补待办那一整块删于 2026-09-21：K线六项 + ETF不复权都自己补待办了，实现搬到了
     //  StockPlatform.Tasks/BarFetchTaskBase.Backlog.cs 和 .Audit.cs。
-    //
-    //  搬过去时顺手修了一个错：老代码拿 pending[0].Gran 当整份名单的口径，而 ETF 的空洞
-    //  不分口径全记在 StepEtfBars 名下（FullAuditTask.TaskIdOfScope），同一份里可能混着
-    //  day 和 day_raw——混着的时候后一半会用错口径去抓、两轮后被错判成"数据源确实没有"。
-    //  新实现按每一段自己的 Gran 分组。
-    //
-    //  ⚠ 判据本体一直在 Logic（ValueIssueFixPlan / ValueIssueRecheck），搬的只是编排；
-    //    白名单和体检那侧（SqliteMissingBarRepository / SqliteBarValueAuditor / FullAuditTask）
-    //    一行没动。
+    //  判据本体一直在 Logic（ValueIssueFixPlan / ValueIssueRecheck），搬的只是编排；
+    //  白名单和体检那侧（SqliteMissingBarRepository / SqliteBarValueAuditor / FullAuditTask）
+    //  一行没动。
     // ════════════════════════════════════════════════════════════════════════
 
-    // ─────────────── 已下载 PDF 的重解析（本地） ───────────────
-
-    /// <summary>
-    /// 用**当前**解析规则把本地已经下载的银行/券商/保险年报中报重跑一遍，**一个网络请求都不发**。
-    ///
-    /// 为什么值得单独成项：解析规则一直在改（各家版式差异会不断暴露新坑——注释角标「（注3）」
-    /// 没清干净让平安银行的拨备覆盖率变成 3.0、目录页的页码被当成资本充足率），改完想全库重跑时，
-    /// 原来只能连带把联网下载那一大段也跑一遍。现在纯本地这一步可以随时单独跑，几分钟就完。
-    /// </summary>
     public async Task<FetchResult> RunStepReparseBankReportsAsync(
         IProgress<string>? progress, CancellationToken ct = default)
     {

@@ -1,4 +1,4 @@
-using StockPlatform.Scheduling;
+﻿using StockPlatform.Scheduling;
 using Xunit;
 
 namespace StockPlatform.Tests;
@@ -24,7 +24,11 @@ public class MarketEventBackfillTests
         var info = FetchTaskCatalog.All.Single(x => x.Id == FetchActionId.FetchMarketEvents);
         Assert.True(info.SupportedModes.HasFlag(FetchMode.FirstBackfill), "少了「首次整段回补」");
         Assert.True(info.SupportedModes.HasFlag(FetchMode.Incremental), "日常那条不能丢");
-        Assert.True(info.SupportedModes.HasFlag(FetchMode.FillBacklog), "补待办那条不能丢");
+        // ⚠ FillBacklog **不该**再声明（2026-09-21）：它原来是为大宗交易的残缺日留的，
+        //    而大宗 09-17 已拆成独立任务。从那以后没有任何地方往这个 taskId 名下记待办，
+        //    留着只会让模式下拉多一个选了没用的选项。
+        Assert.False(info.SupportedModes.HasFlag(FetchMode.FillBacklog),
+                     "它已经没有任何待办来源了，不该再声明 FillBacklog");
     }
 
     /// <summary>

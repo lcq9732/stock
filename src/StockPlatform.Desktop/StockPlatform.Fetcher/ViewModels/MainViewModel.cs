@@ -66,6 +66,9 @@ public class MainViewModel : INotifyPropertyChanged
 
     private readonly StockPlatform.Tasks.BarSourceHolder? _barSourceHolder;
 
+    /// <summary>新框架的【板块成分股】读的板块通道，见 <see cref="StockPlatform.Tasks.BoardFetcherHolder"/>。</summary>
+    private readonly StockPlatform.Tasks.BoardFetcherHolder? _boardFetcherHolder;
+
     private readonly Services.WebView2JsonFetcher? _browserChannel;
 
     /// <summary>
@@ -370,7 +373,8 @@ public class MainViewModel : INotifyPropertyChanged
                          Services.WebView2JsonFetcher? browserChannel = null,
                          Func<IBoardFetcher>? recreateBoardFetcher = null,
                          FetchTaskRegistry? taskRegistry = null,
-                         StockPlatform.Tasks.BarSourceHolder? barSourceHolder = null)
+                         StockPlatform.Tasks.BarSourceHolder? barSourceHolder = null,
+                         StockPlatform.Tasks.BoardFetcherHolder? boardFetcherHolder = null)
     {
         _browserChannel = browserChannel;
         _recreateBoardFetcher = recreateBoardFetcher;
@@ -378,6 +382,7 @@ public class MainViewModel : INotifyPropertyChanged
         // K线源是运行期可变的（改配置 + 【重新读取配置】），而任务是启动时注册的——
         // 所以给任务的是这个可变持有者，由 SelectedSource 写回（见 BarSourceHolder）。
         _barSourceHolder = barSourceHolder;
+        _boardFetcherHolder = boardFetcherHolder;
         _orchestrator = orchestrator;
         // 「我还活着」的旁路（2026-09-08）：黑盒步骤（建索引那种一句 SQL 跑十几分钟的）
         // 靠它定时说一声，免得界面看着像死了。⚠ 只写日志，**不进 progress**——
@@ -502,10 +507,20 @@ public class MainViewModel : INotifyPropertyChanged
     /// （见 <see cref="FetchTaskCatalog.DefaultParamText"/>），特意清空的语义只能是"别抓"。
     /// 不出声地跳过会让人以为"抓了但没搜到"，所以这里必须留一句话。
     /// </summary>
+    /// <summary>
+    /// 只解析、**不写日志**（2026-09-21 拆出来）。新框架那条总分支会给**每一项**都填
+    /// <c>TaskRunArgs.Keywords</c>，用带日志的那个版本会让跟公告毫无关系的任务
+    /// （板块名单、成分股…）也各打一句"关键词格是空的"——实机验证时就是这么露出来的。
+    /// 空关键词该由【中标/订单公告】任务自己报（它知道那对自己意味着什么）。
+    /// </summary>
+    private static List<string> AnnouncementKeywordsOf(FetchPlanItem item)
+        => (item.KeywordsText ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    /// <summary>解析并在为空时说一声。给还在老路上的【拉取区间数据】用。</summary>
     private List<string> ParseAnnouncementKeywords(FetchPlanItem item)
     {
-        var words = (item.KeywordsText ?? "")
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        var words = AnnouncementKeywordsOf(item);
         if (words.Count == 0)
             Log($"【{item.Info.Name}】「关键词」格是空的，这一轮不抓中标/订单公告"
                 + "——要抓请在这一行的「关键词」格里填，例如：中标,签订合同。");
@@ -900,7 +915,10 @@ public class MainViewModel : INotifyPropertyChanged
         }
         else
         {
-            _orchestrator.ReplaceBoardFetcher(_recreateBoardFetcher());
+            var newFetcher = _recreateBoardFetcher();
+            _orchestrator.ReplaceBoardFetcher(newFetcher);
+            // 新框架的【板块成分股】读的是这个持有者，不换的话它还攥着旧通道（2026-09-21）
+            if (_boardFetcherHolder != null) _boardFetcherHolder.Current = newFetcher;
             // 换过通道之后，板块那两行的"数据源"列可能要从"东财行情"变成"本地文件"
             // （FetchTaskCatalog.BoardChannel 在造通道时已经跟着换了），重播一次绑定
             foreach (var vm in PlanItems) vm.RefreshStatus();
@@ -2272,7 +2290,11 @@ public class MainViewModel : INotifyPropertyChanged
                 Day: ParseOptionalDate(item.DateText) is { } d ? DateOnly.FromDateTime(d) : null,
                 Deadline: deadline,
                 // 「新标的补 N 年」（2026-09-21 随K线任务迁移加）。不吃这个参数的任务忽略它即可。
-                LookbackYears: ParseLookbackYears(item.LookbackYearsText));
+                LookbackYears: ParseLookbackYears(item.LookbackYearsText),
+                // 只有【中标/订单公告】吃这个。**按动作过滤**、而且用不写日志的那个解析器——
+                // 不然每一项都会打一句"关键词格是空的"（2026-09-21 实机验证时踩到）。
+                Keywords: item.Action == FetchActionId.StepAnnouncements
+                    ? AnnouncementKeywordsOf(item) : null);
             return _taskRegistry.RunAsync(item.Action, args, progress, ct);
         }
 
@@ -2290,11 +2312,11 @@ public class MainViewModel : INotifyPropertyChanged
                 return _orchestrator.RunFetchRawBarsAsync(
                     SelectedSource, progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(4)));
 
-            case FetchActionId.FetchEarningsSchedule:
-                return _orchestrator.RunFetchEarningsScheduleAsync(progress, ct);
+            // 【拉取财报预约日】的 case 删于 2026-09-21：迁去了
+            // StockPlatform.Tasks/EarningsScheduleTask，走上面那条 _taskRegistry 总分支。
 
-            case FetchActionId.FetchEarningsForecast:
-                return _orchestrator.RunFetchEarningsForecastAsync(progress, ct);
+            // 【拉取业绩预告/快报】的 case 删于 2026-09-21：迁去了
+            // StockPlatform.Tasks/EarningsForecastTask，走上面那条 _taskRegistry 总分支。
 
             // 【拉取龙虎榜席位】的 case 删于 2026-09-17：迁去了 StockPlatform.Tasks/LhbSeatTask，
             // 走上面那条 _taskRegistry 总分支。补残缺日仍走 orchestrator（PartialDayRepair），
@@ -2302,14 +2324,11 @@ public class MainViewModel : INotifyPropertyChanged
 
             // 只剩机构调研/限售解禁/股东增减持三张——【大宗交易】2026-09-17 拆成独立任务，
             // 走上面那条 _taskRegistry 总分支。
-            case FetchActionId.FetchMarketEvents:
-                // 「首次整段回补」＝不看水位线、从 2016 重取一遍。改了排序键之后要跑一次：
-                // 排序排不到主键末列时深分页会跨页遗漏，而遗漏那半没有任何告警。
-                return _orchestrator.RunFetchMarketEventsAsync(progress, ct,
-                    fullBackfill: item.EffectiveMode == FetchMode.FirstBackfill);
+            // 【拉取市场事件】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/MarketEventTask，
+            // 走上面那条 _taskRegistry 总分支（「首次整段回补」也在任务里）。
 
-            case FetchActionId.FetchStockBoardMap:
-                return _orchestrator.RunFetchStockBoardMapAsync(progress, ct);
+            // 【拉取个股行业与题材】的 case 删于 2026-09-21：迁去了
+            // StockPlatform.Tasks/StockBoardMapTask，走上面那条 _taskRegistry 总分支。
 
             case FetchActionId.RepairQfq:
                 // 一只票重抓十年约 4 秒（多页），按剩余时间估本轮能取几只，到点前收尾
@@ -2366,9 +2385,8 @@ public class MainViewModel : INotifyPropertyChanged
             // 【资金净流入】的 case 删于 2026-09-18：迁去了 StockPlatform.Tasks/NetInflowTask，
             // 走上面那条 _taskRegistry 总分支（三个模式都在任务里，三类待办也自己补）。
 
-            case FetchActionId.StepAnnouncements:
-                return _orchestrator.RunStepAnnouncementsAsync(
-                    ParseAnnouncementKeywords(item), progress, ct, specificDay: SpecificDayOf(item));
+            // 【中标/订单公告】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/AnnouncementTask，
+            // 走上面那条 _taskRegistry 总分支（关键词通过 TaskRunArgs.Keywords 传进去）。
 
             // 【指数日K】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/IndexBarTask，
             // 走上面那条 _taskRegistry 总分支（增量和整段回补都在任务里）。
@@ -2415,16 +2433,16 @@ public class MainViewModel : INotifyPropertyChanged
             case FetchActionId.StepEtfIndexMap:
                 return _orchestrator.RunStepEtfIndexMapAsync(progress, ct);
 
-            case FetchActionId.StepBoards:
-                // 已退役，老计划里还排着的话仍按原样跑（列表+成分股）；
-                // FetchPlan.MigrateRetired 会把它换成下面那两项。
-                return _orchestrator.RunStepBoardsOnlyAsync(progress, ct);
+            // 【板块行情与成分】（退役项）的 case 删于 2026-09-21：它的后半段（成分股）迁去了
+            // StockPlatform.Tasks/BoardMemberTask，老编排层那份实现跟着删了，所以这个分支
+            // 也不能留——跟 2026-09-08 删【拉取全部】那几个整包动作时同一条理由。
+            // 老计划里还排着它也不要紧：FetchPlan.MigrateRetired 加载时就换成那两个原子项了。
 
-            case FetchActionId.StepBoardList:
-                return _orchestrator.RunStepBoardListAsync(progress, ct);
+            // 【概念和行业板块】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/BoardListTask，
+            // 走上面那条 _taskRegistry 总分支。
 
-            case FetchActionId.StepBoardMembers:
-                return _orchestrator.RunStepBoardMembersAsync(progress, ct);
+            // 【板块成分股】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/BoardMemberTask，
+            // 走上面那条 _taskRegistry 总分支（一批＝一个板块）。
 
             case FetchActionId.StepReparseBankPdf:
                 // 纯 CPU（PDF 解析/OCR），必须推到线程池，理由同 BankRegulatory 那一项

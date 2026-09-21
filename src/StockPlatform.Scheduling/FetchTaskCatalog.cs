@@ -1242,7 +1242,7 @@ public static class FetchTaskCatalog
             + "滚动一年）。用在**改了排序键之后**：排序键定不出唯一序时深分页会跨页重复 + 遗漏，"
             + "而遗漏那半没有任何告警，只能整段重取一遍才补得回来。跑完记得改回「增量」。\n"
             + "⏳ 机构调研有时效：接口只保留滚动一年，漏掉的行会逐日滚出窗口，那之后再补也补不回来。",
-            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog | FetchMode.FirstBackfill,
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
             SupportsPartialRun: false,
             Sources: [DataSourceId.EmDataCenter]),
 

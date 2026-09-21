@@ -274,8 +274,13 @@ public class FetchTaskCatalogTests
         foreach (var id in new[]
                  {
                      FetchActionId.StepMargin, FetchActionId.StepLhb,
-                     FetchActionId.FetchLhbSeat, FetchActionId.FetchMarketEvents,
+                     FetchActionId.FetchLhbSeat,
                      FetchActionId.FetchMoneyFlowDetail,
+                     // ⚠ FetchMarketEvents 2026-09-21 从这个名单里去掉了：它原来拥有
+                     //    大宗交易那张日频表，而大宗 09-17 拆成了独立任务（RetryTaskIds.BlockTrade）。
+                     //    从那以后**没有任何地方**往 FetchMarketEvents 名下记待办
+                     //    （RetryTaskIds 里没有它、SqliteDailyTableAuditor 也没有它的 OwnerTaskId），
+                     //    那个 FillBacklog 声明只是让下拉框多一个选了没用的选项，同日一并删了。
                  })
             Assert.True(FetchTaskCatalog.Info(id).SupportedModes.HasFlag(FetchMode.FillBacklog),
                 $"{id} 少了 FillBacklog");
