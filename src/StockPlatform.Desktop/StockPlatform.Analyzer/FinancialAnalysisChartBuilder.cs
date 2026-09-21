@@ -30,8 +30,14 @@ public static class FinancialAnalysisChartBuilder
     /// <summary>非末图的底部留白（只够画轴线，不放标签）。</summary>
     public const double BottomMarginCompact = 4;
     /// <summary>末图的底部留白（要放报告期标签）。
-    /// 30 而不是 22：22 装不下 10 号字的 "19/06" 加刻度线，实测标签会被图的下边界裁掉半截。</summary>
-    public const double BottomMarginWithLabels = 30;
+    /// 标签是斜排的（见 <see cref="LabelAngle"/>），"19/06" 斜过来的垂直投影比平排高一截，
+    /// 40 是实测值：再小标签底下的字会被图的下边界裁掉。</summary>
+    public const double BottomMarginWithLabels = 40;
+
+    /// <summary>报告期标签的倾斜角（2026-09-19 用户要求）。8 期平排时 "19/0620/0621/06" 会连成
+    /// 一串读不出来，图又不能加宽；斜过来每个标签就各占一条斜线，互不相碰。
+    /// 负角 = 左低右高，尾字贴着自己那根刻度线。</summary>
+    private const double LabelAngle = -45;
 
     /// <summary>
     /// <paramref name="showXLabels"/>=false 时隐藏横轴标签——几张图上下叠放时**只有最下面那张
@@ -65,6 +71,7 @@ public static class FinancialAnalysisChartBuilder
             FontSize = 10,
             // 共用横坐标：上面几张图不画标签也不画刻度线，只有末图画（见 showXLabels）
             TickStyle = showXLabels ? TickStyle.Outside : TickStyle.None,
+            Angle = LabelAngle,
             // 下标 → 报告期。非整数刻度不给标签，避免 0.5 之类冒出来。
             LabelFormatter = v =>
             {
@@ -77,36 +84,6 @@ public static class FinancialAnalysisChartBuilder
             IsZoomEnabled = false,
             IsPanEnabled = false,
         });
-
-        // 报告期标签之间的分隔竖线（2026-09-19 用户反馈）。8 期 "20/06" 这样的标签在这个宽度下
-        // 首尾相接，读起来是 "20/0621/0622/06" 一长串。窗口不加宽，就只能给眼睛一个断点：
-        // 在相邻两期正中画一条短竖线，把标签行切成一期一格。
-        //
-        // 做法是再挂一条底轴，范围整体左移半格——它的整数刻度落在主轴的 i-0.5 处，正好是两期中间
-        // （两条轴映射到同一块绘图区，范围宽度相同、起点差 0.5，屏幕位置就差半格）。这条轴不画
-        // 标签也不画轴线，只借它的刻度线当分隔符；刻度是 Outside，画在绘图区**外侧**的标签行里，
-        // 不会穿过上面的柱子和折线。序列默认绑第一条 Bottom 轴（上面那条），不会挂到这条上。
-        if (showXLabels)
-            model.Axes.Add(new LinearAxis
-            {
-                Position = AxisPosition.Bottom,
-                Minimum = -1.1,
-                Maximum = series.Points.Count - 0.9,
-                MajorStep = 1,
-                MinorStep = 1,
-                MajorGridlineStyle = LineStyle.None,
-                MinorGridlineStyle = LineStyle.None,
-                MinorTickSize = 0,
-                // 标签行总共 BottomMarginWithLabels 那么高，竖线贯穿它、底下留一点余量
-                MajorTickSize = BottomMarginWithLabels - 4,
-                TickStyle = TickStyle.Outside,
-                AxislineStyle = LineStyle.None,
-                // 分隔线是辅助线，比文字浅一档（深色主题下 ChartTheme 会换成它那套刻度色）
-                TicklineColor = OxyColor.FromRgb(0xC8, 0xC8, 0xC8),
-                LabelFormatter = _ => "",
-                IsZoomEnabled = false,
-                IsPanEnabled = false,
-            });
 
         model.Axes.Add(new LinearAxis
         {

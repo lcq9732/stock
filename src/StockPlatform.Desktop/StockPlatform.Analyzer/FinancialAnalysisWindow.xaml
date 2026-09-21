@@ -151,25 +151,60 @@
                     <ItemsControl x:Name="SectionList">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <StackPanel Margin="0,0,0,14">
+                                <!-- Grid.IsSharedSizeScope 放在**节**上而不是整份列表上（2026-09-19）：
+                                     项目名列改成 Auto 之后要靠它把同一节各行对齐，否则每行各宽各的、
+                                     数值参差不齐。按节而不是按全表共享，是因为银行体检表的项目名特别长
+                                     （"房地产/城投敞口、区域集中度、前十大客户占比"），全表共享的话
+                                     它会把其它五节的项目名列一起撑宽。 -->
+                                <StackPanel Margin="0,0,0,14" Grid.IsSharedSizeScope="True">
                                     <TextBlock Text="{Binding Title}" FontSize="14" FontWeight="Bold"
                                                Foreground="{DynamicResource Theme.Accent.Deep}" Margin="0,0,0,4" />
                                     <Border BorderBrush="{DynamicResource Theme.Border.Soft}" BorderThickness="0,1,0,0">
                                         <ItemsControl ItemsSource="{Binding Lines}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <!-- 七列。首列"条目号"和第六列"参考值"只有银行体检表用得上
-                                                         （2026-08-29）；其它节这两个绑定为空、TextBlock 走 Collapsed，
-                                                         Auto 列宽收缩到 0，所以原有五节的排版跟以前一模一样。 -->
-                                                    <Grid Margin="0,3">
+                                                    <!-- 一行数据 = 上下两块（2026-09-19 改）：
+                                                         上面是原来那张七列 Grid，下面**只在说明很长时**才出现的整行说明。
+                                                         为什么要拆：行高由最窄的那一列决定，而说明列只有 ~215px；一句
+                                                         六十字的说明在那里要换四五行，左边"项目名/数值/变化"三列就跟着
+                                                         空转四五行。挪到下面那一行，宽度变成 ~600px，同样的字数少占一半
+                                                         高度。短说明**不挪**（见 AnalysisLineVm.NoteInlineMaxChars）：
+                                                         挪下去要多占一个基线，反而更高。 -->
+                                                    <StackPanel Margin="0,3">
+                                                    <!-- 六列。首列"条目号"只有银行体检表用得上（2026-08-29），其它节绑定为空、
+                                                         TextBlock 走 Collapsed，Auto 列宽收缩到 0。
+                                                         最后一列同时承载「参考值」和「短说明」——这两者**互斥**：有参考值的行
+                                                         说明一律沉到下面那一行（见 AnalysisLineVm.NoteGoesBelow），而普通五节
+                                                         根本没有参考值。合成一列是 2026-09-19 改的，原先各占一列，两个都是 Auto，
+                                                         放不下时 Grid 不肯压缩 Auto 列，参考值就整段溢出到右边界外被裁掉
+                                                         （银行表第 02、03 条实测）。改成 * 之后列会被压缩，TextWrapping 就生效。 -->
+                                                    <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto" />
                                                             <ColumnDefinition Width="22" />
-                                                            <ColumnDefinition Width="150" />
+                                                            <!-- 原先是死宽 150：短名字（"PB"、"年化 ROE"）后面白空一大截，
+                                                                 把数值往右推、说明列跟着变窄。改成 Auto + SharedSizeGroup：
+                                                                 宽度 = 本节最宽的那个项目名（TextBlock 上有 MaxWidth 兜底），
+                                                                 右边留 5px 空隙，省下的宽度都归后面的列。 -->
+                                                            <ColumnDefinition Width="Auto" SharedSizeGroup="AnalysisLabel" />
+                                                            <!-- ⚠ 闸设在 TextBlock 的 MaxWidth 上，不是这里（2026-09-19 踩过）：
+                                                                 Auto 列在 Measure 阶段给子元素的是**无限宽度**，TextBlock
+                                                                 已经按自然宽度量好了，列宽再被 ColumnDefinition.MaxWidth
+                                                                 限住也不会重新换行——只会因为右对齐向左溢出，压在项目名上。 -->
+                                                            <!-- ⚠ 这一列**不要**加 SharedSizeGroup（2026-09-19 试过又撤掉）：
+                                                                 共享宽度会被本节最宽的那个"数值"绑架，而银行体检表第 09 条把一整句
+                                                                 "ROE ↓　成本收入比 ↓改善…"放在数值位上（限宽后 154px），于是十二条
+                                                                 的数值列全被撑成 154，反过来把参考值挤得折行。实际数据里数值都不超过
+                                                                 92，MinWidth 就够让右边界看齐。 -->
                                                             <ColumnDefinition Width="Auto" MinWidth="92" />
-                                                            <ColumnDefinition Width="Auto" MinWidth="130" />
+                                                            <!-- 纯 Auto，既不留死宽也不跨行共享（2026-09-19 定）：
+                                                                 后面那一列是**针对本行的说明**，跟别的行没有关系，不需要对齐；
+                                                                 让它紧跟在变化值后面，短的行就不会白空一大片。
+                                                                 需要对齐的是数值列——那是一组可比的数字，看齐了才好扫。
+                                                                 硬闸同样在 TextBlock 的 MaxWidth 上，见上面数值列的说明。 -->
                                                             <ColumnDefinition Width="Auto" />
-                                                            <ColumnDefinition Width="*" />
+                                                            <!-- 参考值 / 短说明共用这一列，必须是 * 不能是 Auto，理由见上。 -->
+                                                            <ColumnDefinition Width="*" MinWidth="90" />
                                                         </Grid.ColumnDefinitions>
                                                         <TextBlock Grid.Column="0" Text="{Binding Clause}"
                                                                    Visibility="{Binding ClauseVisibility}"
@@ -178,26 +213,58 @@
                                                         <TextBlock Grid.Column="1" Text="{Binding Mark}"
                                                                    Foreground="{Binding Brush}" FontWeight="Bold"
                                                                    FontFamily="Segoe UI Symbol" />
+                                                        <!-- MaxWidth 130 —— 十个汉字正好不折（2026-09-19 来回试出来的落点）。
+                                                             这一列按本节最宽的项目名取宽，所以银行体检表里"房地产/城投敞口、
+                                                             区域集中度、前十大客户占比"那种二十来字的名字必须封顶，否则整列
+                                                             250px 起、同节的"PB""ROE（年化）"后面白空一大截。
+                                                             ⚠ **别再往下压**：试过 105，"核心一级资本充足率""信用减值损失（倒推）"
+                                                             "单一最大客户贷款比例"这些十来个字的名字全开始折行，用户否掉了。
+                                                             短名字后面那截空隙在"数值列要对齐成一条线"的前提下消不掉——想再紧凑
+                                                             只能让项目名列不对齐、数值紧跟每行名字，那样数值列就参差了。 -->
                                                         <TextBlock Grid.Column="2" Text="{Binding Label}"
-                                                                   TextWrapping="Wrap" />
+                                                                   TextWrapping="Wrap" MaxWidth="130"
+                                                                   Margin="0,0,5,0" />
+                                                        <!-- MaxWidth：银行体检表第 09 条把一整句"ROE ↓　成本收入比 ↓改善…"
+                                                             放在数值位上，不封顶它能把这一列撑到 259px、挤垮后面所有列。 -->
                                                         <TextBlock Grid.Column="3" Text="{Binding Value}"
+                                                                   TextWrapping="Wrap" MaxWidth="160"
                                                                    FontFamily="Consolas" FontSize="13"
                                                                    HorizontalAlignment="Right" Margin="0,0,10,0"
                                                                    Foreground="{Binding Brush}"
                                                                    FontWeight="{Binding Weight}" />
+                                                        <!-- MaxWidth 260（2026-09-19 从 180 放宽）：变化值是"同比 X　较上期末 Y"
+                                                             这样一句完整对照，断在中间最难读，260 够放下最长的那种
+                                                             （"同比 +1094.56 亿　较上期末 +260.99 亿"实测约 270px 也只折一次）。
+                                                             当初设 180 是怕它撑开整列把说明挤没——那个风险现在由说明列自己的
+                                                             MinWidth 90 兜住了，不会再出现被压成一字一行的竖排。 -->
                                                         <TextBlock Grid.Column="4" Text="{Binding Change}"
+                                                                   TextWrapping="Wrap" MaxWidth="260"
                                                                    FontFamily="Consolas" FontSize="12"
-                                                                   Foreground="{DynamicResource Theme.Foreground.Subtle}" Margin="0,0,10,0" />
-                                                        <!-- 参考值：体检报告里的"正常范围"那一列 -->
-                                                        <TextBlock Grid.Column="5" Text="{Binding Reference}"
-                                                                   Visibility="{Binding ReferenceVisibility}"
-                                                                   MaxWidth="230" TextWrapping="Wrap"
-                                                                   FontSize="11.5" Foreground="{DynamicResource Theme.Accent.Link}"
-                                                                   Margin="0,0,12,0" />
-                                                        <TextBlock Grid.Column="6" Text="{Binding Note}"
-                                                                   TextWrapping="Wrap" FontSize="12"
-                                                                   Foreground="{DynamicResource Theme.Foreground.Subtle}" />
+                                                                   Foreground="{DynamicResource Theme.Foreground.Subtle}" Margin="0,0,14,0" />
+                                                        <!-- 参考值（体检报告里的"正常范围"）和短说明共用这一格，两者互斥，
+                                                             实际只会显示其中一个；不设 MaxWidth，让 * 列自己决定宽度。 -->
+                                                        <StackPanel Grid.Column="5">
+                                                            <TextBlock Text="{Binding Reference}"
+                                                                       Visibility="{Binding ReferenceVisibility}"
+                                                                       TextWrapping="Wrap"
+                                                                       FontSize="11.5" Foreground="{DynamicResource Theme.Accent.Link}" />
+                                                            <!-- 只放短说明；长的走下面那条整行（NoteInline / NoteBlock 二选一） -->
+                                                            <TextBlock Text="{Binding NoteInline}"
+                                                                       Visibility="{Binding NoteInlineVisibility}"
+                                                                       TextWrapping="Wrap" FontSize="12"
+                                                                       Foreground="{DynamicResource Theme.Foreground.Subtle}" />
+                                                        </StackPanel>
                                                     </Grid>
+                                                    <!-- 长说明：跨整列宽。34 = 标记列 22 + 一个汉字 12，也就是**相对项目名缩进
+                                                         一个字**：齐头会看起来像下一个项目，缩一个字就够读出"它属于上面那一行"，
+                                                         再多缩就是白丢宽度、让长说明多换行。子项（"└ …"）的说明也用这个固定值，
+                                                         不跟着它自己那层缩进再缩一次。
+                                                         说明为空或够短时 Collapsed，完全不占高度。 -->
+                                                    <TextBlock Text="{Binding NoteBlock}"
+                                                               Visibility="{Binding NoteBlockVisibility}"
+                                                               TextWrapping="Wrap" FontSize="12" Margin="34,2,0,0"
+                                                               Foreground="{DynamicResource Theme.Foreground.Subtle}" />
+                                                    </StackPanel>
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>

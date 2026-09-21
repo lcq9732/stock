@@ -26,6 +26,47 @@ public class AnalysisLineVm
         Reference.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ClauseVisibility =>
         Clause.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>
+    /// 说明短到能跟数值挤在同一行的上限（2026-09-19）。
+    ///
+    /// 30 是按"高度不吃亏"算出来的，不是拍的。项目名列和数值列改成按内容收缩之后，说明这一格
+    /// 实测宽 236~298px（12 号字，窄的那头一行放得下 20 个汉字）：
+    ///   · 留在同一行：<c>ceil(N / 20)</c> 行
+    ///   · 沉到下面那一行：整行宽约 590px、一行 49 个字，总共 <c>1 + ceil(N / 49)</c> 行
+    /// N=30 时两边都是 2 行、打平；要到 40 个字以上沉下去才真的更矮。打平就留在同一行——
+    /// 信息在数值右手边，视线不用往下跳。
+    ///
+    /// 超过 30 字才沉下去：那里宽度是这一格的两倍，同样的字数少占一半高度，左边几列也不会
+    /// 被一句长说明拖着空转（银行体检表最严重的一条原先 1900px 高）。
+    /// **不能无条件都换行**——短说明挪下去要多占一个基线，实测 601088 总高反而增加。
+    /// </summary>
+    private const int NoteInlineMaxChars = 30;
+
+    /// <summary>
+    /// 这一行的说明该不该沉到下面那一行。
+    ///
+    /// 两个条件任意一个成立就沉：
+    ///   · 说明本身超过 <see cref="NoteInlineMaxChars"/> 个字；
+    ///   · **这一行有参考值**——那是银行体检表，参考值列吃掉两百多像素，剩给说明的只有六七个字宽，
+    ///     十八个字就要排三行，而左边的条目号、标记、项目名全吊在第一行顶上、下面空两行。
+    ///     体检表的说明又基本都是整句解释，索性一律沉下去。
+    /// </summary>
+    private bool NoteGoesBelow => Reference.Length > 0 || Note.Length > NoteInlineMaxChars;
+
+    /// <summary>短说明：留在最右那一列，跟数值同一行。</summary>
+    public string NoteInline => NoteGoesBelow ? "" : Note;
+
+    /// <summary>长说明：整行下面另起一行、跨整列宽显示。</summary>
+    public string NoteBlock => NoteGoesBelow ? Note : "";
+
+    public Visibility NoteBlockVisibility =>
+        NoteBlock.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>空的 TextBlock 照样占一行文字的高度，所以不显示时必须 Collapsed，
+    /// 否则每一行都会凭空高出一行（2026-09-19 踩过）。</summary>
+    public Visibility NoteInlineVisibility =>
+        NoteInline.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 }
 
 /// <summary>
@@ -191,8 +232,9 @@ public partial class FinancialAnalysisWindow : Window
             return new TrendChartVm
             {
                 Model = FinancialAnalysisChartBuilder.Build(t, showXLabels: last),
-                // 末图要多容纳 30px 的标签区（BottomMarginWithLabels），所以比其它图高一截
-                Height = last ? 165 : 128,
+                // 末图要多容纳底部那条标签区，所以比其它图高一截。写成"绘图区高 + 标签区高"，
+                // 标签区改高（比如 2026-09-19 标签改斜排）时这里自动跟着走，不用再对一遍数字。
+                Height = last ? 135 + FinancialAnalysisChartBuilder.BottomMarginWithLabels : 128,
             };
         }).ToList();
 

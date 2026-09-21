@@ -801,7 +801,9 @@ public class FinancialAnalyzer
                 lines.Add(new AnalysisLine
                 {
                     Label = "PB", Value = $"{price.Value / bps:F2}",
-                    Change = $"每股净资产 {bps:F2} 元" + shareNote,
+                    // 口径由下面的 Note 说明，变化列不再重复带 shareNote（2026-09-19）：
+                    // 那一列是 Auto 宽又不换行，带上它就要占掉三百多像素，把说明列挤没
+                    Change = $"每股净资产 {bps:F2} 元",
                     Verdict = Verdict.Neutral,
                     Note = shareIsFallback
                         ? "股本用报表的实收资本，不是流通市值倒推"
@@ -818,26 +820,33 @@ public class FinancialAnalyzer
                 double supported = BaseValuationPe * ttm.Value;
                 double earnedPct = supported / cap * 100;
                 var mkt = peStats ?? MarketPeStats.Builtin;
+                // 行业在前、全市场在后（2026-09-14）。两句答的不是一个问题：
+                // 行业分位答"同行里高不高"，全市场分位答"绝对位置在哪"。
+                // 只留行业的话会丢掉"银行整体就便宜"这个信息——银行 6.3 的行业中位
+                // 本身就是市场对整个行业的定价。
+                string peerText = industryPe is { } ind
+                    ? $"{ind.Describe(pe)}　·　全市场中位 {mkt.Median:F1} 倍"
+                    : $"全市场中位 {mkt.Median:F1} 倍　{mkt.DescribePosition(pe)}";
+                string pricedInText = earnedPct >= 100
+                    ? $"已赚到的利润按 {BaseValuationPe:F0} 倍能撑 {supported / Yi:F0} 亿，"
+                      + $"超过市值 {cap / Yi:F0} 亿 —— 现价没有为未来付钱"
+                    : $"市值 {cap / Yi:F0} 亿里，已赚到的利润按 {BaseValuationPe:F0} 倍能撑 "
+                      + $"{supported / Yi:F0} 亿，其余 {100 - earnedPct:F0}% 是对未来的定价";
                 lines.Add(new AnalysisLine
                 {
                     Label = "PE (TTM)", Value = $"{pe:F1}",
-                    Change = $"TTM 归母净利 {ttm.Value / Yi:F2} 亿" + shareNote,
+                    Change = $"TTM 归母净利 {ttm.Value / Yi:F2} 亿",
                     // ⚠ 只能是 Neutral。FactorLab 十分组实测 D1（最贵那组）年化 +10.6%、
                     //   是十组里最高的，曲线呈 U 型不单调 —— "贵"并不预示跌。
                     //   界面按 Verdict 上色，标黄标红就是在暗示一个数据不支持的结论。
                     Verdict = Verdict.Neutral,
-                    // 行业在前、全市场在后（2026-09-14）。两句答的不是一个问题：
-                    // 行业分位答"同行里高不高"，全市场分位答"绝对位置在哪"。
-                    // 只留行业的话会丢掉"银行整体就便宜"这个信息——银行 6.3 的行业中位
-                    // 本身就是市场对整个行业的定价。
-                    Reference = industryPe is { } ind
-                        ? $"{ind.Describe(pe)}　·　全市场中位 {mkt.Median:F1} 倍"
-                        : $"全市场中位 {mkt.Median:F1} 倍　{mkt.DescribePosition(pe)}",
-                    Note = earnedPct >= 100
-                        ? $"已赚到的利润按 {BaseValuationPe:F0} 倍能撑 {supported / Yi:F0} 亿，"
-                          + $"超过市值 {cap / Yi:F0} 亿 —— 现价没有为未来付钱"
-                        : $"市值 {cap / Yi:F0} 亿里，已赚到的利润按 {BaseValuationPe:F0} 倍能撑 "
-                          + $"{supported / Yi:F0} 亿，其余 {100 - earnedPct:F0}% 是对未来的定价",
+                    // ⚠ 分位不走 Reference 那一列（2026-09-19 改）。那一列是给银行体检表的
+                    //   「正常范围」设计的，全表原先只有银行和这一行用得上。七列在第②列的
+                    //   默认宽度（实测约 620px）里已经**刚好排满**，这一行再多一列有内容，
+                    //   Auto 列不肯让，最后那个 * 的说明列就只分到十几像素——四十个字一字一行，
+                    //   把整行撑成 760px 高，看上去就是财报那一列中间一大片空白（实测，
+                    //   601088 上复现）。分位和"贵在哪"讲的本来就是同一件事，并成一句。
+                    Note = $"{peerText}　——　{pricedInText}{shareNote}",
                 });
             }
             if (dps is > 0)
