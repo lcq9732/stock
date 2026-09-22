@@ -275,13 +275,98 @@ public class MoneyFlowSnapshotPagingTests
     }
 
     [Fact]
-    public async Task 中间某页解析不了要报错而不是当成结束()
+    public async Task 中间某页解析不了要记成缺页而不是当成结束()
     {
         // 被限流截断的那一页长这样。当成"翻到头了"的话，这一天就只剩前半个市场，
         // 而且没有任何地方会提示。
+        //
+        // 2026-09-21 改：不再整轮抛异常（那样连已经拿到的页也一起扔了，而东财一轮只放过
+        // 约 16 页，等于永远攒不满）。改成把拿到的留下、把没拿到的页号记进 MissingPages，
+        // 下一轮只补缺的。**"不能当成翻完了"这一条没有放松**——Complete 必须是 false。
         var handler = new PagedHandler(pn => pn == 1 ? Page(500, Row("000001")) : "<html>502</html>");
 
-        await Assert.ThrowsAsync<RateLimitedException>(() => NewProvider(handler).FetchAllAsync());
+        var snap = await NewProvider(handler).FetchAllAsync();
+
+        Assert.False(snap.Complete);                       // 没抓完，绝不能报成抓完了
+        Assert.Single(snap.Rows);                          // 第 1 页拿到的照样留着
+        Assert.Equal([1], snap.RowsByPage.Keys);
+        Assert.DoesNotContain(1, snap.MissingPages);       // 拿到的页不该出现在缺页清单里
+        Assert.Contains(2, snap.MissingPages);
+        // total=500 → 5 页。缺页清单要覆盖到真实页数为止，既不能少（漏补）
+        // 也不能按 200 页的保险丝算（凭空多出 195 个根本不存在的页）。
+        Assert.Equal([2, 3, 4, 5], snap.MissingPages);
+    }
+
+    [Fact]
+    public async Task 连着两页没拿到就收手_不再拿剩下的页去喂封禁()
+    {
+        // 东财被切之后是整条出口被切，不是这一页碰巧不行。接着往下打只会白扔请求、
+        // 还可能把封禁拖得更长——所以连撞两页就收手，剩下的页记进缺页清单留给下一轮。
+        var asked = new List<int>();
+        var handler = new PagedHandler(pn =>
+        {
+            asked.Add(pn);
+            return pn == 1 ? Page(1000, Row("000001")) : "<html>502</html>";
+        });
+
+        var snap = await NewProvider(handler).FetchAllAsync();
+
+        Assert.Equal([1, 2, 3], asked);                    // 第 2、3 页撞了就停，不会一路打到第 10 页
+        Assert.Equal(Enumerable.Range(2, 9), snap.MissingPages);   // 2~10 全记进缺页
+    }
+
+    [Fact]
+    public async Task 上一轮抓过的页这一轮不再发请求()
+    {
+        // 跨轮续抓的核心：东财一轮只放过约 16 页，重抓已有的页就是白扔配额。
+        var asked = new List<int>();
+        var handler = new PagedHandler(pn =>
+        {
+            asked.Add(pn);
+            return Page(500, Row($"00000{pn}"));
+        });
+
+        var snap = await NewProvider(handler).FetchAllAsync(pagesAlreadyHave: _ => [1, 2, 3]);
+
+        // 第 1 页一定会抓——它是交易日探针，"已经抓过哪些页"只有知道交易日之后才问得了。
+        // 2、3 两页被跳过，这是省下来的配额。
+        Assert.Equal([1, 4, 5], asked);
+        Assert.Equal(3, snap.SkippedPages);
+        Assert.True(snap.Complete);                        // 剩下的都拿到了＝这天齐了
+    }
+
+    [Fact]
+    public async Task 第一页就被切时_不要编出两百个缺页()
+    {
+        // total 要等第一页回来才知道。第一页就被切的话页数还是未知的，这时把"剩下的页"
+        // 按保险丝的 200 页编出来，日志上就成了"缺 200 页"——实际全市场只有 60 页。
+        // 2026-09-22 00:15 真跑出来过一次。这一轮本来就一页没拿到，缺多少下一轮问服务端就知道。
+        var handler = new PagedHandler(_ => "<html>502</html>");
+
+        var snap = await NewProvider(handler).FetchAllAsync();
+
+        Assert.Empty(snap.Rows);
+        Assert.False(snap.Complete);
+        Assert.Equal([1, 2], snap.MissingPages);           // 只有真试过的那两页
+    }
+
+    [Fact]
+    public async Task 已抓页按数据自己报的交易日问_不是按今天()
+    {
+        // 交易日只有数据自己说了算（f124）。曾经想先按本地交易日历问一次——
+        // 日历一旦滞后（还没更新到今天），读到的就是昨天的进度，于是今天那些根本没抓过的页
+        // 被当成"抓过了"跳掉，静默丢一整片数据。所以回调的入参必须是数据里的那一天。
+        var askedFor = new List<DateTime>();
+        var handler = new PagedHandler(pn => Page(200, Row($"00000{pn}")));
+
+        await NewProvider(handler).FetchAllAsync(pagesAlreadyHave: day =>
+        {
+            askedFor.Add(day);
+            return [];
+        });
+
+        // Row() 用的那个时间戳是 2026-09-04 15:34（见文件头的真实报文）
+        Assert.Equal([new DateTime(2026, 9, 4)], askedFor);
     }
 }
 

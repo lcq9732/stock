@@ -60,6 +60,48 @@ public class MoneyFlowSnapshotTaskTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// 离线模拟的东财：全市场 <paramref name="totalStocks"/> 只、每页 100，
+    /// **每轮只放过 <paramref name="quotaPerRound"/> 页**，之后一律切连接（空回复）。
+    ///
+    /// 这个配额就是 2026-09-21 晚上实测出来的形状：HttpClient 和浏览器通道都断在第 16~17 页。
+    /// 拿它跑产品代码的整条路（任务→provider→仓储→真 SQLite），是为了回答一个光看代码
+    /// 看不出来的问题：**在这种配额下，这天到底攒不攒得满**。原来的实现答案是"永远攒不满"
+    /// （每轮抓 16 页、整轮丢弃），而那个缺陷在任何单轮测试里都看不见。
+    /// </summary>
+    private sealed class QuotaHandler(DateTime quoteTime, int totalStocks, int quotaPerRound)
+        : HttpMessageHandler
+    {
+        private int _thisRound;
+
+        /// <summary>这一轮问过哪些页（按顺序）。下一轮开始前调 <see cref="NextRound"/> 清零。</summary>
+        public List<int> AskedThisRound { get; } = [];
+        public List<int> AskedEver { get; } = [];
+
+        public void NextRound() { _thisRound = 0; AskedThisRound.Clear(); }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var pn = int.Parse(System.Text.RegularExpressions.Regex
+                .Match(request.RequestUri!.Query, @"pn=(\d+)").Groups[1].Value);
+            AskedThisRound.Add(pn);
+            AskedEver.Add(pn);
+
+            if (++_thisRound > quotaPerRound)
+                throw new HttpRequestException("The response ended prematurely.");   // 被切就长这样
+
+            // 这一页该有哪些票：代码按页切，跟真接口 fid=f12 升序一致
+            var from = (pn - 1) * 100;
+            var codes = Enumerable.Range(from, Math.Min(100, Math.Max(0, totalStocks - from)))
+                                  .Select(i => i.ToString("D6")).ToArray();
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(Page(quoteTime, totalStocks, codes)),
+            });
+        }
+    }
+
     /// <summary>f124 是行情时间戳（Unix 秒，本地时区）——"收盘了没有"全看它。</summary>
     private static long Stamp(DateTime local) =>
         (long)(local.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
@@ -79,7 +121,7 @@ public class MoneyFlowSnapshotTaskTests : IDisposable
     /// <summary>空页：provider 据此收工。</summary>
     private const string EmptyPage = "{\"rc\":0,\"data\":{\"total\":0,\"diff\":[]}}";
 
-    private static EastMoneyMoneyFlowSnapshotProvider NewProvider(PageHandler handler) =>
+    private static EastMoneyMoneyFlowSnapshotProvider NewProvider(HttpMessageHandler handler) =>
         new(new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.Zero,
                             batchSize: 10_000),
             new HttpClient(handler));
@@ -334,5 +376,91 @@ public class MoneyFlowSnapshotTaskTests : IDisposable
         Assert.Contains(DataSourceId.EmPush2Delay, snap);
         Assert.Contains(DataSourceId.EmPush2His, back);
         Assert.Empty(snap.Intersect(back));
+    }
+
+    // ═══════════════ 限流下的跨轮续抓：离线模拟，不发一个真请求 ═══════════════
+
+    /// <summary>
+    /// 全市场 5917 只（＝2026-09-21 当天服务端自报的数）、每轮只放过 16 页，
+    /// 反复跑到抓齐为止——这是 09-21 晚上那个配额的原样复刻。
+    ///
+    /// 原来的实现在这个场景下**永远跑不完**：每轮抓 16 页、任一页失败就整轮不落库。
+    /// 这条用例就是拿来钉死"跑得完"的。
+    /// </summary>
+    [Fact]
+    public async Task 每轮只放过16页时_反复跑能把一天攒齐()
+    {
+        const int total = 5917, pages = 60, quota = 16;
+        var handler = new QuotaHandler(AfterClose, total, quota);
+        var provider = NewProvider(handler);
+        var day = AfterClose.Date;
+
+        var rounds = 0;
+        while (rounds < 12)
+        {
+            rounds++;
+            handler.NextRound();
+            var task = new MoneyFlowSnapshotTask(_repo, provider);
+            await task.RunAsync(new TaskRunArgs(), CancellationToken.None);
+            if (_repo.GetSnapshotPages(day).Count >= pages) break;
+        }
+
+        // 60 页 / 每轮 16 页，其中第 1 页每轮都要重抓（交易日探针）→ 每轮净进 15 页。
+        // 所以 5 轮以内必须抓完；跑到 12 轮还不完就是续抓没生效。
+        Assert.True(rounds <= 5, $"用了 {rounds} 轮才抓完，续抓没起作用");
+        Assert.Equal(pages, _repo.GetSnapshotPages(day).Count);
+        Assert.Equal(total, _repo.Count());               // 全市场一只不少地落了库
+    }
+
+    [Fact]
+    public async Task 第二轮只问上一轮没拿到的页()
+    {
+        var handler = new QuotaHandler(AfterClose, totalStocks: 5917, quotaPerRound: 16);
+        var provider = NewProvider(handler);
+
+        await new MoneyFlowSnapshotTask(_repo, provider).RunAsync(new TaskRunArgs(), CancellationToken.None);
+        var firstRound = handler.AskedThisRound.ToList();
+
+        handler.NextRound();
+        await new MoneyFlowSnapshotTask(_repo, provider).RunAsync(new TaskRunArgs(), CancellationToken.None);
+        var secondRound = handler.AskedThisRound.ToList();
+
+        // 按页号去重再比：限流器对失败的页自己会重试两次（2s/10s），同一页出现三遍是它的事，
+        // 这条用例问的是"问了哪些页"，不是"发了几个请求"。
+        var firstPages = firstRound.Distinct().ToList();
+        var secondPages = secondRound.Distinct().ToList();
+
+        // 第一轮：1~16 拿到，17、18 连撞两页收手（不会拿剩下的 42 页去喂封禁）
+        Assert.Equal(Enumerable.Range(1, 18), firstPages);
+
+        // 第二轮：第 1 页照抓（交易日探针），2~16 一个都不再问，直接从 17 接着来
+        Assert.Equal(1, secondPages[0]);
+        Assert.DoesNotContain(secondPages.Skip(1), p => p is >= 2 and <= 16);
+        Assert.Equal(17, secondPages[1]);
+    }
+
+    [Fact]
+    public async Task 抓到一半被切_拿到的那部分照样落库()
+    {
+        // 这是整件事的要害。原来一页失败就整轮抛异常、一行都不写，于是每轮 16 页全白抓。
+        var handler = new QuotaHandler(AfterClose, totalStocks: 5917, quotaPerRound: 16);
+
+        var (result, _) = (await RunAsync2(handler));
+
+        Assert.Equal(1600, _repo.Count());                       // 16 页 × 100 只，实实在在进库了
+        Assert.Equal(16, _repo.GetSnapshotPages(AfterClose.Date).Count);
+        // 没抓齐还是要如实报——只是不再靠抛异常来报
+        Assert.NotEqual(TaskState.Completed, result.State);
+    }
+
+    /// <summary>跟 <c>RunAsync</c> 一样，只是收 <see cref="QuotaHandler"/>。</summary>
+    private async Task<(TaskRunResult Result, List<TaskProgress> Progress)> RunAsync2(QuotaHandler handler)
+    {
+        var task = new MoneyFlowSnapshotTask(_repo, NewProvider(handler),
+                                             new SqliteMoneyFlowDayAudit(_paths.CurrentDb));
+        var seen = new List<TaskProgress>();
+        task.OnProgress += p => seen.Add(p);
+        var result = await task.RunAsync(new TaskRunArgs(), CancellationToken.None);
+        return (result, seen);
     }
 }

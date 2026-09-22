@@ -651,6 +651,27 @@ public static class SqliteSchema
                 PRIMARY KEY (code, trade_date)
             );
 
+            -- 全市场快照「这天的第几页抓到了」（2026-09-21）。
+            --
+            -- 为什么需要单独记页：快照那条通道（push2delay 的 clist）是**按页**取的，一页 100 只，
+            -- 全市场约 60 页；而上面那张表存的是**股票行**，从行反推不出"第 37 页抓过没有"——
+            -- 停牌股整行不写库，页边界因此对不齐。
+            --
+            -- 为什么非要跨轮记住不可：东财的配额实测**一轮只放过约 16 页**，之后整条出口被切。
+            -- 原来的做法是"一批＝一整天，任一页失败就整轮不落库"，在这个配额下的结果是
+            -- 每轮抓 16 页、每轮全扔掉，**永远攒不满**（2026-09-21 晚上就是这么卡住的）。
+            -- 记下已抓的页，下一轮只补缺的，四五轮就能补齐。
+            --
+            -- 这张表只是**抓取进度**，不是数据本身：删掉它顶多让下一轮重抓几页
+            -- （NetInflowDetail 按主键 upsert，重抓不产生脏数据）。
+            CREATE TABLE IF NOT EXISTS MoneyFlowSnapshotPage (
+                trade_date TEXT NOT NULL,
+                page_no INTEGER NOT NULL,
+                rows_got INTEGER,               -- 这一页拿到几行（不含停牌），对账用
+                fetched_at TEXT,
+                PRIMARY KEY (trade_date, page_no)
+            );
+
             -- ─── 市场事件四表（2026-09-03，东财 datacenter）。本地此前全都没有 ───
             --
             -- 主键都带了"同一天可能有多条"的区分列。这是从龙虎榜席位表那次事故来的教训：

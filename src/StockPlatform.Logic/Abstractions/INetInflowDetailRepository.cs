@@ -49,4 +49,20 @@ public interface INetInflowDetailRepository
     int CountCodes();
 
     List<NetInflowDetail> Query(string code, int limit = 120);
+
+    /// <summary>
+    /// 全市场快照这一天**已经抓到手的页号**（2026-09-21）。
+    ///
+    /// 东财的配额实测一轮只放过约 16 页，而全市场约 60 页。原来"任一页失败就整轮不落库"的
+    /// 做法在这个配额下永远攒不满——每轮抓 16 页、每轮全扔。记住已抓的页，下一轮只补缺的。
+    ///
+    /// 为什么不能从 <c>NetInflowDetail</c> 的行反推页号：停牌股整行不写库，页边界对不齐。
+    /// </summary>
+    HashSet<int> GetSnapshotPages(DateTime day);
+
+    /// <summary>
+    /// 记下"这一天的这些页抓到了"。<paramref name="rowsByPage"/> 是页号→这页拿到几行，
+    /// 行数只用来事后对账（"第 37 页只有 3 行"一眼能看出那页是被截断的）。
+    /// </summary>
+    void MarkSnapshotPages(DateTime day, IReadOnlyDictionary<int, int> rowsByPage, DateTime fetchedAt);
 }

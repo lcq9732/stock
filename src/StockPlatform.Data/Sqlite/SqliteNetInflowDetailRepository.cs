@@ -216,4 +216,47 @@ public class SqliteNetInflowDetailRepository : INetInflowDetailRepository
         }
         return list;
     }
+
+    /// <inheritdoc />
+    public HashSet<int> GetSnapshotPages(DateTime day)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT page_no FROM MoneyFlowSnapshotPage WHERE trade_date = $d;";
+        cmd.Parameters.AddWithValue("$d", day.ToString(DateFormat, CultureInfo.InvariantCulture));
+
+        var pages = new HashSet<int>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) pages.Add(r.GetInt32(0));
+        return pages;
+    }
+
+    /// <inheritdoc />
+    public void MarkSnapshotPages(DateTime day, IReadOnlyDictionary<int, int> rowsByPage, DateTime fetchedAt)
+    {
+        if (rowsByPage.Count == 0) return;
+
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO MoneyFlowSnapshotPage (trade_date, page_no, rows_got, fetched_at)
+            VALUES ($d, $pn, $rows, $at);
+            """;
+        var d = cmd.Parameters.Add("$d", SqliteType.Text);
+        var pn = cmd.Parameters.Add("$pn", SqliteType.Integer);
+        var rows = cmd.Parameters.Add("$rows", SqliteType.Integer);
+        var at = cmd.Parameters.Add("$at", SqliteType.Text);
+        d.Value = day.ToString(DateFormat, CultureInfo.InvariantCulture);
+        at.Value = fetchedAt.ToString(TimeFormat, CultureInfo.InvariantCulture);
+
+        foreach (var (page, got) in rowsByPage)
+        {
+            pn.Value = page;
+            rows.Value = got;
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
 }

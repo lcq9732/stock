@@ -70,6 +70,23 @@ public sealed class SqliteMoneyFlowDayAudit(string dbPath)
             DateTime.ParseExact(day, DayFormat, CultureInfo.InvariantCulture), expect, have, roster);
     }
 
+    /// <summary>
+    /// 日历上最近一个已过去的交易日（含今天）——**快照进度记在哪一天头上**就问它
+    /// （2026-09-21，跨轮续抓要用）。
+    ///
+    /// 为什么不能直接用"今天"：周末和节假日跑的时候数据源给的是上一个交易日的终值，
+    /// 进度当然也该记在那一天头上，否则周六那一轮会另起一天、把周五攒下的页全当没抓过。
+    /// 日历是空的（老库还没这张表）就返回 null，调用方按"从头抓"处理。
+    /// </summary>
+    public DateTime? LastTradingDay()
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var day = LastTradingDay(conn);
+        return day == null ? null
+            : DateTime.ParseExact(day, DayFormat, CultureInfo.InvariantCulture);
+    }
+
     /// <summary>日历上最近一个已过去的交易日（含今天）。日历是空的就返回 null。</summary>
     private static string? LastTradingDay(SqliteConnection conn)
     {

@@ -6,6 +6,7 @@ using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using StockPlatform.Logic.Abstractions;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Fetcher.Services;
 
@@ -781,6 +782,24 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
             try { await NavigateAndReadAsync(url, ct); }
             catch (OperationCanceledException) { throw; }
             catch { /* 拿不到内容正是预期：验证页/被拒都算，人看得见就行 */ }
+
+            // ⚠ 叫出来的要是**浏览器自己的错误页**，那就不是验证，是连接被切（2026-09-22）。
+            //
+            // 这一步不能省：JSONP 和导航失败时都是"空"，光看取没取到数据，
+            // "东财弹了滑块"和"东财把连接切了"长得一模一样。2026-09-21 晚上东财把出口切得很死，
+            // 于是每一轮限流都被当成需要人工验证——弹窗、_awaitingHuman 挡住整条通道、
+            // 干等人来关，一轮白卡十几分钟（00:00:58 弹窗，人关掉之后 00:15:17 才报第一页失败），
+            // 而窗口里只有一句 ERR_EMPTY_RESPONSE。
+            //
+            // 这种情况请人也没用，直接当这一轮失败交给上层按限流处理（退避、下轮再来）。
+            // 判据只认浏览器错误页的标识，认不出来就按老路走——宁可多弹一次窗，
+            // 也不能把真验证判成限流，那道验证就永远过不去了。
+            if (!await LooksLikeChallengeAsync(ct) && await LooksLikeNetworkErrorAsync(ct))
+            {
+                _log?.Invoke("浏览器通道：页面上是浏览器的网络错误页（连接被切），不是要人过的验证"
+                           + "——不弹窗、不等人，这一轮按限流处理，退避之后下一轮再来。");
+                return false;
+            }
         }
 
         // 往托盘弹一条气泡：抓取常常是夜里或你在忙别的时候跑的，
@@ -896,6 +915,46 @@ public sealed class WebView2JsonFetcher : IBrowserJsonFetcher
         catch
         {
             // 页面卡着、脚本跑不了——判不出来就当不是（维持原来的行为）
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 当前页面是不是**浏览器自己的网络错误页**（连接被切/超时），而不是东财的验证页。
+    /// 必须在 UI 线程调。判据本体在 <see cref="BrowserErrorPage"/>（纯文本判断，那边有测试）。
+    ///
+    /// ⚠ 调用方必须**先**问 <see cref="LooksLikeChallengeAsync"/>，那边说不是验证，才轮到这条。
+    /// 判错的代价不对称：漏判＝照旧弹窗等人（难看但不丢数据），误判＝不再请人、
+    /// 那道验证永远过不去。
+    /// </summary>
+    private async Task<bool> LooksLikeNetworkErrorAsync(CancellationToken ct)
+    {
+        try
+        {
+            var core = _view?.CoreWebView2;
+            if (core == null) return false;
+
+            // 错误页的正文很短，取前 3000 字足够；错误码就在正文里。
+            const string js = """
+                (function () {
+                  var t = document.title || '';
+                  var b = document.body ? (document.body.innerText || '') : '';
+                  return t + ' | ' + b.slice(0, 3000);
+                })()
+                """;
+            var raw = await core.ExecuteScriptAsync(js).WaitAsync(TimeSpan.FromSeconds(5), ct);
+            if (string.IsNullOrEmpty(raw) || raw == "null") return false;
+
+            string text;
+            try { text = JsonSerializer.Deserialize<string>(raw) ?? ""; }
+            catch { text = raw; }
+
+            return BrowserErrorPage.IsNetworkError(text);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch
+        {
+            // 判不出来就当不是——走老路（该请人还是请人）
             return false;
         }
     }

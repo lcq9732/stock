@@ -437,7 +437,13 @@ public partial class App : Application
                                 batchSize: 30, restDuration: TimeSpan.FromSeconds(20)),
                 host: FetcherSettings.ReadMoneyFlowSnapshotHost(paths.SettingsPath),
                 // 跟板块那边共用同一个开关：被网关按域名拦掉的时候，换块网卡出去就通了
-                bindNetworkInterface: ReadSetting(paths.SettingsPath, "Push2NetworkInterface"));
+                bindNetworkInterface: ReadSetting(paths.SettingsPath, "Push2NetworkInterface"),
+                // 2026-09-21：这一项也接上浏览器通道——跟板块那边**同一个实例**，
+                // 共用攒下的 Cookie 和"熟面孔"身份（各起各的等于在同一个出口上装两个生面孔）。
+                // 为什么非接不可：当晚 HttpClient 这条在东财已经一个请求都过不去，
+                // 而浏览器通道在同一台机器上照样抓得到；一条全新的 4G 出口跑网页版反而一次都没成，
+                // 所以不是出口配额，是请求形态。详见 provider 的 browser 参数注释。
+                browser: browserChannel);
         var moneyFlowRepository = new SqliteNetInflowDetailRepository(paths.CurrentDb);
         moneyFlowRepository.EnsureSchema();
 

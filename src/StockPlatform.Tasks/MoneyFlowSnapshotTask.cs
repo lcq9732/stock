@@ -51,6 +51,9 @@ public sealed class MoneyFlowSnapshotTask(
     private int _rows;
     private DateTime? _day;
 
+    /// <summary>这一轮的抓取结果——落库之后要拿它把"哪些页到手了"记进进度表。</summary>
+    private MoneyFlowSnapshot? _snap;
+
     protected override async IAsyncEnumerable<IReadOnlyList<NetInflowDetail>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
@@ -76,11 +79,21 @@ public sealed class MoneyFlowSnapshotTask(
         MoneyFlowSnapshot? snap;
         try
         {
-            Report($"分档资金流快照：从 {snapshot.Host} 拉当日全市场"
+            // 浏览器通道先起来（建 WebView2 + 打开东财页面拿 Cookie，要几秒）。
+            // ⚠ 这一步不是可有可无的优化：2026-09-21 起 HttpClient 这条在东财已经一个请求
+            //   都过不去了，而浏览器通道照样能抓（见 EastMoneyMoneyFlowSnapshotProvider 的
+            //   browser 参数注释）。没起来就照常往下走——抓不到会如实报失败，
+            //   但日志里得先把"这轮走的是哪条路"说清楚，否则失败了没人知道该查什么。
+            await snapshot.PrepareAsync(ct);
+
+            Report($"分档资金流快照：{snapshot.DescribeChannel()}，拉当日全市场"
                  + $"（每页 {EastMoneyMoneyFlowSnapshotProvider.PageSize} 只、约 60 页）…");
             // 抓取本身不吞异常：这一项漏一天就永久没了，"抓不到"必须记成失败被人看见，
             // 而不是记一条 error 就算完（原实现在合并那一项里是后者，因为还要让补历史接着跑）。
-            snap = await snapshot.FetchAllAsync(ProgressSink, ct);
+            //
+            // 跨轮续抓：哪些页已经在手，按**数据自己报的交易日**问库（不是按今天、也不是按
+            // 本地交易日历——日历滞后的话会跳过今天没抓过的页，静默丢一整片数据）。
+            snap = await snapshot.FetchAllAsync(ProgressSink, repository.GetSnapshotPages, ct);
         }
         finally
         {
@@ -101,25 +114,56 @@ public sealed class MoneyFlowSnapshotTask(
         }
 
         _day = day;
+        _snap = snap;
 
-        // 对账：服务端自报的总数减去停牌的，就是本该拿到的行数。差额是**静默丢数据**的唯一
-        // 信号——翻页少翻一页、某页被限流截断，表现出来都只是"今天少几百只"，没人会发现。
-        int missing = snap.Total - snap.Suspended - snap.Rows.Count;
-        if (missing > 0)
+        // 缺页是常态不是意外（2026-09-21）：东财一轮只放过约 16 页，全市场约 60 页。
+        // 所以这里只如实报进度，**不记成错误**——整项成败由收尾时查库的那个判据定，
+        // 那个才回答得了"这天到底齐没齐"，而它不依赖某一轮跑成什么样。
+        if (snap.MissingPages.Count > 0)
         {
-            var msg = $"分档资金流快照少了 {missing} 只（自报 {snap.Total}、停牌 {snap.Suspended}、"
-                    + $"实收 {snap.Rows.Count}）——多半是某页被限流截断，下轮会补上。";
-            Report($"⚠ {msg}");
-            _errors.Add(msg);
+            Report($"　这一轮拿到 {snap.RowsByPage.Count} 页 / {snap.Rows.Count} 只"
+                 + (snap.SkippedPages > 0 ? $"（另有 {snap.SkippedPages} 页上几轮已抓）" : "")
+                 + $"，还缺 {snap.MissingPages.Count} 页："
+                 + string.Join("、", snap.MissingPages.Take(10))
+                 + (snap.MissingPages.Count > 10 ? " …" : "")
+                 + "。下一轮只补这些页。");
+        }
+
+        // 对账：服务端自报的总数减去停牌的，就是本该拿到的行数。差额是**某一页被截断**
+        // 的唯一信号——那一页回了 200 状态、解析得动、于是被记成"抓到了"，但里面只有三五行；
+        // 表现出来只是"今天少几百只"，缺页清单里也看不见，没人会发现。
+        //
+        // ⚠ 只在"这一轮自己把所有页都走完了"时才判（2026-09-21）：跨轮续抓的轮次手上
+        //   只有一部分页，跟全市场 total 对不上是正常的。那种情形交给收尾时查库的判据，
+        //   它看的是库里这天到底有多少行，比抓取侧的对账更靠得住。
+        if (snap.Complete && snap.SkippedPages == 0)
+        {
+            int shortfall = snap.Total - snap.Suspended - snap.Rows.Count;
+            if (shortfall > 0)
+            {
+                var msg = $"分档资金流快照少了 {shortfall} 只（自报 {snap.Total}、停牌 {snap.Suspended}、"
+                        + $"实收 {snap.Rows.Count}）——页都走完了还差这么多，多半是某页被截断。";
+                Report($"⚠ {msg}");
+                _errors.Add(msg);
+            }
         }
 
         yield return snap.Rows;
     }
 
-    /// <summary>一批＝一整天的全市场，所以就落这一次库。</summary>
+    /// <summary>
+    /// 一轮＝这一轮抓到的那些页，所以就落这一次库。
+    ///
+    /// ⚠ 落库**之后**才记页号进度（2026-09-21）。顺序反了的话，写库失败时进度里已经记着
+    /// "这些页抓过了"，下一轮就会跳过它们——那些票当天的数据从此谁也不会再去补。
+    /// </summary>
     protected override Task SaveBatchAsync(IReadOnlyList<NetInflowDetail> batch, CancellationToken ct)
     {
         _rows += repository.Upsert(batch);
+
+        if (_day is { } day && _snap is { } snap && snap.RowsByPage.Count > 0)
+            repository.MarkSnapshotPages(day, snap.RowsByPage, snap.QuoteTime ?? DateTime.Now);
+
         return Task.CompletedTask;
     }
 
@@ -150,10 +194,33 @@ public sealed class MoneyFlowSnapshotTask(
             return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(why, errors));
         }
 
-        var summary = $"分档资金流快照：{_day:yyyy-MM-dd} 写入 {_rows} 行，用时 {Fmt(_sw.Elapsed)}。"
+        var pages = _snap is { } s && _day is { } dd
+            ? $" 页进度 {repository.GetSnapshotPages(dd).Count}/{TotalPages(s)}"
+              + (s.MissingPages.Count > 0 ? $"，还缺 {s.MissingPages.Count} 页（下轮补）" : "，已补齐")
+            : "";
+        var summary = $"分档资金流快照：{_day:yyyy-MM-dd} 写入 {_rows} 行，用时 {Fmt(_sw.Elapsed)}。{pages}。"
                     + $"本地共 {repository.CountCodes()} 只 / {repository.Count()} 行。";
         if (day != null) summary += $" 核对：{day.Text}。";
         Report(summary);
+
+        // 这一轮还有页没拿到 → 整项**不算完成**（2026-09-21）。
+        //
+        // 为什么不能记成完成：缺页就是这一天还没抓齐，而记成完成会让计划以为这一期做完了、
+        // 当天不再回来（AlreadyRanOn 只认 Ok）——那正好废掉跨轮续抓，每天只补一轮 16 页。
+        // 记成失败，计划会排自动重试，一轮补 15 页，四五轮就齐了。
+        //
+        // ⚠ 这条判据摆在查库那条**前面**，因为它不依赖本地有没有交易日历和当天的日K：
+        //   老库、新建的空库、日历还没更新的机器上，查库那条会"判不了"而放行，
+        //   而缺页是抓取侧当场就知道的事实，任何时候都作数。
+        if (_snap is { MissingPages.Count: > 0 } s2)
+        {
+            var msg = $"分档资金流快照这天还缺 {s2.MissingPages.Count} 页（共 {TotalPages(s2)} 页）"
+                    + $"——东财一轮只放过十几页，这是常态；下一轮只补缺的页，四五轮能齐。";
+            errors.Add(msg);
+            if (day is { IsAlert: true }) Report($"⚠ {WhyRed(day)}");
+            return Task.FromResult<TaskRunResult?>(
+                new TaskRunResult(TaskState.Failed, errors, NothingToDo: false, summary));
+        }
 
         // 库里就是不齐 → 整项失败（状态列标红）。为什么这一项要这么狠，而别的表不：
         // 快照接口只给最近一个交易日，今天不补上，下一个交易日开盘后就**永久**取不回来了。
@@ -195,6 +262,11 @@ public sealed class MoneyFlowSnapshotTask(
       + "⚠ 这份数据的接口**只给最近一个交易日**，下一个交易日开盘后就永久取不回来了"
       + "（事后只能逐股补，5500 个请求换一天）——请现在就重跑本项，"
       + "整天按主键 upsert 去重，已有的行不受影响。";
+
+    /// <summary>全市场一共多少页——服务端自报的只数除以每页 100。拿不到 total 就按已知的算。</summary>
+    private static int TotalPages(MoneyFlowSnapshot s) => s.Total > 0
+        ? (int)Math.Ceiling(s.Total / (double)EastMoneyMoneyFlowSnapshotProvider.PageSize)
+        : s.RowsByPage.Count + s.MissingPages.Count + s.SkippedPages;
 
     private static string Fmt(TimeSpan t) =>
         t.TotalMinutes >= 1 ? $"{(int)t.TotalMinutes} 分 {t.Seconds} 秒" : $"{t.TotalSeconds:F1} 秒";

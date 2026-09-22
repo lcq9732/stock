@@ -642,10 +642,14 @@ public sealed class PlanRunner(
             var result = await run.Task;
             foreach (var err in result.Errors) log($"错误：{err}");
 
+            // 结果分类的判据在 RunOutcomeRules（2026-09-21 挪过去的）——手动点【执行】那条路
+            // 原来自己写了一份、还漏了 Failed，两份判据漂移过一次，见那个类的注释。
+            var outcome = RunOutcomeRules.Classify(result);
+
             // 「根本没开工」不能记成完成（2026-09-04）：界面上会显示成绿勾"09:25 完成"，
             // 可它一行数据都没抓；更要命的是 AlreadyRanOn 只认 Ok，记成完成的话**今天就不再跑了**。
             // 记成 Skipped，等数据源的熔断过去，今天还有机会补上。
-            if (result.SkippedReason is { } why)
+            if (outcome == RunOutcome.Skipped && result.SkippedReason is { } why)
             {
                 Finish(item, RunOutcome.Skipped, result.Errors.Count, why, result.Errors);
                 log($"⏸ 计划：【{info.Name}】本轮没开工——{why}。今天恢复之后还会再来。{tail}");
@@ -672,10 +676,10 @@ public sealed class PlanRunner(
             // 被骨架吞在里面、只翻译成 TaskState.Failed 返回——于是失败的轮次在状态列上
             // 是绿色的"完成，但有 1 条错误"。【分档资金流快照】抓不到一行时正是这样，
             // 而它漏一天就永久补不回来，最不能静默（见 FetchResult.Failed）。
-            if (result.Failed)
+            if (outcome == RunOutcome.Failed)
             {
-                var failWhy = result.Errors.Count > 0 ? result.Errors[0] : "任务报告失败";
-                Finish(item, RunOutcome.Failed, Math.Max(errors, 1), failWhy, result.Errors);
+                var failWhy = RunOutcomeRules.FailureReason(result);
+                Finish(item, RunOutcome.Failed, RunOutcomeRules.FailureErrorCount(result), failWhy, result.Errors);
                 if (item.Pacing == RunPacing.WhenIdle)
                     _idleNextAllowed[item.Action] = DateTime.Now + IdleCooldown;
                 log($"✘ 计划：【{info.Name}】失败：{failWhy}（不影响后面的项，继续）{tail}");

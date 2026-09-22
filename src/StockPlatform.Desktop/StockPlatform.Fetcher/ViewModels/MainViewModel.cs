@@ -2057,17 +2057,34 @@ public class MainViewModel : INotifyPropertyChanged
             // 「根本没开工」不能记成完成（2026-09-04）：原来这里无条件写 Ok、连返回值都没看，
             // 结果数据源还在限流熔断里、一行都没抓，界面上照样是绿勾"09:25 完成"。
             // 更要命的是 FetchPlanItem.AlreadyRanOn 只认 Ok——记成完成的话今天就不会再跑了。
-            if (result?.SkippedReason is { } why)
+            //
+            // ⚠ 判据走 RunOutcomeRules，**别在这儿再写一份**（2026-09-21 修）：这里原来只认
+            //   SkippedReason、漏了 result.Failed，于是新式任务（FetchTaskBase）如实返回的
+            //   「整项失败」在手动这条路上被记成 Ok。9-21 20:22 手动重跑【分档资金流快照】、
+            //   push2delay 第 1 页就被切，界面上却是绿勾「✓ 20:22 完成」——而 AlreadyRanOn
+            //   只认 Ok，当天计划就再也不会自动回来补这一项了。计划自动跑那条路
+            //   （PlanRunner.FinishRunAsync）09-16 就判了，只有这里没跟上。
+            switch (RunOutcomeRules.Classify(result))
             {
-                vm.Model.LastOutcome = RunOutcome.Skipped;
-                vm.Model.LastMessage = why;
-                Log($"⏸ 【{vm.Name}】本轮没开工——{why}。今天恢复之后还会再来。");
-            }
-            else
-            {
-                vm.Model.LastOutcome = RunOutcome.Ok;
-                // 跨轮才做得完的活（板块成分股这种）把存量进度显示出来，别只说"完成"
-                vm.Model.LastMessage = result?.Progress;
+                case RunOutcome.Skipped:
+                    vm.Model.LastOutcome = RunOutcome.Skipped;
+                    vm.Model.LastMessage = result!.SkippedReason;
+                    Log($"⏸ 【{vm.Name}】本轮没开工——{result.SkippedReason}。今天恢复之后还会再来。");
+                    break;
+
+                case RunOutcome.Failed:
+                    vm.Model.LastOutcome = RunOutcome.Failed;
+                    // 至少记 1 条——"这一项没干成"本身就是一条账，跟 PlanRunner 对齐。
+                    vm.Model.LastErrorCount = RunOutcomeRules.FailureErrorCount(result!);
+                    vm.Model.LastMessage = RunOutcomeRules.FailureReason(result!);
+                    Log($"✘ 【{vm.Name}】失败：{vm.Model.LastMessage}");
+                    break;
+
+                default:
+                    vm.Model.LastOutcome = RunOutcome.Ok;
+                    // 跨轮才做得完的活（板块成分股这种）把存量进度显示出来，别只说"完成"
+                    vm.Model.LastMessage = result?.Progress;
+                    break;
             }
         }
         // 这两支的错误数跟 PlanRunner.Finish 对齐：停止＝0（人自己停的不算错），失败＝1。
