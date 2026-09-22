@@ -385,8 +385,9 @@ public class DividendTaskResumeTests : IDisposable
     [Fact]
     public void 注册表按声明把待办分派给任务()
     {
-        // 【重新拉取失败股票】是拿 taskId 字符串走 ITaskBacklogRunner 转交的，
-        // 所以"RetryTaskIds.Dividend 解析得成 FetchActionId"这一环断了就会静默跳过分红。
+        // 【重新拉取失败】是拿 taskId 字符串分派的（RetryFailedTask 里那句 Enum.TryParse），
+        // 所以「RetryTaskIds.Dividend 解析得成 FetchActionId」这一环断了就会静默跳过分红。
+        // 2026-09-22 那一项迁成任务、ITaskBacklogRunner 端口撤掉，这里改成直接验解析 + 声明。
         var registry = new FetchTaskRegistry();
         registry.Register(FetchActionId.FetchDividend,
                           () => new DividendTask(_paths, new FakeProvider(), _repo, _manifest));
@@ -395,10 +396,11 @@ public class DividendTaskResumeTests : IDisposable
         Assert.True(registry.HandlesBacklog(FetchActionId.FetchDividend));
         Assert.False(registry.HandlesBacklog(FetchActionId.StepLhb));
 
-        ITaskBacklogRunner runner = registry;
-        Assert.True(runner.Handles(RetryTaskIds.Dividend));
-        Assert.False(runner.Handles(RetryTaskIds.Lhb));
-        Assert.False(runner.Handles("不存在的任务"));
+        Assert.True(Enum.TryParse<FetchActionId>(RetryTaskIds.Dividend, out var dividend)
+                    && registry.HandlesBacklog(dividend));
+        Assert.True(Enum.TryParse<FetchActionId>(RetryTaskIds.Lhb, out var lhb)
+                    && !registry.HandlesBacklog(lhb));
+        Assert.False(Enum.TryParse<FetchActionId>("不存在的任务", out _));
     }
 
     /// <summary>只为验分派用的空任务——HandlesBacklog 默认 false。</summary>

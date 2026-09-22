@@ -20,11 +20,15 @@ namespace StockPlatform.Tasks;
 ///    没有这两道，接口一挂就是对着几千只票空跑几小时、一行数据都拿不到。
 /// ③ **数据源不支持就整项跳过**：新浪只有前复权一种口径。
 ///
-/// ════ 不复权还多一个模式：首次整段回补 ════
-/// 把每只补到跟前复权一样长（实测约 24700 个请求、2 小时出头，跑完一次基本不用再管）。
+/// ════ 还有一个模式：首次整段回补 ════
+/// 把每只补到跟前复权一样长（不复权实测约 24700 个请求、2 小时出头，跑完一次基本不用再管）。
 /// 判据是 <see cref="RawBarCompletenessRule"/> 的**两头都要比**——只比尾巴的话，
 /// 日更那根会先把最近 3 年填上、判据归零显示「已补齐」，前面 7 年再也没人补
 /// （2026-09-01 实测 5781 只里有 5232 只卡在 3 年）。
+///
+/// ⚠ 2026-09-22 起**后复权也走这条路**（原来限死只有不复权能用）：判据比的是"跟前复权一样长"，
+/// 跟口径无关，后复权一样会因为日更只填最近 3 年而卡在前面那几年。
+/// 顺带支持年份区间（<see cref="TaskRunArgs.YearStart"/>），【拉取区间数据】分派过来时带着。
 ///
 /// ════ 日志密度 ════
 /// 迁移前不复权那一路**逐只**打"正在抓取 xxx"（后复权不打），全市场一轮就是几千行，
@@ -70,7 +74,7 @@ public sealed class StockAdjustedBarTask(
         _skippedReason = _nothingToDoReason = null;
         _aborted = false;
         _planned = _leftAfterRun = 0;
-        _fullBackfill = args.Mode.HasFlag(FetchMode.FirstBackfill) && granularity == Granularity.DayRaw;
+        _fullBackfill = args.Mode.HasFlag(FetchMode.FirstBackfill);
         using var _ = ForwardSourceStatus();
 
         if (args.Mode == FetchMode.FillBacklog)
@@ -94,7 +98,7 @@ public sealed class StockAdjustedBarTask(
         List<(string Code, DateTime Start, DateTime End)> plan;
         if (_fullBackfill)
         {
-            plan = await Task.Run(() => PlanFullBackfill(today), ct);
+            plan = await Task.Run(() => PlanFullBackfill(today, args), ct);
         }
         else
         {
@@ -183,13 +187,13 @@ public sealed class StockAdjustedBarTask(
     }
 
     /// <summary>
-    /// 首次整段回补（只有不复权用）：把每只补到跟前复权一样长。
+    /// 首次整段回补：把每只补到跟前复权一样长（2026-09-22 起后复权也走这里）。
     ///
     /// ⚠ 窗口从**前复权的最早那天**起，不是"从不复权的水位线次日续"——缺的往往是**开头**
     /// 而不是尾巴（日更那根按回看年数只填了最近 3 年），从水位线往后续永远补不到前面那几年。
     /// 整段重抓不会重复写：库里已有的行在写入判据里原样跳过。
     /// </summary>
-    private List<(string Code, DateTime Start, DateTime End)> PlanFullBackfill(DateTime today)
+    private List<(string Code, DateTime Start, DateTime End)> PlanFullBackfill(DateTime today, TaskRunArgs args)
     {
         // ⚠ 下面四次全表 GROUP BY 加起来要几十秒，**先说一声**——否则点完【执行】日志一直不动，
         //   人以为没点上会反复点（2026-09-01 反馈）。
@@ -198,10 +202,33 @@ public sealed class StockAdjustedBarTask(
         var todo = PendingBackfill(today, out var dayEarliest);
         if (todo.Count == 0) return [];
 
-        Report($"补{Kind}日线：还差 {todo.Count} 只——{Kind}是原始成交价，抓过就永远有效，"
-             + "不会因为分红而失效。每批 " + _batchSize + " 只，到点或做满上限就收尾、下轮接着补。");
+        // 每只的窗口＝"它自己的前复权最早那天 ~ 今天"，按年份区间收窄；
+        // **收窄之后**再在这个窗口里判缺口（水位表 + 本地已覆盖 + 交易日历）。
+        //
+        // ⚠ 顺序不能反（2026-09-22 踩过）：先在大窗口里算缺口、再收窄，算出来的是
+        //   "区间之外那部分缺口"，收窄后仍非空——于是每轮都重新计划、抓回来一行都写不进去。
+        //   实测填 2024 重跑，5995 只全部重抓、写入 0 行。
+        //   判据走 YearGapCalculator，跟前复权那路同一个。
+        var de = dayEarliest;
+        var plan = PlanGaps(todo, granularity,
+                            code => NarrowToYears(de[code], today, args),
+                            ignoreFloor: false, out _);
 
-        return todo.Select(code => (code, dayEarliest[code], today)).ToList();
+        // ⚠ 报的是**这一轮真要抓的只数**，不是 todo.Count（2026-09-22 修）：
+        //   todo 是按"跟前复权一样长"判的、看全历史；而这一轮只补收窄后的那几年。
+        //   照 todo 报的话，同一项里会先说「还差 5995 只」、紧接着说「已经齐了，没什么可做」——
+        //   数据是对的，但两句话打架，看的人会以为漏抓了。
+        bool narrowed = args.YearStart is not null || args.YearEnd is not null;
+        Report($"补{Kind}日线：{(narrowed ? $"指定区间内有 {plan.Count} 只要补" : $"还差 {plan.Count} 只")}"
+             + (narrowed && todo.Count > plan.Count
+                 ? $"（全历史口径还差 {todo.Count} 只，其余那些的缺口在这个区间之外）"
+                 : "")
+             + $"——{Kind}是原始成交价，抓过就永远有效，不会因为分红而失效。"
+             + $"每批 {_batchSize} 只，到点或做满上限就收尾、下轮接着补。");
+        if (plan.Count < todo.Count)
+            Report($"其中 {todo.Count - plan.Count} 只在指定区间内没有可补的"
+                 + "（年份区间之外，或数据源已探明没有更早数据），本轮跳过、不发请求。");
+        return plan;
     }
 
     /// <summary>还差哪些票（判据在 <see cref="RawBarCompletenessRule"/>）。</summary>

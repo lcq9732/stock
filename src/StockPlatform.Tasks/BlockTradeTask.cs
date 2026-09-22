@@ -89,6 +89,8 @@ public sealed class BlockTradeTask(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
         repository.EnsureSchema();
+        // 数据源的状态播报（限流退避/重试）转成日志——不订阅的话被退避时一个字都没有
+        using var statusSub = ForwardStatus(h => provider.OnStatus += h, h => provider.OnStatus -= h);
         _errors.Clear();
         _incomplete.Clear();
         _okDays = _emptyDays = _rows = _attempted = 0;

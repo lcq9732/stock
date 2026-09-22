@@ -1,5 +1,6 @@
 ﻿using System.Runtime.CompilerServices;
 using StockPlatform.Data.Orchestration;
+using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
@@ -66,18 +67,24 @@ public sealed class StockDayBarTask(
         }
 
         bool exactDay = args.Mode == FetchMode.SpecificDay;
+        bool fullBackfill = args.Mode.HasFlag(FetchMode.FirstBackfill);
         var day = args.Day?.ToDateTime(TimeOnly.MinValue) ?? DateTime.Today;
         int lookbackYears = args.LookbackYears is > 0 ? args.LookbackYears.Value : DefaultLookbackYears;
 
         // 名册和逐只查水位线都是同步 IO，推线程池——骨架不替子类推，首个 await 之前干这些会冻住界面。
         var codes = await Task.Run(LocalStockCodes, ct);
-        var plan = await Task.Run(
-            () => exactDay ? PlanForDay(codes, day) : PlanIncremental(codes, DateTime.Today, lookbackYears), ct);
+        var plan = await Task.Run(() =>
+            exactDay ? PlanForDay(codes, day)
+            // ⚠ 整段回补用的是**另一份名册**（含退市股），见 BackfillCodes
+            : fullBackfill ? PlanFullBackfill(BackfillCodes(), args)
+            : PlanIncremental(codes, DateTime.Today, lookbackYears), ct);
 
         _planned = plan.Count;
         if (plan.Count == 0)
         {
-            _nothingToDoReason = $"个股日K·前复权：{codes.Count} 只本地都已是最新";
+            _nothingToDoReason = fullBackfill
+                ? "个股日K·前复权：指定的年份区间内没有可补的"
+                : $"个股日K·前复权：{codes.Count} 只本地都已是最新";
             Report($"{_nothingToDoReason}，这一轮无需抓取（一个请求都没发）。");
             yield break;
         }
@@ -85,6 +92,12 @@ public sealed class StockDayBarTask(
         Report(exactDay
             ? $"按天抓取个股前复权日K：{day:yyyy-MM-dd}，共 {codes.Count} 只里有 {plan.Count} 只要抓"
               + "（用本地名册，不重新扫全市场）"
+            : fullBackfill
+            ? $"个股日K·前复权**整段回补**：{plan.Count} 只要抓（每只只补它自己缺的那一段）"
+              + (args.OverwriteQfq
+                  ? "，**覆盖重抓**（不看本地已有什么，整段按数据源当前基准重写，用来抹平复权基准接缝）"
+                  : "（不看水位线，库里已有的行在写入判据里原样跳过）")
+              + $"，每批 {_batchSize} 只..."
             : $"个股日K·前复权：{codes.Count} 只里有 {plan.Count} 只要抓、{codes.Count - plan.Count} 只本地已是最新"
               + $"（按各自水位线跳过，不发请求），每批 {_batchSize} 只...");
 
@@ -93,12 +106,56 @@ public sealed class StockDayBarTask(
         {
             ct.ThrowIfCancellationRequested();
             var got = await FetchBatchAsync(
-                batch.Select(b => (b.Code, Granularity.Day, b.Start, b.End, true)), ct);
+                batch.Select(b => (b.Code, Granularity.Day, b.Start, b.End, true)), ct,
+                // 「覆盖重抓」只在整段回补那一路有意义（见 TaskRunArgs.OverwriteQfq）
+                overwrite: fullBackfill && args.OverwriteQfq);
             batchIndex++;
             done += batch.Length;
             ReportBatch(batchIndex, "个股日K·前复权：抓取中", done, plan.Count);
             yield return got;
         }
+    }
+
+    /// <summary>
+    /// 整段回补的标的全集：个股 **加上退市股**。
+    ///
+    /// ⚠ 不能用 <c>LocalStockCodes()</c>：它走 <c>SqliteStockMetaUpsert.GetAll</c>，
+    /// 而那个方法**只返回 type='stock'**（它被 20 多处共用，混进别的类型会污染选股候选池，
+    /// 所以不能动它）。日更不轮询退市股是对的——数据源早就不给新数据了，那几百个请求必然落空；
+    /// 但**往回补历史时必须带上它们**，否则回测只剩活下来的那些票，就是幸存者偏差。
+    /// 老【拉取区间数据】把这件事单列成一段（<c>FetchDelistedForRangeAsync</c>），
+    /// 不复权那一路也早就是这么取的（<see cref="StockAdjustedBarTask"/> 的 PendingBackfill）。
+    /// </summary>
+    private List<string> BackfillCodes()
+        => SqliteStockMetaUpsert
+            .GetByTypes(Paths.CurrentDb, SqliteStockMetaUpsert.TypeStock, SqliteStockMetaUpsert.TypeDelisted)
+            .Select(x => x.Code).ToList();
+
+    /// <summary>
+    /// 首次整段回补：**不看水位线**，所有票都按同一个窗口抓。
+    ///
+    /// 「整段」＝ A股开市首日到今天，再按调用方给的年份区间收窄（<see cref="NarrowToYears"/>）——
+    /// 【拉取区间数据】分派过来时就带着年份，单独跑这一项不带年份就是补到底。
+    /// 数据源只会返回该票实际存在的日期，上市前那段自然是空。
+    ///
+    /// ⚠ 这里**不按只跳过**：缺的往往是**开头**而不是尾巴（日更那根按回看年数只填了最近 3 年），
+    /// 按水位线跳过的话前面那几年永远补不到。重复抓不会重复写——库里已有的行在
+    /// <see cref="BarWritePlanner"/> 里原样跳过（<see cref="TaskRunArgs.OverwriteQfq"/> 那条路除外，
+    /// 它要的就是整段重写）。
+    /// </summary>
+    private List<(string Code, DateTime Start, DateTime End)> PlanFullBackfill(
+        IReadOnlyList<string> codes, TaskRunArgs args)
+    {
+        var (start, end) = NarrowToYears(IncrementalWindowCalculator.AShareMarketOpen, DateTime.Today, args);
+        if (start.Date > end.Date) return [];      // 年份区间落在窗口外，正常，不是错
+
+        // 逐只算缺口：水位表 + 本地已覆盖 + 交易日历，见 PlanGaps。
+        // 「覆盖重抓」那一路要整段重写，所以连水位也不看。
+        var plan = PlanGaps(codes, Granularity.Day, start, end, ignoreFloor: args.OverwriteQfq, out int skipped);
+        for (int i = 0; i < skipped; i++) CountSkipped();
+        if (skipped > 0)
+            Report($"其中 {skipped} 只这一段本地已经齐了、或数据源已探明没有更早数据，整只跳过、不发请求。");
+        return plan;
     }
 
     /// <summary>增量：每只按自己的水位线续到今天，已经追上的直接跳过、不发请求。</summary>

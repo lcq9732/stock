@@ -39,7 +39,11 @@ public sealed class AnnouncementTask(
         _slicesDone = _slicesTotal = 0;
         _nothingToDoReason = null;
 
-        var keywords = args.Keywords ?? [];
+        // 关键词从**自己那一行**来。两种"没给"要分开（2026-09-22）：
+        //   · null   ＝ 调用方压根没指定（比如【拉取区间数据】分派过来时）→ 用本项的默认值；
+        //   · 空列表 ＝ 人在自己那一行**明确清空了** → 就是"这一轮别抓"，照旧跳过。
+        // 混成一种的话，要么"清空了还照抓"，要么"被别人调用时永远不抓"，两头都不对。
+        var keywords = args.Keywords ?? DefaultKeywords();
         if (keywords.Count == 0)
         {
             _nothingToDoReason = "公告关键词为空，这一项跳过";
@@ -47,12 +51,38 @@ public sealed class AnnouncementTask(
             yield break;
         }
 
-        // 「只抓某一天」就把窗口收成那一天；否则按回看窗口。
+        // 「只抓某一天」就把窗口收成那一天；「整段回补」按年份区间；否则按回看窗口。
         DateOnly start, end;
         if (args.Mode == FetchMode.SpecificDay)
         {
             var day = args.Day ?? DateOnly.FromDateTime(DateTime.Today);
             start = end = day;
+        }
+        else if (args.Mode.HasFlag(FetchMode.FirstBackfill))
+        {
+            // ⚠ 这一项跟别的任务不一样：它**没有**"本地最早是哪天"那种水位线可依，
+            //   搜索是按关键词打的、不按标的。所以"整段"对它来说就等于**调用方给的那几年**，
+            //   没给就没有意义——不填年份的整段回补会退化成"从 1990 年搜到今天"，
+            //   而搜索源有翻页上限，那只会翻满即停、剩下的静默丢掉。所以这里明确不跑。
+            //   （2026-09-22 用户拍板：就按"只吃年份区间、不填就不跑"。）
+            if (args.YearStart is not { } ys)
+            {
+                _nothingToDoReason = "整段回补要填年份区间，这一项跳过";
+                Report($"（{_nothingToDoReason}——公告是按关键词搜的、没有「本地补到哪儿了」这种水位线，"
+                     + "不给年份就只能从头搜到尾，而搜索源有翻页上限，搜不全还会静默丢掉。）");
+                yield break;
+            }
+            start = new DateOnly(ys, 1, 1);
+            int ye = args.YearEnd ?? DateTime.Today.Year;
+            end = ye >= DateTime.Today.Year
+                ? DateOnly.FromDateTime(DateTime.Today)      // 别往未来搜
+                : new DateOnly(ye, 12, 31);
+            if (start > end)
+            {
+                _nothingToDoReason = $"年份区间 {ys}~{ye} 是空的，这一项跳过";
+                Report($"（{_nothingToDoReason}）");
+                yield break;
+            }
         }
         else
         {
@@ -89,6 +119,14 @@ public sealed class AnnouncementTask(
 
         yield break;   // 公告那条链自己落库（AnnouncementFetchOrchestrator），不产出批
     }
+
+    /// <summary>
+    /// 本项自己的默认关键词——目录里那份（建计划项时也是拿它预填这一行的）。
+    /// 只在调用方没指定时用；人把那一格清空了走的是另一条路（见上面）。
+    /// </summary>
+    private static IReadOnlyList<string> DefaultKeywords()
+        => (FetchTaskCatalog.DefaultParamText(FetchActionId.StepAnnouncements, FetchActionParams.Keywords) ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     /// <summary>用不上——公告那条链自己落库。</summary>
     protected override Task SaveBatchAsync(IReadOnlyList<int> batch, CancellationToken ct)

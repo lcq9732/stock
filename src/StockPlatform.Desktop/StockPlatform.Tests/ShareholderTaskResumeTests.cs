@@ -234,14 +234,15 @@ public class ShareholderTaskResumeTests : IDisposable
     [Fact]
     public void 任务声明了自己补待办_注册表按声明分派()
     {
-        // 【重新拉取失败股票】是拿 taskId 字符串走 ITaskBacklogRunner 转交的，
-        // 所以"RetryTaskIds.Shareholder 解析得成 FetchActionId"这一环断了就会静默跳过。
+        // 【重新拉取失败】是拿 taskId 字符串分派的（RetryFailedTask 里那句 Enum.TryParse），
+        // 所以「RetryTaskIds.Shareholder 解析得成 FetchActionId」这一环断了就会静默跳过。
         var registry = new FetchTaskRegistry();
         registry.Register(FetchActionId.FetchShareholder,
                           () => new ShareholderTask(_paths, new FakeProvider(), _repo, _manifest));
 
         Assert.True(registry.HandlesBacklog(FetchActionId.FetchShareholder));
-        Assert.True(((ITaskBacklogRunner)registry).Handles(RetryTaskIds.Shareholder));
+        Assert.True(Enum.TryParse<FetchActionId>(RetryTaskIds.Shareholder, out var parsed)
+                    && registry.HandlesBacklog(parsed));
     }
 
     // ── ⑥ 熔断判据 ────────────────────────────────────────────────

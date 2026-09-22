@@ -193,6 +193,14 @@ public sealed class DelistedSupplementTask(
             ct.ThrowIfCancellationRequested();
             done++;
 
+            // ⚠ **每只都喂一次看门狗**（2026-09-22 修）：下面四条出路里只有"判定为已退市"那条
+            //   会写日志，另外三条（探测失败／从未上市／还在交易）一声不吭。候选里连着一批都不是
+            //   退市股时这一项就是全哑的，而每只都要发一个真请求——2026-09-22 模拟实测：
+            //   1342 只候选连哑 5 分 27 秒，被静默看门狗判成卡死掐断。
+            //   用 ReportQuiet 而不是 Report：它算真进展、喂狗，但不写日志（几千行会把日志刷爆，
+            //   而日志走 UI 线程）。见 FetchTaskBase.ReportQuiet 与 QuietWatchdog。
+            ReportQuiet($"补全退市名单：探测中 {done}/{_candidates}", done, _candidates);
+
             List<Bar> bars;
             try
             {

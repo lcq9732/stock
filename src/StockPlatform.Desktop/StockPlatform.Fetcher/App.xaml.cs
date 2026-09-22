@@ -164,6 +164,14 @@ public partial class App : Application
 #else
         const bool offlineMock = false;
 #endif
+        // 有几个任务**不走 BarSource**、自己拿一个K线取数器（探测退市、ETF不复权、判交易日）。
+        // 它们必须从这里拿——直接 `new TencentBarFetcher(...)` 就绕过了离线总开关，
+        // 而那正是"验证时白发真请求"的唯一来源：2026-09-18 漏了判交易日那处，
+        // 2026-09-22 又漏了【补全退市名单】和【ETF日K·不复权】两处，后者实测发了约 750 个真请求。
+        IBarDataFetcher ProbeBars(int concurrency) => offlineMock
+            ? new MockBarFetcher()
+            : new TencentBarFetcher(new RateLimiter(concurrency, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+
         IMarketCapFetcher marketCapFetcher = offlineMock
             ? new MockMarketCapFetcher()
             : new SinaListMarketCapFetcher();
@@ -175,8 +183,19 @@ public partial class App : Application
         // announcement API are different endpoints from the bar/list APIs and shouldn't share a
         // budget with them. 现在整合进 FetchOrchestrator 内部自动跑（见
         // FetchOrchestrator.FetchAnnouncementsAsync），不再是 MainViewModel 自己触发的独立按钮/流程。
-        var announcementSearchProvider = new CninfoAnnouncementSearchProvider(new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1)));
-        var announcementDetailFetcher = new EastMoneyAnnouncementDetailFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        // 公告也跟总开关走（2026-09-22 补）——它是最后一个漏网的，而且恰好是跑得最久的那个：
+        // 实测验【拉取区间数据】时它在真抓巨潮全文检索，关键词「中标」翻几十页再逐条查详情。
+        // 检索和详情是同一个模拟对象的两半（它同时实现两个接口）。
+        var mockAnnouncements = offlineMock
+            ? new MockAnnouncementProvider(() => SqliteStockMetaUpsert.GetAll(paths.CurrentDb)
+                .Select(x => new StockListEntry(x.Code, x.Name)).ToList())
+            : null;
+        IAnnouncementSearchProvider announcementSearchProvider = mockAnnouncements
+            ?? (IAnnouncementSearchProvider)new CninfoAnnouncementSearchProvider(
+                   new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1)));
+        IAnnouncementDetailFetcher announcementDetailFetcher = mockAnnouncements
+            ?? (IAnnouncementDetailFetcher)new EastMoneyAnnouncementDetailFetcher(
+                   new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
         var announcementRepository = new SqliteAnnouncementRepository(paths.CurrentDb);
         var announcementOrchestrator = new AnnouncementFetchOrchestrator(announcementSearchProvider, announcementDetailFetcher, announcementRepository);
 
@@ -543,15 +562,25 @@ public partial class App : Application
         // 没除权过的那 1336 只是从库里的 day 复制的。
         taskRegistry.Register(FetchActionId.StepEtfRawBars,
             () => new EtfRawBarTask(paths, new SqliteBarRepository(paths.CurrentDb), dividendRepository,
-                new TencentBarFetcher(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                ProbeBars(3),
                 // manifestStore 是给【只补待办】用的（2026-09-21）：它只会有 missing_day 那一类。
                 manifestStore));
         // 【补全退市名单】2026-09-17。巨潮的全市场名单减去在市名单，差集里确实交易过的补进 DelistedStock。
         // 修的是两所官网名单的两个洞：科创板退市股整类缺失、已换代码的老号没有。
         // 限流器 1 并发：候选通常几十只，一只一个探测请求。
         taskRegistry.Register(FetchActionId.StepDelistedSupplement,
-            () => new DelistedSupplementTask(paths, new CninfoStockListProvider(), companyProfileRepository,
-                new TencentBarFetcher(new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1)))));
+            // ⚠ 名单也要跟总开关走：只把 K线取数器换成模拟源是不够的，
+            //   巨潮那个全市场名单本身就是一个真请求（2026-09-22 实测漏过这一处）。
+            //   离线时用库里已知的退市股当名单——候选＝名单−在市−已知退市，于是候选为空、一轮秒过，
+            //   正好也是"没有可补的"这条路径。
+            () => new DelistedSupplementTask(paths,
+                offlineMock
+                    ? new MockStockListProvider(() => SqliteStockMetaUpsert
+                        .GetByTypes(paths.CurrentDb, SqliteStockMetaUpsert.TypeStock,
+                                    SqliteStockMetaUpsert.TypeDelisted)
+                        .Select(x => new StockListEntry(x.Code, x.Name)).ToList())
+                    : new CninfoStockListProvider(),
+                companyProfileRepository, ProbeBars(1)));
         taskRegistry.Register(FetchActionId.StepCompanyProfile,
             () => new CompanyProfileTask(companyProfileRepository, companyProfileProvider));
         taskRegistry.Register(FetchActionId.StepCustomerSupplier,
@@ -761,6 +790,25 @@ public partial class App : Application
             // manifestStore：读/清"day_adj 被重写过，要整段重算"那个标记（见 BoardIndexTask）
             () => new BoardIndexTask(paths, boardRepository, manifestStore));
 
+        // 【拉取区间数据】2026-09-22 改成**分派器**（见 doc/fetch-year-migration-design.md）：
+        //   它自己不抓任何东西，带着年份区间去调上面这些任务。跟【重新拉取失败】同一个形状。
+        //   ⚠ 注册的是工厂、lambda 到 Create 时才求值，所以这里引用 taskRegistry 自己不成环。
+        taskRegistry.Register(FetchActionId.FetchYear, () => new FetchYearTask(taskRegistry));
+
+        // 【重新拉取失败】2026-09-22 也改成分派器：读统一待办清单、按 taskId 让各任务自己补。
+        //   跟上面那个同一个形状，差别只在分派依据（年份区间 vs 待办清单）。
+        taskRegistry.Register(FetchActionId.RetryFailed,
+            () => new RetryFailedTask(paths, manifestStore, taskRegistry, taskRegistry));
+
+        // 最后 5 项本地维护类 2026-09-22 一并迁到新框架（见 StockPlatform.Tasks/LocalMaintenanceTasks.cs）。
+        // 单看每一项收益都不大（都不联网、5 秒到几分钟），收益在**迁完之后**：
+        // 界面那个 switch 没有剩下的 case 了，编排层不再是任何一项的执行入口。
+        taskRegistry.Register(FetchActionId.StepFillProbeFloor, () => new ProbeFloorBackfillTask(paths));
+        taskRegistry.Register(FetchActionId.StepEtfIndexMap, () => new EtfIndexMapTask(paths, indexRepository));
+        taskRegistry.Register(FetchActionId.StepReparseBankPdf, () => new BankPdfReparseTask(paths));
+        taskRegistry.Register(FetchActionId.ImportManual, () => new ManualImportTask(paths));
+        taskRegistry.Register(FetchActionId.OptimizeDatabase, () => new DatabaseOptimizeTask(paths));
+
         // 【指数成分名单】【指数权重】【股票名册与流通市值】2026-09-18 迁到新任务框架——
         //   迁完 RunFillBacklogAsync 里就只剩 K线那一块了。见 doc/index-roster-task-design.md。
         //   前两项一批＝一个指数，732 个的轮次终于能分批跑、能到点收尾。
@@ -774,9 +822,7 @@ public partial class App : Application
                 sources[0].StockListProvider,
                 // ⚠ 判交易日的退路也要跟着总开关走——日历为空时它**真的会发请求**
                 //   （2026-09-18 就是漏了这一处，验证时白发了一轮新浪列表请求）。
-                offlineMock
-                    ? new MockBarFetcher()
-                    : new TencentBarFetcher(new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                ProbeBars(1),
                 manifestStore, paths));
 
         // 【资金净流入】2026-09-18 迁到新任务框架。三类待办（失败名单/整天缺失/残缺日）都归它自己补
@@ -793,7 +839,15 @@ public partial class App : Application
             () => new MarginTask(marginRepository, marginProvider, tradingDayRepository,
                                  manifestStore, paths, dailyNoDataRepository));
 
-        var orchestrator = new FetchOrchestrator(paths, manifestStore, fundamentalRepository, marketCapFetcher, netInflowFetcher, announcementOrchestrator, boardFetcher, boardRepository, indexConsProvider, indexWeightProvider, lhbProvider, indexRepository, lhbRepository, shareholderProvider, shareholderRepository, marginProvider, marginRepository, etfListProvider, delistedListProvider, financialProvider, dividendProvider, dividendRepository, prebookProvider, forecastProvider, forecastRepository, moneyFlowProvider, moneyFlowRepository, marketEventProvider, marketEventRepository, boardMapProvider, boardMapRepository, sideMenuBoardList, moneyFlowSnapshotProvider, boardHierarchy, tradingDayRepository, dailyNoDataRepository);
+        // ⚠ 2026-09-22：参数从 36 个降到 12 个。【拉取区间数据】改成分派器之后，编排层里
+        //   ProcessOneStockAsync 那一串老内核（连同区间回补的十一段）整体删掉，
+        //   于是 24 个依赖变成"造出来传进去、一次都不用"——留着会让人以为编排器还管这些事。
+        //   这些对象本身都还在，只是不再喂给编排器了（各自的新式任务直接拿）。
+        var orchestrator = new FetchOrchestrator(
+            paths, manifestStore, boardFetcher, boardRepository,
+            indexConsProvider, indexWeightProvider, indexRepository,
+            financialProvider, moneyFlowProvider, moneyFlowRepository,
+            moneyFlowSnapshotProvider, tradingDayRepository);
 
         // 【金融监管指标】2026-09-15 迁到新任务框架。注册放在 orchestrator 之后，
         // 因为它要拿 FetchFinancialsForCodesAsync 做前置补数（金融股的特征科目没抓到
@@ -838,8 +892,8 @@ public partial class App : Application
 
         // 待办的转交口：【重新拉取失败股票】在 orchestrator 内部按 taskId 循环、不经过界面那一层，
         // 所以声明了"自己补待办"的任务（目前只有分红）要靠这条路回调过来，
-        // 否则那一项会被静默跳过。见 ITaskBacklogRunner。
-        orchestrator.BacklogRunner = taskRegistry;
+        // 【已删 2026-09-22】orchestrator.BacklogRunner 接线：【重新拉取失败】改成任务之后
+        // （RetryFailedTask，上面注册的），待办分派整块从编排层搬走了。
         // 【拉取区间数据】末尾要重合成板块指数，而那一项 2026-09-21 迁进了 Tasks——
         // 编排层引用不到它，走这个端口触发（见 ITaskRunner）。
         orchestrator.TaskRunner = taskRegistry;

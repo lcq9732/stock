@@ -531,7 +531,11 @@ public static class FetchTaskCatalog
             + "——残缺日以前**没有人补**，只会每轮报一句\"只能人工处理\"。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.Date,
             SoftDependsOn: [FetchActionId.StepRoster],
-            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay | FetchMode.FillBacklog),
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay
+                          // 「首次整段回补」2026-09-22 加：从**数据源起点**(2010-03-01)补起，
+                          // 不是开市首日——这个源一次返回整只票全部历史、窗口在客户端裁，
+                          // 起点填 1990 会让每只票都算出缺口、一只都跳不过，实测白跑 1 小时 45 分。
+                          | FetchMode.FirstBackfill | FetchMode.FillBacklog),
 
         new(FetchActionId.StepAnnouncements, "中标/订单公告", "巨潮检索 + 正文", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(3), "每工作日",
@@ -540,7 +544,11 @@ public static class FetchTaskCatalog
             + "模式选「只抓某一天」就只搜那一天。\n"
             + "关键词就填在这一行的参数格里（逗号分隔），留空＝不抓公告（日志里会说明是因为没填）。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.Date | FetchActionParams.Keywords,
-            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay,
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay
+                          // 「首次整段回补」2026-09-22 加，**必须带年份区间**：这一项没有
+                          // "本地补到哪儿了"的水位线（按关键词搜、不按标的），不给年份就只能
+                          // 从头搜到尾，而搜索源有翻页上限、搜不全还会静默丢掉。
+                          | FetchMode.FirstBackfill,
             Sources: [DataSourceId.Cninfo]),
 
         new(FetchActionId.StepIndexBars, "指数日K", "腾讯", QuotaGroup.Mixed,
@@ -573,7 +581,11 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.StepRoster],
             // 只有前复权这一路支持"补某一天"：后复权/不复权/ETF/指数在原来的【补指定历史日】里
             // 走的也一直是水位线增量，不是"只抓那天"。
-            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay | FetchMode.FillBacklog,
+            SupportedModes: FetchMode.Incremental | FetchMode.SpecificDay
+                          // 「首次整段回补」2026-09-22 加：不看水位线、所有票按同一窗口抓。
+                          // 缺的往往是**开头**而不是尾巴（日更那根按回看年数只填了最近 3 年），
+                          // 按水位线续永远补不到前面那几年。【拉取区间数据】分派过来时带年份区间。
+                          | FetchMode.FirstBackfill | FetchMode.FillBacklog,
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.StepStockHfqBars, "个股日K·后复权", "腾讯", QuotaGroup.Mixed,
@@ -583,7 +595,11 @@ public static class FetchTaskCatalog
             + " day_adj**，这一条现在主要是对照和历史兼容。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
             SoftDependsOn: [FetchActionId.StepRoster],
-            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
+            SupportedModes: FetchMode.Incremental
+                          // 「首次整段回补」2026-09-22 加：补到跟前复权一样长。判据比的是
+                          // 「两头都要跟前复权比」，跟口径无关——后复权一样会因为日更只填
+                          // 最近 3 年而卡在前面那几年（不复权实测 5781 只里有 5232 只卡住）。
+                          | FetchMode.FirstBackfill | FetchMode.FillBacklog,
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
         new(FetchActionId.StepStockRawBars, "个股日K·不复权", "腾讯", QuotaGroup.Mixed,
@@ -603,7 +619,9 @@ public static class FetchTaskCatalog
             "全市场 ETF 的日K（约 1000 只，水位线增量）。代码带前缀存（sh510300），天然被挡在个股选股全集外。"
             + "名单和K线是两家，但\"没有名单就抓不了K线\"，所以是一项。",
             FetchActionParams.GlobalFetchOptions | FetchActionParams.LookbackYears,
-            SupportedModes: FetchMode.Incremental | FetchMode.FillBacklog,
+            SupportedModes: FetchMode.Incremental
+                          // 「首次整段回补」2026-09-22 加：不看水位线、从开市首日补起。
+                          | FetchMode.FirstBackfill | FetchMode.FillBacklog,
             Sources: [DataSourceId.Sina, DataSourceId.Tencent]),
 
         new(FetchActionId.StepEtfRawBars, "ETF日K·不复权", "腾讯", QuotaGroup.Mixed,
@@ -1530,11 +1548,13 @@ public static class FetchTaskCatalog
             + "中标公告按**自然年切片**搜索（巨潮单次搜索有翻页上限，一次跨二十几年会翻满即停、剩下的静默丢掉）。\n"
             + "补完之后，期间除过权的票会自动记进【重取前复权】的待办名单——新补的那段用的是数据源当前基准，"
             + "跟库里较新那段的基准可能对不上，接缝处会有假跳空。\n"
-            + "⚠ 这一项**故意保持复合**（2026-09-02 评估）：它内部各段共享同一次"
-            + "\"每只标的本地最早是哪天\"的预取，拆开的话每段都要把这几 GB 的库各扫一遍；"
-            + "而它本来就是一次性整批回补、几乎没有\"只补某一类\"的用法。要只补某一类历史时，"
-            + "用对应项的「首次整段回补」模式更省。",
-            FetchActionParams.YearRange | FetchActionParams.GlobalFetchOptions | FetchActionParams.Keywords),
+            + "这一项**自己不抓任何东西**（2026-09-22 改）：它带着年份区间去调上面那些任务，"
+            + "跟【重新拉取失败】一个形状。停在任何一项之间都算数，下轮重跑时各项会自己跳过补过的部分。\n"
+            + "⚠ 只想补某一类历史时，直接把对应那一项设成「首次整段回补」并填年份区间即可，不必跑整轮。",
+            // ⚠ **不挂 Keywords**（2026-09-22）：这一项改成分派器之后，关键词是
+            //   【中标/订单公告】自己的参数，在它自己那一行填。复合任务再挂一份就是两处配置、
+            //   两处可能不一致——而且它调的本来就是那个任务，用它自己的设置才对。
+            FetchActionParams.YearRange | FetchActionParams.GlobalFetchOptions),
 
         new(FetchActionId.OptimizeDatabase, "优化数据库", "本地", QuotaGroup.Local,
             TimeSpan.FromMinutes(5), "一次性",

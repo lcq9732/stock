@@ -83,6 +83,8 @@ public sealed class NetInflowTask(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
         Repo.EnsureSchema();
+        // 数据源的状态播报（限流退避/重试）转成日志——不订阅的话被退避时一个字都没有
+        using var statusSub = ForwardStatus(h => fetcher.OnStatus += h, h => fetcher.OnStatus -= h);
         _errors.Clear();
         _attempted.Clear();
         _failed.Clear();
@@ -246,11 +248,55 @@ public sealed class NetInflowTask(
     private List<(string Code, DateTime Start, DateTime End)> Plan(TaskRunArgs args)
     {
         var codes = LocalStockCodes();
+        if (args.Mode.HasFlag(FetchMode.FirstBackfill)) return PlanFullBackfill(codes, args);
+
         var end = args.Mode == FetchMode.SpecificDay
             ? args.Day?.ToDateTime(TimeOnly.MinValue) ?? DateTime.Today
             : DateTime.Today;
         bool exactDayOnly = args.Mode == FetchMode.SpecificDay;
         return PlanFor(codes, end, exactDayOnly);
+    }
+
+    /// <summary>
+    /// 首次整段回补（2026-09-22）：**不看水位线**，所有票按同一个窗口抓。
+    ///
+    /// 「整段」的起点是**数据源自己的起点**（<see cref="INetInflowFetcher.EarliestAvailable"/>，
+    /// 东财是 2010-03-01），不是 A股开市首日。这件事有实测代价：这个源一次返回整只票的全部历史、
+    /// 窗口在客户端裁，起点填 1990 的话每只票都算出 [1990, 本地最早日-1] 的缺口、**一只都跳不过**，
+    /// 全市场白抓一遍约 1 小时 45 分。
+    ///
+    /// 再按调用方给的年份区间收窄（<see cref="BackfillWindowRule"/>）——收窄到数据源起点之前
+    /// 是无效的，那是"只收窄不放宽"要挡住的正是这种。
+    /// </summary>
+    private List<(string Code, DateTime Start, DateTime End)> PlanFullBackfill(
+        IReadOnlyList<string> codes, TaskRunArgs args)
+    {
+        var floor = fetcher.EarliestAvailable.ToDateTime(TimeOnly.MinValue);
+        var (start, end) = BackfillWindowRule.Narrow(floor, DateTime.Today,
+                                                    args.YearStart, args.YearEnd, DateTime.Today);
+        if (start.Date > end.Date)
+        {
+            Report($"资金净流入：指定的年份区间整段早于数据源起点 {floor:yyyy-MM-dd}，"
+                 + "这几年源上根本没有这份数据，跳过（不是漏抓）。");
+            return [];
+        }
+        // ⚠ **逐只算缺口，别所有票一个窗口**（2026-09-22 修）：
+        //   "不看水位线"说的是不按"续到今天"那条线走，不是"本地已经有了也重抓一遍"。
+        //   第一版就是所有票同一个窗口，实测同样的区间重跑一次，5977 只全部重抓、
+        //   又写了 156 万行重复数据；模拟源下只是慢 4 秒，真源下这个接口是逐只查询、
+        //   全市场一轮约 1 小时 45 分——整轮白跑。
+        //   判据用 YearGapCalculator，跟K线那几路同一个（本地最早日已覆盖区间起点就整只跳过）。
+        var earliest = Repo.GetEarliestPeriodStartByCode();
+        var plan = new List<(string, DateTime, DateTime)>(codes.Count);
+        foreach (var code in codes)
+        {
+            var (s, e) = YearGapCalculator.For(code, earliest, start, end);
+            if (s.Date <= e.Date) plan.Add((code, s, e));
+        }
+        Report($"资金净流入**整段回补**：{codes.Count} 只里有 {plan.Count} 只要抓"
+             + $"（窗口 {start:yyyy-MM-dd}~{end:yyyy-MM-dd}，每只只补它自己缺的那一段；"
+             + $"{codes.Count - plan.Count} 只这一段本地已经齐了、不发请求）。");
+        return plan;
     }
 
     private List<(string Code, DateTime Start, DateTime End)> PlanFor(
@@ -459,9 +505,19 @@ public sealed class NetInflowTask(
         manifestStore.Save(manifest);
     }
 
+    /// <summary>
+    /// 这一轮是按什么口径跑的，写在开工那句里。
+    ///
+    /// ⚠ **每加一个模式都要在这儿加一支**：漏了就掉进兜底那支，日志会说"增量"，
+    /// 而实际走的是别的路——2026-09-22 加「首次整段回补」时漏了，于是同一轮里
+    /// 前一句报「整段回补，窗口 2024-01-01~2024-12-31（不看水位线）」、
+    /// 后一句报「增量（每只按自己的水位线续抓）」，两句话说的是相反的事。
+    /// （当时数据是对的——5977 只 × 262 行正好是全年交易日数——但日志会把人带偏。）
+    /// </summary>
     private static string Describe(FetchMode mode) => mode switch
     {
         FetchMode.SpecificDay => "只抓指定的那一天",
+        _ when mode.HasFlag(FetchMode.FirstBackfill) => "整段回补（不看水位线，所有票同一个窗口）",
         _ => $"增量（每只按自己的水位线续抓；从没抓过的回看 {InitialLookbackDays} 天）",
     };
 }

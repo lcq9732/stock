@@ -6,7 +6,13 @@ namespace StockPlatform.Data.Sqlite;
 /// <summary>
 /// <c>BarProbeFloor</c> 表的存取——"数据源在这一天之前没有这只标的的K线"这个已探明的结论。
 ///
-/// 由【拉取区间数据】写、也由它读（见 <c>FetchOrchestrator.RunFetchYearInternalAsync</c> 与
+/// ⚠ **2026-09-22 起只有读、没有写**：唯一的写入方是老【拉取区间数据】的 RecordProbeFloors，
+/// 那一项改成分派器时整段删掉了。已有的 17541 行永远成立（水位是数据源的属性、不是我们库的状态），
+/// 所以读它安全；但这张表**不再长大**——新上市的标的、以后新探明的空区间都不会被记下来。
+/// 要补写入的话，判据现成（<see cref="StockPlatform.Logic.Services.ProbeFloorPlanner"/>），
+/// 落点在各K线任务的抓取路径上（BarFetchTaskBase.FetchOneAsync 那里知道"成功且返回 0 行"）。
+///
+/// 读它的是各K线任务的整段回补（BarFetchTaskBase.PlanGaps →
 /// <see cref="StockPlatform.Logic.Services.YearGapCalculator"/>）：往前补历史时先把缺口起点抬到
 /// 这个水位，抬过缺口就整只跳过、连请求都不发。没有它的话，每次重跑都要把"那些年还没上市"的票
 /// 重新试一遍（2026-09-07 实测一万六千个请求、四个半小时零写入）。

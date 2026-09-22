@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 using StockPlatform.Scheduling;
 using StockPlatform.Scheduling.Tasks;
 
@@ -90,6 +91,8 @@ public sealed class LhbTask(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
         repository.EnsureSchema();
+        // 数据源的状态播报（限流退避/重试）转成日志——不订阅的话被退避时一个字都没有
+        using var statusSub = ForwardStatus(h => provider.OnStatus += h, h => provider.OnStatus -= h);
         _errors.Clear();
         _seen.Clear();
         _targets = [];
@@ -324,6 +327,29 @@ public sealed class LhbTask(
         if (start < provider.EarliestAvailable) start = provider.EarliestAvailable;
 
         var end = DateOnly.FromDateTime(today);
+
+        // 整段回补可以带年份区间（2026-09-22）——【拉取区间数据】分派过来时就带着。
+        //
+        // ⚠ 不带年份时的行为**一个字不改**（上面那段注释说的"不跳过已有的天"仍然成立，
+        //   580 个请求、十几分钟，一次性）。加这一下是因为：忽略年份的话，
+        //   一句「补 2024」会让它从 2004 年重跑到今天——**一次性的成本变成了每轮的成本**。
+        //   实测：同样的区间连跑两轮，每轮都重写 5803 个交易日、23208 行。
+        if (args.Mode.HasFlag(FetchMode.FirstBackfill)
+            && (args.YearStart is not null || args.YearEnd is not null))
+        {
+            var (ns, ne) = BackfillWindowRule.Narrow(
+                start.ToDateTime(TimeOnly.MinValue), end.ToDateTime(TimeOnly.MinValue),
+                args.YearStart, args.YearEnd, today);
+            start = DateOnly.FromDateTime(ns);
+            end = DateOnly.FromDateTime(ne);
+            if (start > end)
+            {
+                Report($"龙虎榜：指定的年份区间整段早于数据源起点 {provider.EarliestAvailable:yyyy-MM-dd}，"
+                     + "这几年源上根本没有，跳过（不是漏抓）。");
+                return (today, today, [], confirmed);
+            }
+            Report($"龙虎榜**整段回补**收窄到 {start:yyyy-MM-dd}~{end:yyyy-MM-dd}（按指定的年份区间）。");
+        }
         var days = tradingDays.GetBetween(start, end).OrderBy(d => d).ToList();
         if (days.Count == 0)
         {

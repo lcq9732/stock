@@ -24,6 +24,44 @@ public interface IFetchTaskRegistry
 
     /// <summary>注册了哪些动作（给自检和测试用）。</summary>
     IReadOnlyCollection<FetchActionId> Registered { get; }
+
+    /// <summary>
+    /// 这个任务能不能**自己补待办**。2026-09-22 提到接口上——【重新拉取失败】迁成任务之后
+    /// 要在分派前问一句，没声明的说清楚别静默（见 <c>RetryFailedTask</c>）。
+    ///
+    /// ⚠ 按任务的声明判，不是「registry 里有就算」：没实现 FillBacklog 的任务收到那个模式
+    /// 会返回空、报一句「没有欠着的」，**待办永远补不上而且一声不吭**。
+    /// </summary>
+    bool HandlesBacklog(FetchActionId id);
+}
+
+/// <summary>
+/// 「让一个任务去调另一个任务」的口子（2026-09-22，给【拉取区间数据】那个分派器用）。
+///
+/// ════ 为什么不复用 Data 层那个 <see cref="ITaskRunner"/> ════
+/// 那个接口按**字符串** actionId 定义、也带不了 <see cref="TaskRunArgs"/>，因为它服务的是
+/// 编排层（Data），而依赖方向是 Scheduling → Data——Data 里看不见 FetchActionId 和 TaskRunArgs。
+/// 分派器本身是个任务、住在 StockPlatform.Tasks，那一层**看得见 Scheduling**，
+/// 所以这里可以用真类型，不用为了跨层而降级成字符串。
+///
+/// ════ 占用不在这里登记 ════
+/// 数据源占用是按**计划项**登记的（见 <see cref="IFetchTask"/> 类注释："准入判断移出任务"）。
+/// 从这里跑起来的任务是别人任务内部的一步，外层那一项已经拿着占用了，内层不再抢——
+/// 【重新拉取失败】分派待办时就是这么干的（<c>RetryFailedTask</c>）。
+/// </summary>
+public interface IFetchTaskDispatcher
+{
+    /// <summary>
+    /// 跑一个任务。<paramref name="subscribe"/> 在它开跑**之前**被调用，
+    /// 调用方在那里挂自己的订阅——通常就是 <c>FetchTaskBase.ForwardFrom</c>。
+    ///
+    /// ⚠ 给的是**订阅口子**、不是 <c>IProgress&lt;string&gt;</c>：后者会把
+    /// <see cref="TaskProgress.Quiet"/>、Done/Total、Phase 和 <see cref="IFetchTask.OnLiveness"/>
+    /// 全压扁掉，靠 <c>ReportQuiet</c> 喂狗的子任务在外层看来就是哑的
+    /// （2026-09-22 实测掐断过一整轮，见 <c>FetchTaskBase.ForwardFrom</c>）。
+    /// </summary>
+    Task<FetchResult> RunAsync(FetchActionId id, TaskRunArgs args,
+                               Action<IFetchTask>? subscribe, CancellationToken ct);
 }
 
 /// <inheritdoc cref="IFetchTaskRegistry"/>
@@ -37,7 +75,7 @@ public interface IFetchTaskRegistry
 /// 任务本身一行都不用改。传 null 就是不记（测试里用）。
 /// </param>
 public sealed class FetchTaskRegistry(IManifestStore? manifestStore = null)
-    : IFetchTaskRegistry, ITaskBacklogRunner, ITaskRunner
+    : IFetchTaskRegistry, ITaskRunner, IFetchTaskDispatcher
 {
     private readonly Dictionary<FetchActionId, Func<IFetchTask>> _factories = new();
 
@@ -59,22 +97,11 @@ public sealed class FetchTaskRegistry(IManifestStore? manifestStore = null)
     /// </summary>
     public bool HandlesBacklog(FetchActionId id) => Create(id)?.HandlesBacklog == true;
 
-    // ── ITaskBacklogRunner：给编排层（Data 层，引用不到这里）转交待办用 ──
-    //    【重新拉取失败股票】是在 orchestrator 内部按 taskId 循环的，不经过界面那一层，
-    //    所以必须有这条回来的路，否则它会静默跳过"自己补待办"的那些任务。
-
-    bool ITaskBacklogRunner.Handles(string taskId)
-        => Enum.TryParse<FetchActionId>(taskId, out var id) && HandlesBacklog(id);
-
-    Task<FetchResult> ITaskBacklogRunner.RunAsync(
-        string taskId, IProgress<string>? progress, CancellationToken ct)
-    {
-        if (!Enum.TryParse<FetchActionId>(taskId, out var id))
-            throw new InvalidOperationException($"待办里的任务 id 解析不出动作：{taskId}");
-        return RunAsync(id, new TaskRunArgs(Mode: FetchMode.FillBacklog), progress, ct);
-    }
-
-    // ── ITaskRunner：给编排层触发一个任务用（眼下只有【拉取区间数据】末尾重合成板块指数）──
+    // ⚠ progress 传 null：调用方要的是原始事件（它在 subscribe 里自己挂），
+    //    再桥一份 IProgress 只会让同一句话进两遍日志。
+    Task<FetchResult> IFetchTaskDispatcher.RunAsync(
+        FetchActionId id, TaskRunArgs args, Action<IFetchTask>? subscribe, CancellationToken ct)
+        => RunAsync(id, args, progress: null, ct, subscribe);
 
     Task<FetchResult> ITaskRunner.RunAsync(string actionId, IProgress<string>? progress, CancellationToken ct)
     {

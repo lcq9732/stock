@@ -60,6 +60,9 @@ public class BlockTradeTaskTests : IDisposable
     /// </summary>
     private sealed class FakeFetcher : IBlockTradeDayFetcher
     {
+        /// <summary>接口要求（2026-09-22 加）。假源不发请求，一直是空的。</summary>
+        public event Action<string>? OnStatus;
+
         public readonly List<DateTime> Asked = [];
         public HashSet<DateTime> Empty = [];
         public HashSet<DateTime> Shortfall = [];

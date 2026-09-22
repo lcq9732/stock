@@ -192,7 +192,7 @@ public class SqliteBarRepository : IBarRepository
     }
 
     /// <summary>每个代码本地最早的 period_start（一次查询返回全部代码，2026-07-29新增）——给"拉取指定
-    /// 年份"（<see cref="Orchestration.FetchOrchestrator.RunFetchYearAsync"/>）决定每只标的在那一年里要
+    /// 年份"（【拉取区间数据】的整段回补）决定每只标的在那一年里要
     /// 补哪一段：最早日已经在目标年之前=那年本地已有（增量抓取保证历史是连续的），直接跳过不发请求；
     /// 最早日落在目标年内=只补"年初→最早日前一天"这段缺口；最早日在目标年之后=整年都缺、抓一整年。
     /// 故意不做成逐个代码查（全市场5000+只，逐个查会有5000+次往返），而是一次 GROUP BY 全拿回来。

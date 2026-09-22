@@ -77,8 +77,21 @@ public sealed class IndexBarTask(
                     all.Select(i => (i.Symbol, i.Name)), SqliteStockMetaUpsert.TypeIndex);
         }, ct);
 
-        var end = DateTime.Today;
+        var today = DateTime.Today;
         int lookbackYears = args.LookbackYears is > 0 ? args.LookbackYears.Value : DefaultLookbackYears;
+
+        // 整段回补：逐只算缺口（水位表 + 本地已覆盖 + 交易日历，见 PlanGaps）。
+        // 指数只有十来个，一次算好查表用，省得在循环里反复开库。
+        Dictionary<string, (DateTime Start, DateTime End)> gaps = [];
+        if (_fullBackfill)
+        {
+            var (ws, we) = NarrowToYears(IncrementalWindowCalculator.AShareMarketOpen, today, args);
+            if (ws.Date <= we.Date)
+                gaps = (await Task.Run(() => PlanGaps(all.Select(i => i.Symbol).ToList(), Granularity.Day,
+                                                      ws, we, ignoreFloor: false, out int _skip), ct))
+                       .ToDictionary(g => g.Code, g => (g.Start, g.End), StringComparer.Ordinal);
+        }
+
         int done = 0;
         foreach (var (symbol, name) in all)
         {
@@ -87,9 +100,10 @@ public sealed class IndexBarTask(
             // 整段回补忽略水位线**和**回看年数：这个模式存在的意义就是"一次补到底"，
             // 还要人先把那个格子改成 25、跑完再改回 3，正是它要消灭的麻烦。
             // 数据源只会返回该指数实际存在的日期，早于发布日的部分自然是空。
-            var start = _fullBackfill
-                ? IncrementalWindowCalculator.AShareMarketOpen
-                : await Task.Run(() => IncrementalStart(symbol, Granularity.Day, end, lookbackYears), ct);
+            var (start, end) = _fullBackfill
+                // 缺口表里没有这只＝它这一段已经齐了（或数据源已探明没有），给个空区间让下面跳过
+                ? gaps.TryGetValue(symbol, out var g) ? g : (today.AddDays(1), today)
+                : (await Task.Run(() => IncrementalStart(symbol, Granularity.Day, today, lookbackYears), ct), today);
 
             done++;
             if (start.Date > end.Date)

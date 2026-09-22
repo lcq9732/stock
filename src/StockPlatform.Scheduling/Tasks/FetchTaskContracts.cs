@@ -138,7 +138,34 @@ public sealed record TaskRunArgs(
     /// 中标/订单公告的关键词（2026-09-21 随公告任务迁移加）——计划里那一行自己填的，逗号分隔。
     /// 留空**不是错**，是"这一轮不抓公告"，任务会在日志里说清楚原因。只有那一项用得上。
     /// </summary>
-    IReadOnlyList<string>? Keywords = null);
+    IReadOnlyList<string>? Keywords = null,
+    /// <summary>
+    /// 「整段」从哪一年起（2026-09-22 随【拉取区间数据】改成分派器加）。
+    ///
+    /// ⚠ **只跟 <see cref="FetchMode.FirstBackfill"/> 搭配使用**：那个模式本来就是
+    /// "不看水位线、只补缺的"，而「整段」有多长原本由各任务自己的数据源决定
+    /// （K线从开市首日、分档资金流只有 120 个交易日）。这两个参数把那个"整段"
+    /// **收窄**成调用方指定的年份区间——是同一种行为的窗口更小，不是另一种行为。
+    /// 所以没有为它新开一个 FetchMode：模式是会两两组合的，多一个就多一片要想清楚的格子。
+    ///
+    /// null＝按各任务自己的"整段"。<see cref="FetchMode.Incremental"/> 下这两个值无意义、
+    /// 任务应当忽略它们（增量永远是从各标的自己的水位线往后续）。
+    /// </summary>
+    int? YearStart = null,
+    /// <inheritdoc cref="YearStart"/>
+    int? YearEnd = null,
+    /// <summary>
+    /// 【覆盖重抓前复权】（2026-09-22 同上）——**不看本地已有什么、整段按数据源当前基准重写**。
+    ///
+    /// 用来抹平历史上分批入库造成的复权基准接缝：数据源的前复权是「原价 − 之后累计分红送配」，
+    /// 某只票一分红，它全部历史的前复权值就都变了；而本地历史是分批入库的，
+    /// 接缝处会出现假跳空（实测有票虚增 50%）。
+    ///
+    /// ⚠ 它跟 <see cref="FetchMode.FirstBackfill"/>「只补缺的」正好相反，**只有前复权那一路吃**，
+    /// 别的任务忽略即可。走这条路时连 <c>BarProbeFloor</c> 水位也不看——
+    /// 否则"抹接缝"的活会被"这段已经探明没有"给跳过。
+    /// </summary>
+    bool OverwriteQfq = false);
 
 /// <summary>跑完之后的统计，给 <c>OnCompletedAsync</c> 用。</summary>
 /// <param name="Batches">抓了几批。</param>

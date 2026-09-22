@@ -99,6 +99,14 @@ public sealed record BlockTradeDay(DateTime Day, List<BlockTrade> Rows, int Repo
 /// </summary>
 public interface IBlockTradeDayFetcher
 {
+    /// <summary>
+    /// 取数过程中的状态播报（限流退避、重试那类）——跟别的取数接口一致（2026-09-22 补）。
+    ///
+    /// ⚠ 实现类 <c>EastMoneyMarketEventProvider</c> 一直有这个事件，只是**接口没暴露**，
+    /// 于是 <c>BlockTradeTask</c> 拿着接口订不到，被退避时日志里一个字都没有。
+    /// </summary>
+    event Action<string>? OnStatus;
+
     Task<BlockTradeDay> FetchBlockTradesOfDayAsync(DateTime day, CancellationToken ct = default);
 }
 

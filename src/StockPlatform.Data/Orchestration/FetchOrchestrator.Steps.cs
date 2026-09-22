@@ -78,21 +78,24 @@ public partial class FetchOrchestrator
     //   · 写入判据两边共用 Logic 层的 BarWritePlanner；
     //   · 漂移名单的筛选走 QfqRepairPlanner；不复权"补齐了没有"走 RawBarCompletenessRule；
     //   · 后复权/不复权那两道闸（探一只 + 失败率熔断）走 HfqProbeGate。
-    // ⚠ FetchHfqBarsAsync / ProcessOneStockAsync / RunFetchRawBarsAsync **都还在**：
-    //   【拉取区间数据】【重取前复权】【重新拉取失败】【全库体检值回补】仍在用它们。
+    // ⚠ 2026-09-22：FetchHfqBarsAsync / ProcessOneStockAsync / RunFetchRawBarsAsync **已全部删除**。
+    //   最后一个使用者【拉取区间数据】那天改成了分派器（Tasks/FetchYearTask，它调上面这些任务），
+    //   连同区间回补的十一段一起删掉——编排层这一轮少了 1131 行。
 
     // ───────────────────────────── 8. ETF 日K ─────────────────────────────
 
     // 整项 2026-09-21 迁到新任务框架（StockPlatform.Tasks/EtfBarTask），本类不再有它的入口。
     // 名单那道"半截就改用库里存量"的闸搬进了 Logic 层的 EtfListGuard。
-    // 【拉取区间数据】里的 ETF 那半边仍在 FetchOrchestrator（FetchEtfBarsForYearAsync）。
+    // 【拉取区间数据】里的 ETF 那半边已删（2026-09-22）：它现在直接调上面那个任务。
 
     // ───────────────────────────── 9. 退市股收尾 ─────────────────────────────
 
     // 整项 2026-09-21 迁到新任务框架（StockPlatform.Tasks/DelistedTailTask），本类不再有它的入口。
     // 筛"哪几只缺尾巴、各补哪一段"的判据搬进了 Logic 层的 DelistedTailPlanner。
     // ⚠ CatchUpDelistedTailsAsync 也一并删了——它只有这一个调用方；
-    //   【拉取区间数据】里的退市股那半边走的是另一个方法 FetchDelistedForRangeAsync，那个还在。
+    //   【拉取区间数据】里的退市股那半边已删（2026-09-22）：退市股的**区间历史**现在由
+    //   个股三个口径带上（见 StockDayBarTask.BackfillCodes，整段回补的名册含 type='delisted'），
+    //   这一项仍只管"终止日前最后那几天"。
 
     // ─────────────────────── 10. 板块指数合成（本地计算） ───────────────────────
 
@@ -108,58 +111,6 @@ public partial class FetchOrchestrator
     //   ·【龙虎榜】2026-09-17 → StockPlatform.Tasks/LhbTask，落库统一走 LhbDayWriter。
     // 两项的残缺日待办现在也都归各自的任务补（HandlesBacklog=true），
     // 见 doc/fill-backlog-to-tasks-design.md。
-
-    /// <summary>
-    /// 【回填"无更早数据"水位】（2026-09-07）——不联网，把本地已有历史里能推出的水位一次性
-    /// 写进 <c>BarProbeFloor</c>，让往后的【拉取区间数据】不再对着"那些年还没上市"的票空跑。
-    ///
-    /// 判据与实测数据见 <see cref="ProbeFloorPlanner.PlanFromLocalHistory"/>（纯计算、可单测）。
-    /// 这里只负责查三路水位线、落库、把结果说清楚——尤其要说清**哪些没填、为什么**，
-    /// 否则人会以为跑完就万事大吉，而 ETF 那 1655 只其实还留给真探测。
-    ///
-    /// 幂等：水位表只抬不降（见 <see cref="SqliteBarProbeFloorRepository.Record"/>），反复跑无害。
-    /// </summary>
-    public Task<FetchResult> RunStepFillProbeFloorAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (repo, errors, failed, _, sw) = BeginStep();
-        var floors = new SqliteBarProbeFloorRepository(_paths.CurrentDb);
-        floors.EnsureSchema();
-
-        progress?.Report("正在查本地三路（前复权/后复权/不复权）日K的最早一根……23GB 库上约需半分钟，不联网。");
-        var eDay = repo.GetEarliestPeriodStartByCode(Granularity.Day);
-        ct.ThrowIfCancellationRequested();
-        var eHfq = repo.GetEarliestPeriodStartByCode(Granularity.DayHfq);
-        ct.ThrowIfCancellationRequested();
-        var eRaw = repo.GetEarliestPeriodStartByCode(Granularity.DayRaw);
-        ct.ThrowIfCancellationRequested();
-
-        var plan = ProbeFloorPlanner.PlanFromLocalHistory(eDay, eHfq, eRaw,
-            Granularity.Day, Granularity.DayHfq, Granularity.DayRaw,
-            out int agreed, out int disagreed, out int dayOnly);
-
-        int before = floors.Count();
-        foreach (var (gran, rows) in plan)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (rows.Count > 0) floors.Record(rows, gran);
-        }
-        int after = floors.Count();
-
-        progress?.Report($"三路最早一根一致的标的 {agreed} 只 → 已按它写入水位（三个粒度各 {agreed} 条，"
-                       + $"表里从 {before} 条变成 {after} 条）。这些票往后的区间回补连请求都不会发。");
-        if (disagreed > 0)
-            progress?.Report($"三路最早一根不一致的 {disagreed} 只**没有填**——那说明其中某一路确实还缺前段，"
-                           + "该抓。下一次【拉取区间数据】会照旧请求它们。");
-        if (dayOnly > 0)
-            progress?.Report($"只有前复权一路的 {dayOnly} 个标的（ETF / 大盘指数 / 板块指数）**没有填**："
-                           + "它们没有另外两路可以交叉印证，不敢凭一路下结论。板块指数是本地合成的、区间回补本来就不抓；"
-                           + "ETF 留给真探测（约 20 分钟一轮，探完水位会自动记下来）。");
-        progress?.Report($"回填完毕，用时 {FormatElapsed(sw.Elapsed)}。要作废这些结论，"
-                       + "跑【全库数据体检】并勾上「彻底体检」。");
-
-        return Task.FromResult(FinishFetchRun(errors, "回填\"无更早数据\"水位", Array.Empty<string>(), failed, progress));
-    }
 
     // 【龙虎榜】的 RunStepLhbDayAsync / RunStepBackfillLhbAsync 删于 2026-09-17：
     // 整项迁去了 StockPlatform.Tasks/LhbTask（增量、只抓某一天、整段回补三条路都在那儿，
@@ -187,20 +138,6 @@ public partial class FetchOrchestrator
     // （StockPlatform.Tasks/IndexConsTask、IndexWeightTask）。权重那两道筛子
     // （本地这一期还新鲜 / 确认没有权重文件）跟着搬了过去——丢了它们就是每轮拿四五百个
     // 注定 404 的请求去撞中证的反爬。见 doc/index-roster-task-design.md。
-
-    /// <summary>ETF↔指数 名称匹配（本地、不联网）——供"股票→指数→ETF"反查。</summary>
-    public async Task<FetchResult> RunStepEtfIndexMapAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        _indexRepository.EnsureSchema();
-        await Task.Run(() =>
-        {
-            var map = BuildEtfIndexMap(progress);
-            lock (_dbLock) _indexRepository.ReplaceEtfIndexMap(map);
-        }, ct);
-        return FinishFetchRun(errors, "ETF指数映射", Array.Empty<string>(), failed, progress);
-    }
 
     // ─────────────── 板块行情与成分（不含合成） ───────────────
 
@@ -243,19 +180,4 @@ public partial class FetchOrchestrator
     //  一行没动。
     // ════════════════════════════════════════════════════════════════════════
 
-    public async Task<FetchResult> RunStepReparseBankReportsAsync(
-        IProgress<string>? progress, CancellationToken ct = default)
-    {
-        var (_, errors, failed, _, _) = BeginStep();
-        await Task.Run(() =>
-        {
-            var repo = new SqliteBankRegulatoryRepository(_paths.CurrentDb);
-            repo.EnsureSchema();
-            // 机构类型是靠财务特征科目认出来的，这里只**读**本地已有的快照，不联网补抓——
-            // 补抓是【金融监管指标】那一项的事。认不出类型的按银行的标签集解析（同原逻辑）。
-            var latest = new SqliteFinancialRepository(_paths.CurrentDb).GetLatestSnapshotByCode();
-            ReparseCachedBankReports(repo, latest, progress, ct);
-        }, ct);
-        return FinishFetchRun(errors, "重解析已有PDF", Array.Empty<string>(), failed, progress);
-    }
 }

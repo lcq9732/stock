@@ -17,6 +17,8 @@ namespace StockPlatform.Data.Remote;
 /// </summary>
 public sealed class MockBlockTradeProvider : IBlockTradeDayFetcher
 {
+    /// <summary>接口要求（2026-09-22）。模拟源不发请求，也就没有退避/重试可报，一直是空的。</summary>
+    public event Action<string>? OnStatus;
     /// <summary>每天几行。</summary>
     public const int RowsPerDay = 6;
 

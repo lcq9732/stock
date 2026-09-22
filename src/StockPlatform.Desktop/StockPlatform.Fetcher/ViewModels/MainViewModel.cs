@@ -2283,17 +2283,21 @@ public class MainViewModel : INotifyPropertyChanged
         FetchPlanItem item, DateTime? deadline, IProgress<string> progress, CancellationToken ct)
     {
         // ── 【只补待办】走这一条总分支（2026-09-13）──
-        // 这个模式跟具体是哪一项无关：都是"读 Manifest.Todos 里属于我的那几条、补上"，
-        // 所以在这里一次分派掉，下面那个 switch 也不用管它。
-        // 【重新拉取失败】自己也是遍历待办的 TaskId 走这条路（见 RunRetryFailedInternalAsync）。
+        // 【只补待办】现在**全部由任务自己认领**（2026-09-22）：声明了 HandlesBacklog 的任务
+        // 落到下面那条 registry 总分支，收到 FetchMode.FillBacklog 自己去读属于自己的那几条。
+        // 编排层原来那个 RunFillBacklogAsync 中转已经删掉——它到最后只剩一层转交加一句告警。
         //
-        // 例外是**声明了自己补待办**的新式任务（2026-09-18）：它们落到下面那条 registry 总分支，
-        // 由任务自己认领属于自己的待办。判据是任务的 HandlesBacklog，**不是"是不是新式任务"**
-        // ——席位/大宗/龙虎榜都没实现 FillBacklog，让它们接管的话会返回空、报一句
-        // "没有欠着的"，待办永远补不上而且一声不吭。见 doc/dividend-task-design.md §9。
+        // 这里只剩那句告警：没声明 HandlesBacklog 的任务收到这个模式会返回空、报一句
+        // "没有欠着的"，**待办永远补不上而且一声不吭**（见 doc/dividend-task-design.md §9）。
+        // 判据是任务的 HandlesBacklog，**不是"是不是新式任务"**。
         if (item.EffectiveMode == FetchMode.FillBacklog
             && _taskRegistry?.HandlesBacklog(item.Action) != true)
-            return _orchestrator.RunFillBacklogAsync(item.Action.ToString(), progress, ct);
+        {
+            var label = FetchTaskCatalog.Info(item.Action).Name;
+            progress?.Report($"⚠【{label}】没有声明自己补待办（HandlesBacklog=false），"
+                           + "它欠着的那些补不了——这是个配置问题，见 IFetchTask.HandlesBacklog。");
+            return Task.FromResult(new FetchResult { NothingToDo = true });
+        }
 
         // ── 新式任务走这一条总分支（2026-09-08）──
         // 加过这一次之后，**再新增任务就不用碰这个 switch 了**：写一个类（继承 FetchTaskBase，
@@ -2302,16 +2306,31 @@ public class MainViewModel : INotifyPropertyChanged
         // 计划引擎、静默看门狗全都零改动就能收到（见 FetchTaskRegistry.RunAsync）。
         if (_taskRegistry?.Has(item.Action) == true)
         {
+            bool wantsYears = item.Info.Params.HasFlag(FetchActionParams.YearRange);
             var args = new TaskRunArgs(
                 Mode: item.EffectiveMode,
                 Day: ParseOptionalDate(item.DateText) is { } d ? DateOnly.FromDateTime(d) : null,
                 Deadline: deadline,
                 // 「新标的补 N 年」（2026-09-21 随K线任务迁移加）。不吃这个参数的任务忽略它即可。
                 LookbackYears: ParseLookbackYears(item.LookbackYearsText),
-                // 只有【中标/订单公告】吃这个。**按动作过滤**、而且用不写日志的那个解析器——
-                // 不然每一项都会打一句"关键词格是空的"（2026-09-21 实机验证时踩到）。
-                Keywords: item.Action == FetchActionId.StepAnnouncements
-                    ? AnnouncementKeywordsOf(item) : null);
+                // 只有【中标/订单公告】和【拉取区间数据】声明了这个参数（后者会把它转交给前者）。
+                // **按声明过滤**、而且用不写日志的那个解析器——不然每一项都会打一句
+                // "关键词格是空的"（2026-09-21 实机验证时踩到）。
+                Keywords: item.Info.Params.HasFlag(FetchActionParams.Keywords)
+                    ? AnnouncementKeywordsOf(item) : null,
+                // 年份区间 + 覆盖前复权（2026-09-22）。**按声明的参数过滤**，不按动作名硬编码：
+                // 这两个格子只在声明了 FetchActionParams.YearRange 的行上才有，界面显示与否
+                // 读的也是它（PlanItemViewModel.NeedsYearRange）——两边同一个判据，
+                // 就不会出现"界面上没这格、却往任务里塞了个值"。不吃的任务忽略即可。
+                // 留空时兜底到目录里的默认值——计划是无人值守跑的，不该因为一个空格子整轮不跑
+                // （跟老那条分支的行为一致，见 FetchTaskCatalog.DefaultParamText）。
+                YearStart: wantsYears
+                    ? ParseOptionalYear(item.YearStartText)
+                      ?? ParseOptionalYear(FetchTaskCatalog.DefaultParamText(
+                             item.Action, FetchActionParams.YearRange))
+                    : null,
+                YearEnd: wantsYears ? ParseOptionalYear(item.YearEndText) : null,
+                OverwriteQfq: wantsYears && item.OverwriteQfq);
             return _taskRegistry.RunAsync(item.Action, args, progress, ct);
         }
 
@@ -2321,14 +2340,6 @@ public class MainViewModel : INotifyPropertyChanged
         //   2026-09-08 连编排层那几个整包方法一起删了，所以分支也不能留。
         switch (item.Action)
         {
-            case FetchActionId.RetryFailed:
-                return _orchestrator.RunRetryFailedAsync(progress, ct);
-
-            case FetchActionId.FetchRawBars:
-                // 一只补十年约 4 秒（多页），按空窗剩余时间估本轮补几只
-                return _orchestrator.RunFetchRawBarsAsync(
-                    SelectedSource, progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(4)));
-
             // 【拉取财报预约日】的 case 删于 2026-09-21：迁去了
             // StockPlatform.Tasks/EarningsScheduleTask，走上面那条 _taskRegistry 总分支。
 
@@ -2351,45 +2362,26 @@ public class MainViewModel : INotifyPropertyChanged
             // 走上面那条 _taskRegistry 总分支。原来这里按"每只约 4 秒"估本轮能取几只
             // （DeadlineToCount），现在靠框架的 Deadline 在批边界收尾，不用再估。
 
-            case FetchActionId.FetchIndexCons:
-                return _orchestrator.RunFetchIndexConsAsync(progress, ct);
+            // 【指数成分/权重】（退役项）的 case 删于 2026-09-22：它 2026-09-02 就退役了，
+            // 老计划加载时由 FetchPlan.MigrateRetired 换成【指数成分名单】+【指数权重】两个原子项
+            // （都已是新式任务），运行期不可能再出现。
 
             // 【拉取股东数据】2026-09-18 迁到新任务框架，走上面那条 _taskRegistry 总分支
             // （它的待办也自己补，所以 FillBacklog 也走那条）。
 
-            case FetchActionId.FetchFinancials:
-                return FetchFinancialsRoundAsync(deadline, progress, ct);
+            // 【拉取财务报表】的 case 删于 2026-09-22：它 2026-09-10 就注册成新式任务了，
+            // 而注册表那条总分支在这个 switch **之前**——这个 case 从那天起就不可达。
+            // 它原来包的那层 FetchFinancialsRoundAsync 里的四件事现在分别由别处承担：
+            //   · 本轮限量 → 骨架的 Deadline 在批边界收尾（一批＝一只票，掐得干净还不用估）
+            //   · 待抓清单为空不发请求 → 任务自己 Plan() 之后 targets 为空就 yield break
+            //   · 空窗太短不开工 → 没了，后果只是"至少做一只"
+            //   · 先查一遍 AllPending → 任务自己的 Plan() 本来就要算，少扫一遍 FinancialReport
 
             // 【拉取分红送配】2026-09-18 迁到新任务框架，走上面那条 _taskRegistry 总分支
             // （它的待办也自己补，所以 FillBacklog 也走那条）。
 
             // 【金融监管指标】2026-09-15 迁到新任务框架，走上面那条 _taskRegistry 总分支，
             // 这里的 case 已经不可能命中，删掉。老方法 RunFetchBankRegulatoryAsync 同时移除。
-
-            case FetchActionId.ImportManual:
-                return _orchestrator.RunImportManualMetricsAsync(progress, ct);
-
-            case FetchActionId.FetchYear:
-            {
-                // 年份取自这一行自己的两个输入框。留空＝用目录里的默认值（起始年＝去年、
-                // 结束年＝今年）——建项时 FillDefaultParams 本来就把它们填好了，这里只是
-                // 兜住"用户手工清空了又直接点执行"那一下（2026-09-08 起不再回落【手动】页）。
-                var startText = string.IsNullOrWhiteSpace(item.YearStartText)
-                    ? FetchTaskCatalog.DefaultParamText(item.Action, FetchActionParams.YearRange) ?? ""
-                    : item.YearStartText.Trim();
-                var endText = (item.YearEndText ?? "").Trim();
-                if (!int.TryParse(startText, out var startYear))
-                    throw new InvalidOperationException($"起始年份格式不对：\"{startText}\"");
-                int endYear = DateTime.Today.Year;
-                if (endText.Length > 0 && !int.TryParse(endText, out endYear))
-                    throw new InvalidOperationException($"结束年份格式不对：\"{endText}\"");
-                return _orchestrator.RunFetchYearAsync(
-                    SelectedSource, startYear, endYear, ParseAnnouncementKeywords(item),
-                    progress, ct, item.OverwriteQfq);
-            }
-
-            case FetchActionId.OptimizeDatabase:
-                return _orchestrator.RunOptimizeDatabaseAsync(progress, ct);
 
             // ───── 【拉取全部】拆出来的 13 个原子项（2026-09-02）─────
             // 它们调的是编排层 FetchOrchestrator.Steps.cs 里的单项入口，跟【拉取全部】内部走的是
@@ -2438,16 +2430,9 @@ public class MainViewModel : INotifyPropertyChanged
             // 走上面那条 _taskRegistry 总分支。orchestrator 里那个同名方法还在，但只剩
             // 【重新拉取失败】收尾时调（补过一轮之后名单要重算），跟这一项共用同一个 auditor。
 
-            case FetchActionId.StepFillProbeFloor:
-                // 纯查库（三次 GROUP BY，本机 23GB 库上约 40 秒），推到线程池别让界面假死
-                return Task.Run(() => _orchestrator.RunStepFillProbeFloorAsync(progress, ct), ct);
-
             // ───── 另外三处复合动作拆出来的（2026-09-02）─────
 
 
-
-            case FetchActionId.StepEtfIndexMap:
-                return _orchestrator.RunStepEtfIndexMapAsync(progress, ct);
 
             // 【板块行情与成分】（退役项）的 case 删于 2026-09-21：它的后半段（成分股）迁去了
             // StockPlatform.Tasks/BoardMemberTask，老编排层那份实现跟着删了，所以这个分支
@@ -2460,80 +2445,21 @@ public class MainViewModel : INotifyPropertyChanged
             // 【板块成分股】的 case 删于 2026-09-21：迁去了 StockPlatform.Tasks/BoardMemberTask，
             // 走上面那条 _taskRegistry 总分支（一批＝一个板块）。
 
-            case FetchActionId.StepReparseBankPdf:
-                // 纯 CPU（PDF 解析/OCR），必须推到线程池，理由同 BankRegulatory 那一项
-                return Task.Run(() => _orchestrator.RunStepReparseBankReportsAsync(progress, ct), ct);
-
             default:
                 throw new InvalidOperationException($"还没实现的动作：{item.Action}");
         }
     }
 
-    /// <summary>一只票大约要多久（实测约 18 秒：3 个请求 × 4 秒 + 每 30 请求歇 60 秒）。
-    /// 按"到截止时刻还剩多少时间"估算本轮能抓几只时用。</summary>
-    private static readonly TimeSpan PerStockEstimate = TimeSpan.FromSeconds(18);
-
     /// <summary>
-    /// 「空闲时」那类任务塞进空窗时，本轮最多做几个——就是"到截止时刻还剩多少时间 ÷ 每个多久"。
-    /// <paramref name="deadline"/> 为 null（今天没有后续定时任务了）就返回 null = 不限量。
-    /// 至少给 1，免得算出 0 之后每轮都空跑。
-    /// </summary>
-    private static int? DeadlineToCount(DateTime? deadline, TimeSpan perItem)
-    {
-        if (!deadline.HasValue) return null;
-        var usable = deadline.Value - DateTime.Now;
-        if (usable <= TimeSpan.Zero) return 0;
-        return Math.Max(1, (int)(usable.TotalSeconds / perItem.TotalSeconds));
-    }
-
-    /// <summary>
-    /// 跑一轮财务报表。这是**唯一支持"只跑一部分"的动作**（见 FetchActionInfo.SupportsPartialRun）——
-    /// 计划里把它设成重复「空闲时」之后，就靠这里在别人不用的时间见缝插针地补。
+    /// 年份格子里的值；留空或填了个不像数的东西一律返回 null。
     ///
-    /// 两件原来在【空闲时自动补财务】里、必须保住的事：
-    ///   ① <paramref name="deadline"/> 是"最晚要结束的时刻"（后面还有定时任务时才有值）。
-    ///      按剩余时间除以每只约 18 秒，算出本轮最多抓几只，到点前干净收尾——
-    ///      不是抓一半被掐断（虽然那样也不丢数据，但会白白撞一次配额）。
-    ///   ② 待抓清单为空时**不发任何请求**，直接标 NothingToDo 返回，让计划把下一轮推远一点
-    ///      （不然全补齐之后还每 20 分钟查一遍几 GB 的库）。
+    /// ⚠ 跟 <see cref="ParseLookbackYears"/> 的区别是**不兜底**：回看年数留空要给个默认值
+    /// （不然新标的一根都抓不到），而年份区间留空的语义是"按各任务自己的「整段」"
+    /// ——K线是开市首日、分档资金流是最近 120 个交易日——不是某个具体年份，兜不出来。
+    /// 真正的范围校验（不早于 A股开市、不晚于今年）在任务里做，那儿才知道自己的数据源起点。
     /// </summary>
-    private async Task<FetchResult> FetchFinancialsRoundAsync(
-        DateTime? deadline, IProgress<string> progress, CancellationToken ct)
-    {
-        var cap = DeadlineToCount(deadline, PerStockEstimate);
-        if (deadline.HasValue && cap is null or <= 0) return new FetchResult { NothingToDo = true };
-
-        int remaining;
-        try
-        {
-            remaining = _orchestrator.GetFinancialFetchPlan().AllPending.Count;
-        }
-        catch (Exception ex)
-        {
-            progress.Report($"　查待抓清单失败（{ex.Message}），这一轮跳过。");
-            return new FetchResult { NothingToDo = true };
-        }
-
-        if (remaining == 0)
-        {
-            progress.Report("　财务数据已全部补齐（报告期和科目集版本都是最新），这一轮无事可做。");
-            return new FetchResult { NothingToDo = true };
-        }
-
-        progress.Report($"　还有 {remaining} 只待补，开始一轮"
-            + (cap.HasValue ? $"（本轮限 {cap} 只——{deadline:HH:mm} 前要收尾）" : "")
-            + "…（点【停止】可中断，已抓的不会白费）");
-        // 2026-09-10 迁成新式任务（StockPlatform.Tasks/FinancialTask.cs）：本轮上限从原来的
-        // maxCount 参数改走框架的 MaxItems（一批＝一只票，语义正好对上），Deadline 一并交给骨架。
-        if (_taskRegistry == null)
-        {
-            var noTask = new FetchResult();
-            noTask.Errors.Add("未注册【拉取财务报表】任务（taskRegistry 为空）");
-            return noTask;
-        }
-        return await _taskRegistry.RunAsync(FetchActionId.FetchFinancials,
-            new TaskRunArgs(MaxItems: cap, Deadline: deadline), progress, ct);
-    }
+    private static int? ParseOptionalYear(string? text)
+        => int.TryParse((text ?? "").Trim(), out var y) ? y : null;
 
     /// <summary>
     /// 回看年数：用计划里那一行填的；留空或填了个不像数的东西就兜底 3 年（目录里的默认值）——

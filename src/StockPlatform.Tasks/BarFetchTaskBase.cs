@@ -47,8 +47,13 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
     /// ⚠ 跟 <paramref name="DriftCheck"/> 互斥：覆盖本来就是"全都以新基准为准"，
     /// 再比对一遍毫无意义，判据那边也是先看 overwrite 就直接返回。
     /// </param>
+    /// <param name="RequestEnd">
+    /// 这次请求的终点。空响应要落成水位时用得上（见 <see cref="RecordProbeFloors"/>）——
+    /// "探到空"只证明"这个终点及其之前那段没有"，脱离终点这个结论就没意义了。
+    /// </param>
     public sealed record CodeBars(string Code, string Granularity, List<Bar> Bars,
-                                  bool DriftCheck = false, bool Overwrite = false);
+                                  bool DriftCheck = false, bool Overwrite = false,
+                                  DateTime RequestEnd = default);
 
     /// <summary>一批几只。批边界＝可以干净收尾的点，不是并发度。</summary>
     public const int DefaultBatchSize = 30;
@@ -126,7 +131,7 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
             var (_, bars) = await Source.Fetcher.FetchAsync(code, granularity, fetchStart, end, ct);
             if (bars.Count > 0) Interlocked.Increment(ref _withNewData);
             else Interlocked.Increment(ref _empty);
-            return new CodeBars(code, granularity, bars, driftCheck, overwrite);
+            return new CodeBars(code, granularity, bars, driftCheck, overwrite, end);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -167,6 +172,7 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
         => Task.Run(() =>
         {
             var today = DateTime.Today;
+            RecordProbeFloors(batch);
             foreach (var item in batch)
             {
                 if (item.Bars.Count == 0) continue;
@@ -189,6 +195,44 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
                 }
             }
         }, ct);
+
+    /// <summary>
+    /// 把这一批里"请求成功、但返回 0 行"的结论落成永久水位（<c>BarProbeFloor</c>，2026-09-22 重建）。
+    ///
+    /// ════ 为什么要有 ════
+    /// 没有它，"那些年还没上市"的票每轮都要重新试一遍——2026-09-07 实测一万六千个请求、
+    /// 四个半小时、写入为零。这张表原来由老编排层的 <c>RecordProbeFloors</c> 写，
+    /// 那条路 2026-09-22 随【拉取区间数据】整段删掉之后，表就只读不写了。
+    ///
+    /// ════ 为什么落在每批、而不是收尾 ════
+    /// 老实现是**每个阶段跑完**才写，中途停就整段丢——下一轮这些票重新发一遍空请求。
+    /// 这次跟着批走，停在哪里前面的结论都算数。
+    ///
+    /// ════ 安全前提在判据里，不在这儿 ════
+    /// 记高了会让这只票的历史**永久跳过**而且不报错，所以两道前提
+    /// （本地得有这只票的K线、请求终点必须早于本地最早一根）都在
+    /// <see cref="ProbeFloorPlanner"/> 里，有单测钉着。这里只负责喂它正确的输入：
+    /// ⚠ 每只**现查一次自己的最早日**，不用整轮缓存的快照——这一轮前面的批可能刚补进更早的历史，
+    /// 拿旧快照会把水位记高。单只查询走主键索引，便宜。
+    /// </summary>
+    private void RecordProbeFloors(IReadOnlyList<CodeBars> batch)
+    {
+        var empties = batch.Where(b => b.Bars.Count == 0 && b.RequestEnd != default).ToList();
+        if (empties.Count == 0) return;
+
+        var floorRepo = new SqliteBarProbeFloorRepository(paths.CurrentDb);
+        foreach (var byGran in empties.GroupBy(b => b.Granularity, StringComparer.Ordinal))
+        {
+            var earliest = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            foreach (var code in byGran.Select(b => b.Code).Distinct(StringComparer.Ordinal))
+                if (Bars.GetEarliestPeriodStart(code, byGran.Key) is { } e) earliest[code] = e;
+
+            var floors = ProbeFloorPlanner.Plan(
+                byGran.Select(b => (b.Code, b.RequestEnd)), earliest);
+            if (floors.Count > 0)
+                lock (SqliteWriteGate.Local) floorRepo.Record(floors, byGran.Key);
+        }
+    }
 
     private static readonly Dictionary<DateTime, double> EmptyCloses = [];
 
@@ -219,6 +263,91 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
         lock (SqliteWriteGate.Local)
             return IncrementalWindowCalculator.IncrementalStart(
                 Bars.GetLatestBarInfo(code, granularity), end, lookbackYears);
+    }
+
+    /// <summary>
+    /// 整段回补的窗口，按调用方给的年份区间**收窄**（2026-09-22，判据见
+    /// <see cref="BackfillWindowRule"/>）。
+    ///
+    /// 「整段」有多长本来由各任务自己定（指数是 A股开市首日、不复权是前复权的最早那天），
+    /// 这里只把它收小到 <see cref="TaskRunArgs.YearStart"/>~<see cref="TaskRunArgs.YearEnd"/>，
+    /// **永不放宽**——否则数据源上根本没有的那些年会变成白发的空请求。
+    /// 两个年份都没填就原样返回，所以这个调用可以无条件加在整段回补那一路上。
+    /// </summary>
+    protected static (DateTime Start, DateTime End) NarrowToYears(
+        DateTime start, DateTime end, TaskRunArgs args)
+        => BackfillWindowRule.Narrow(start, end, args.YearStart, args.YearEnd, DateTime.Today);
+
+    /// <summary>
+    /// 整段回补时**逐只算缺口**（2026-09-22）。判据是 <see cref="YearGapCalculator.For"/>，
+    /// 老编排层那条路用的是同一个——所以两边不会分叉。
+    ///
+    /// 它比"所有票同一个窗口"多做三件事，每件都省掉大量必然落空的请求：
+    ///   ① **已探明的水位**（<c>BarProbeFloor</c>）：上一轮真发过请求、成功、返回 0 行的那段不再重试。
+    ///      没有它的话"那些年还没上市"的票每轮都要重新试一遍——2026-09-07 实测一万六千个请求、
+    ///      四个半小时、写入为零。
+    ///   ② **本地已经覆盖到的**整只跳过，只补缺的那一头。
+    ///   ③ **缺口里一个交易日都没有**就跳过（区间起点写 01-01、而首个交易日是 01-04 那种）。
+    ///      2026-07-30 实测：不判这一下，一次区间重跑光在这上面烧掉 19 分钟、1150 个请求。
+    ///
+    /// <paramref name="ignoreFloor"/>＝「覆盖重抓」那一路：它的语义是"不看本地已有什么、整段重写"，
+    /// 所以连水位也不看——否则抹接缝的活会被"这段已经探明没有"给跳过。
+    /// </summary>
+    protected List<(string Code, DateTime Start, DateTime End)> PlanGaps(
+        IReadOnlyList<string> codes, string granularity,
+        DateTime windowStart, DateTime windowEnd, bool ignoreFloor, out int skipped)
+        => PlanGaps(codes, granularity, _ => (windowStart, windowEnd), ignoreFloor, out skipped);
+
+    /// <summary>
+    /// 同上，但**每只的窗口不一样**（不复权那路是"它自己的前复权最早那天 ~ 今天"）。
+    ///
+    /// ⚠ 顺序要紧：**先把窗口定下来（含年份收窄），再在这个窗口里判缺口**。
+    /// 反过来做——先在一个大窗口里算缺口、再收窄——算出来的缺口是"区间之外的那部分"，
+    /// 收窄之后仍然非空，于是每轮都重新计划、抓回来一行都写不进去。
+    /// 2026-09-22 实测踩过：填 2024 重跑，5995 只全部重抓、写入 0 行。
+    /// </summary>
+    protected List<(string Code, DateTime Start, DateTime End)> PlanGaps(
+        IReadOnlyList<string> codes, string granularity,
+        Func<string, (DateTime Start, DateTime End)> windowOf, bool ignoreFloor, out int skipped)
+    {
+        var earliest = Bars.GetEarliestPeriodStartByCode(granularity);
+        var floor = ignoreFloor
+            ? null
+            : new SqliteBarProbeFloorRepository(Paths.CurrentDb).GetAll(granularity);
+        var calendar = LocalTradingCalendar();
+
+        var plan = new List<(string, DateTime, DateTime)>(codes.Count);
+        foreach (var code in codes)
+        {
+            var (ws, we) = windowOf(code);
+            if (ws.Date > we.Date) continue;              // 这只在指定区间里没有窗口
+            var (s, e) = ignoreFloor
+                ? (ws, we)
+                : YearGapCalculator.For(code, earliest, ws, we, calendar, floor);
+            if (s.Date <= e.Date) plan.Add((code, s, e));
+        }
+        skipped = codes.Count - plan.Count;
+        return plan;
+    }
+
+    /// <summary>
+    /// 本地已知的交易日历，取不到就返回 null（判据会退回"一律放行去抓"）。
+    ///
+    /// ⚠ 用**不复权**的日期全集当日历、上证指数只是兜底：日历自己缺哪段就会瞎哪段，
+    /// 2026-09-06 就是拿只有 2016 年之后的上证指数 day 去断言 1990~2015 没开过市，
+    /// 把 2360 只最该补历史的老股静默跳过了（见 <see cref="TradingCalendar"/>）。
+    /// </summary>
+    private TradingCalendar? LocalTradingCalendar()
+    {
+        try
+        {
+            var days = Bars.GetDistinctPeriodStarts(Granularity.DayRaw);
+            if (days.Count == 0)
+                days = Bars.Query(MarketIndexCatalog.All[0].Symbol, Granularity.Day)
+                           .Select(b => b.PeriodStart.Date).ToList();
+            return days.Count > 0 ? new TradingCalendar(days) : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>这只标的本地最早那根在哪天（整段回补跑完报覆盖范围用）。</summary>

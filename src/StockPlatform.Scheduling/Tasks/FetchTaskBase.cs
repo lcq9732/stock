@@ -81,6 +81,11 @@ public abstract class FetchTaskBase<TItem> : IFetchTask
     /// <c>ProgressThrottle</c> 和那些还在用 <c>OnStatus</c>／<c>IProgress</c> 的 provider 要的是这个形状。
     ///
     /// 不用 <c>Progress&lt;string&gt;</c>：那个是异步 post 的，几十分钟的循环里日志顺序会乱。
+    ///
+    /// ⚠ 它只服务 **provider**（那些还在用 <c>OnStatus</c>／<c>IProgress</c> 的取数类）。
+    /// **别拿它转发子任务**——它是个压扁成字符串的通道，<see cref="TaskProgress.Quiet"/>、
+    /// Done/Total、Phase、<see cref="IFetchTask.OnLiveness"/> 全都过不来。
+    /// 任务套任务用 <see cref="ForwardFrom"/>。
     /// </summary>
     protected IProgress<string> ProgressSink => _sink ??= new ReportSink(Report);
     private IProgress<string>? _sink;
@@ -88,6 +93,53 @@ public abstract class FetchTaskBase<TItem> : IFetchTask
     private sealed class ReportSink(Action<string, int?, int?, string?> report) : IProgress<string>
     {
         public void Report(string value) => report(value, null, null, null);
+    }
+
+    /// <summary>
+    /// 订阅数据源的状态播报并转成日志（2026-09-22）——限流退避、重试、"未发任何请求"那类。
+    ///
+    /// ⚠ **不订阅的代价是静默**：那些消息大多来自限流器（<c>RateLimiter.OnStatus</c>），
+    /// 被退避/重试时日志里一个字都没有，抓得慢看着就像卡住。
+    /// 2026-09-22 查出资金净流入／融资余额／龙虎榜／大宗交易四项一直没订阅——
+    /// 它们都已经是新框架任务，不会随别的迁移自动补上。
+    ///
+    /// 事件不能当参数传，所以收两个委托：<c>h =&gt; provider.OnStatus += h</c> / <c>-=</c>。
+    /// 用 <c>using</c> 保证退订——provider 实例是注册时建的、跨轮复用，漏退订就是重复日志加内存泄漏。
+    /// </summary>
+    protected IDisposable ForwardStatus(Action<Action<string>> add, Action<Action<string>> remove)
+    {
+        void Forward(string m) => Report(m);
+        add(Forward);
+        return new StatusUnsubscriber(() => remove(Forward));
+    }
+
+    private sealed class StatusUnsubscriber(Action undo) : IDisposable
+    {
+        public void Dispose() => undo();
+    }
+
+    /// <summary>
+    /// **任务套任务**：把子任务的事件原样转发出去（2026-09-22）。
+    ///
+    /// 这是新框架本来就支持的形状——任务是独立的，别人调用时只要转发它的事件即可
+    /// （注册表的 <c>RunAsync</c> 一直留着 <c>subscribe</c> 这个口子）。
+    ///
+    /// ⚠ **必须转发事件、不能退化成 <see cref="ProgressSink"/>**：那个通道只有一个 string，
+    /// <see cref="TaskProgress.Quiet"/> 会在那一层丢掉，于是靠 <see cref="ReportQuiet"/> 喂狗的
+    /// 子任务（"一批很快、但要跑几百批"那类）在外层看来是**哑的**。
+    /// 2026-09-22 实测：【拉取区间数据】分派到【补全退市名单】，探测 1342 只连哑 5 分 3 秒，
+    /// 整轮被静默看门狗掐断、后面 8 项一项没跑。
+    ///
+    /// ⚠ **不转发 <see cref="IFetchTask.OnStateChanged"/>**：外层任务的状态由骨架发，
+    /// 把子任务的 Completed 也播出去，订阅方会以为外层这一轮做完了。
+    /// </summary>
+    /// <param name="sub">子任务。</param>
+    /// <param name="phase">子任务没自报阶段名时，用它当阶段名（通常是子任务的中文名）。</param>
+    protected void ForwardFrom(IFetchTask sub, string? phase = null)
+    {
+        sub.OnProgress += p => Raise(OnProgress,
+            phase is null || p.Phase != null ? p : p with { Phase = phase });
+        sub.OnLiveness += l => Raise(OnLiveness, l);
     }
 
     /// <summary>

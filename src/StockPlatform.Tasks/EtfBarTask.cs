@@ -110,20 +110,43 @@ public sealed class EtfBarTask(
                         etfs.Select(e => (e.Code, e.Name)), SqliteStockMetaUpsert.TypeEtf);
             }, ct);
 
-        var end = DateTime.Today;
+        var today = DateTime.Today;
         int lookbackYears = args.LookbackYears is > 0 ? args.LookbackYears.Value : DefaultLookbackYears;
+        bool fullBackfill = args.Mode.HasFlag(FetchMode.FirstBackfill);
 
         // 先把每只的窗口算出来，分清"真要抓"和"本地已是最新"——全都不用抓时连一个请求都不发，
         // 日志也能说清楚（跟后复权/不复权那条路的口径一致）。
-        var plan = await Task.Run(() => etfs
-            .Select(e => (e.Code, Start: IncrementalStart(e.Code, Granularity.Day, end, lookbackYears)))
-            .Where(w =>
-            {
-                if (w.Start.Date <= end.Date) return true;
-                CountSkipped();
-                return false;
-            })
-            .ToList(), ct);
+        //
+        // 整段回补那一路**不看水位线**：缺的往往是开头不是尾巴（日更那根按回看年数只填了最近
+        // 几年），按水位线续永远补不到前面。窗口是 A股开市首日~今天，再按年份区间收窄。
+        List<(string Code, (DateTime Start, DateTime End) Window)> plan;
+        if (fullBackfill)
+        {
+            // 整段回补：逐只算缺口（水位表 + 本地已覆盖 + 交易日历，见 PlanGaps）
+            var (ws, we) = NarrowToYears(IncrementalWindowCalculator.AShareMarketOpen, today, args);
+            plan = ws.Date > we.Date
+                ? []
+                : await Task.Run(() =>
+                    {
+                        var gaps = PlanGaps(etfs.Select(e => e.Code).ToList(), Granularity.Day,
+                                            ws, we, ignoreFloor: false, out int skipped);
+                        for (int i = 0; i < skipped; i++) CountSkipped();
+                        return gaps.Select(g => (g.Code, Window: (g.Start, g.End))).ToList();
+                    }, ct);
+        }
+        else
+        {
+            plan = await Task.Run(() => etfs
+                .Select(e => (e.Code, Window: (Start: IncrementalStart(e.Code, Granularity.Day, today, lookbackYears),
+                                               End: today)))
+                .Where(w =>
+                {
+                    if (w.Window.Start.Date <= w.Window.End.Date) return true;
+                    CountSkipped();
+                    return false;
+                })
+                .ToList(), ct);
+        }
 
         _planned = plan.Count;
         if (plan.Count == 0)
@@ -138,15 +161,19 @@ public sealed class EtfBarTask(
             yield break;
         }
 
-        Report($"共 {etfs.Count} 只 ETF，其中 {plan.Count} 只要抓、{etfs.Count - plan.Count} 只本地已是最新"
-             + $"（按各自水位线跳过，不发请求），每批 {_batchSize} 只...");
+        Report(fullBackfill
+            ? $"ETF日K**整段回补**：{etfs.Count} 只里有 {plan.Count} 只要抓"
+              + "（每只只补它自己缺的那一段；已经齐了、或数据源已探明没有更早数据的整只跳过），"
+              + $"每批 {_batchSize} 只..."
+            : $"共 {etfs.Count} 只 ETF，其中 {plan.Count} 只要抓、{etfs.Count - plan.Count} 只本地已是最新"
+              + $"（按各自水位线跳过，不发请求），每批 {_batchSize} 只...");
 
         int batchIndex = 0, done = 0;
         foreach (var batch in plan.Chunk(_batchSize))
         {
             ct.ThrowIfCancellationRequested();
             var got = await FetchBatchAsync(
-                batch.Select(b => (b.Code, Granularity.Day, b.Start, end, false)), ct);
+                batch.Select(b => (b.Code, Granularity.Day, b.Window.Start, b.Window.End, false)), ct);
             batchIndex++;
             done += batch.Length;
             ReportBatch(batchIndex, "ETF日K：抓取中", done, plan.Count);

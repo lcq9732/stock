@@ -1,6 +1,7 @@
 ﻿using StockPlatform.Data.Orchestration;
 using StockPlatform.Logic.Models;
 using StockPlatform.Scheduling;
+using StockPlatform.Tasks;
 using Xunit;
 
 namespace StockPlatform.Tests;
@@ -10,7 +11,7 @@ namespace StockPlatform.Tests;
 /// 只是读待办清单、按 <see cref="RetryTodo.TaskId"/> 挨个调对应任务的"补待办"入口。
 ///
 /// 这里测的是"该调哪些任务、按什么顺序"。真正的执行一跑就是几千个网络请求，测不了，
-/// 所以把顺序抽成了 <see cref="FetchOrchestrator.DispatchOrder"/> 这个纯函数。
+/// 所以把顺序抽成了 <see cref="RetryFailedTask.DispatchOrder"/> 这个纯函数。
 /// </summary>
 public class RetryDispatchTests
 {
@@ -29,7 +30,7 @@ public class RetryDispatchTests
     [Fact]
     public void 没有待办就一个任务都不调()
     {
-        Assert.Empty(FetchOrchestrator.DispatchOrder(Backlog(new Manifest())));
+        Assert.Empty(RetryFailedTask.DispatchOrder(Backlog(new Manifest())));
     }
 
     [Fact]
@@ -44,7 +45,7 @@ public class RetryDispatchTests
 
         Assert.Equal(
             new[] { RetryTaskIds.StockDayBars, RetryTaskIds.StockHfqBars, RetryTaskIds.StockRawBars },
-            FetchOrchestrator.DispatchOrder(Backlog(m)));
+            RetryFailedTask.DispatchOrder(Backlog(m)));
     }
 
     [Fact]
@@ -55,7 +56,7 @@ public class RetryDispatchTests
         m.FailedMarketCapCodes.Add("000002");                   // 最轻：一次请求拿全市场
         m.FailedNetInflowCodes.Add("000003");
 
-        var order = FetchOrchestrator.DispatchOrder(Backlog(m));
+        var order = RetryFailedTask.DispatchOrder(Backlog(m));
 
         Assert.Equal(RetryTaskIds.Roster, order[0]);
         Assert.Equal(RetryTaskIds.NetInflow, order[1]);
@@ -72,7 +73,7 @@ public class RetryDispatchTests
         m.MissingDayCodes.Add("000002");
         m.MissingBars.Add(Gap("000003", Granularity.Day));
 
-        var order = FetchOrchestrator.DispatchOrder(Backlog(m));
+        var order = RetryFailedTask.DispatchOrder(Backlog(m));
 
         Assert.Equal(new[] { RetryTaskIds.StockDayBars }, order);
     }
@@ -91,7 +92,7 @@ public class RetryDispatchTests
         m.MissingNetInflowDays.Add(new MissingDayRetry { Day = new DateTime(2026, 9, 9) });
         m.MissingBars.Add(Gap("000006", Granularity.DayHfq));
 
-        foreach (var id in FetchOrchestrator.DispatchOrder(Backlog(m)))
+        foreach (var id in RetryFailedTask.DispatchOrder(Backlog(m)))
             Assert.True(Enum.TryParse<FetchActionId>(id, out _), $"\"{id}\" 不是一个有效的 FetchActionId");
     }
 
