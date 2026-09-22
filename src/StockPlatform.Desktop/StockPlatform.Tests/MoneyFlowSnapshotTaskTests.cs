@@ -352,6 +352,45 @@ public class MoneyFlowSnapshotTaskTests : IDisposable
     }
 
     [Fact]
+    public void 判据本身_盘前今天还没有日K时_改看上一个交易日()
+    {
+        // 2026-09-22 用户报的那个误报：交易日早上八点，今天一根K线都还没有，
+        // 判据却去问"今天齐了吗"，界面整个上午挂着"⚠ 无法核对：09-22 的个股日线只有 0/5554 只"。
+        // 那不是缺口，是还没到时候——这时候该报的是上一个交易日齐没齐。
+        var prev = DateTime.Today.AddDays(-1);
+        SeedLocal(prev, roster: 100, bars: 100);
+        SeedLocal(DateTime.Today, roster: 100, bars: 0);   // 今天：有日历、有名册，没日K
+        SeedFlow(prev, rows: 100);
+
+        var status = new SqliteMoneyFlowDayAudit(_paths.CurrentDb)
+            .Check(DateTime.Today.AddHours(8).AddMinutes(9));
+
+        Assert.Equal(prev, status.Day);
+        Assert.True(status.IsComplete);
+        Assert.False(status.IsAlert);
+        Assert.DoesNotContain("无法核对", status.Text);
+    }
+
+    [Fact]
+    public void 判据本身_收盘之后今天仍没有日K_才报无法核对()
+    {
+        // 退一格只在"还没到时候"的时候退。过了收盘确认时刻日K还不到位，
+        // 那就是日更没跑到位——必须说出来，不能拿昨天的绿色把它盖住。
+        var prev = DateTime.Today.AddDays(-1);
+        SeedLocal(prev, roster: 100, bars: 100);
+        SeedLocal(DateTime.Today, roster: 100, bars: 0);
+        SeedFlow(prev, rows: 100);
+
+        var status = new SqliteMoneyFlowDayAudit(_paths.CurrentDb)
+            .Check(DateTime.Today.AddHours(20));
+
+        Assert.Equal(DateTime.Today, status.Day);
+        Assert.False(status.BarsReady);
+        Assert.False(status.IsAlert);                      // 判不了不算红，这条没变
+        Assert.Contains("无法核对", status.Text);
+    }
+
+    [Fact]
     public void 快照归日更_补历史归定期()
     {
         // 拆这两项的全部意义就在这一条断言上（2026-09-12）：

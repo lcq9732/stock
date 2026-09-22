@@ -53,6 +53,19 @@ public class SqliteStockBoardMapRepository : IStockBoardMapRepository
 
         using var conn = Open();
         using var tx = conn.BeginTransaction();
+        InsertIndustries(conn, tx, list);
+        tx.Commit();
+        return list.Count;
+    }
+
+    /// <summary>
+    /// 行业那张表的插入语句。抽出来是为了让 <see cref="UpsertIndustries"/> 和
+    /// <see cref="ReplaceForStocks"/> 共用同一份 SQL——两条路各写一遍 INSERT 迟早会分叉，
+    /// 而分叉的表现是"某条路少写一列"这种没人会立刻发现的错。
+    /// </summary>
+    private static void InsertIndustries(
+        SqliteConnection conn, SqliteTransaction tx, List<StockIndustryEm> list)
+    {
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
@@ -70,8 +83,6 @@ public class SqliteStockBoardMapRepository : IStockBoardMapRepository
             p["$f"].Value = x.FetchedAt.ToString(TimeFormat, CultureInfo.InvariantCulture);
             cmd.ExecuteNonQuery();
         }
-        tx.Commit();
-        return list.Count;
     }
 
     public int UpsertThemes(IEnumerable<StockThemeEm> items)
@@ -81,6 +92,15 @@ public class SqliteStockBoardMapRepository : IStockBoardMapRepository
 
         using var conn = Open();
         using var tx = conn.BeginTransaction();
+        InsertThemes(conn, tx, list);
+        tx.Commit();
+        return list.Count;
+    }
+
+    /// <summary>题材那张表的插入语句。抽出来的理由同 <see cref="InsertIndustries"/>。</summary>
+    private static void InsertThemes(
+        SqliteConnection conn, SqliteTransaction tx, List<StockThemeEm> list)
+    {
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
@@ -101,8 +121,69 @@ public class SqliteStockBoardMapRepository : IStockBoardMapRepository
             p["$f"].Value = x.FetchedAt.ToString(TimeFormat, CultureInfo.InvariantCulture);
             cmd.ExecuteNonQuery();
         }
+    }
+
+    /// <inheritdoc cref="IStockBoardMapRepository.ReplaceForStocks"/>
+    public (int Industry, int Theme) ReplaceForStocks(
+        IEnumerable<StockIndustryEm> industries, IEnumerable<StockThemeEm> themes)
+    {
+        var inds = industries.ToList();
+        var ths = themes.ToList();
+
+        // 要替换哪些票＝两份的**并集**：只有题材没有行业（或反过来）的票也得替换，
+        // 「本轮它没有行业归属」同样是事实，旧行该删。见接口注释。
+        var codes = inds.Select(x => x.Code)
+            .Concat(ths.Select(x => x.Code))
+            .Where(c => !string.IsNullOrEmpty(c))
+            .ToHashSet(StringComparer.Ordinal);
+        if (codes.Count == 0) return (0, 0);
+
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+
+        // 先删这些票的旧行。逐个参数化执行，不拼 IN 列表——一批 5000 行、上千只票，
+        // 拼出来的 SQL 会撞 SQLite 的参数/长度上限，而且每批 SQL 文本都不一样、语句缓存全废。
+        using (var del = conn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = """
+                DELETE FROM StockIndustryEm WHERE code = $c;
+                DELETE FROM StockThemeEm WHERE code = $c;
+                """;
+            var pc = del.CreateParameter();
+            pc.ParameterName = "$c";
+            del.Parameters.Add(pc);
+            foreach (var c in codes) { pc.Value = c; del.ExecuteNonQuery(); }
+        }
+
+        if (inds.Count > 0) InsertIndustries(conn, tx, inds);
+        if (ths.Count > 0) InsertThemes(conn, tx, ths);
+
         tx.Commit();
-        return list.Count;
+        return (inds.Count, ths.Count);
+    }
+
+    /// <inheritdoc cref="IStockBoardMapRepository.PurgeOlderThan"/>
+    public int PurgeOlderThan(DateTime cutoff)
+    {
+        // fetched_at 存的是 "yyyy-MM-dd HH:mm:ss"，这个格式的字符串序跟时间序一致，可以直接比。
+        var stamp = cutoff.ToString(TimeFormat, CultureInfo.InvariantCulture);
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        int n = 0;
+        foreach (var table in new[] { "StockIndustryEm", "StockThemeEm" })
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = $"DELETE FROM {table} WHERE fetched_at IS NULL OR fetched_at < $t;";
+            var p = cmd.CreateParameter();
+            p.ParameterName = "$t";
+            p.Value = stamp;
+            cmd.Parameters.Add(p);
+            n += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return n;
     }
 
     public int CountIndustries() => Scalar("SELECT COUNT(*) FROM StockIndustryEm");

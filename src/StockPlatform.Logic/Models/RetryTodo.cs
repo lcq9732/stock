@@ -40,6 +40,18 @@ public static class RetryTaskIds
     /// </summary>
     public const string BlockTrade = "FetchBlockTrade";
 
+    /// <summary>
+    /// 【重取前复权】（2026-09-22 迁进新框架时加）。
+    ///
+    /// ⚠ 这一项**不往 <see cref="RetryTodoKind.Failed"/> 里写东西**：它的待办就是
+    /// <c>Manifest.PendingQfqRepairCodes</c> 本身——重取成功一只划掉一只，失败的留在名单上
+    /// 下一轮自然重来。再记一份失败名单等于同一件事记两处，而且会让【个股日K·前复权】
+    /// 把这些票当成"当天没抓到"去重抓一遍。
+    ///
+    /// 定义这个常量是为了 <c>TaskId</c> 有个正经取值（基类要求），取值仍按规矩等于枚举名。
+    /// </summary>
+    public const string QfqRepair = "RepairQfq";
+
     /// <summary>分档资金流·逐股补历史（push2his）。NetInflowDetail 的残缺日归它——
     /// 另一条通道【分档资金流快照】走 push2delay，接口**只给最近一个交易日**，补不了历史。</summary>
     public const string MoneyFlowDetail = "FetchMoneyFlowDetail";

@@ -118,6 +118,25 @@
                             <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" local:CellAction.Kind="Detail" />
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="110" IsReadOnly="True" local:CellAction.Kind="Quote" />
                             <DataGridTextColumn Header="行业" Binding="{Binding Industry}" Width="110" IsReadOnly="True" />
+                            <!-- 我的分类（2026-09-22新增）——手填的自由文本标签，双击就能打字、失焦即存，
+                                 跟隔壁"财报日✎"同一套（2026-09-22 用户要求：本来做成带历史候选的可编辑
+                                 下拉，但第一次用时候选必然是空的，点开一个空下拉只会挡着打字，不如直接
+                                 给个输入框）。
+                                 左边的"行业"是申万的分法、"板块"是东财的分法，都是别人按行业口径切的；
+                                 这一列是自己的切法（"Apple供应商"这种产业链视角，官方分类里没有）。
+                                 程序不解释它的内容，只显示、可排序。 -->
+                            <DataGridTextColumn Header="我的分类✎" Binding="{Binding UserTag, UpdateSourceTrigger=LostFocus}" Width="130">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="ToolTip" Value="{Binding UserTag}" />
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                                <DataGridTextColumn.HeaderStyle>
+                                    <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource Theme.ColumnHeader}">
+                                        <Setter Property="ToolTip" Value="我自己给这只票打的标签，比如&quot;Apple供应商&quot;、&quot;光模块&quot;——双击这一格直接打字，编辑完点其它地方自动保存，清空即取消。&#10;一只票要归几个类就用顿号分开，如&quot;Apple供应商、光模块&quot;。&#10;点表头按它排序，同一个标签的票就排到一起了。&#10;纯标注：不参与任何选股条件和晨检纪律。" />
+                                    </Style>
+                                </DataGridTextColumn.HeaderStyle>
+                            </DataGridTextColumn>
                             <DataGridTextColumn Header="来源方法" Binding="{Binding Method}" Width="80" IsReadOnly="True"
                                                 SortMemberPath="Method" local:CellAction.Kind="Criteria" />
                             <!-- 加入时价格 + 那天的日期，格式跟右边"最新收盘"一致，两列并排直接对比
@@ -862,6 +881,16 @@
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" local:CellAction.Kind="Quote" />
                             <DataGridTextColumn Header="板块(概念)" Binding="{Binding Board}" Width="200" IsReadOnly="True" />
                             <DataGridTextColumn Header="行业" Binding="{Binding Industry}" Width="120" IsReadOnly="True" />
+                            <!-- 我的分类：本页**只读**（填在"主动仓"页，两页是同一份 watchlist.json，
+                                 那边改完这边刷新就能看到）——本页是算法验证样本，不是我打算买的票，
+                                 没道理在这里录我自己的产业链归类。 -->
+                            <DataGridTextColumn Header="我的分类" Binding="{Binding UserTag}" Width="130" IsReadOnly="True">
+                                <DataGridTextColumn.HeaderStyle>
+                                    <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource Theme.ColumnHeader}">
+                                        <Setter Property="ToolTip" Value="我自己给这只票打的分类（如&quot;Apple供应商&quot;）。&#10;要填/要改请到&quot;主动仓&quot;页那一列，本页只显示。" />
+                                    </Style>
+                                </DataGridTextColumn.HeaderStyle>
+                            </DataGridTextColumn>
                             <DataGridTextColumn Header="方法" Binding="{Binding Method}" Width="80" IsReadOnly="True" local:CellAction.Kind="Criteria" />
                             <DataGridTextColumn Header="数据日期" Binding="{Binding DataDate}" Width="90" IsReadOnly="True" />
                             <DataGridTextColumn Header="当时价格" Binding="{Binding PriceAtPick, StringFormat=F2}" Width="80" IsReadOnly="True" />

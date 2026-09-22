@@ -1103,80 +1103,13 @@ public partial class FetchOrchestrator
         catch { return 0; }
     }
 
-    /// <summary>
-    /// 重取前复权全历史（2026-08-31 新增）——把 <see cref="RecordDriftedForRepair"/> 记下的股票
-    /// 逐只从本地最早一根重抓到今天、整段覆盖，取成一只从名单里划掉一只。
-    ///
-    /// ════ 为什么要有这件事 ════
-    /// 数据源的前复权是"原价 − 之后累计分红送配"，**基准随抓取时点变化**：某只票一分红，它全部
-    /// 历史的前复权值就都变了。而本地历史是分批入库的，于是同一只股票不同时间段落在不同基准上，
-    /// 接缝处出现假跳空（实测有股票虚增 50%）。后复权不受影响。
-    ///
-    /// ════ 为什么单独做成一个任务 ════
-    /// 分红季一天上百只，每只要重抓十年。以前混在"拉取全部"里当场修，既拖慢当轮、又只能看到
-    /// 一个数字、还得限量 200 只/轮。现在记名单、由计划里的【重取前复权】在空闲时补，
-    /// 跟"拉取财务报表"一个路子：能看见还剩多少、可以随时停、取过的不会重取。
-    /// </summary>
-    /// <param name="maxCount">本轮最多取几只（空闲时段塞得下多少就取多少）；null=一次取完。</param>
-    public async Task<FetchResult> RunRepairQfqAsync(
-        NamedBarSource source, IProgress<string>? progress, CancellationToken ct = default, int? maxCount = null)
-    {
-        var result = new FetchResult();
-        List<string> pending;
-        lock (_dbLock) pending = _manifestStore.Load().PendingQfqRepairCodes.ToList();
-
-        if (pending.Count == 0)
-        {
-            progress?.Report("待重取前复权的名单是空的——没有股票的复权基准发生过漂移，这一轮没什么可做。");
-            result.NothingToDo = true;
-            return result;
-        }
-
-        var currentRepo = new SqliteBarRepository(_paths.CurrentDb);
-        var earliestByCode = currentRepo.GetEarliestPeriodStartByCode(Granularity.Day);
-        var batch = maxCount is > 0 ? pending.Take(maxCount.Value).ToList() : pending;
-
-        progress?.Report($"待重取前复权 {pending.Count} 只，本轮取 {batch.Count} 只"
-                       + (batch.Count < pending.Count ? "（其余下一轮继续）" : "")
-                       + "——每只从本地最早一根按数据源当前基准整段重写。");
-
-        var errors = new ConcurrentBag<string>();
-        var failed = new ConcurrentBag<string>();
-        var stats = new FetchStats();
-        var sw = Stopwatch.StartNew();
-        var doneCodes = new ConcurrentBag<string>();
-        int done = 0;
-
-        await Task.WhenAll(batch.Select(async code =>
-        {
-            var start = earliestByCode.TryGetValue(code, out var e) ? e : DateTime.Today.AddYears(-DefaultLookbackYears);
-            try
-            {
-                await ProcessOneStockAsync(code, source, start, DateTime.Today, currentRepo, errors, failed,
-                    stats, progress, batch.Count, () => Interlocked.Increment(ref done), sw, ct,
-                    Granularity.Day, overwrite: true);
-                doneCodes.Add(code);      // 只有真跑完的才从名单里划掉
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { errors.Add($"{code} 重取前复权失败：{ex.Message}"); }
-        }));
-
-        var finished = doneCodes.ToHashSet(StringComparer.Ordinal);
-        int left;
-        lock (_dbLock)
-        {
-            var manifest = _manifestStore.Load();
-            manifest.PendingQfqRepairCodes = manifest.PendingQfqRepairCodes
-                .Where(c => !finished.Contains(c)).ToList();
-            left = manifest.PendingQfqRepairCodes.Count;
-            _manifestStore.Save(manifest);
-        }
-
-        result.Errors.AddRange(errors);
-        progress?.Report($"重取前复权完成：{finished.Count} 只已按新基准重写，还剩 {left} 只"
-                       + (left > 0 ? "（下一轮空闲时自动继续）" : "，名单已清空") + $"，用时 {FormatElapsed(sw.Elapsed)}。");
-        return result;
-    }
+    // RunRepairQfqAsync（【重取前复权】）删于 2026-09-22：整项迁去了
+    // StockPlatform.Tasks/QfqRepairTask（继承 BarFetchTaskBase，一批 10 只、每批存完就从
+    // PendingQfqRepairCodes 划账）。迁的理由就是这个老实现的毛病：Task.WhenAll 把整批丢给
+    // 限流器、划账在 WhenAll 之后，而取消是直接冒泡的——被停止时名单一个都不更新，
+    // 已经按新基准重写完的票下一轮全部重抓一遍（每只十年多页、约 4 秒）。
+    // 覆盖写入的判据（BarWritePlanner 的 overwrite 那一路）一行没动，搬的只是外面那圈循环。
+    // 上面的 GetPendingQfqRepairCount 留着——界面刷新"待重取 N 只"走的是 orchestrator。
 
     /// <summary>
     /// 后复权日线阶段（2026-07-30新增，三个抓取入口都会跑）——回测专用的价格序列，理由见

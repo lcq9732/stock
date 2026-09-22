@@ -43,6 +43,22 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
     public string Board { get; }
     /// <summary>申万行业（跟其它结果表"板块"列同一个口径，来自本地静态映射，见 IndustryClassifier）。</summary>
     public string Industry => IndustryClassifier.GetIndustry(Entry.Code);
+
+    /// <summary>我自己打的分类（2026-09-22新增）——"主动仓"页那一格直接编辑、失焦即存，
+    /// "自选股"页只读显示。空着显示空白（不显示"—"：这一列多数行本来就是空的，满屏破折号更吵）。
+    /// 含义见 <see cref="WatchlistEntry.UserTag"/>。</summary>
+    public string UserTag
+    {
+        get => Entry.UserTag;
+        set
+        {
+            var t = (value ?? "").Trim();
+            if (t == Entry.UserTag) return;   // 进出编辑态不改内容时不必写盘
+            Entry.UserTag = t;
+            _store.UpdateUserTag(Entry.Id, t);
+            Raise(nameof(UserTag));
+        }
+    }
     public string Method => Entry.Method;
     public string DataDate => Entry.DataDate.ToString("yyyy-MM-dd");
     public double PriceAtPick => Entry.PriceAtPick;

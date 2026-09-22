@@ -2347,10 +2347,9 @@ public class MainViewModel : INotifyPropertyChanged
             // 【拉取个股行业与题材】的 case 删于 2026-09-21：迁去了
             // StockPlatform.Tasks/StockBoardMapTask，走上面那条 _taskRegistry 总分支。
 
-            case FetchActionId.RepairQfq:
-                // 一只票重抓十年约 4 秒（多页），按剩余时间估本轮能取几只，到点前收尾
-                return _orchestrator.RunRepairQfqAsync(
-                    SelectedSource, progress, ct, DeadlineToCount(deadline, TimeSpan.FromSeconds(4)));
+            // 【重取前复权】的 case 删于 2026-09-22：迁去了 StockPlatform.Tasks/QfqRepairTask，
+            // 走上面那条 _taskRegistry 总分支。原来这里按"每只约 4 秒"估本轮能取几只
+            // （DeadlineToCount），现在靠框架的 Deadline 在批边界收尾，不用再估。
 
             case FetchActionId.FetchIndexCons:
                 return _orchestrator.RunFetchIndexConsAsync(progress, ct);

@@ -34,4 +34,23 @@ public static class QfqRepairPlanner
             .OrderBy(c => c, StringComparer.Ordinal)
             .ToList();
     }
+
+    /// <summary>
+    /// 名单里的票，这一轮要重取哪一段（2026-09-22 随【重取前复权】迁进新框架时抽出来）。
+    ///
+    /// 「本地最早那根 → 今天」整段重写。**不是**从水位线往后续——那正是要修的东西：
+    /// 库里较早那段是当时的基准、较新那段是后来的基准，接缝处是假跳空，
+    /// 只有整段按同一个（数据源当前的）基准重写一遍才能抹平。
+    ///
+    /// 本地一根都没有的票给一个回看窗口：名单里理论上不该有这种票
+    /// （<see cref="SelectForRepair"/> 要求"本地最早那根早于已覆盖的那一页"），
+    /// 但名单是累加的，中间若被别的路清过库就会剩下这种条目——那时抓一段历史回来
+    /// 总比整只跳过、让它永远挂在名单上好。
+    /// </summary>
+    /// <param name="earliest">这只票本地最早那根日线的日期；null＝本地一根都没有。</param>
+    /// <param name="today">哪一天算"今天"（传进来才可单测）。</param>
+    /// <param name="lookbackYears">本地没有历史时回看几年。</param>
+    public static (DateTime Start, DateTime End) WindowFor(
+        DateTime? earliest, DateTime today, int lookbackYears)
+        => (earliest?.Date ?? today.Date.AddYears(-lookbackYears), today.Date);
 }

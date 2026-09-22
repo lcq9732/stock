@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.Data.Sqlite;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Sqlite;
 
@@ -29,6 +30,21 @@ namespace StockPlatform.Data.Sqlite;
 /// 同向失效必须挡掉：个股日K今天也没抓完的话，期望跟着变小，两边一起少、判据会说"齐了"。
 /// 所以先看 <see cref="MoneyFlowDayStatus.BarsReady"/>（当天日K ≥ 在市名册的
 /// <see cref="BarsReadyRatio"/>），不够就**不下结论**——那是日K的事，不该记到这一项头上。
+///
+/// ════ 判哪一天：先看尺子在不在（2026-09-22 用户要求）════
+/// 原来认死了"最近一个交易日（含今天）"，于是交易日早上八点就去问"今天齐了吗"——今天还没开盘、
+/// 日K一根没有，尺子本身是空的，界面整个上午挂着"⚠ 无法核对：09-22 的个股日线只有 0/5554 只"。
+/// 那不是缺口，是还没到时候。
+///
+/// 改成两步：<b>今天的日K已经到位就判今天</b>（收盘后日更先跑日K再跑本项，老路一步不变，
+/// 当晚发现缺口的能力一点不丢）；<b>今天日K不到位、而且还没到当天的确认时刻</b>
+/// （<see cref="IncrementalWindowCalculator.MarketCloseHour"/>，跟"K线算不算最终值"共用一个钟点，
+/// 不另立一个）<b>就退一格</b>，改报上一个交易日齐没齐。过了那个点日K还不到位，才是真该提醒的
+/// "无法核对，先把日K补齐"。
+///
+/// 为什么不简单按"收盘前一律看昨天"：15~16 点之间本项可能已经跑完了，一刀切会把当天的核对
+/// 整个跳过——而这一项的全部意义就是当晚发现缺口。所以依据是"今天的日K在不在"，钟点只用来区分
+/// 尺子不在时是"还没到时候"还是"出问题了"。
 /// </summary>
 public sealed class SqliteMoneyFlowDayAudit(string dbPath)
 {
@@ -42,21 +58,43 @@ public sealed class SqliteMoneyFlowDayAudit(string dbPath)
     private const string DayFormat = "yyyy-MM-dd";
 
     /// <summary>
-    /// 查"最近一个交易日"的分档资金流齐不齐。
+    /// 查"最近一个该有数据的交易日"的分档资金流齐不齐。
     ///
     /// 查的是**日历上最近一个已过去的交易日**而不是"今天"：周末和节假日也该能看出周五那天齐没齐
     /// （数据源那时还给得出周五的快照，补得回来）。交易日历走 <c>TradingDay</c> 表（深交所官方），
     /// 不拿上证指数K线当锚——那样会依赖"日更跑到哪一步了"，而这个判据要能随时问。
+    ///
+    /// 最近那天要是**今天、还没收盘、日K也还没到位**，就退一格报上一个交易日（理由见类注释）。
     /// </summary>
-    public MoneyFlowDayStatus Check()
+    /// <param name="now">"现在"是几点，只用来判当天收没收盘；不给就是 <see cref="DateTime.Now"/>
+    /// （留这个口子是为了单测能把时间摆到盘前/盘后，判据本身不该靠"跑的时候正好几点"来验）。</param>
+    public MoneyFlowDayStatus Check(DateTime? now = null)
     {
         using var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
 
-        var day = LastTradingDay(conn);
-        if (day == null) return new MoneyFlowDayStatus(null, 0, 0, 0);
+        var days = RecentTradingDays(conn, 2);
+        if (days.Count == 0) return new MoneyFlowDayStatus(null, 0, 0, 0);
 
         int roster = Scalar(conn, "SELECT COUNT(*) FROM StockMeta WHERE COALESCE(type,'stock')='stock';");
+        var status = Measure(conn, days[0], roster);
+
+        // 尺子不在、而且那天还没到收盘确认时刻 → 今天本来就不该有数据，改看上一个交易日。
+        // days[0] 不是今天时（周末/节假日）这个条件天然不成立，行为跟以前一模一样。
+        if (!status.BarsReady && days.Count > 1 && !IsClosed(days[0], now ?? DateTime.Now))
+            status = Measure(conn, days[1], roster);
+
+        return status;
+    }
+
+    /// <summary>某一天到没到"收盘确认"时刻——过去的日子天然成立。</summary>
+    private static bool IsClosed(string day, DateTime now) =>
+        now >= DateTime.ParseExact(day, DayFormat, CultureInfo.InvariantCulture)
+            .AddHours(IncrementalWindowCalculator.MarketCloseHour);
+
+    /// <summary>量某一个交易日：该有多少只（有日K的在市个股）、实有多少只。</summary>
+    private static MoneyFlowDayStatus Measure(SqliteConnection conn, string day, int roster)
+    {
         int expect = Scalar(conn, """
             SELECT COUNT(*) FROM Bar b JOIN StockMeta m ON m.code = b.code
             WHERE b.granularity = $g AND b.period_start >= $from AND b.period_start <= $to
@@ -88,12 +126,21 @@ public sealed class SqliteMoneyFlowDayAudit(string dbPath)
     }
 
     /// <summary>日历上最近一个已过去的交易日（含今天）。日历是空的就返回 null。</summary>
-    private static string? LastTradingDay(SqliteConnection conn)
+    private static string? LastTradingDay(SqliteConnection conn) =>
+        RecentTradingDays(conn, 1).FirstOrDefault();
+
+    /// <summary>日历上最近的 <paramref name="count"/> 个已过去的交易日（含今天），新的在前。</summary>
+    private static List<string> RecentTradingDays(SqliteConnection conn, int count)
     {
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT day FROM TradingDay WHERE day <= $t ORDER BY day DESC LIMIT 1;";
+        cmd.CommandText = "SELECT day FROM TradingDay WHERE day <= $t ORDER BY day DESC LIMIT $n;";
         cmd.Parameters.AddWithValue("$t", DateTime.Today.ToString(DayFormat, CultureInfo.InvariantCulture));
-        return cmd.ExecuteScalar() as string;
+        cmd.Parameters.AddWithValue("$n", count);
+
+        var days = new List<string>(count);
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) days.Add(r.GetString(0));
+        return days;
     }
 
     private static int Scalar(SqliteConnection conn, string sql, params (string Name, object Value)[] args)

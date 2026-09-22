@@ -94,6 +94,20 @@ public class JsonWatchlistStore
         }
     }
 
+    /// <summary>更新手填的"我的分类"（2026-09-22新增，"主动仓"页那一列）——按 Id 定位、只改这一个
+    /// 字段。空/空白一律存成空字符串（不存 null），见 <see cref="WatchlistEntry.UserTag"/>。</summary>
+    public void UpdateUserTag(Guid id, string? userTag)
+    {
+        lock (_fileLock)
+        {
+            var all = LoadUnlocked();
+            var entry = all.FirstOrDefault(e => e.Id == id);
+            if (entry == null) return;
+            entry.UserTag = (userTag ?? "").Trim();
+            Save(all);
+        }
+    }
+
     /// <summary>把若干条自选加入/移出"主动仓"（2026-07-31新增）——主动仓是"我打算买卖、要每天盯"的
     /// 那一小撮，跟"算法验证样本"分开（见 <see cref="WatchlistEntry.InTradePool"/>）。返回实际改动的条数。
     /// 移出时不清空买卖信息（交易记录要留痕）：**未平仓的持仓**移不出去（<see cref="WatchlistEntry.IsInTradePool"/>

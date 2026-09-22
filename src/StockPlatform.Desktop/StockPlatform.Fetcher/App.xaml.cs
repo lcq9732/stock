@@ -702,6 +702,12 @@ public partial class App : Application
             () => new StockAdjustedBarTask(paths, barSourceHolder, manifestStore,
                                            FetchActionId.StepStockRawBars, Granularity.DayRaw));
 
+        // 【重取前复权】2026-09-22 迁过来（最后一个还在老路上的K线类动作）。消费前复权那一路
+        // 记下的待重取名单，整段按数据源当前基准重写。迁移改掉的是"取消就整轮白跑"：
+        // 老实现的划账在 Task.WhenAll 之后、取消直接冒泡，已重写完的票下轮全部重抓一遍。
+        taskRegistry.Register(FetchActionId.RepairQfq,
+            () => new QfqRepairTask(paths, barSourceHolder, manifestStore));
+
         // 【退市股收尾】2026-09-21（第④步，K线六项迁完）。刷名单 + 给新退市的票补最后几天，
         // 三个口径各补一段；"已尝试过"的标记只给没失败的打（见 DelistedTailTask 的 ⚠）。
         taskRegistry.Register(FetchActionId.StepDelistedTails,

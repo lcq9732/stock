@@ -1,6 +1,8 @@
 ﻿using System.Globalization;
 using System.Text.Json;
+using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Remote;
 
@@ -23,6 +25,26 @@ namespace StockPlatform.Data.Remote;
 /// 这里是**个股属性场景**（"这只股属于哪个行业"），正是这张报表的本职用途；覆盖 5644/5753 只，
 /// 剩下那 109 只退回证监会分类即可——所以 <c>StockIndustry</c> 那张老表要留着做兜底，不删。
 /// </summary>
+/// <summary>
+/// 一轮抓取的结果（2026-09-22）。
+///
+/// 加这个 record 是为了让任务能判断**该不该清孤儿票**：
+/// <see cref="IStockBoardMapRepository.PurgeOlderThan"/> 只在"整轮抓完且对账通过"时才能调，
+/// 而原来 provider 只返回落库行数、对账结果仅仅报进日志——任务无从判断，只能一律清或一律不清。
+/// </summary>
+/// <param name="Industry">落库的行业行数。</param>
+/// <param name="Theme">落库的题材行数。</param>
+/// <param name="Rows">这一轮实际收到的总行数。</param>
+/// <param name="Reported">接口自报的总行数（拿不到是 0）。</param>
+public sealed record StockBoardMapFetchOutcome(int Industry, int Theme, int Rows, int Reported)
+{
+    /// <summary>
+    /// 这一轮是不是**取全了**。判据跟 provider 里那句告警同一条（差 1% 以内不算，
+    /// 抓的过程中接口那侧数据可能有微调）；接口没自报总数时只能认它取全了。
+    /// </summary>
+    public bool Complete => Reported <= 0 || Rows >= Reported * 0.99;
+}
+
 public class EastMoneyStockBoardMapProvider
 {
     private const string Report = "RPT_F10_CORETHEME_BOARDTYPE";
@@ -42,17 +64,29 @@ public class EastMoneyStockBoardMapProvider
     /// 所以没法做增量、每次都是全量重取；好在行业和题材归属变动都很慢，季度跑一次就够。
     ///
     /// 边抓边回调落库：9.4 万行攒内存没必要，而且中途断了已落库的部分仍然有效。
+    ///
+    /// ⚠ **一批绝不切开一只票**（2026-09-22）：落库那侧是「按票整只替换」（先删这只票的旧行、
+    /// 再插新的，见 <see cref="IStockBoardMapRepository.ReplaceForStocks"/>），一只票的行被切成
+    /// 两批的话，第二批会把第一批刚写进去的行当成旧行删掉。所以攒够行数之后要等到
+    /// <c>SECURITY_CODE</c> 换下一只才提交——同一只票的行必然连续，这一点正好由下面那个
+    /// 排序键保证（它本来是为了翻页不重不漏才加的）。
     /// </summary>
     /// <param name="onBatch">每积累一批就回调（行业, 题材），返回写入行数。</param>
-    public async Task<(int Industry, int Theme)> FetchAsync(
+    /// <param name="fetchedAt">
+    /// 这一轮的落盘时刻，**由调用方给**：整轮抓完之后它要拿这个时刻去清「本轮一行都没出现」
+    /// 的孤儿票（<see cref="IStockBoardMapRepository.PurgeOlderThan"/>），两边必须是同一个值。
+    /// </param>
+    public async Task<StockBoardMapFetchOutcome> FetchAsync(
         Func<List<StockIndustryEm>, List<StockThemeEm>, (int, int)> onBatch,
+        DateTime fetchedAt,
         IProgress<string>? progress = null, CancellationToken ct = default)
     {
         var inds = new List<StockIndustryEm>(4000);
         var themes = new List<StockThemeEm>(4000);
         int totalInd = 0, totalTheme = 0, rows = 0;
         int reported = 0;             // 接口自报的总行数，抓完拿来对账
-        var now = DateTime.Now;
+        var now = fetchedAt;
+        string? batchCode = null;     // 这一批攒到哪只票了——批边界只能落在它变化的地方
 
         progress?.Report("个股行业/题材归属：全量重取（约 9.4 万行、188 页）...");
 
@@ -69,6 +103,19 @@ public class EastMoneyStockBoardMapProvider
             var board = Str(el, "NEW_BOARD_CODE");
             if (code.Length == 0 || board.Length == 0) continue;
             rows++;
+
+            // 批边界：攒够了、而且**下一只票开始了**才提交。判据和它的理由在
+            // StockBoardMapBatchRule——那条规则是正确性前提（切开一只票会让下一批的整只替换
+            // 删掉刚写进去的行），所以它在 Logic 层、有用例钉着，不留在这儿当一句内联条件。
+            // ⚠ 必须判在把这一行加进批**之前**。
+            if (StockBoardMapBatchRule.ShouldFlush(inds.Count + themes.Count, batchCode, code))
+            {
+                var (a, b) = onBatch(inds, themes);
+                totalInd += a; totalTheme += b;
+                inds.Clear(); themes.Clear();
+                progress?.Report($"个股行业/题材：已处理 {rows} 行（行业 {totalInd}、题材 {totalTheme}）");
+            }
+            batchCode = code;
 
             if (Str(el, "BOARD_TYPE") == "行业")
             {
@@ -94,14 +141,6 @@ public class EastMoneyStockBoardMapProvider
                     FetchedAt = now,
                 });
             }
-
-            if (inds.Count + themes.Count >= 5000)
-            {
-                var (a, b) = onBatch(inds, themes);
-                totalInd += a; totalTheme += b;
-                inds.Clear(); themes.Clear();
-                progress?.Report($"个股行业/题材：已处理 {rows} 行（行业 {totalInd}、题材 {totalTheme}）");
-            }
         }
         if (inds.Count + themes.Count > 0)
         {
@@ -125,7 +164,7 @@ public class EastMoneyStockBoardMapProvider
             $"个股行业/题材完成：共 {rows} 行"
             + (reported > 0 ? $"（接口自报 {reported} 行）" : "")
             + $"，行业 {totalInd} 条、题材 {totalTheme} 条。");
-        return (totalInd, totalTheme);
+        return new StockBoardMapFetchOutcome(totalInd, totalTheme, rows, reported);
     }
 
     private static string Str(JsonElement el, string prop)

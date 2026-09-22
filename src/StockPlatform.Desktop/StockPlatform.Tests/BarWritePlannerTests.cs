@@ -169,4 +169,35 @@ public class QfqRepairPlannerTests
         Assert.Equal(["000001", "600519"],
             QfqRepairPlanner.SelectForRepair(["600519", "000001", "600519"], earliest, Today));
     }
+
+    // ── 重取哪一段（2026-09-22 随【重取前复权】迁进新框架时加）──
+    // 整条链的行为在 QfqRepairTaskTests。
+
+    [Fact]
+    public void 有本地历史_从最早那根重取到今天()
+    {
+        var (start, end) = QfqRepairPlanner.WindowFor(new DateTime(2015, 3, 2), Today, 3);
+
+        // 不是从水位线往后续：那正是要修的东西（早段旧基准、新段新基准，接缝处是假跳空）
+        Assert.Equal(new DateTime(2015, 3, 2), start);
+        Assert.Equal(Today, end);
+    }
+
+    [Fact]
+    public void 本地一根都没有_给回看窗口而不是整只跳过()
+    {
+        // 名单是累加的，中间被别的路清过库就会剩下这种条目；跳过它等于让它永远挂在名单上。
+        var (start, end) = QfqRepairPlanner.WindowFor(null, Today, 3);
+
+        Assert.Equal(Today.AddYears(-3), start);
+        Assert.Equal(Today, end);
+    }
+
+    [Fact]
+    public void 起点带了时分秒_只取日期()
+    {
+        var (start, _) = QfqRepairPlanner.WindowFor(new DateTime(2015, 3, 2, 15, 30, 0), Today, 3);
+
+        Assert.Equal(new DateTime(2015, 3, 2), start);
+    }
 }

@@ -36,7 +36,19 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
     /// <param name="Granularity">哪个口径。一只票在同一批里可能有多条（退市股收尾要补三个口径）。</param>
     /// <param name="Bars">抓回来的行。</param>
     /// <param name="DriftCheck">要不要做复权基准漂移比对（只有前复权那一路开）。</param>
-    public sealed record CodeBars(string Code, string Granularity, List<Bar> Bars, bool DriftCheck = false);
+    /// <param name="Overwrite">
+    /// 「覆盖重写」——整段以数据源当前基准为准，不比对、不看库里已有什么
+    /// （<see cref="BarWritePlanner.Plan"/> 的 overwrite 那一路）。
+    ///
+    /// 只有【重取前复权】用它：那一项的全部意义就是抹掉分批入库留下的复权基准接缝，
+    /// 走默认那条路的话已有的行会被判成"值也对得上"而原样跳过，等于白抓一轮。
+    /// 另外五个口径一律留默认 false——它们的基准不随分红变，覆盖只会把确认过的行重新写一遍。
+    ///
+    /// ⚠ 跟 <paramref name="DriftCheck"/> 互斥：覆盖本来就是"全都以新基准为准"，
+    /// 再比对一遍毫无意义，判据那边也是先看 overwrite 就直接返回。
+    /// </param>
+    public sealed record CodeBars(string Code, string Granularity, List<Bar> Bars,
+                                  bool DriftCheck = false, bool Overwrite = false);
 
     /// <summary>一批几只。批边界＝可以干净收尾的点，不是并发度。</summary>
     public const int DefaultBatchSize = 30;
@@ -98,7 +110,7 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
     /// </summary>
     protected async Task<CodeBars?> FetchOneAsync(
         string code, string granularity, DateTime start, DateTime end,
-        bool driftCheck, CancellationToken ct)
+        bool driftCheck, CancellationToken ct, bool overwrite = false)
     {
         ct.ThrowIfCancellationRequested();
         _attempted.Add(code);
@@ -114,7 +126,7 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
             var (_, bars) = await Source.Fetcher.FetchAsync(code, granularity, fetchStart, end, ct);
             if (bars.Count > 0) Interlocked.Increment(ref _withNewData);
             else Interlocked.Increment(ref _empty);
-            return new CodeBars(code, granularity, bars, driftCheck);
+            return new CodeBars(code, granularity, bars, driftCheck, overwrite);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -125,13 +137,20 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
         }
     }
 
-    /// <summary>抓一批（组内并发，真正的闸是数据源自己的限流器）。</summary>
+    /// <summary>
+    /// 抓一批（组内并发，真正的闸是数据源自己的限流器）。
+    /// </summary>
+    /// <param name="overwrite">
+    /// 整批都走「覆盖重写」（见 <see cref="CodeBars.Overwrite"/>）。作用于整批而不是每项，
+    /// 是因为这件事按**任务**固定：一个任务的一路要么全覆盖要么全不覆盖，
+    /// 放进元组只会让另外五个子类跟着改签名。
+    /// </param>
     protected async Task<List<CodeBars>> FetchBatchAsync(
         IEnumerable<(string Code, string Granularity, DateTime Start, DateTime End, bool DriftCheck)> batch,
-        CancellationToken ct)
+        CancellationToken ct, bool overwrite = false)
     {
         var got = await Task.WhenAll(batch.Select(t =>
-            FetchOneAsync(t.Code, t.Granularity, t.Start, t.End, t.DriftCheck, ct)));
+            FetchOneAsync(t.Code, t.Granularity, t.Start, t.End, t.DriftCheck, ct, overwrite)));
         return got.Where(x => x != null).Select(x => x!).ToList();
     }
 
@@ -154,8 +173,11 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
                 ct.ThrowIfCancellationRequested();
                 lock (SqliteWriteGate.Local)
                 {
+                    // 覆盖那一路不需要比对样本，也别去查（那是一次多余的区间查询）。
                     var plan = BarWritePlanner.Plan(
-                        item.Bars, today, StoredCloses(item), overwrite: false, driftCheck: item.DriftCheck);
+                        item.Bars, today,
+                        item.Overwrite ? EmptyCloses : StoredCloses(item),
+                        overwrite: item.Overwrite, driftCheck: item.DriftCheck);
 
                     if (plan.ToInsert.Count > 0) Bars.InsertOrRefreshUnconfirmed(plan.ToInsert);
                     if (plan.ToOverwrite.Count > 0) SqliteBarUpsert.Upsert(paths.CurrentDb, plan.ToOverwrite);
@@ -167,6 +189,8 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
                 }
             }
         }, ct);
+
+    private static readonly Dictionary<DateTime, double> EmptyCloses = [];
 
     /// <summary>抓回来这一段里、除今天以外那几天在库里已有的收盘价（比对样本）。</summary>
     private IReadOnlyDictionary<DateTime, double> StoredCloses(CodeBars item)
