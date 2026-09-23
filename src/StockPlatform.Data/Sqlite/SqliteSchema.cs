@@ -539,6 +539,22 @@ public static class SqliteSchema
                 PRIMARY KEY (dataset, day)
             );
 
+            -- 上交所官方每日 ETF 份额（2026-09-23，见 doc/etf-turnover-recalc-design.md）。
+            --
+            -- 【ETF换手率校正】的裁判：腾讯的 ETF 换手率口径不统一（有时 ÷前一交易日份额、有时 ÷当天份额），
+            -- 2022 年年中以前干脆全是 0。拿这张表统一按「成交量 ÷ 前一交易日份额」重算。
+            -- 顺带也是 ETF 规模和每日申赎（份额差）的原始数据。
+            --
+            -- code 是 6 位裸码（上交所的 SEC_CODE）；Bar 里同一只 ETF 存成 'sh' || code。
+            -- 上交所 2012-01-04 起才有数据；空的日子记在 DailyFetchNoData(dataset='EtfShare')。
+            CREATE TABLE IF NOT EXISTS EtfShare (
+                code       TEXT NOT NULL,
+                trade_date TEXT NOT NULL,   -- yyyy-MM-dd，上交所的 STAT_DATE
+                shares_wan REAL NOT NULL,   -- 总份额，万份（TOT_VOL 原样）
+                fetched_at TEXT,
+                PRIMARY KEY (code, trade_date)
+            );
+
             -- 业绩预告（2026-09-03，东财 RPT_PUBLIC_OP_NEWPREDICT）。本地此前完全没有这份数据。
             --
             -- 值钱在三点：① 比正式财报早一个月以上（Q3预告10月中 vs 财报10月底；年报预告1月底 vs 年报4月）；

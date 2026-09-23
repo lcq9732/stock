@@ -56,12 +56,16 @@ public interface IFetchTask
     /// <summary>
     /// 这个任务能不能**自己补待办**（<see cref="FetchMode.FillBacklog"/>）。默认 false。
     ///
-    /// false＝待办的编排仍在 <c>FetchOrchestrator.RunFillBacklogAsync</c> 那边（席位/大宗/
-    /// 龙虎榜的残缺日就是这样，按天重抓的动作两边共用一个写入器）。
+    /// ⚠ **false 现在意味着"这一项的待办没人补"**（2026-09-22 起）。原先它的含义是
+    /// "待办的编排仍在 <c>FetchOrchestrator.RunFillBacklogAsync</c> 那边"——那个中转
+    /// 随【重新拉取失败】迁成任务（<c>RetryFailedTask</c>）一起删了，编排层不再参与待办分派。
+    /// 所以现在收到这个模式而没声明 true 的项，界面会当场报一句
+    /// "没有声明自己补待办，它欠着的那些补不了"，把配置问题喊出来（见
+    /// <c>MainViewModel.DispatchPlanActionAsync</c> 开头那条分支）。
     ///
     /// ⚠ **分派按这个属性走，不按"是不是新式任务"走**（2026-09-18）：粗暴地让 registry 里的
-    /// 任务全部自己接管的话，那三个没实现 FillBacklog 的任务会收到这个模式、返回空、
-    /// 报一句"没有欠着的"——**待办永远补不上而且一声不吭**。
+    /// 任务全部自己接管的话，没实现 FillBacklog 的任务会收到这个模式、返回空、
+    /// 报一句"没有欠着的"——**待办永远补不上而且一声不吭**。这正是上面那句告警要拦的。
     /// 见 doc/dividend-task-design.md §9。
     /// </summary>
     bool HandlesBacklog => false;

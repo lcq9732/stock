@@ -60,6 +60,9 @@ public class WatchlistRowViewModel : ISelectableRow, INotifyPropertyChanged
         }
     }
     public string Method => Entry.Method;
+
+    /// <summary>自选股/主动仓两页查询框匹配的字段（见 <see cref="RowFilter{T}"/>）。</summary>
+    public static string?[] SearchFields(WatchlistRowViewModel r) => [r.Code, r.Name, r.Industry, r.UserTag, r.Board, r.Method];
     public string DataDate => Entry.DataDate.ToString("yyyy-MM-dd");
     public double PriceAtPick => Entry.PriceAtPick;
 
@@ -433,7 +436,12 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
     private readonly IBoardRepository _boardRepository;
     private readonly TradeFeeStore _fees;
 
+    /// <summary>全量自选记录（表格显示的是按 <see cref="Filter"/> 过滤后的视图）。</summary>
     public ObservableCollection<WatchlistRowViewModel> Entries { get; } = new();
+
+    /// <summary>查询框（2026-09-23新增）——【删除】【加入主动仓】【导出Excel】只作用于显示出来的行；
+    /// 但"各方法准确率"仍按**全量**统计：这些是验证样本，筛过再统计就是挑样本了。</summary>
+    public RowFilter<WatchlistRowViewModel> Filter { get; }
 
     private string _methodStatsText = "";
     /// <summary>各方法的准确率速览（只数 / 平均涨跌 / 上涨占比）——本页的核心产出。</summary>
@@ -457,9 +465,10 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
         _barRepository = barRepository;
         _boardRepository = boardRepository;
         _fees = fees;
+        Filter = new RowFilter<WatchlistRowViewModel>(Entries, WatchlistRowViewModel.SearchFields);
         RefreshCommand = new RelayCommand(_ => Reload());
         RemoveSelectedCommand = new RelayCommand(_ => RemoveSelected());
-        ExportCommand = new RelayCommand(_ => GridExporter.ExportWatchlist(Entries));
+        ExportCommand = new RelayCommand(_ => GridExporter.ExportWatchlist(Filter.Visible));
         AddToTradePoolCommand = new RelayCommand(_ => AddSelectedToTradePool());
         Reload();
     }
@@ -484,7 +493,8 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
             Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store, _fees,
                 earnings.TryGetValue(e.Code, out var es) ? es : null));
         }
-        BuildMethodStats();
+        BuildMethodStats();   // 全量，不看查询框
+        Filter.RaiseCounts();
     }
 
     /// <summary>按"来源方法"统计准确率——只数、平均"选中后涨跌幅"、上涨占比，按平均涨跌从高到低排。
@@ -517,7 +527,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
 
     private void RemoveSelected()
     {
-        var toRemove = Entries.Where(e => e.IsSelected).Select(e => e.Entry.Id).ToList();
+        var toRemove = Filter.Visible.Where(e => e.IsSelected).Select(e => e.Entry.Id).ToList();
         if (toRemove.Count == 0) return;
         _store.Remove(toRemove);
         Reload();
@@ -528,7 +538,7 @@ public class WatchlistTabViewModel : INotifyPropertyChanged
     /// 理由见类注释）。</summary>
     private void AddSelectedToTradePool()
     {
-        var ids = Entries.Where(e => e.IsSelected).Select(e => e.Entry.Id).ToList();
+        var ids = Filter.Visible.Where(e => e.IsSelected).Select(e => e.Entry.Id).ToList();
         if (ids.Count == 0) return;
         _store.SetTradePool(ids, true);
         foreach (var e in Entries) e.IsSelected = false;
@@ -555,7 +565,12 @@ public class TradePoolTabViewModel
     private readonly IBoardRepository _boardRepository;
     private readonly TradeFeeStore _fees;
 
+    /// <summary>全量主动仓记录。表格绑的是它的默认视图，按 <see cref="Filter"/> 过滤，
+    /// 所以这里始终是全量；要"用户看得见的那些"走 <see cref="RowFilter{T}.Visible"/>。</summary>
     public ObservableCollection<WatchlistRowViewModel> Entries { get; } = new();
+
+    /// <summary>查询框（2026-09-23新增）——【移出主动仓】【导出Excel】只作用于显示出来的行。</summary>
+    public RowFilter<WatchlistRowViewModel> Filter { get; }
 
     public RelayCommand RefreshCommand { get; }
     public RelayCommand RemoveFromPoolCommand { get; }
@@ -570,9 +585,10 @@ public class TradePoolTabViewModel
         _barRepository = barRepository;
         _boardRepository = boardRepository;
         _fees = fees;
+        Filter = new RowFilter<WatchlistRowViewModel>(Entries, WatchlistRowViewModel.SearchFields);
         RefreshCommand = new RelayCommand(_ => Reload());
         RemoveFromPoolCommand = new RelayCommand(_ => RemoveFromPool());
-        ExportCommand = new RelayCommand(_ => GridExporter.ExportWatchlist(Entries));
+        ExportCommand = new RelayCommand(_ => GridExporter.ExportWatchlist(Filter.Visible));
         Reload();
     }
 
@@ -599,6 +615,7 @@ public class TradePoolTabViewModel
             Entries.Add(new WatchlistRowViewModel(e, _barRepository, boards, _store, _fees,
                 earnings.TryGetValue(e.Code, out var es) ? es : null));
         }
+        Filter.RaiseCounts();
     }
 
     /// <summary>把勾选的票移出主动仓（不删除记录，它仍留在"自选股"页作为算法样本，交易记录也不清空）。
@@ -606,7 +623,7 @@ public class TradePoolTabViewModel
     /// 没道理继续占着每天要看的清单）。有挡下的就如实提示，不静默失败。</summary>
     private void RemoveFromPool()
     {
-        var selected = Entries.Where(e => e.IsSelected).ToList();
+        var selected = Filter.Visible.Where(e => e.IsSelected).ToList(); // 被查询框筛掉的不动
         if (selected.Count == 0) return;
 
         // 未平仓持仓 = 买过、还没全部卖出（跟 WatchlistEntry.IsInTradePool 的第①条同一判定）

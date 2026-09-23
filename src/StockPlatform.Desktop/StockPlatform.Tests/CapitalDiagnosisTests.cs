@@ -779,7 +779,7 @@ public class CapitalDiagnosisTests
 
         var lev = new CapitalDiagnosisAnalyzer().Analyze(input, w)
             .Dimensions.Single(d => d.Index == 4);
-        var c = Assert.Single(lev.Conclusions, x => x.Contains("大进大出"));
+        var c = Assert.Single(lev.Conclusions, x => x.Contains("（买入 "));
         _out.WriteLine(c);
 
         // 锚点日不计入 → 59 天 × 0.5亿 = 29.5亿 流水，净减 1.1亿，反推偿还 30.6亿
@@ -791,9 +791,9 @@ public class CapitalDiagnosisTests
         // 区间写明多久
         Assert.Contains("本波 60日", c);
         Assert.Contains("2026-01-05 起", c);
-        // 尾句方向要跟净额符号一致：净减了还说"增仓"是自相矛盾（2026-09-19 用户指出）
-        Assert.Contains("真实减仓远小于流水", c);
-        Assert.DoesNotContain("增仓", c);
+        // 句尾不再挂"大进大出/远小于流水"的复述（2026-09-23 用户嫌废话删掉）
+        Assert.DoesNotContain("远小于流水", c);
+        Assert.DoesNotContain("增", c.Replace("净增", ""));
         // Top3 表的尾注同理，不能写死"增仓"
         var cap = lev.Tables.Single(x => x.Caption.Contains("Top3")).Caption;
         Assert.Contains("净偿还", cap);
@@ -821,13 +821,13 @@ public class CapitalDiagnosisTests
             .Analyze(input, CapitalDiagnosisAnalyzer.ResolveWindows(bars))
             .Dimensions.Single(d => d.Index == 4);
 
-        var c = Assert.Single(lev.Conclusions, x => x.Contains("大进大出"));
+        var c = Assert.Single(lev.Conclusions, x => x.Contains("（买入 "));
         _out.WriteLine(c);
         // 净增 1.1亿：买入 29.5亿，反推偿还 28.4亿
         Assert.Contains("净增 1.1亿", c);
         Assert.Contains("买入 29.5亿", c);
         Assert.Contains("偿还 28.4亿", c);
-        Assert.Contains("真实增仓远小于流水", c);
+        Assert.DoesNotContain("远小于流水", c);
         Assert.Contains("净买入", lev.Tables.Single(x => x.Caption.Contains("Top3")).Caption);
     }
 
@@ -902,7 +902,7 @@ public class CapitalDiagnosisTests
             .Dimensions.Single(d => d.Index == 4);
 
         // 防误读那句要**保留**，新的结构判断是**另起一条**，不是替换
-        Assert.Contains(lev.Conclusions, x => x.Contains("真实减仓远小于流水"));
+        Assert.Contains(lev.Conclusions, x => x.Contains("净减 1.1亿（买入 "));
         var c = Assert.Single(lev.Conclusions, x => x.Contains("流水是平均余额"));
         _out.WriteLine(c);
 

@@ -95,7 +95,15 @@
                                 ToolTip="把勾选的票移出主动仓（记录和买卖留痕都不删除，仍留在&quot;自选股&quot;页作为算法样本）。&#10;已平仓的可以移出——那笔交易已经结束了。&#10;只有【未平仓的持仓】移不出去（钱还在里面必须每天盯）：先点那一行的【买入】格打开交易记录，把剩余股数卖出平仓，或把买入记录删掉。" />
                         <Button Content="仓位计算器" Width="90" Margin="8,0,0,0" Click="PositionSizingButton_Click"
                                 ToolTip="按凯利公式把&quot;我觉得有几成把握涨&quot;换算成&quot;该买多少钱/该留多少股&quot;。&#10;这里打开是空手起算（不带某只票）；要针对某一只，点那一行的【持仓股数】那一格，现价和持仓会自动带进去。" />
-                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0" />
+                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="导出当前显示的行（用了查询就只导命中的那些）" />
+                        <!-- 查询（2026-09-23新增，票多了找不到）——只筛显示，移出/导出也只作用于显示的行 -->
+                        <TextBlock Text="查询：" VerticalAlignment="Center" Margin="16,0,0,0" />
+                        <TextBox Width="150" Margin="2,0" VerticalContentAlignment="Center"
+                                 Text="{Binding Filter.Text, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="按代码/名称/行业/我的分类/概念板块/来源方法筛选，边打边筛。&#10;筛选时【移出主动仓】和【导出Excel】只作用于显示出来的行。" />
+                        <TextBlock Text="{Binding Filter.StatusText}" Margin="8,0,0,0" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource Theme.Foreground.Muted}" />
                         <TextBlock Text="&#8505;" FontWeight="Bold" FontSize="16" VerticalAlignment="Center"
                                    Background="Transparent" Foreground="{DynamicResource Theme.Foreground.Muted}"
                                    Margin="16,0,0,0" ToolTipService.ShowDuration="60000"
@@ -348,6 +356,13 @@
                                 ToolTip="重新读取底仓记录、现价和分红数据" />
                         <Button Content="移出底仓" Command="{Binding RemoveCommand}" Width="90" Margin="8,0,0,0"
                                 ToolTip="把勾选的记录从底仓删除（成交明细一起删，不影响自选和主动仓）" />
+                        <!-- 查询（2026-09-23新增）——跟自选股/主动仓同一套（RowFilter）；上面的汇总不跟着筛 -->
+                        <TextBlock Text="查询：" VerticalAlignment="Center" Margin="16,0,0,0" />
+                        <TextBox Width="150" Margin="2,0" VerticalContentAlignment="Center"
+                                 Text="{Binding Filter.Text, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="按代码/名称/行业/备注筛选，边打边筛。&#10;筛选时【移出底仓】只作用于显示出来的行。&#10;底仓汇总（总投入/年化股息/总回报）不跟着筛，始终按全部底仓统计。" />
+                        <TextBlock Text="{Binding Filter.StatusText}" Margin="8,0,0,0" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource Theme.Foreground.Muted}" />
                         <TextBlock VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" Margin="16,0,0,0"
                                    Text="底仓不设价格止盈止损，退出条件是分红中断或基本面变坏" />
                     </StackPanel>
@@ -858,7 +873,15 @@
                             <Button Content="移除勾选" Command="{Binding RemoveSelectedCommand}" Width="80" Margin="8,0,0,0"
                                     ToolTip="从自选里彻底删除（连同主动仓里的同一条记录一起删）" />
                             <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
-                                    ToolTip="把自选股列表导出成 Excel(.xlsx)" />
+                                    ToolTip="把自选股列表导出成 Excel(.xlsx)——只导当前显示的行（用了查询就只导命中的那些）" />
+                            <!-- 查询（2026-09-23新增）——三页同一套（RowFilter）；
+                                 下面的"各方法准确率"不跟着筛，仍按全量统计 -->
+                            <TextBlock Text="查询：" VerticalAlignment="Center" Margin="16,0,0,0" />
+                            <TextBox Width="150" Margin="2,0" VerticalContentAlignment="Center"
+                                     Text="{Binding Filter.Text, UpdateSourceTrigger=PropertyChanged}"
+                                     ToolTip="按代码/名称/行业/我的分类/概念板块/来源方法筛选，边打边筛。&#10;筛选时【加入主动仓】【移除勾选】【导出Excel】只作用于显示出来的行。&#10;下面的&quot;各方法准确率&quot;不跟着筛，始终按全部样本统计。" />
+                            <TextBlock Text="{Binding Filter.StatusText}" Margin="8,0,0,0" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Theme.Foreground.Muted}" />
                         </StackPanel>
                         <TextBlock Text="{Binding MethodStatsText}" Margin="0,6,0,0" Foreground="{DynamicResource Theme.Accent}" FontWeight="SemiBold" TextWrapping="Wrap"
                                    ToolTip="按来源方法统计&quot;选中后涨跌幅&quot;的平均值与上涨占比——本页的核心产出。口径提醒：各方法的自选日期不同、持有时长不可比，这是粗对比；要严格评测得固定同一时间窗口。" />

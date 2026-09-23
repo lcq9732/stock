@@ -8,13 +8,25 @@
 /// </summary>
 public class Manifest
 {
-    /// <summary>When the last "拉取全部"/"拉取当天" run actually completed (wall-clock, not a
-    /// trading day) — paired with the Bar table's own earliest/latest period_start so the Fetcher
-    /// UI can show both "数据覆盖到哪天" and "上次真的抓取是什么时候"，让用户判断该不该再抓一次，
-    /// 不用凭感觉重复点。Updated every time a run reaches completion, even if it found nothing new
-    /// (a clean "刚检查过，没有新数据" is still worth recording as a last-checked time).</summary>
+    /// <summary>
+    /// **最后收尾的那一项**跑完的时刻（墙上时间，不是交易日）——跟 Bar 表自己的最早/最晚
+    /// period_start 配成一对，于是【数据状态】页能同时显示"数据覆盖到哪天"和"上次真的抓取是
+    /// 什么时候"，用户不用凭感觉重复点。空转的轮次也记（"刚检查过、没有新数据"本身就是一条
+    /// 值得显示的最后检查时间）。
+    ///
+    /// ⚠ 写它的地方 2026-09-23 换过：原来是 <c>FetchOrchestrator.FinishFetchRun</c>，那是老三种
+    /// 抓取模式共用的收尾；54 项全部迁进新框架、那个方法删掉之后，改由
+    /// <c>FetchTaskRegistry.RecordRun</c> 一处写（所有任务都从那儿过）。中间有一小段时间
+    /// 这两个字段没人写、界面上那句话停在陈旧值——修的就是这个。
+    ///
+    /// 想知道**逐项**什么时候跑的、干不干净，看 <see cref="LastRunByTask"/>：拆成 54 项之后
+    /// 这两个字段只回答得了"最后收尾的是哪一项"。
+    /// </summary>
     public DateTime? LastFetchAt { get; set; }
-    public string? LastFetchKind { get; set; } // "拉取全部" / "拉取当天" / "重新拉取失败股票"
+
+    /// <summary>最后收尾的那一项的**中文名**（目录里的 Name，跟 <see cref="LastRunByTask"/> 的键
+    /// 同一个取值）。老版本里它只可能是"拉取全部"/"拉取当天"/"重新拉取失败股票"那三个之一。</summary>
+    public string? LastFetchKind { get; set; }
 
     /// <summary>K线抓取失败、还没成功补上的股票代码（2026-07-08新增）——每次"拉取全部"/"拉取
     /// 当天"/"重新拉取失败股票"结束后都会更新：本轮尝试过且这次成功了的代码会被移出，这次还是
@@ -140,8 +152,8 @@ public class Manifest
     /// 拉取全部/当天/重试三个入口时够用；拆细之后一天会有十几项各跑各的，那个字段就变成
     /// "今天最后收尾的那一项"，看不出别的项跑没跑、什么时候跑的。
     ///
-    /// key 用任务的中文名（就是 FetchOrchestrator.FinishFetchRun 的 fetchKind 参数，
-    /// 也是目录里的 Name）——不用枚举名，是因为编排层不认识计划层的 FetchActionId。
+    /// key 用任务的中文名（目录里的 Name；老路那边是 <c>FinishFetchRun</c> 的 fetchKind 参数，
+    /// 两边同一个取值，所以迁移前后不会把同一项显示成两行）。
     /// 改名会丢历史记录，但这只是"给人看的最近运行时间"，丢了下次跑完就重新有了。
     /// </summary>
     public Dictionary<string, TaskRunRecord> LastRunByTask { get; set; } = new();

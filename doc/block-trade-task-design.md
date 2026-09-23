@@ -421,7 +421,7 @@ Debug 构建的数据目录在 `bin/.../win-x64/data`，跟生产库天然隔离
 | 那笔 −18.71% 折价过户 | 确认**只有 1 笔**（原来是 2 行副本）|
 | `buyer_code` 空值 | 10681 → **10138**（补了 543 行，正是 09-04 那批早期试抓的——去重时保留最新批次的行，字段最全）|
 
-备份：`publish/data/local/BlockTrade.backup-20260917-113802.sqlite`（172MB，只备这一张表，
+备份（验收完，2026-09-23 已删）：`publish/data/local/BlockTrade.backup-20260917-113802.sqlite`（172MB，只备这一张表，
 库本身 24GB 没必要整份复制）。manifest 备份：`manifest.json.bak-btclean-20260917-114056`。
 
 **一个诚实的边界**：离线 fetcher 永远 `IsComplete`，所以 `count` 校验那条分支这一跑没走到

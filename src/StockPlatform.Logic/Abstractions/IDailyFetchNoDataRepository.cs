@@ -20,6 +20,9 @@ public interface IDailyFetchNoDataRepository
     /// <summary>融资余额（MarginDetail 表）。</summary>
     const string MarginDataset = "MarginDetail";
 
+    /// <summary>上交所 ETF 份额（EtfShare 表，2026-09-23）。上交所 2012-01-04 起才有数据。</summary>
+    const string EtfShareDataset = "EtfShare";
+
     void EnsureSchema();
 
     /// <summary>某个数据集已确认没有数据的全部日子。</summary>

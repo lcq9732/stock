@@ -26,8 +26,10 @@ namespace StockPlatform.Data.Remote;
 /// Known gaps: the endpoint doesn't return 成交额/换手率, so Amount/Turnover are left at 0.
 /// （这条限制的分量在2026-07-13变了：TencentBarFetcher 已改用 newfqkline 补上这两个字段，
 /// 回测/大盘热度指标开始依赖 Bar.Amount——所以新浪现在只适合当腾讯的回退兜底，它补进来的行
-/// 会缺成交额，事后可以用 Fetcher 的"回填成交额/换手率"按钮从腾讯补齐，见
-/// FetchOrchestrator.RunBackfillAmountTurnoverAsync。）
+/// 会缺成交额。⚠ 那个"回填成交额/换手率"的补救入口**已经没有了**（RunBackfillAmountTurnoverAsync
+/// 删于 2026-09-23，它是 2026-07-13 的一次性修复、跑完就再没有调用方）——判据还留在仓储侧
+/// （SqliteBarRepository.GetDayCodesWithMissingAmount / UpdateDayAmountTurnover），真要再补一次
+/// 就照着那两个方法写一个新式任务。）
 /// 涨跌幅不再存储（2026-07-14起改成消费端用相邻收盘价现算），本抓取器不再计算它。
 ///
 /// **Unverified as of 2026-07-08**: whether this endpoint returns front-adjusted (前复权) prices

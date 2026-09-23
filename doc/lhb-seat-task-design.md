@@ -444,7 +444,7 @@ Debug 构建的数据目录在 `bin/.../win-x64/data/local`，跟生产库天然
 > ——它不看水位线，下次还是从头重来；改用增量也接不上（只回看 7 天）。
 > `OnStoppedAsync` 照抄了 `BlockTradeTask` 没按模式分岔。**2026-09-18 已修，见 §11。**
 
-备份：`publish/data/local/LhbSeat.backup-20260917-135202.sqlite`（398MB，只备这一张表，
+备份（验收完，2026-09-23 已删）：`publish/data/local/LhbSeat.backup-20260917-135202.sqlite`（398MB，只备这一张表，
 全程 `mode=ro` 附加生产库）。
 
 ### 验收

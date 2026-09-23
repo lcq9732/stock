@@ -524,8 +524,10 @@ public class SqliteBarRepository : IBarRepository
         return result;
     }
 
-    /// <summary>日线里还有成交额缺失（amount=0）的代码及其缺失区间——"回填成交额/换手率"
-    /// （见 FetchOrchestrator.RunBackfillAmountTurnoverAsync）用它决定每个代码要重抓哪段日期。
+    /// <summary>日线里还有成交额缺失（amount=0）的代码及其缺失区间——用它决定每个代码要重抓哪段日期。
+    /// ⚠ **眼下没有调用方**：原来的"回填成交额/换手率"（FetchOrchestrator.RunBackfillAmountTurnoverAsync）
+    /// 是 2026-07-13 的一次性修复，跑完就没人调了，方法本体删于 2026-09-23。这个判据留着是因为
+    /// 它比方法值钱——真要再补一次，照它写一个新式任务即可。
     /// 判定只看 amount：turnover 跟着同一次UPDATE顺带补，某些标的（如B股）接口天生不给换手率，
     /// 如果把 turnover=0 也算"缺失"，这些行会永远补不满、每次回填都白白重抓一遍。2026-07-10
     /// 之前入库的历史行两个字段都是0（老 fqkline 接口不带这两个字段），是回填的主要目标。</summary>

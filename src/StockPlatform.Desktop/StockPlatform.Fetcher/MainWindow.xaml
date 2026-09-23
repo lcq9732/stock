@@ -4,7 +4,7 @@
         xmlns:vm="clr-namespace:StockPlatform.Fetcher.ViewModels"
         xmlns:local="clr-namespace:StockPlatform.Fetcher"
         xmlns:theme="clr-namespace:StockPlatform.Desktop.Shared.Theme"
-        Title="A股历史数据获取程序" Height="780" Width="1240" MinWidth="1000" MinHeight="520"
+        Title="A股历史数据获取程序" Height="780" Width="1400" MinWidth="1250" MinHeight="520"
         Background="{DynamicResource Theme.Window.Background}"
         Foreground="{DynamicResource Theme.Foreground}">
     <Window.Resources>
@@ -70,7 +70,10 @@
         <Grid.ColumnDefinitions>
             <!-- 2026-09-01 由上下改成**左右**：任务表是横向长的（十来列），日志是纵向长的（一直往下滚），
                  上下摆的话两边都被压扁；左右摆各得其所，中间那根竖条可以拖着分配宽度。 -->
-            <ColumnDefinition Width="1.5*" MinWidth="1000" /> <!-- 计划（上面一行是全程序的状态条） -->
+            <!-- 2026-09-23 从「1.5* + MinWidth 1000」改成固定宽：计划表的列宽都是定死的，
+                 左栏再按比例变宽也只是在状态列后面多出一截空白；窗口放大多出来的宽度全给日志。
+                 920 ≈ 表格各列之和 + 缩进/滚动条；组头比这宽，放不下时自己折行。中间竖条照样能拖。 -->
+            <ColumnDefinition Width="920" MinWidth="860" /> <!-- 计划（上面一行是全程序的状态条） -->
             <ColumnDefinition Width="Auto" />                <!-- 拖动条 -->
             <ColumnDefinition Width="*" MinWidth="300" />    <!-- 运行日志 -->
         </Grid.ColumnDefinitions>
@@ -89,7 +92,8 @@
             <!-- 全程序的状态与设置条（2026-08-31 从底部和【手动】页挪上来）——运行状态、本地数据范围、
                  自动重试排定、界面主题，没一样是属于计划表本身的，所以单独占一行摆在最上面。
                  2026-09-08 从"浮在页签栏右端"改成这一行：页签栏没了，再浮着就会盖住计划的工具条。 -->
-            <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Right"
+            <!-- WrapPanel（2026-09-23）：左栏改成定宽后，排着自动重试时这一行会超宽，放不下就折行。 -->
+            <WrapPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Right"
                         VerticalAlignment="Center" Margin="0,2,10,4">
                 <!-- ToolTip 从固定文字改成绑定（2026-09-02）：任务拆细之后，"上次抓取"只说得清最后
                      收尾的那一项，逐项的"上次什么时候跑完"在 DataStatusDetail 里。 -->
@@ -116,7 +120,7 @@
                         ToolTip="一轮抓取跑完后如果还有没补齐的数据，程序会自动排一次重试，时间取【跑完+1小时】和【当天21:00】里较晚的那个——盘后数据源是逐步更新的，等一会儿再抓才补得到。&#10;&#10;等待期间界面照常能用（不占用），到点如果正在跑别的会自动顺延10分钟再看。最多连做3轮；名单清零、或者某一轮之后待重试数量不再减少（剩下的多半是当天停牌、数据源确实没有的票）就会自动停下。&#10;&#10;点这个按钮取消本次排定；点【停止】也会一并取消。" />
 
                 <theme:ThemeSwitcher Margin="20,0,0,0" />
-            </StackPanel>
+            </WrapPanel>
 
         <Grid Grid.Row="1" Margin="6,6,6,3">
             <Grid.RowDefinitions>
@@ -226,7 +230,8 @@
                               Background="{DynamicResource Theme.Panel.Background}">
                         <StackPanel>
                           <!-- 组头：一眼看清"这一组什么时候跑、有多少项、今天跑到哪儿了" -->
-                          <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="6,5,8,5">
+                          <!-- WrapPanel（2026-09-23）：「每日收盘后」这一行组头约 920px，比左栏定宽还宽，放不下就折行。 -->
+                          <WrapPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="6,5,8,5">
                             <ToggleButton IsChecked="{Binding IsExpanded, Mode=TwoWay}"
                                           Style="{StaticResource PlanGroupToggle}" Margin="0,0,4,0"
                                           ToolTip="展开/折叠这一组" />
@@ -289,7 +294,7 @@
                                  而这三个组（每工作日+到点就跑 / 每月+空闲时补 / 手动）永远不可能
                                  "同时到期且同一档"，那个顺序一次都用不上。
                                  组内子项的拖动排序仍然有用：组里是严格按顺序串行跑的。 -->
-                          </StackPanel>
+                          </WrapPanel>
 
                 <!-- IsReadOnly=True 但单元格里放的是真控件（CellTemplate 而不是 CellEditingTemplate），
                      所以勾选/改时间/换模式都是**单击即改**，不用先双击进编辑态。
@@ -411,7 +416,9 @@
                              （2026-09-08 起不再有"回落到【手动】页全局框"这回事——那一页撤掉了）。
                              「模式」（抓哪一段）2026-09-02 并进这一列：它本来就是这一行的一个参数，
                              而且只有 6 行用得上，单占一列会让其余十几行都空着一格。 -->
-                                                        <DataGridTemplateColumn Header="参数" Width="430">
+                        <!-- 430→310（2026-09-23 按实机量的）：最宽的是【中标/订单公告】（关键词框）299px、
+                             【拉取区间数据】293px，其余行都在 265 以内。以后参数格再加东西要回来重量。 -->
+                        <DataGridTemplateColumn Header="参数" Width="310">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                   <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -607,7 +614,9 @@ eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
-                                                    <DataGridTextColumn Header="状态" Binding="{Binding StatusText}" Width="*" MinWidth="200">
+                        <!-- MinWidth 200→170（2026-09-23）：实测最长「✔ 9/22 01:38 已抓 1031/1031」约 165px；
+                             完整原因在悬停提示里，状态格只放最短一截。 -->
+                        <DataGridTextColumn Header="状态" Binding="{Binding StatusText}" Width="*" MinWidth="170">
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="VerticalAlignment" Value="Center" />

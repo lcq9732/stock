@@ -336,7 +336,12 @@ public class CorePositionTabViewModel : INotifyPropertyChanged
     private readonly IDividendRepository _dividendRepository;
     private readonly TradeFeeStore _fees;
 
+    /// <summary>全量底仓记录（表格显示的是按 <see cref="Filter"/> 过滤后的视图）。</summary>
     public ObservableCollection<CorePositionRowViewModel> Entries { get; } = new();
+
+    /// <summary>查询框（2026-09-23新增）——代码/名称/行业/备注；【移出底仓】只作用于显示出来的行，
+    /// 顶部汇总仍按全量算（那是整个底仓组合的数，筛过就不是了）。</summary>
+    public RowFilter<CorePositionRowViewModel> Filter { get; }
 
     public RelayCommand RefreshCommand { get; }
     public RelayCommand RemoveCommand { get; }
@@ -359,6 +364,7 @@ public class CorePositionTabViewModel : INotifyPropertyChanged
         _barRepository = barRepository;
         _dividendRepository = dividendRepository;
         _fees = fees;
+        Filter = new RowFilter<CorePositionRowViewModel>(Entries, r => [r.Code, r.Name, r.Industry, r.Note]);
         RefreshCommand = new RelayCommand(_ => Reload());
         RemoveCommand = new RelayCommand(_ => RemoveSelected());
         Reload();
@@ -405,7 +411,8 @@ public class CorePositionTabViewModel : INotifyPropertyChanged
                 earnings.TryGetValue(entry.Code, out var es) ? es : null));
         }
 
-        UpdateSummary();
+        UpdateSummary();   // 全量，不看查询框
+        Filter.RaiseCounts();
     }
 
     private void UpdateSummary()
@@ -437,7 +444,7 @@ public class CorePositionTabViewModel : INotifyPropertyChanged
 
     private void RemoveSelected()
     {
-        var ids = Entries.Where(e => e.IsSelected).Select(e => e.Entry.Id).ToList();
+        var ids = Filter.Visible.Where(e => e.IsSelected).Select(e => e.Entry.Id).ToList();
         if (ids.Count == 0) return;
         _store.Remove(ids);
         Reload();

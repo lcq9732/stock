@@ -294,8 +294,7 @@ public partial class App : Application
             : new SinaEtfListProvider();
 
         // 指数成分名单(新浪 vII_NewestComponent)、成分权重(中证 closeweight.xls)、龙虎榜(新浪)——各自
-        // 独立限流，独立按钮触发（见 FetchOrchestrator RunFetchIndexConsAsync / RunFetchLhbAsync），不掺
-        // 进主抓取流程。中证权重源偏不稳、失败进 Manifest 可用"重新拉取失败股票"重试。三张表(IndexCons/
+        // 独立限流、各自是一项（IndexConsTask / IndexWeightTask / LhbTask），不掺进主抓取流程。中证权重源偏不稳、失败进 Manifest 可用"重新拉取失败股票"重试。三张表(IndexCons/
         // IndexWeight/Lhb/EtfIndexMap)都写进同一个 current.sqlite。
         IIndexConsProvider indexConsProvider = offlineMock ? new MockIndexConsProvider() : new SinaIndexConsProvider(new RateLimiter(maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1)));
         // 中证 OSS 很容易触发反爬（2026-09-02 用户反馈）：原来是 2 并发 + 1 秒 ≈ 2 请求/秒，
@@ -634,6 +633,15 @@ public partial class App : Application
         // ——它拿当天收盘价乘当天融券余量，两样都落库了才算得出来。
         taskRegistry.Register(FetchActionId.StepFillShortBalance,
             () => new MarginShortBalanceFillTask(new SqliteMarginShortBalanceFiller(paths.CurrentDb)));
+        // 【ETF换手率校正】2026-09-23，见 doc/etf-turnover-recalc-design.md。上交所一天一个请求，
+        // 1 并发、1 秒间隔（跟【总股本】同一套配置）；首次补 2012 年起约 3600 天、约 1 小时。
+        taskRegistry.Register(FetchActionId.StepEtfTurnoverFix,
+            () => new EtfTurnoverRecalcTask(
+                new SqliteEtfShareRepository(paths.CurrentDb),
+                new SseEtfShareProvider(
+                    new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                tradingDayRepository, dailyNoDataRepository,
+                new SqliteEtfTurnoverStore(paths.CurrentDb)));
         // 【拉取行业分类】2026-09-10 从 orchestrator 迁过来（判据见
         // doc/full-audit-task-migration-design.md §0：迁移成本 + 维护成本，老方式耦合）。
         // 它只有一批（整表快照），MaxItems/Deadline 对它没意义，理由见 IndustryTask 类注释。
@@ -843,9 +851,10 @@ public partial class App : Application
         //   ProcessOneStockAsync 那一串老内核（连同区间回补的十一段）整体删掉，
         //   于是 24 个依赖变成"造出来传进去、一次都不用"——留着会让人以为编排器还管这些事。
         //   这些对象本身都还在，只是不再喂给编排器了（各自的新式任务直接拿）。
+        // 指数那三个 provider/repository 2026-09-23 从这里的参数表拿掉了——编排层只是注入着
+        // 从不读，三个指数任务各自注入自己要的那份。它们在上面仍然要造，任务注册要用。
         var orchestrator = new FetchOrchestrator(
             paths, manifestStore, boardFetcher, boardRepository,
-            indexConsProvider, indexWeightProvider, indexRepository,
             financialProvider, moneyFlowProvider, moneyFlowRepository,
             moneyFlowSnapshotProvider, tradingDayRepository);
 

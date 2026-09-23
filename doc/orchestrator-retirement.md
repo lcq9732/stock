@@ -8,18 +8,58 @@
 
 ## 1. 结果
 
-| | 迁移前 | 迁移后 |
-|---|---|---|
-| 仍走旧编排器的任务 | 7 项 | **0 项** |
-| 注册在新框架的任务 | 47 项 | **54 项** |
-| 界面 `DispatchPlanActionAsync` 里的 `case` | 7 个 | **0 个** |
-| `FetchOrchestrator.cs` | 2743 行 | **1205 行** |
-| `FetchOrchestrator.Steps.cs` | 261 行 | **183 行** |
+| | 迁移前 | 09-22 迁完 | 09-23 清完死代码 |
+|---|---|---|---|
+| 仍走旧编排器的任务 | 7 项 | **0 项** | 0 项 |
+| 注册在新框架的任务 | 47 项 | **54 项** | 54 项 |
+| 界面 `DispatchPlanActionAsync` 里的 `case` | 7 个 | **0 个** | 0 个 |
+| `FetchOrchestrator.cs` | 2743 行 | 1205 行 | **944 行** |
+| `FetchOrchestrator.Steps.cs` | 261 行 | 183 行 | **已删** |
+| 编排层合计 | 3004 行 | 1388 行 | **944 行**（−69%） |
 
-净改动 **+848 / −1880**（29 个文件改动、9 个新增）。全量测试 **2117 通过**。
+09-22 那一轮净改动 **+848 / −1880**（29 个文件改动、9 个新增），全量测试 **2117 通过**；
+09-23 的清理见下面 §1.1，清完 **2153 通过**。
 
-`FetchOrchestrator` 现在**不再是任何一项的执行入口**，剩下的是被别处复用的几个方法
-（`FinishFetchRun`、`GetDataStatus`、`FetchFinancialsForCodesAsync` 等）。
+`FetchOrchestrator` 现在**不再是任何一项的执行入口**，剩下的是被别处复用的几件东西：
+【数据状态】页的只读查询（`GetDataStatus`／`GetRetryBacklog`／一串 `GetPendingXxxCount`）、
+财报那一段（`FetchFinancialsForCodesAsync`／`GetFinancialFetchPlan`，【金融监管指标】要复用）、
+板块抓取器的宿主（`ReplaceBoardFetcher`）、以及两个给任务用的端口（`Liveness`／`TaskRunner`）。
+
+### 1.1 09-23 收尾：把迁移留下的死代码清掉
+
+迁完的第二天做了一次死代码收敛。**七项迁走只是让它们没人调，本体还留在原地**——
+按项目一贯做法（没有调用方的老实现要删，留着是留陷阱），这些得跟着清：
+
+| 清掉的 | 为什么它死了 |
+|---|---|
+| `RunFetchIndexConsAsync` | 服务的【指数成分/权重】是退役项，09-22 那个 `case` 一删就没人调了 |
+| `RunBackfillAmountTurnoverAsync` + `ReportBackfillProgress` | 2026-07-13 的一次性修复（补 newfqkline 换接口前入库的 amount/turnover 全 0 的日线），跑完就再没有调用方，界面上也从来没有入口 |
+| `FinishFetchRun` | 老三种抓取模式共用的收尾。这件事现在由 `FetchTaskRegistry.RecordRun` 一处做掉 |
+| `SetFailedTodo`／`ComputeUpdatedFailedCodes` | 两个都只是一行转发到 Logic 层的 `FailedTodoRule`，唯一调用方是 `FinishFetchRun` |
+| `ReportCompareProgress` | 老K线内核的粗粒度心跳，随内核一起没了调用方 |
+| `FetchStats` 类、`BeginStep`、`TaskLabel` | 只服务 `Steps.cs` 里的单项入口 |
+| **`FetchOrchestrator.Steps.cs` 整个文件** | 见下 |
+
+`Steps.cs` 的文件名是「【拉取全部】拆出来的单项入口」，而单项入口一个不剩了，
+183 行里活代码只剩 `LocalStockCodes` 一个方法（`GetPendingMoneyFlowCount` 在用），
+其余全是逐项的墓碑注释——而那些信息在各新任务类的注释和这份文档里都有。
+把那个方法搬进主文件，文件删掉。
+
+**顺带翻出一个静默的坑**：`FinishFetchRun` 是 `manifest.LastFetchAt`／`LastFetchKind`
+唯一的写入方，删之前它就已经没有调用方了——也就是说**从最后一项迁走那天起，这两个字段就没人写了**。
+而 `GetDataStatus` 还在读它们喂给【数据状态】页，于是界面上那句
+「上次抓取：时刻（哪一项）」一直停在最后一次老路运行的陈旧值，
+旁边的「最近任务运行」清单（读 `LastRunByTask`）却天天在变——**同一行里两个数对不上，一个错都不报**。
+
+修法是让 `FetchTaskRegistry.RecordRun` 顺带写这两个字段：所有任务都从那儿过，一处写、54 项全覆盖。
+三处（`LastRunByTask[name]`、`LastFetchAt`、`LastFetchKind`）**共用同一个 name 和同一个 now**，
+两边就不可能再对不上。语义沿用老路：空转和失败的轮次照样记
+（"刚检查过、没有新数据"本身就是一条有用的最后检查时间），逐项成败仍看 `LastRunByTask`。
+用例在 `TaskRunRecordingTests`，实机也验过：跑一项之前那两个字段停在 09-22 11:43 的
+「回填"无更早数据"水位」（最后一个走老路的项），跑完变成当天时刻 +「ETF指数映射」，
+且与 `LastRunByTask` 里那条的时间戳完全相等。
+
+这类"少写一处状态"的毛病，编译器、单元测试、界面都不会喊——只有在删掉最后一个写入方时才撞见。
 
 ### 迁了哪 7 项
 
@@ -167,7 +207,23 @@
 - **【优化数据库】和【重解析已有PDF】的长耗时路径**。模拟环境里库是空的、没有缓存 PDF，
   两项都是 0 秒跑完。前者是全库唯一的"真·黑盒"（单条 `CREATE INDEX` 十几分钟、中间无法插进度），
   它的 liveness 播报只有真跑起来才看得出。
-- **3.7 那四个任务的 `OnStatus`** 只改了接线，没在真限流下验过。
+- **3.7 那四个任务的 `OnStatus`**：2026-09-23 补验了**通路**——离线模拟下
+  资金净流入 20 行、融资余额 15 行、龙虎榜 8 行 `[模拟源] …` 都进了日志（改之前这些话全进黑洞）。
+  大宗 0 行是预期：`MockBlockTradeProvider` 只声明事件不发话，真源有内容可发。
+  ⚠ **真限流下的退避消息仍没验过**——那要真发请求才有，不该在用户机器上发。
+  但限流器的话走的是同一个 `OnStatus`，通路已证。
+
+  > 补验时踩了一下自己的坑：第一轮把这几项设成了「只补待办」模式，清单空就直接返回、根本没抓，
+  > 日志里 0 行。那不是接线没生效，是**测试环境搭错了**。改成增量模式重跑才验到——
+  > "没看到预期输出"要先怀疑自己的场景，别急着改产品代码。
+
+### 4.1 这两条是模拟环境天然造不出来的
+
+- **【优化数据库】的长耗时路径**要一个**没建过索引的大库**：生产库索引早建好了、跑起来也是秒完，
+  空库更是 0 秒。造这个场景得复制 23.8 GB 再删索引。
+- **【重解析已有PDF】**要本地有缓存的 PDF。
+
+不是"忘了验"，是代价和风险都不小。真要验，得拿生产数据单独造一次场景。
 
 ---
 

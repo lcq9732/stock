@@ -323,6 +323,29 @@ EastMoneyTotalSharesProvider ..|> ITotalSharesProvider
 TotalSharesTask --> ITotalSharesProvider : 抓
 TotalSharesTask --> ITradingDayRepository : 值归到交易日
 FinancialAnalyzer ..> TotalSharesTask : PE/PB 的股数(缺则回退 share_capital 并标识)
+EtfTurnoverRecalcTask --|> FetchTaskBase
+class EtfTurnoverRecalcTask {
+  <<Tasks>>
+  按需·ETF换手率校正
+  补份额→检查→(彻底重查)写回
+  只写 turnover 一列
+}
+class SseEtfShareProvider {
+  <<Data.Remote>>
+  上交所每日ETF份额
+  一天一个请求·2012-01-04起
+}
+class EtfTurnoverRule {
+  <<Logic.Services>>
+  成交量(手) ÷ 前一交易日份额(万份)
+  一致/错值/空值/无法裁判
+}
+SseEtfShareProvider ..|> IEtfShareProvider
+SqliteEtfShareRepository ..|> IEtfShareRepository
+EtfTurnoverRecalcTask --> IEtfShareProvider : 补份额
+EtfTurnoverRecalcTask --> IEtfShareRepository : EtfShare 表
+EtfTurnoverRecalcTask --> SqliteEtfTurnoverStore : 按只读写 Bar.turnover
+EtfTurnoverRecalcTask ..> EtfTurnoverRule : 判据
 class SqliteMarketPeSource {
   <<Data.Sqlite>>
   一次读全市场 PE 的四份输入

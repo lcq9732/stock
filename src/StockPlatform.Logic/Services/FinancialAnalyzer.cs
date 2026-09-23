@@ -238,15 +238,27 @@ public class FinancialAnalyzer
             RevNote(rev, revP)));
 
         double? profitYoY = Ratio(npp, nppP);
-        lines.Add(Money("归母净利", npp, nppP,
-            profitYoY switch
+        var turn = ClassifyProfitTurn(npp, nppP);
+        var nppLine = Money("归母净利", npp, nppP,
+            turn switch
             {
-                null => Verdict.Missing,
-                <= ProfitDropBad => Verdict.Bad,
-                <= ProfitDropWarn => Verdict.Warn,
-                _ => Verdict.Good,
+                ProfitTurn.Turnaround => Verdict.Good,
+                ProfitTurn.LossNarrowed => Verdict.Neutral,
+                ProfitTurn.LossWidened or ProfitTurn.TurnedToLoss => Verdict.Bad,
+                _ => profitYoY switch
+                {
+                    null => Verdict.Missing,
+                    <= ProfitDropBad => Verdict.Bad,
+                    <= ProfitDropWarn => Verdict.Warn,
+                    _ => Verdict.Good,
+                },
             },
-            profitYoY is <= ProfitDropBad ? "跌幅超过30%" : ""));
+            turn != ProfitTurn.None ? DescribeProfitTurn(turn, npp, nppP)
+            : profitYoY is <= ProfitDropBad ? "跌幅超过30%" : "",
+            // 基期 ≤ 0 时百分比算不出来，变化列换成文字，不留空
+            change: turn == ProfitTurn.None ? null
+                : TurnChange(npp, nppP) is { } tc ? $"{tc * 100:+0.0;-0.0}%" : "");
+        lines.Add(nppLine);
 
         // 单季：本期累计 − 上期累计。能看出"降幅在收窄还是扩大"，比只看累计有用得多。
         if (prevInYear != null && npp.HasValue && prevInYear.Get(FinancialKeys.NetProfitParent) is { } prevCum)
@@ -333,7 +345,13 @@ public class FinancialAnalyzer
     {
         var revYoY = Ratio(rev, revP);
         var profYoY = Ratio(npp, nppP);
+        var turn = ClassifyProfitTurn(npp, nppP);
+        if (revYoY != null && turn is ProfitTurn.Turnaround or ProfitTurn.LossNarrowed or ProfitTurn.LossWidened)
+            return $"营收 {revYoY * 100:+0.0;-0.0}%、归母净利{DescribeProfitTurn(turn, npp, nppP)}"
+                   + (turn == ProfitTurn.Turnaround ? " —— 去年同期是亏的，利润没有可比的同比百分比。" : "。");
         if (revYoY == null || profYoY == null) return "";
+        if (turn == ProfitTurn.TurnedToLoss)
+            return $"营收 {revYoY * 100:+0.0;-0.0}%、归母净利{DescribeProfitTurn(turn, npp, nppP)}。";
 
         // 这个对比是整份报告最重要的一句：规模没变而利润大跌，问题就在盈利能力，不在生意本身
         if (revYoY > -0.05 && profYoY < -0.20)
@@ -452,6 +470,8 @@ public class FinancialAnalyzer
         lines.Add(Money("经营现金流", ocf, ocfP,
             ocf is < 0 ? Verdict.Bad : ocfYoY is < -0.5 ? Verdict.Bad : ocfYoY is < -0.2 ? Verdict.Warn : Verdict.Good,
             ocf is < 0 ? "**经营活动净流出** —— 主营业务在烧钱"
+            : ocfYoY is < 0 && ClassifyProfitTurn(npp, nppP) == ProfitTurn.Turnaround
+                ? $"利润扭亏为盈但现金流在往下走（{ocfYoY * 100:F1}%）"
             : DescribeCashVsProfit(ocfYoY, profYoY, Ratio2(ocf, npp))));
 
         double? cov = Ratio2(ocf, npp);
@@ -601,11 +621,11 @@ public class FinancialAnalyzer
         {
             Title = "三、利润有没有变成现金（最该看的一块）",
             Lines = lines,
-            Conclusion = CashConclusion(cur, ocfYoY, profYoY, cov, arGap, arYoY, revYoY, isFin),
+            Conclusion = CashConclusion(cur, ocfYoY, profYoY, ClassifyProfitTurn(npp, nppP), cov, arGap, arYoY, revYoY, isFin),
         };
     }
 
-    private static string CashConclusion(FinancialSnapshot cur, double? ocfYoY, double? profYoY,
+    private static string CashConclusion(FinancialSnapshot cur, double? ocfYoY, double? profYoY, ProfitTurn turn,
         double? cov, double? arGap, double? arYoY, double? revYoY, bool isFin)
     {
         if (isFin) return "金融机构的经营现金流受同业往来和存贷款影响很大，跟工商企业不是一个含义，别直接对比。";
@@ -617,6 +637,8 @@ public class FinancialAnalyzer
                       + "所以不能用“一次性因素”解释掉");
         else if (ocfYoY is < 0 && profYoY is >= 0)
             parts.Add("**利润在增长但现金流在往下走**，增长没有同步变成现金");
+        else if (ocfYoY is < 0 && turn == ProfitTurn.Turnaround)
+            parts.Add("**利润扭亏了但现金流在往下走**，账面盈利没有同步变成现金");
         double? invDec = cur.Get(FinancialKeys.InventoryDecrease);
         double? recvDec = cur.Get(FinancialKeys.ReceivableDecrease);
         double? advance = cur.Get(FinancialKeys.AdvanceReceipts);
@@ -952,14 +974,27 @@ public class FinancialAnalyzer
         var profYoY = Ratio(cur.Get(FinancialKeys.NetProfitParent), prior?.Get(FinancialKeys.NetProfitParent));
         var ocfYoY = Ratio(cur.Get(FinancialKeys.Ocf), prior?.Get(FinancialKeys.Ocf));
         var cov = Ratio2(cur.Get(FinancialKeys.Ocf), cur.Get(FinancialKeys.NetProfitParent));
+        double? npp = cur.Get(FinancialKeys.NetProfitParent), nppP = prior?.Get(FinancialKeys.NetProfitParent);
+        var turn = ClassifyProfitTurn(npp, nppP);
 
-        if (revYoY == null || profYoY == null) return "数据不足，无法给出总体判断。";
+        // 只有真缺数时才说"数据不足"；利润跨零轴（profYoY 为 null）走 turn 那条路
+        if (revYoY == null || (profYoY == null && turn == ProfitTurn.None)) return "数据不足，无法给出总体判断。";
 
         var parts = new List<string>();
-        parts.Add(revYoY > -0.05 ? "营收持稳" : revYoY > -0.15 ? "营收小幅下滑" : "营收明显萎缩");
-        parts.Add(profYoY > 0.15 ? "利润快速增长"
-            : profYoY > -0.05 ? "利润基本持平"
-            : profYoY > -0.30 ? "利润下滑" : "利润大幅下滑");
+        // 原来只有"持稳"及以下三档，营收 +125% 也被说成"营收持稳"；分档跟 RevNote 对齐
+        // 每档都带同比百分比（2026-09-23 用户要求）——"利润下滑"不说跌了多少太笼统
+        string revWord = revYoY > 0.15 ? "营收快速增长"
+            : revYoY > -0.05 ? "营收持稳" : revYoY > -0.15 ? "营收小幅下滑" : "营收明显萎缩";
+        parts.Add($"{revWord}（{revYoY * 100:+0.0;-0.0}%）");
+        if (turn != ProfitTurn.None)
+            parts.Add(DescribeProfitTurn(turn, npp, nppP));
+        else
+        {
+            string profWord = profYoY > 0.15 ? "利润快速增长"
+                : profYoY > -0.05 ? "利润基本持平"
+                : profYoY > -0.30 ? "利润下滑" : "利润大幅下滑";
+            parts.Add($"{profWord}（归母净利 {profYoY * 100:+0.0;-0.0}%）");
+        }
         // 带上具体数字（2026-08-27 用户要求）——原来这句只有结论没有数，用户还得去底部异常项
         // 里找那个 "-78.4% vs -39.9%"，两处说同一件事。合并到这一句里，标题行就自足了。
         // ⚠ "失血"只能用在真的负增长上，见 DescribeCashVsProfit 的说明。
@@ -967,16 +1002,20 @@ public class FinancialAnalyzer
             parts.Add($"**现金流失血比利润更严重**（{ocfYoY * 100:F1}% vs {profYoY * 100:F1}%）");
         else if (ocfYoY is < 0 && profYoY is >= 0)
             parts.Add($"**利润在增长但现金流在往下走**（{ocfYoY * 100:F1}% vs +{profYoY * 100:F1}%）");
+        else if (ocfYoY is < 0 && turn == ProfitTurn.Turnaround)
+            parts.Add($"**扭亏了但现金流在往下走**（经营现金流 {ocfYoY * 100:F1}%"
+                      + (cov is < OcfCoverageWarn ? $"，现金流/净利 {cov:F2}）" : "）"));
         else if (cov is < OcfCoverageWarn)
             parts.Add($"利润的现金含量偏低（现金流/净利 {cov:F2}）");
         return string.Join("、", parts) + "。";
     }
 
-    private static AnalysisLine Money(string label, double? v, double? prior, Verdict verdict, string note) => new()
+    private static AnalysisLine Money(string label, double? v, double? prior, Verdict verdict, string note,
+                                      string? change = null) => new()
     {
         Label = label,
         Value = v.HasValue ? $"{v.Value / Yi:+0.00;-0.00} 亿" : "—",
-        Change = Ratio(v, prior) is { } r ? $"{r * 100:+0.0;-0.0}%" : "",
+        Change = change ?? (Ratio(v, prior) is { } r ? $"{r * 100:+0.0;-0.0}%" : ""),
         Verdict = v.HasValue ? verdict : Verdict.Missing,
         Note = note,
     };
@@ -1063,4 +1102,44 @@ public class FinancialAnalyzer
 
     /// <summary>简单相除；分母非正或缺失返回 null。</summary>
     private static double? Ratio2(double? a, double? b) => a.HasValue && b is > 0 ? a.Value / b.Value : null;
+
+    /// <summary>
+    /// 利润跨过零轴时的状态（2026-09-23）。基期 ≤ 0 时 <see cref="Ratio"/> 返回 null——百分比
+    /// 确实没意义（-0.91亿→+22.92亿算出来是 -2623%），但这不等于"没数据"。原来标题直接退成
+    /// "数据不足，无法给出总体判断"，天华新能 2026 中报扭亏、营收 +125% 就是这么被吞掉的。
+    /// 由盈转亏时百分比算得出（≤ -100%），但"大幅下滑"说轻了，也归到这里。
+    /// </summary>
+    private enum ProfitTurn { None, Turnaround, LossNarrowed, LossWidened, TurnedToLoss }
+
+    private static ProfitTurn ClassifyProfitTurn(double? cur, double? prior) => (cur, prior) switch
+    {
+        ({ } c, { } p) when p <= 0 && c > 0 => ProfitTurn.Turnaround,
+        ({ } c, { } p) when p <= 0 => c >= p ? ProfitTurn.LossNarrowed : ProfitTurn.LossWidened,
+        ({ } c, { } p) when c <= 0 => ProfitTurn.TurnedToLoss,
+        _ => ProfitTurn.None,
+    };
+
+    /// <summary>
+    /// 跨零轴时的变化率：(本期 − 基期) ÷ |基期|，即按基期绝对值算（财经媒体的通行口径）。
+    /// 普通公式在基期为负时符号会反（亏损收窄算成负数），用绝对值做分母后正号恒表示变好。
+    /// 基期为 0 时没有意义，返回 null。
+    /// </summary>
+    private static double? TurnChange(double? cur, double? prior) =>
+        cur.HasValue && prior is { } p && p != 0 ? (cur.Value - p) / Math.Abs(p) : null;
+
+    /// <summary>"扭亏为盈（-0.91 亿 → +22.92 亿，+2619.0%）"；普通情况返回空串。</summary>
+    private static string DescribeProfitTurn(ProfitTurn turn, double? cur, double? prior)
+    {
+        string word = turn switch
+        {
+            ProfitTurn.Turnaround => "扭亏为盈",
+            ProfitTurn.LossNarrowed => "亏损收窄",
+            ProfitTurn.LossWidened => "亏损扩大",
+            ProfitTurn.TurnedToLoss => "由盈转亏",
+            _ => "",
+        };
+        if (word.Length == 0) return "";
+        string pct = TurnChange(cur, prior) is { } c ? $"，{c * 100:+0.0;-0.0}%" : "";
+        return $"{word}（{prior!.Value / Yi:+0.00;-0.00} 亿 → {cur!.Value / Yi:+0.00;-0.00} 亿{pct}）";
+    }
 }
