@@ -520,7 +520,7 @@
 - 上交所官网「ETF 规模」（`query.sse.com.cn` `sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L&STAT_DATE=`），一天一个请求拿当天全部沪市 ETF，单位万份。**2012-01-04 起**；**不列货币 ETF**。
 - 深交所官网「基金规模·ETF」（`ShowReport?SHOWTYPE=xlsx&CATALOGID=scsj_fund_jjgm&jjlb=ETF`），xlsx 导出一个月一个请求，单位**份**（入库换算成万份）。**2016-09-26 起**；含货币 ETF。
 
-**写入**：【ETF换手率校正】（按需），只补表里还没有的交易日，最近 3 天每轮重抓覆盖（深交所 T 日晚间的值只是参考）；
+**写入**：【ETF换手率校正】（日更，2026-09-23 从按需挪过来），只补表里还没有的交易日，最近 3 天每轮重抓覆盖（深交所 T 日晚间的值只是参考）；
 交易所那天返回空、且已过 3 天的记进 `DailyFetchNoData`（沪 `EtfShare`、深 `EtfShareSz`）。
 **用途**：换手率裁判（统一成「成交量 ÷ **前一交易日**份额」，见 `EtfTurnoverRule`；腾讯自己的沪市口径不统一）；也是 ETF 规模和每日申赎（份额差）的原始数据。
 

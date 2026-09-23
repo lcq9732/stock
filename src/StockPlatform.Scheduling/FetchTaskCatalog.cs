@@ -804,7 +804,7 @@ public static class FetchTaskCatalog
             MaxQuiet: TimeSpan.FromMinutes(30)),
 
         new(FetchActionId.StepEtfTurnoverFix, "ETF换手率校正", "沪深交易所官网（ETF 份额）+ 本地计算", QuotaGroup.Exchange,
-            TimeSpan.FromMinutes(5), "按需",
+            TimeSpan.FromMinutes(2), "每日",
             "用沪深交易所官方公布的每日 ETF 份额，按「**成交量 ÷ 前一交易日份额**」重算**沪深两市 ETF** 的换手率，"
             + "把错值改对、空值补上。只改换手率一列，价格和量额一行不动。\n"
             + "**修的是什么**：① 腾讯的**沪市** ETF 换手率口径不统一——2024-10 以前几乎全按前一交易日份额算，"
@@ -819,15 +819,19 @@ public static class FetchTaskCatalog
             + "统一成前一交易日（2026-09-23 用户定）：收盘后马上就能算（当天份额常常第二天才发布），回测也不会用到收盘后才公布的数。"
             + "东财（拿**当前**份额除历史成交量）和搜狐的换手率都对不上任何一天的官方份额，不能当裁判。\n"
             + "**两档**：「日常增量」＝补份额 + 只检查、**不写库**，日志里按市场报错值/空值/无法裁判各多少行并列样例；"
-            + "「彻底重查」＝同上再写回。先跑增量看报告，数字对了再切彻底重查。\n"
+            + "「彻底重查」＝同上再写回，**只写对不上的行**，已经一致的一行不动，所以天天跑是安全的。"
+            + "**日更里用的是「彻底重查」**（2026-09-23 用户定：首跑的增量报告跟全量比对逐项一致、写回后复核归零之后才挪进日更）。\n"
             + "**不做什么**：上交所 2012-01-04 起、深交所 2016-09-26 起才有份额数据，更早的行、上市首日（没有前一天份额）、"
             + "交易所那天没列的，都原样留着、单独报数。**沪市货币 ETF** 不在上交所那个接口里，校正不了，报告里单独列名单"
             + "（深交所是列货币 ETF 的）。\n"
             + "**请求量**：首次上交所约 3,600 个请求（一天一个，约 1 小时）、深交所约 121 个（一个月一个，xlsx 导出）；"
             + "一个请求一批落库，停在哪都不丢。之后每次只补新的交易日，外加最近 3 天重抓一遍"
             + "（深交所注明 T 日晚间的规模只是参考、以 T+1 早间为准）。份额存在 EtfShare 表，也能拿来看 ETF 规模和每日申赎。\n"
-            + "⚠ 腾讯眼下沪市多数按当天份额给，所以**新抓进来的沪市 ETF 日K会继续跟这个口径有出入**，而且两个口径通常一起偏、"
-            + "体检报不出来。隔一阵跑一次「日常增量」看报告里的错值数，攒多了再跑一次「彻底重查」。",
+            + "**为什么每天跑**：腾讯眼下沪市多数按当天份额给，**每天新抓进来的沪市 ETF 日K都会带一批跟这个口径不一致的值**，"
+            + "而且两个口径通常一起偏、体检报不出来——每天跑一次，当晚就改掉。份额本身不急（两所都能按日期查历史，"
+            + "哪天没跑下次自动补上）。实测成本：份额约 4 个请求（沪市最近 3 天各一个、深市一个），检查全部 1781 只 ETF 43 秒、"
+            + "首轮写回 143 万行也只要 44 秒。\n"
+            + "⚠ 排在【ETF日K】【ETF日K·不复权】【重算回测序列】之后：它要检查当天新抓的 ETF 日K，回测序列里的换手率也得先生成出来。",
             FetchActionParams.None,
             // 软前置：份额要按交易日历逐日拉；检查的是 ETF 两套日K。缺了照样能跑（能查多少查多少），
             // 只是新的那几天查不到。
@@ -1663,6 +1667,8 @@ public static class FetchTaskCatalog
         FetchActionId.StepBoardIndex,
         FetchActionId.StepDayCoverage,
         FetchActionId.RetryFailed,
+        // 【ETF换手率校正】检查的是当天的 ETF 日K：盘中跑只会查到一堆未收盘的行
+        FetchActionId.StepEtfTurnoverFix,
         // 退役的两个复合项也标上：老计划迁移前的那一刻界面还会用到它们的信息
         FetchActionId.FetchAll,
         FetchActionId.FetchDay,
@@ -1670,6 +1676,19 @@ public static class FetchTaskCatalog
 
     public static DataReadiness ReadinessOf(FetchActionId id) =>
         AfterCloseActions.Contains(id) ? DataReadiness.AfterClose : DataReadiness.Anytime;
+
+    /// <summary>
+    /// 一项在默认计划 / 模板里用什么模式（2026-09-23）。绝大多数就是「增量」。
+    ///
+    /// 例外只有【ETF换手率校正】：它的「增量」是**只检查、不写库**（首跑先看报告用的），
+    /// 放进日更要用「彻底重查」才会把当天的新错值改掉。不在这里登记的话，新建计划或用模板恢复出来的
+    /// 日更组里就会躺着一个天天只报告、从不写库的项，看着在跑、其实什么都没修。
+    /// </summary>
+    public static FetchMode DefaultModeOf(FetchActionId id) => id switch
+    {
+        FetchActionId.StepEtfTurnoverFix => FetchMode.Thorough,
+        _ => FetchMode.Incremental,
+    };
 
     /// <summary>
     /// 一个动作**默认归哪个组**（2026-09-02 分组用）。只在两处用到：建默认计划、
@@ -1735,6 +1754,11 @@ public static class FetchTaskCatalog
         // 增量只补缺值、没新数据就空转，放日更没有任何负担。
         // 不归【按需启动】：那一组是"想起来才做的一次性活"，而这一项漏一天就有一天的沪市融券余额是空的。
         FetchActionId.StepFillShortBalance => PlanGroupKind.Daily,
+
+        // 【ETF换手率校正】（2026-09-23 从按需挪进日更）：腾讯眼下沪市 ETF 多数按当天份额算换手率，
+        // 跟统一口径（÷前一交易日份额）不一样，**每天新抓的日K都会带一批要改的值**，而且体检报不出来。
+        // 成本很低：份额约 4 个请求、检查 + 写回不到一分钟（2026-09-23 生产实测）。
+        FetchActionId.StepEtfTurnoverFix => PlanGroupKind.Daily,
 
         // 【回购公告进展】（2026-09-11）必须日更：首次回购是**次一交易日**披露的，
         // 晚一天就失去意义——那正是这一项唯一要等的信号。
@@ -1946,6 +1970,11 @@ public static class FetchTaskCatalog
         FetchActionId.RetryFailed,
         FetchActionId.RepairQfq,
         FetchActionId.RebuildAdjSeries,
+        // 【ETF换手率校正】（2026-09-23 从按需挪进日更）排在【重算回测序列】之后：它要检查当天新抓的
+        // ETF 日K（ETF日K / ETF日K·不复权 都在前面的K线族里），而回测序列 day_adj 里的换手率
+        // 也得先由那一项生成出来，否则当晚新增的 day_adj 行要等到明天才被校正。
+        // 日更里用「彻底重查」（见 DefaultModeOf）：只写对不上的行，天天跑是安全的。
+        FetchActionId.StepEtfTurnoverFix,
 
         // 【行业景气指标】（2026-09-07）排在补漏之后、龙虎榜席位之前。
         //

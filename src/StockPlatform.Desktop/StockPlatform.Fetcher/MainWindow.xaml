@@ -72,8 +72,9 @@
                  上下摆的话两边都被压扁；左右摆各得其所，中间那根竖条可以拖着分配宽度。 -->
             <!-- 2026-09-23 从「1.5* + MinWidth 1000」改成固定宽：计划表的列宽都是定死的，
                  左栏再按比例变宽也只是在状态列后面多出一截空白；窗口放大多出来的宽度全给日志。
-                 920 ≈ 表格各列之和 + 缩进/滚动条；组头比这宽，放不下时自己折行。中间竖条照样能拖。 -->
-            <ColumnDefinition Width="920" MinWidth="860" /> <!-- 计划（上面一行是全程序的状态条） -->
+                 920 ≈ 表格各列之和 + 缩进/滚动条；组头比这宽，放不下时自己折行。中间竖条照样能拖。
+                 920→821（同日）：参数列 310→268、状态列 170→140，外加原先状态列多分到的 27px，全给日志。 -->
+            <ColumnDefinition Width="821" MinWidth="780" /> <!-- 计划（上面一行是全程序的状态条） -->
             <ColumnDefinition Width="Auto" />                <!-- 拖动条 -->
             <ColumnDefinition Width="*" MinWidth="300" />    <!-- 运行日志 -->
         </Grid.ColumnDefinitions>
@@ -92,7 +93,7 @@
             <!-- 全程序的状态与设置条（2026-08-31 从底部和【手动】页挪上来）——运行状态、本地数据范围、
                  自动重试排定、界面主题，没一样是属于计划表本身的，所以单独占一行摆在最上面。
                  2026-09-08 从"浮在页签栏右端"改成这一行：页签栏没了，再浮着就会盖住计划的工具条。 -->
-            <!-- WrapPanel（2026-09-23）：左栏改成定宽后，排着自动重试时这一行会超宽，放不下就折行。 -->
+            <!-- WrapPanel（2026-09-23）：左栏改成定宽后这一行可能超宽，放不下就折行。 -->
             <WrapPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Right"
                         VerticalAlignment="Center" Margin="0,2,10,4">
                 <!-- ToolTip 从固定文字改成绑定（2026-09-02）：任务拆细之后，"上次抓取"只说得清最后
@@ -110,14 +111,8 @@
                     </TextBlock.ToolTip>
                 </TextBlock>
 
-                <!-- 自动重试的排定提示（见 MainViewModel.ScheduleAutoRetry）：没排定时文字为空、
-                     按钮整个隐藏——平时挂着一个灰按钮只是噪音。 -->
-                <TextBlock Text="{Binding AutoRetryText}" Margin="16,0,0,0" VerticalAlignment="Center"
-                           Foreground="{DynamicResource Theme.Accent.Warm}" FontWeight="Bold" />
-                <Button Content="取消自动重试" Command="{Binding CancelAutoRetryCommand}"
-                        Visibility="{Binding HasAutoRetry, Converter={StaticResource BoolToVis}}"
-                        Margin="8,0,0,0" Padding="8,0"
-                        ToolTip="一轮抓取跑完后如果还有没补齐的数据，程序会自动排一次重试，时间取【跑完+1小时】和【当天21:00】里较晚的那个——盘后数据源是逐步更新的，等一会儿再抓才补得到。&#10;&#10;等待期间界面照常能用（不占用），到点如果正在跑别的会自动顺延10分钟再看。最多连做3轮；名单清零、或者某一轮之后待重试数量不再减少（剩下的多半是当天停牌、数据源确实没有的票）就会自动停下。&#10;&#10;点这个按钮取消本次排定；点【停止】也会一并取消。" />
+                <!-- 自动重试的排定提示 2026-09-23 挪到右栏日志上方（StatusPane）：它讲的是执行情况，
+                     跟"计划状态/正在执行"摆在一起；留在这一行还会把本行撑到折行。 -->
 
                 <theme:ThemeSwitcher Margin="20,0,0,0" />
             </WrapPanel>
@@ -417,8 +412,11 @@
                              「模式」（抓哪一段）2026-09-02 并进这一列：它本来就是这一行的一个参数，
                              而且只有 6 行用得上，单占一列会让其余十几行都空着一格。 -->
                         <!-- 430→310（2026-09-23 按实机量的）：最宽的是【中标/订单公告】（关键词框）299px、
-                             【拉取区间数据】293px，其余行都在 265 以内。以后参数格再加东西要回来重量。 -->
-                        <DataGridTemplateColumn Header="参数" Width="310">
+                             【拉取区间数据】293px，其余行都在 265 以内。以后参数格再加东西要回来重量。
+                             310→268（同日，用户要求"每日那组显示全即可、不留空"）：关键词框 150→110
+                             （默认词「中标,签订合同」约 80px），【中标/订单公告】随之降到约 259px；
+                             其余最宽是【分档资金流·补历史】265、【重新拉取失败】247（UIAutomation 实测）。 -->
+                        <DataGridTemplateColumn Header="参数" Width="268">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                   <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -444,7 +442,7 @@
                                         <TextBlock Text="关键词" VerticalAlignment="Center"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}" />
                                         <TextBox Text="{Binding KeywordsText, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
-                                                 Width="150" Margin="4,0,0,0" VerticalContentAlignment="Center"
+                                                 Width="110" Margin="4,0,0,0" VerticalContentAlignment="Center"
                                                  ToolTip="逗号分隔，例如：中标,签订合同。&#10;&#10;留空 = 这一项不抓公告（日志里会说明是因为没填）。&#10;建项时这里已经预填了默认词，清空就是「别抓」的意思。" />
                                     </StackPanel>
                                     <!-- ⚠ 这里必须是 StackPanel 不能是 Grid：Grid 的子元素是**叠加**的，
@@ -615,8 +613,10 @@ eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
                         <!-- MinWidth 200→170（2026-09-23）：实测最长「✔ 9/22 01:38 已抓 1031/1031」约 165px；
-                             完整原因在悬停提示里，状态格只放最短一截。 -->
-                        <DataGridTextColumn Header="状态" Binding="{Binding StatusText}" Width="*" MinWidth="170">
+                             完整原因在悬停提示里，状态格只放最短一截。
+                             170→140（同日用户要求）：常见的「✔ 9/22 18:10 完成」103px、当天的「✔ 01:38 已抓 1031/1031」135px；
+                             隔天的「已抓」那种约 165px 会截掉尾巴，悬停提示里有全文。 -->
+                        <DataGridTextColumn Header="状态" Binding="{Binding StatusText}" Width="*" MinWidth="140">
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="VerticalAlignment" Value="Center" />
@@ -692,6 +692,17 @@ eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填
                 <TextBlock Text="{Binding PlanStatusText}" Margin="0,2,0,0"
                            Foreground="{DynamicResource Theme.Accent}" FontWeight="Bold"
                            TextWrapping="Wrap" ToolTip="{Binding PlanStatusText}" />
+
+                <!-- 自动重试的排定提示（见 MainViewModel.ScheduleAutoRetry；2026-09-23 从左上状态条挪来）：
+                     没排定时整行隐藏——平时挂着一个灰按钮只是噪音。按钮靠右、文字自动换行，同下面「正在执行」。 -->
+                <DockPanel LastChildFill="True" Margin="0,4,0,0"
+                           Visibility="{Binding HasAutoRetry, Converter={StaticResource BoolToVis}}">
+                    <Button DockPanel.Dock="Right" Content="取消自动重试" Command="{Binding CancelAutoRetryCommand}"
+                            Margin="8,0,0,0" Padding="8,0" VerticalAlignment="Center"
+                            ToolTip="一轮抓取跑完后如果还有没补齐的数据，程序会自动排一次重试，时间取【跑完+1小时】和【当天21:00】里较晚的那个——盘后数据源是逐步更新的，等一会儿再抓才补得到。&#10;&#10;等待期间界面照常能用（不占用），到点如果正在跑别的会自动顺延10分钟再看。最多连做3轮；名单清零、或者某一轮之后待重试数量不再减少（剩下的多半是当天停牌、数据源确实没有的票）就会自动停下。&#10;&#10;点这个按钮取消本次排定；点【停止】也会一并取消。" />
+                    <TextBlock Text="{Binding AutoRetryText}" VerticalAlignment="Center" TextWrapping="Wrap"
+                               Foreground="{DynamicResource Theme.Accent.Warm}" FontWeight="Bold" />
+                </DockPanel>
 
                 <!-- 正在执行的任务，一项一行（2026-09-05）。源不冲突的任务可以同时跑，
                      所以这里可能同时列着两三项；没人在跑时 ItemsControl 是空的、不占地方。

@@ -794,8 +794,9 @@ public sealed class FetchPlan
     /// </summary>
     public static FetchPlan CreateDefault()
     {
+        // 模式按 FetchTaskCatalog.DefaultModeOf 给：绝大多数是增量，【ETF换手率校正】在日更里要用彻底重查
         FetchPlanItem It(FetchActionId a, bool on, TimeOnly? at = null) =>
-            new() { Action = a, Enabled = on, NotBefore = at };
+            new() { Action = a, Enabled = on, NotBefore = at, Mode = FetchTaskCatalog.DefaultModeOf(a) };
 
         // 日更那一串的顺序集中定义在 FetchTaskCatalog.DailyOrder（按数据性质分四族：
         // K线 → 资金交易 → 收尾与合成 → 补漏与重算），那边也写着哪四条是硬约束。
@@ -939,7 +940,10 @@ public sealed class FetchPlan
             if (have.Contains(info.Id)) continue;
             var kind = FetchTaskCatalog.DefaultGroupOf(info.Id);
             // 新加的项一律不启用：它没经过用户同意，不该自己跑起来
-            GroupOf(kind).Items.Add(new FetchPlanItem { Action = info.Id, Enabled = false });
+            GroupOf(kind).Items.Add(new FetchPlanItem
+            {
+                Action = info.Id, Enabled = false, Mode = FetchTaskCatalog.DefaultModeOf(info.Id),
+            });
         }
 
         // ③ 「手动」组里的项不留启用状态
@@ -992,15 +996,32 @@ public sealed class FetchPlan
     /// ⚠ **名单要显式列**，不要对所有动作都按默认组归位：那等于以后每次微调模板都把用户
     ///   自己排过的顺序冲掉一遍。搬完就该从这里删掉（下一次加载时它已经在对的组里，
     ///   这段是空操作，留着只是给下一个改模板的人当样板）。
+    ///
+    /// <c>Adjust</c>：搬完之后要顺带改的设置（null＝不改）。只给**用户明确要求**的那种用——
+    /// 默认一律不替用户勾启用、不改模式。
     /// </summary>
-    private static readonly FetchActionId[] Regrouped = [FetchActionId.StepDelistedSupplement];
+    private static readonly (FetchActionId Action, string Why, Func<FetchPlanItem, string?>? Adjust)[] Regrouped =
+    [
+        (FetchActionId.StepDelistedSupplement, "它的产出是后面各项的输入名单，晚一轮就白抓一轮", null),
+        // 【ETF换手率校正】2026-09-23 从按需挪进日更。用户明确要求"改到日更"，而且首跑的增量报告
+        // 已经跟全量比对逐项核对过、写回后复核归零——所以搬过去就勾上启用、模式设成彻底重查。
+        // 不改模式的话它会带着「增量」进日更：天天只报告、从不写库，看着在跑、其实什么都没修。
+        (FetchActionId.StepEtfTurnoverFix,
+         "腾讯每天新抓的沪市 ETF 日K都会带一批要改的换手率",
+         item =>
+         {
+             item.Enabled = true;
+             item.Mode = FetchMode.Thorough;
+             return "已勾上启用、模式设成「彻底重查」（只写对不上的行，天天跑是安全的）";
+         }),
+    ];
 
     public List<string> MigrateRetired()
     {
         var notes = new List<string>();
 
         // ── 换过组的动作搬家（2026-09-19，见 Regrouped）──
-        foreach (var action in Regrouped)
+        foreach (var (action, why, adjust) in Regrouped)
         {
             var want = FetchTaskCatalog.DefaultGroupOf(action);
             var target = GroupOf(want);
@@ -1012,8 +1033,9 @@ public sealed class FetchPlan
             // 插到模板顺序该在的位置，而不是简单追加到末尾——顺序即执行顺序，
             // 追加到末尾会让它跑在所有"逐只抓"的项**后面**，那正好是它该避免的。
             target.Items.Insert(TemplateIndexIn(target, action), item);
-            notes.Add($"【{FetchTaskCatalog.Info(action).Name}】已从「{from.Name}」挪到「{target.Name}」"
-                    + "（它的产出是后面各项的输入名单，晚一轮就白抓一轮）");
+            var adjusted = adjust?.Invoke(item);
+            notes.Add($"【{FetchTaskCatalog.Info(action).Name}】已从「{from.Name}」挪到「{target.Name}」（{why}）"
+                    + (adjusted is null ? "" : $"，{adjusted}"));
         }
 
         // 【全库数据体检】的「彻底体检」勾 2026-09-09 收成了 FetchMode.Thorough（那一项迁到新任务

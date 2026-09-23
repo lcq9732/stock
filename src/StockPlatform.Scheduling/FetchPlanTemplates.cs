@@ -46,7 +46,8 @@ public static class FetchPlanTemplates
         RepeatKind.EveryWorkday, new TimeOnly(18, 0),
         // 顺序集中定义在 FetchTaskCatalog.DailyOrder，跟默认计划共用同一份——
         // 两边各抄一遍的话，往日更里加了新步骤却只改了一处，用模板恢复出来的计划就会静默少一步。
-        FetchTaskCatalog.DailyOrder.Select(a => new PlanTemplateItem(a)).ToList());
+        // 模式按 DefaultModeOf 给（【ETF换手率校正】在日更里要用彻底重查，否则只报告不写库）。
+        FetchTaskCatalog.DailyOrder.Select(a => new PlanTemplateItem(a, FetchTaskCatalog.DefaultModeOf(a))).ToList());
 
     /// <summary>
     /// 按周期更新、晚几天没关系的那一组。整组「空闲时补」：财务报表每轮只能 300 只、
