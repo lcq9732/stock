@@ -97,12 +97,18 @@ flowchart TD
 **数据源与存储**（Data.Remote / Data.Sqlite，落在 Logic 的接口上）。
 界面层不认识任何 provider，编排层不认识任何界面类型。
 
+⚠ **"编排"这一层 2026-09-22/23 基本退场了**：54 项抓取任务全部住在 Tasks 层
+（一个类一项，见 `IFetchTask`），`FetchOrchestrator` 不再是任何一项的执行入口，
+剩下的只有【数据状态】页的只读查询、财报那一段共用逻辑、板块抓取器的宿主和两个端口。
+所以现在真正的主干是**界面 → 调度 → 任务 → 数据源与存储**，编排层是旁挂的。
+整个过程见 [orchestrator-retirement.md](orchestrator-retirement.md)。
+
 ### 图 F1 · 主干：界面 → 调度 → 编排
 
 启动路径只有一条（2026-09-08 起）：界面上的每个动作都是**计划里的一行**，计划引擎
 `PlanRunner` 按时间表串行跑，人也可以按行【执行】或按组【执行整组】插一次。
 两种触发都要先过 `SourceAdmission` 这道准入，否则会出现两个任务同时打同一家服务器、
-同时写同一张表。（原来还有一条【手动】页按钮直调 `FetchOrchestrator.RunXxxAsync` 的路，
+同时写同一张表。（原来还有一条【手动】页按钮直调编排层 `RunXxxAsync` 的路，
 连同那一页一起撤了——同一件事两套实现，改一边忘另一边是迟早的事。）
 
 ```mermaid
@@ -162,9 +168,8 @@ class FetchTaskRegistry {
 }
 class FetchOrchestrator {
   <<Data>>
-  五十多个 RunXxxAsync
-  抓取写库聚合三合一
-  Fetcher 的真正核心
+  已不是任何一项的入口
+  只剩只读查询与共用件
 }
 class FetcherSettings {
   <<Data>>
@@ -180,7 +185,7 @@ App --> MainViewModel : 注入依赖
 App --> MainWindow : 设为 DataContext
 App --> FetcherSettings : 读取并写模板
 MainWindow --> MainViewModel
-MainViewModel --> FetchOrchestrator : 把计划项翻译成编排调用
+MainViewModel --> FetchOrchestrator : 数据状态与计数
 MainViewModel --> PlanRunner : 启动与停止计划
 MainViewModel --> SourceAdmission : 任务准入
 MainViewModel --> FetchTaskRegistry : 跑新式任务
@@ -441,19 +446,29 @@ flowchart LR
 `SqliteStockEventSource` 是给**阅读**用的——把来龙去脉讲成人话。
 两者取同一批表但形状完全不同，合成一个会互相将就。
 
-### 图 F3 · 编排层 → 数据源与存储
+### 图 F3 · 数据源与存储
 
-`FetchOrchestrator` 只认 Logic 里的接口，具体是新浪还是东财由 App 组装时决定
+抓取方**只认 Logic 里的接口**，具体是新浪还是东财由 App 组装时决定
 （一次运行只用一个数据源，不做自动混用和故障切换）。这里每类接口只画代表实现。
+
+⚠ 2026-09-23 更新：这张图原来画的是 `FetchOrchestrator` 指向各接口——那是编排层还在逐标的
+抓取的年代。现在连这些接口的是**各个任务**（`StockDayBarTask` → `IBarDataFetcher`、
+`BoardMemberTask` → `IBoardFetcher`…），编排层只剩下板块抓取器的宿主和几处只读查询。
+任务与接口的对应关系在图 F2，这里只画接口与实现那一侧。
 
 ```mermaid
 classDiagram
 direction LR
 
+class FetchTask {
+  <<Tasks>>
+  54 个任务的统称
+  一个类一项·见图 F2
+}
 class FetchOrchestrator {
   <<Data>>
-  逐标的抓取 写库 聚合
-  水位线续抓与失败名单
+  只读查询与共用件
+  板块抓取器的宿主
 }
 class AnnouncementFetchOrchestrator {
   <<Data>>
@@ -534,18 +549,20 @@ class MarketClassifier {
   代码判市场与前缀
 }
 
-FetchOrchestrator --> IBarDataFetcher
-FetchOrchestrator --> IStockListProvider
-FetchOrchestrator --> IBoardFetcher
-FetchOrchestrator --> IBarRepository
-FetchOrchestrator --> AnnouncementFetchOrchestrator
-FetchOrchestrator --> BoardListFetchLoop
-FetchOrchestrator --> ManualFillWorklist
-FetchOrchestrator --> BarAggregator
-FetchOrchestrator --> AdjustFactorCalculator
+FetchTask --> IBarDataFetcher
+FetchTask --> IStockListProvider
+FetchTask --> IBoardFetcher
+FetchTask --> IBarRepository
+FetchTask --> AnnouncementFetchOrchestrator
+FetchTask --> BoardListFetchLoop
+FetchTask --> ManualFillWorklist
+FetchTask --> BarAggregator
+FetchTask --> AdjustFactorCalculator
+FetchTask --> TradingCalendar
+FetchTask --> MarketClassifier
+FetchTask --> SqliteMaintenance
+FetchOrchestrator --> IBoardFetcher : 只是宿主·运行期可换
 FetchOrchestrator --> TradingCalendar
-FetchOrchestrator --> MarketClassifier
-FetchOrchestrator --> SqliteMaintenance
 
 TencentThenSinaBarFetcher ..|> IBarDataFetcher
 EastMoneyBarFetcher ..|> IBarDataFetcher
@@ -578,7 +595,7 @@ EastMoneyTerminalBoardFetcher --> EastMoneyDataCenterClient
 | `FetchTaskCatalog` · `FetchActionInfo` · `DataSourceCatalog` | Scheduling | 动作元数据的**唯一权威处**：数据源、配额组、参数、全量/增量、数据就绪度、界面分组。加动作只改这一处。 |
 | `IFetchTask` · `FetchTaskBase<TItem>` · `FetchTaskRegistry` | Scheduling | 新式任务契约（2026-09-08）：任务自己会跑、广播三路事件（真进展 / 存活播报 / 状态变化），停止＝取消 token 后 finally 收尾。**准入归调度侧**，任务只判断自己才知道的前提并返回 `NothingToDo`。 |
 | `TradingCalendarTask` | Tasks | 目前唯一的新形状任务：抓深交所官方交易日历写 `TradingDay` 表，逐日回补靠它跳过节假日。 |
-| `FetchOrchestrator`（partial，5800+1400 行） | Data | 抓取程序真正的核心，与 UI 无关。五十多个 `RunStepXxxAsync` 单项入口 + 两个仍保留复合的模式（重拉失败 / 拉取年份区间），共用同一套"逐标的抓取→写库→聚合→更新水位线"躯干。全部直接写 `current.sqlite`。（拉取全部 / 补指定历史日 / 拉取板块 / 一键补齐每日历史 / 一键拉取定期数据那五个整包方法 2026-09-08 已删——它们 09-02 就被拆成原子项，此后只剩【手动】页在调。） |
+| `FetchOrchestrator`（833 行） | Data | **已经不是任何一项的执行入口**（2026-09-22 最后 7 项迁完，09-23 清掉死代码，从 3004 行降到这里）。现在剩四类东西：①【数据状态】页的只读查询（`GetDataStatus` / `GetRetryBacklog` / 一串 `GetPendingXxxCount`）；② 财报那一段（`FetchFinancialsForCodesAsync` / `GetFinancialFetchPlan`，【金融监管指标】要先补那几家的财报，两项共用同一份计划判据）；③ 板块抓取器的宿主（`ReplaceBoardFetcher`——`BoardMemberChannel` 决定造哪个类、什么限流参数，运行期【重新读取配置】要换掉它）；④ 两个给任务用的端口（`Liveness` / `TaskRunner`）。**别再往这里加任务**——新任务是 Tasks 层一个类 + 注册表一行。 |
 | `AnnouncementFetchOrchestrator` · `BoardListFetchLoop` | Data | 两条自成一体的子流程：公告（巨潮搜索→东财正文→解析入库）、板块名单分页循环。 |
 | `FetchPaths` · `FetcherSettings` · `JsonManifestStore` · `Heartbeat` · `ProgressThrottle` · `FetchResult` · `FailedRetrySummary` · `ManualFillWorklist` | Data | 编排层配套件：路径、JSONC 设置、水位线清单、心跳、进度节流、运行结果、失败重试汇总、手工补录清单。 |
 | `Data.Remote`（约 60 个类） | Data | 数据源实现，按"一个数据源/通道一个类"拆：新浪系（K线/财务/分红/股东/指数成分/市值/ETF，龙虎榜留作后备）、东财系（datacenter 客户端 + 预测/龙虎榜概要/龙虎榜席位/资金流/事件/板块映射/行业指标/客户供应商，板块另有 HTTP、页面、终端文件三通道并存）、腾讯 K线、交易所直连（融资/退市名单/深交所日历）、中证权重、巨潮公告与预约。公共件：`RateLimiter`、`NetworkInterfaceBinder`、`EastMoneyJson`、`EastMoneyClistPage`。PDF 提取已于 2026-09-11 拆去 `StockPlatform.Pdf`，这里只剩业务解析 `BankReportParser`（给页面判据 + 从行里取数）。 |

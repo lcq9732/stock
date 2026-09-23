@@ -153,7 +153,7 @@ public sealed class EtfTurnoverRecalcTask(
     {
         bool write = args.Mode == FetchMode.Thorough;
         Report(write
-            ? "开始检查并**写回**沪市 ETF 换手率（彻底重查：错值和空值改成「成交量 ÷ 前一交易日官方份额」）…"
+            ? "开始检查并写回沪市 ETF 换手率（彻底重查：错值和空值改成「成交量 ÷ 前一交易日官方份额」）…"
             : "开始检查沪市 ETF 换手率（日常增量：只报告，不写库）…");
 
         // ⚠ 整段是同步的重活（九百多只 × 三四千天 × 3 个口径），必须自己推线程池——

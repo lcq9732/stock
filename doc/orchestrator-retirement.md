@@ -13,9 +13,9 @@
 | 仍走旧编排器的任务 | 7 项 | **0 项** | 0 项 |
 | 注册在新框架的任务 | 47 项 | **54 项** | 54 项 |
 | 界面 `DispatchPlanActionAsync` 里的 `case` | 7 个 | **0 个** | 0 个 |
-| `FetchOrchestrator.cs` | 2743 行 | 1205 行 | **944 行** |
+| `FetchOrchestrator.cs` | 2743 行 | 1205 行 | **833 行** |
 | `FetchOrchestrator.Steps.cs` | 261 行 | 183 行 | **已删** |
-| 编排层合计 | 3004 行 | 1388 行 | **944 行**（−69%） |
+| 编排层合计 | 3004 行 | 1388 行 | **833 行**（−72%） |
 
 09-22 那一轮净改动 **+848 / −1880**（29 个文件改动、9 个新增），全量测试 **2117 通过**；
 09-23 的清理见下面 §1.1，清完 **2153 通过**。
@@ -38,6 +38,9 @@
 | `SetFailedTodo`／`ComputeUpdatedFailedCodes` | 两个都只是一行转发到 Logic 层的 `FailedTodoRule`，唯一调用方是 `FinishFetchRun` |
 | `ReportCompareProgress` | 老K线内核的粗粒度心跳，随内核一起没了调用方 |
 | `FetchStats` 类、`BeginStep`、`TaskLabel` | 只服务 `Steps.cs` 里的单项入口 |
+| `BuildEtfIndexMap`、`CodesWithStaleAdjEvents`、`HfqWatermarkWindow`、`StoredClosesFor`、`RecordDriftedForRepair`、`ReparseCachedBankReports` | 判据早就抽进 Logic 或独立类了（`EtfIndexMatcher`／`SqliteAdjSeriesAuditor`／`IncrementalWindowCalculator`／`QfqRepairPlanner`／`BankReportReparser`），这些只剩一层取数或转发的壳，调用方随老K线内核和 `Steps.cs` 一起没了 |
+| 六个常量（`DefaultLookbackYears`、`FirstAShareYear`、`HfqAbortCheckAfter`、`LaggingFieldLookbackDays`、`AnnouncementLookbackDaysForFetchAll`、`NetInflowInitialLookbackDays`）、字段 `EmptyCloses` | 各自随使用者迁走 |
+| 构造参数 `IIndexConsProvider`／`IIndexWeightProvider`／`IIndexConsRepository` | `RunFetchIndexConsAsync` 一删，它们就只是被注入、从不被读——三个指数任务各自注入自己要的那份 |
 | **`FetchOrchestrator.Steps.cs` 整个文件** | 见下 |
 
 `Steps.cs` 的文件名是「【拉取全部】拆出来的单项入口」，而单项入口一个不剩了，
@@ -60,6 +63,17 @@
 且与 `LastRunByTask` 里那条的时间戳完全相等。
 
 这类"少写一处状态"的毛病，编译器、单元测试、界面都不会喊——只有在删掉最后一个写入方时才撞见。
+
+**清理是一层层收敛的**：删掉七项本体 → `FinishFetchRun` 失去调用方 → 它的两个转发helper 跟着死 →
+`Steps.cs` 只剩一个活方法于是整个删掉 → `BuildEtfIndexMap`（Steps 里唯一的调用方没了）和
+三个指数依赖（`RunFetchIndexConsAsync` 的）跟着暴露 → 六个常量和几个取样函数再跟着暴露。
+一次只清一层会挤牙膏，所以最后是拿"私有成员在本文件出现次数 < 2"扫了一遍，扫到空为止。
+同类清理下次照这个办法做。
+
+另外更新了 [solution-class-map.md](solution-class-map.md)：它描述的是**当前**架构（不像各个
+设计文档是历史存档），里面 `FetchOrchestrator` 的类图块还写着"五十多个 RunXxxAsync／抓取写库
+聚合三合一／Fetcher 的真正核心"，图 F3 也还画着它指向 `IBarDataFetcher` 等一串接口。现在改成：
+主干是「界面 → 调度 → 任务 → 数据源与存储」，编排层旁挂；连数据源接口的是各个任务。
 
 ### 迁了哪 7 项
 
