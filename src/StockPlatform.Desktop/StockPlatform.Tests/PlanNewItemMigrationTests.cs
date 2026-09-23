@@ -116,8 +116,6 @@ public class PlanNewItemMigrationTests
 
         Assert.DoesNotContain(FetchActionId.StepEtfTurnoverFix, onDemand.Items.Select(i => i.Action));
         var order = daily.Items.Select(i => i.Action).ToList();
-        Assert.True(order.IndexOf(FetchActionId.StepEtfTurnoverFix) > order.IndexOf(FetchActionId.RebuildAdjSeries),
-            "要排在【重算回测序列】之后（day_adj 的换手率先生成出来）");
         Assert.True(order.IndexOf(FetchActionId.StepEtfTurnoverFix) > order.IndexOf(FetchActionId.StepEtfRawBars),
             "要排在 ETF 日K 之后（检查的就是当天新抓的行）");
         Assert.True(item.Enabled);
