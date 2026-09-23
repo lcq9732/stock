@@ -139,6 +139,37 @@ public class PlanNewItemMigrationTests
         Assert.DoesNotContain(notes, n => n.Contains("ETF换手率校正"));
     }
 
+    /// <summary>
+    /// 【基金除权除息】2026-09-23 从周期组挪进日更。必须落在两条 ETF 日K **中间**：
+    /// 前面要 ETF 名单（【ETF日K】），后面【ETF日K·不复权】和【重算回测序列】当天就要用它的事件。
+    /// 启用状态照搬——这一项不替用户改设置。
+    /// </summary>
+    [Fact]
+    public void 基金除权除息从周期组搬进日更_落在两条ETF日K之间_启用状态照搬()
+    {
+        var plan = FetchPlan.CreateDefault();
+        plan.Normalize();
+        var daily = plan.GroupOf(PlanGroupKind.Daily);
+        var periodic = plan.GroupOf(PlanGroupKind.Periodic);
+        var item = daily.Items.Single(i => i.Action == FetchActionId.ImportFundExDividend);
+        daily.Items.Remove(item);
+        item.Enabled = true;
+        periodic.Items.Insert(Math.Min(15, periodic.Items.Count), item);   // 2026-09-23 之前的样子
+
+        var notes = plan.MigrateRetired();
+        plan.Normalize();
+
+        Assert.DoesNotContain(FetchActionId.ImportFundExDividend, periodic.Items.Select(i => i.Action));
+        var order = daily.Items.Select(i => i.Action).ToList();
+        int at = order.IndexOf(FetchActionId.ImportFundExDividend);
+        Assert.True(at > order.IndexOf(FetchActionId.StepEtfBars), "要排在【ETF日K】之后（ETF 名单从那边来）");
+        Assert.True(at < order.IndexOf(FetchActionId.StepEtfRawBars), "要排在【ETF日K·不复权】之前");
+        Assert.True(at < order.IndexOf(FetchActionId.RebuildAdjSeries), "要排在【重算回测序列】之前");
+        Assert.True(item.Enabled);
+        Assert.Equal(FetchMode.Incremental, item.Mode);
+        Assert.Contains(notes, n => n.Contains("基金除权除息"));
+    }
+
     /// <summary>新建计划 / 用模板恢复：日更里的【ETF换手率校正】默认就是「彻底重查」，其余仍是增量。</summary>
     [Fact]
     public void 默认计划和日更模板里ETF换手率校正用彻底重查()

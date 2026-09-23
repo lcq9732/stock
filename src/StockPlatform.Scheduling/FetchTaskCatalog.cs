@@ -647,7 +647,7 @@ public static class FetchTaskCatalog
             Sources: [DataSourceId.Tencent]),
 
         new(FetchActionId.ImportFundExDividend, "基金除权除息", "东财终端本地文件", QuotaGroup.Local,
-            TimeSpan.FromSeconds(20), "不定期",
+            TimeSpan.FromSeconds(20), "每工作日",
             "从东财终端自己落盘的 fund_cqcx.db 导 ETF 的分红/份额折算事件（5845 条 / 1017 只基金）。"
             + "**纯本地读文件，一个请求都不发**；没装终端就整项跳过、不算失败。\n"
             + "它是 ETF 能回测的另一半——day_adj ＝ 不复权价 × 本地算的因子，而因子要靠这些事件。\n"
@@ -1741,9 +1741,13 @@ public static class FetchTaskCatalog
         // 直接从 day 复制，判据纯本地），而漏一天就要在下一轮多翻一页补回来。
         FetchActionId.StepEtfRawBars => PlanGroupKind.Daily,
 
-        // 【基金除权除息】归周期组：它读的是东财终端自己更新的本地文件，不定期变；
-        // 而且一次 20 秒、不发请求，晚几天补上毫无代价。
-        FetchActionId.ImportFundExDividend => PlanGroupKind.Periodic,
+        // 【基金除权除息】归日更（2026-09-23 从周期组挪过来）。原来的理由"晚几天补上毫无代价"
+        // 只对【ETF日K·不复权】成立（它有本地判据兜底，事件缺了顶多多抓一次全历史），
+        // 对【重算回测序列】**不成立**——那一项也在日更，事件没进来它就走增量、按旧因子追加，
+        // 除权日起 day_adj 凭空多一个假跳空（折算能到 +200%），要等周期组导入后才被
+        // StaleEvents 触发整段重算修好，中间那几天回测读到的是错值且不报警。
+        // 而这一项一次 20 秒、一个请求都不发，天天跑没有负担。
+        FetchActionId.ImportFundExDividend => PlanGroupKind.Daily,
 
         // 【观察指标映射】（2026-09-11）跟着【行业景气指标】走日更。它本身变得很慢（规则改了才变），
         // 但重算是纯本地、毫秒级、幂等，每天白跑一次的成本可以忽略；而放到季度组的话，
@@ -1926,6 +1930,11 @@ public static class FetchTaskCatalog
         FetchActionId.StepStockRawBars,
         FetchActionId.StepStockHfqBars,
         FetchActionId.StepEtfBars,
+        // 【基金除权除息】夹在两条 ETF 日K 中间（2026-09-23 从周期组挪进日更）：
+        // 前面要【ETF日K】（它的 SoftDependsOn——ETF 名单和带前缀的 code 从那边来），
+        // 后面的【ETF日K·不复权】靠它分"除过权必须抓 / 没除过可复制"，
+        // 排在最后的【重算回测序列】靠它当天就把新除权算进 day_adj。
+        FetchActionId.ImportFundExDividend,
         FetchActionId.StepEtfRawBars,
         FetchActionId.StepIndexBars,
         // ── 资金与交易 ──
@@ -2035,10 +2044,7 @@ public static class FetchTaskCatalog
         // 一轮；现在每个工作日都刷新一遍，这两项无论什么时候跑，用的名单至多隔一天。
         FetchActionId.FetchShareholder,
         FetchActionId.FetchDividend,
-        // 【基金除权除息】紧跟个股分红（2026-09-17）：同一族数据（除权除息事件），
-        // 只是一个抓个股、一个读东财终端的本地文件。它给【ETF日K·不复权】当前置——
-        // 那一项在日更组，靠它区分"这只 ETF 除过权（必须抓）"还是"从没除过（可以复制）"。
-        FetchActionId.ImportFundExDividend,
+        // （【基金除权除息】原来紧跟在这里，2026-09-23 挪进了日更，理由见 DefaultGroupOf。）
         FetchActionId.FetchFinancials,        // 监管指标要靠它认机构类型，所以排在前面
         // 【公司档案】+【客户与供应商】紧跟财务报表（2026-09-07/09-08）：
         // 它们是同一份年报里的东西，一起更新才不会出现"财务是新的、客户集中度还是去年的"错配。

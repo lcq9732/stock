@@ -1014,6 +1014,10 @@ public sealed class FetchPlan
              item.Mode = FetchMode.Thorough;
              return "已勾上启用、模式设成「彻底重查」（只写对不上的行，天天跑是安全的）";
          }),
+        // 【基金除权除息】2026-09-23 从周期组挪进日更（用户要求）。启用状态和模式照搬、不替用户改：
+        // 它在周期组里勾着就带着勾过去，没勾就还是没勾。
+        (FetchActionId.ImportFundExDividend,
+         "【重算回测序列】在日更，事件晚到几天 ETF 的 day_adj 就按旧因子错几天", null),
     ];
 
     public List<string> MigrateRetired()
