@@ -20,8 +20,14 @@ public interface IDailyFetchNoDataRepository
     /// <summary>融资余额（MarginDetail 表）。</summary>
     const string MarginDataset = "MarginDetail";
 
-    /// <summary>上交所 ETF 份额（EtfShare 表，2026-09-23）。上交所 2012-01-04 起才有数据。</summary>
+    /// <summary>上交所 ETF 份额（EtfShare 表 market='sh'，2026-09-23）。上交所 2012-01-04 起才有数据。</summary>
     const string EtfShareDataset = "EtfShare";
+
+    /// <summary>深交所 ETF 份额（EtfShare 表 market='sz'，2026-09-23）。深交所 2016-09-26 起才有数据。</summary>
+    const string EtfShareSzDataset = "EtfShareSz";
+
+    /// <summary>某个市场的 ETF 份额用哪个数据集名。沪市沿用最早那个名字，已记的空日不作废。</summary>
+    static string EtfShareDatasetOf(string market) => market == "sz" ? EtfShareSzDataset : EtfShareDataset;
 
     void EnsureSchema();
 

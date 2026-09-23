@@ -11,7 +11,7 @@ public enum EtfTurnoverVerdict
     Wrong,
     /// <summary>有成交、库里换手率却是 0 或 NULL。</summary>
     Missing,
-    /// <summary>没有前一交易日的官方份额（2012 年以前、上市首日、上交所那天没列这只），判不了。</summary>
+    /// <summary>没有前一交易日的官方份额（交易所开始有数据以前、上市首日、交易所那天没列这只），判不了。</summary>
     Unjudgeable,
 }
 
@@ -26,13 +26,15 @@ public enum EtfTurnoverVerdict
 ///   · 同一天两个接口还可能不一样：510150 在 2024-09-30，前复权 83.63 = ÷T-1、不复权 48.38 = ÷T。
 /// 跟我们的抓取时刻无关（抓取滞后 7 天以上的行里照样有近万行 ÷T-1），同一时刻重抓也还是那个数，
 /// 所以【重新拉取失败】修不好，只能按一个统一的算法重算。
+/// 深市 ETF（同日拿深交所 2016-09-26 起的份额复算）腾讯**一直是 ÷T-1**，2022–2026 只对得上 ÷T 的仅 55 行，
+/// 对不上的也集中在上面那几个故障日——统一成 T-1 对深市几乎不改现有值。
 ///
 /// 为什么选 T-1 而不是 T：① 收盘后马上就能算——当天份额要等上交所发布（常常第二天才有）；
 /// ② 是开盘前就知道的份额，回测里不会用到当天收盘后才公布的数据。
 /// 代价是 2024-11 以后腾讯按 ÷T 给的那十几万行会被改掉，这是有意的。
 ///
 /// ════ 单位 ════
-/// Bar.volume 在 ETF 上是**手**（1 手 = 100 份），上交所 TOT_VOL 是**万份**，于是
+/// Bar.volume 在 ETF 上是**手**（1 手 = 100 份），份额统一存**万份**（上交所原样、深交所导出是份、provider 里换算），于是
 /// 换手率(%) = 手 × 100 ÷ (万份 × 10⁴) × 100 = 手 ÷ 万份。
 /// 保留两位小数跟腾讯一致。
 ///
@@ -71,11 +73,12 @@ public static class EtfTurnoverRule
     }
 
     /// <summary>
-    /// Bar 里一只 ETF 的代码是不是「上交所 ETF」的形式（sh5 开头 + 6 位）。
+    /// Bar 里一只代码像不像沪深 ETF（sh5 / sz15 开头 + 6 位）。
     ///
     /// 只给**提示文案**用（【重新拉取失败】复查后提醒去跑【ETF换手率校正】），不参与任何数据判断——
-    /// 校正任务的名单来自上交所份额表本身，不猜代码规则。
+    /// 校正任务的名单来自交易所份额表本身，不猜代码规则。
     /// </summary>
-    public static bool LooksLikeSseEtfBarCode(string code)
-        => code.Length == 8 && code.StartsWith("sh5", StringComparison.Ordinal);
+    public static bool LooksLikeEtfBarCode(string code)
+        => code.Length == 8 && (code.StartsWith("sh5", StringComparison.Ordinal)
+                                || code.StartsWith("sz15", StringComparison.Ordinal));
 }

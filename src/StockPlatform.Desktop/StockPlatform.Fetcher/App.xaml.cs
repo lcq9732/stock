@@ -633,13 +633,18 @@ public partial class App : Application
         // ——它拿当天收盘价乘当天融券余量，两样都落库了才算得出来。
         taskRegistry.Register(FetchActionId.StepFillShortBalance,
             () => new MarginShortBalanceFillTask(new SqliteMarginShortBalanceFiller(paths.CurrentDb)));
-        // 【ETF换手率校正】2026-09-23，见 doc/etf-turnover-recalc-design.md。上交所一天一个请求，
-        // 1 并发、1 秒间隔（跟【总股本】同一套配置）；首次补 2012 年起约 3600 天、约 1 小时。
+        // 【ETF换手率校正】2026-09-23，见 doc/etf-turnover-recalc-design.md。两市各一个份额源，
+        // 都是 1 并发、1 秒间隔（跟【总股本】同一套配置）：上交所一天一个请求，首次补 2012 年起约 3600 天、
+        // 约 1 小时；深交所一个月一个请求，首次补 2016-09 起约 121 个。两个源按顺序跑，不并发。
         taskRegistry.Register(FetchActionId.StepEtfTurnoverFix,
             () => new EtfTurnoverRecalcTask(
                 new SqliteEtfShareRepository(paths.CurrentDb),
-                new SseEtfShareProvider(
-                    new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                [
+                    new SseEtfShareProvider(
+                        new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                    new SzseEtfShareProvider(
+                        new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                ],
                 tradingDayRepository, dailyNoDataRepository,
                 new SqliteEtfTurnoverStore(paths.CurrentDb)));
         // 【拉取行业分类】2026-09-10 从 orchestrator 迁过来（判据见

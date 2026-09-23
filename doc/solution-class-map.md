@@ -331,7 +331,7 @@ FinancialAnalyzer ..> TotalSharesTask : PE/PB 的股数(缺则回退 share_capit
 EtfTurnoverRecalcTask --|> FetchTaskBase
 class EtfTurnoverRecalcTask {
   <<Tasks>>
-  按需·ETF换手率校正
+  按需·ETF换手率校正(沪深)
   补份额→检查→(彻底重查)写回
   只写 turnover 一列
 }
@@ -340,17 +340,29 @@ class SseEtfShareProvider {
   上交所每日ETF份额
   一天一个请求·2012-01-04起
 }
+class SzseEtfShareProvider {
+  <<Data.Remote>>
+  深交所基金规模 xlsx
+  一个月一个请求·2016-09-26起·单位份
+}
+class EtfShareFetchPlan {
+  <<Logic.Services>>
+  按天/按月排请求
+  最近3天重抓
+}
 class EtfTurnoverRule {
   <<Logic.Services>>
   成交量(手) ÷ 前一交易日份额(万份)
   一致/错值/空值/无法裁判
 }
 SseEtfShareProvider ..|> IEtfShareProvider
+SzseEtfShareProvider ..|> IEtfShareProvider
 SqliteEtfShareRepository ..|> IEtfShareRepository
 EtfTurnoverRecalcTask --> IEtfShareProvider : 补份额
 EtfTurnoverRecalcTask --> IEtfShareRepository : EtfShare 表
 EtfTurnoverRecalcTask --> SqliteEtfTurnoverStore : 按只读写 Bar.turnover
 EtfTurnoverRecalcTask ..> EtfTurnoverRule : 判据
+EtfTurnoverRecalcTask ..> EtfShareFetchPlan : 排请求
 class SqliteMarketPeSource {
   <<Data.Sqlite>>
   一次读全市场 PE 的四份输入

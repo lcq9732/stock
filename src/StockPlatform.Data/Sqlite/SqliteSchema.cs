@@ -539,15 +539,18 @@ public static class SqliteSchema
                 PRIMARY KEY (dataset, day)
             );
 
-            -- 上交所官方每日 ETF 份额（2026-09-23，见 doc/etf-turnover-recalc-design.md）。
+            -- 沪深交易所官方每日 ETF 份额（2026-09-23，见 doc/etf-turnover-recalc-design.md；同日加了深市）。
             --
             -- 【ETF换手率校正】的裁判：腾讯的 ETF 换手率口径不统一（有时 ÷前一交易日份额、有时 ÷当天份额），
             -- 2022 年年中以前干脆全是 0。拿这张表统一按「成交量 ÷ 前一交易日份额」重算。
             -- 顺带也是 ETF 规模和每日申赎（份额差）的原始数据。
             --
-            -- code 是 6 位裸码（上交所的 SEC_CODE）；Bar 里同一只 ETF 存成 'sh' || code。
-            -- 上交所 2012-01-04 起才有数据；空的日子记在 DailyFetchNoData(dataset='EtfShare')。
+            -- code 是 6 位裸码；Bar 里同一只 ETF 存成 market || code（sh510150 / sz159915）。
+            -- 上交所 2012-01-04 起、深交所 2016-09-26 起才有数据；空的日子记在
+            -- DailyFetchNoData(dataset='EtfShare' / 'EtfShareSz')。
+            -- 主键不含 market：两市 ETF 代码段不重叠（沪 5 开头、深 1 开头）。
             CREATE TABLE IF NOT EXISTS EtfShare (
+                market     TEXT NOT NULL DEFAULT 'sh',   -- 'sh' / 'sz'
                 code       TEXT NOT NULL,
                 trade_date TEXT NOT NULL,   -- yyyy-MM-dd，上交所的 STAT_DATE
                 shares_wan REAL NOT NULL,   -- 总份额，万份（TOT_VOL 原样）
@@ -1161,6 +1164,8 @@ public static class SqliteSchema
         // SinaShareholderProvider.ParseD）；修复时把这个方向本身也存下来——机构调仓方向是有用信息。
         // 老库的历史行这一列为 NULL，等用户重新"拉取股东数据"时按 code 覆盖写入。
         AddColumnIfMissing(conn, "TopShareholder", "change_direction", "TEXT");
+        // 2026-09-23：EtfShare 当天先只有沪市、后加深市。先建过表的库补 market 列，老行都是沪市。
+        AddColumnIfMissing(conn, "EtfShare", "market", "TEXT NOT NULL DEFAULT 'sh'");
         // 2026-08-29：监管指标区分来源——pdf / ocr / ocr_confirmed / manual，取值和含义见
         // Logic.Models.MetricSources。有它才能保证**重解析不会覆盖掉人拍板过的数据**
         // （见 SqliteBankRegulatoryRepository.Upsert 的 ON CONFLICT … WHERE），

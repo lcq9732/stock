@@ -48,7 +48,7 @@
 | 资金 | `NetInflow` | 主力/资金净流入（日频，**只有合计一个字段**） |
 |  | `NetInflowDetail` 🆕 | **分档资金流**（超大/大/中/小单的净额+净占比，仅最近约120交易日）。当天走 `push2delay` 全市场快照、历史靠 `push2his` 逐股补 |
 |  | `MarginDetail` | 融资融券明细（融资余额，仅两融标的） |
-|  | `EtfShare` ✨ | **上交所官方每日 ETF 份额**（2012-01-04 起），【ETF换手率校正】的裁判，也能看规模和每日申赎 |
+|  | `EtfShare` ✨ | **沪深交易所官方每日 ETF 份额**（沪 2012-01-04 起、深 2016-09-26 起），【ETF换手率校正】的裁判，也能看规模和每日申赎 |
 | 龙虎榜 | `Lhb` | 每日龙虎榜上榜记录（**无营业部名单**）。2026-09-09 换东财，上榜原因与 `LhbSeat` 同源可 join |
 |  | `LhbSeat` 🆕 | **买卖前五营业部明细**（含营业部代码、该席位3日胜率） |
 | 筹码/事件 | `BlockTrade` 🆕 | 大宗交易（买卖双方营业部、折溢价率） |
@@ -159,7 +159,7 @@
 | open / close / high / low | REAL | 开/收/高/低（前复权） |
 | volume | REAL | 成交量（**手**）。三家源口径不同，进库前统一换算，见下方"成交量单位" |
 | amount | REAL | 成交额（元；2026-07-10 前腾讯老接口为 0，已回填） |
-| turnover | REAL | 换手率（%）。⚠ 沪市 ETF：腾讯大约 2022 年年中以前全是 0；之后口径不统一（2024-10 前多数 ÷前一交易日份额、之后多数 ÷当天份额）——跑【ETF换手率校正】按 `EtfShare` 统一成「成交量 ÷ 前一交易日份额」 |
+| turnover | REAL | 换手率（%）。⚠ ETF：腾讯大约 2022 年年中以前全是 0；沪市之后口径不统一（2024-10 前多数 ÷前一交易日份额、之后多数 ÷当天份额），深市一直 ÷前一交易日——跑【ETF换手率校正】按 `EtfShare` 统一成「成交量 ÷ 前一交易日份额」 |
 | fetched_at | TEXT | 抓取时刻 |
 | | | **主键** (code, granularity, period_start) |
 
@@ -515,20 +515,23 @@
 | fetched_at | TEXT | 抓取时刻 |
 | | | **主键** (trade_date, code) |
 
-### EtfShare — 上交所每日 ETF 份额（2026-09-23 新增）
-**数据源**：上交所官网「ETF 规模」（`query.sse.com.cn` `sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L&STAT_DATE=`），
-一天一个请求拿当天全部沪市 ETF。**2012-01-04 起**才有（那天 23 只，2026-09-22 是 912 只）；当天的份额收盘后才发布。
-**写入**：【ETF换手率校正】（按需），只补表里还没有的交易日；上交所那天返回空、且已过 3 天的记进 `DailyFetchNoData(dataset='EtfShare')`。
-**用途**：换手率裁判（统一成「成交量 ÷ **前一交易日**份额」，见 `EtfTurnoverRule`；腾讯自己的口径不统一）；也是 ETF 规模和每日申赎（份额差）的原始数据。
-深市 ETF 不在这里（深交所份额源还没核）。
+### EtfShare — 沪深交易所每日 ETF 份额（2026-09-23 新增）
+**数据源**：
+- 上交所官网「ETF 规模」（`query.sse.com.cn` `sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L&STAT_DATE=`），一天一个请求拿当天全部沪市 ETF，单位万份。**2012-01-04 起**；**不列货币 ETF**。
+- 深交所官网「基金规模·ETF」（`ShowReport?SHOWTYPE=xlsx&CATALOGID=scsj_fund_jjgm&jjlb=ETF`），xlsx 导出一个月一个请求，单位**份**（入库换算成万份）。**2016-09-26 起**；含货币 ETF。
+
+**写入**：【ETF换手率校正】（按需），只补表里还没有的交易日，最近 3 天每轮重抓覆盖（深交所 T 日晚间的值只是参考）；
+交易所那天返回空、且已过 3 天的记进 `DailyFetchNoData`（沪 `EtfShare`、深 `EtfShareSz`）。
+**用途**：换手率裁判（统一成「成交量 ÷ **前一交易日**份额」，见 `EtfTurnoverRule`；腾讯自己的沪市口径不统一）；也是 ETF 规模和每日申赎（份额差）的原始数据。
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| code | TEXT | 6 位裸码（上交所 SEC_CODE）。Bar 里同一只存成 `'sh' \|\| code` |
-| trade_date | TEXT | 统计日 `yyyy-MM-dd`（STAT_DATE） |
-| shares_wan | REAL | 总份额，**万份**（TOT_VOL 原样） |
+| market | TEXT | `sh` / `sz`。Bar 里同一只存成 market + code（sh510150 / sz159915） |
+| code | TEXT | 6 位裸码 |
+| trade_date | TEXT | 统计日 `yyyy-MM-dd` |
+| shares_wan | REAL | 总份额，**万份** |
 | fetched_at | TEXT | 抓取时刻 |
-| | | **主键** (code, trade_date) |
+| | | **主键** (code, trade_date)——两市 ETF 代码段不重叠（沪 5 开头、深 1 开头） |
 
 ## 龙虎榜
 
@@ -1273,7 +1276,7 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| dataset | TEXT | `Lhb` / `MarginDetail` / `EtfShare`（将来别的日频表直接加） |
+| dataset | TEXT | `Lhb` / `MarginDetail` / `EtfShare`（沪市 ETF 份额）/ `EtfShareSz`（深市）（将来别的日频表直接加） |
 | day | TEXT | 交易日 `yyyy-MM-dd` |
 | confirmed_at | TEXT | 确认时刻 |
 | | | **主键** (dataset, day) |

@@ -255,13 +255,13 @@ public abstract partial class BarFetchTaskBase
              + "。⚠ 还在的**不会**进「数据源确实没有」白名单——那是给停牌用的，"
              + "值错进去等于发永久豁免，所以它会一直报到真修好为止。");
 
-        // 沪市 ETF 的「多口径不一致」重抓修不好（2026-09-23 查实）：腾讯的 ETF 换手率口径不统一，
+        // ETF 的「多口径不一致」重抓修不好（2026-09-23 查实）：腾讯的 ETF 换手率口径不统一，
         // 有时 ÷前一交易日份额、有时 ÷当天份额，同一天两个接口还可能各用一种，同一时刻重抓还是那个数。
         // 待办照常留着报警，这里只指一条能修的路。
-        int sseEtfInconsistent = still.Count(r => r.EffectiveReason == AuditFindingKind.Inconsistent
-                                                  && EtfTurnoverRule.LooksLikeSseEtfBarCode(r.Code));
-        if (sseEtfInconsistent > 0)
-            Report($"　其中 {sseEtfInconsistent} 段是沪市 ETF 的多口径不一致——多半只是换手率对不上"
+        int etfInconsistent = still.Count(r => r.EffectiveReason == AuditFindingKind.Inconsistent
+                                               && EtfTurnoverRule.LooksLikeEtfBarCode(r.Code));
+        if (etfInconsistent > 0)
+            Report($"　其中 {etfInconsistent} 段是 ETF 的多口径不一致——多半只是换手率对不上"
                  + "（腾讯两个接口那天一个按前一交易日份额、一个按当天份额算），重新拉取修不好，"
                  + "请跑【ETF换手率校正】（先「日常增量」看报告，再「彻底重查」写回）。");
         BacklogParts.Add($"值问题 修好 {fixedTotal}/{ranges.Count} 段");

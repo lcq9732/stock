@@ -28,6 +28,13 @@ public class SseEtfShareProvider : IEtfShareProvider
     private readonly RateLimiter _rateLimiter;
     private readonly HttpClient _http;
 
+    public string Market => "sh";
+
+    /// <summary>2026-09-23 实测：2011-12-30 空、2012-01-04 有 23 只。</summary>
+    public DateOnly FirstDay => new(2012, 1, 4);
+
+    public EtfShareBatch Batch => EtfShareBatch.Day;
+
     public event Action<string>? OnStatus
     {
         add => _rateLimiter.OnStatus += value;
@@ -51,8 +58,13 @@ public class SseEtfShareProvider : IEtfShareProvider
         return new HttpClientHandler { Proxy = proxy, UseProxy = true, UseDefaultCredentials = true };
     }
 
-    public Task<List<EtfShareRow>> GetDayAsync(DateOnly day, CancellationToken ct = default)
-        => _rateLimiter.RunAsync(() => FetchAsync(day, ct), ct);
+    public Task<List<EtfShareRow>> GetAsync(DateOnly from, DateOnly to, CancellationToken ct = default)
+    {
+        // 这个接口一次只给一天（STAT_DATE 是单个日期）。给区间就是调用方把 Batch 用错了，别静默只取第一天。
+        if (from != to)
+            throw new ArgumentException($"上交所 ETF 份额一次只能取一天，收到 {from:yyyy-MM-dd} ~ {to:yyyy-MM-dd}");
+        return _rateLimiter.RunAsync(() => FetchAsync(from, ct), ct);
+    }
 
     private async Task<List<EtfShareRow>> FetchAsync(DateOnly day, CancellationToken ct)
     {
@@ -124,7 +136,7 @@ public class SseEtfShareProvider : IEtfShareProvider
                 if (!double.TryParse(Str(item, "TOT_VOL"), NumberStyles.Float, CultureInfo.InvariantCulture, out var wan)
                     || wan <= 0)
                     continue;
-                rows.Add(new EtfShareRow(code, day, wan));
+                rows.Add(new EtfShareRow("sh", code, day, wan));
             }
             return rows;
         }

@@ -5,7 +5,7 @@ using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Data.Sqlite;
 
-/// <summary>上交所 ETF 份额的本地存取（EtfShare 表）。表结构见 <see cref="SqliteSchema"/>。</summary>
+/// <summary>沪深交易所 ETF 份额的本地存取（EtfShare 表）。表结构见 <see cref="SqliteSchema"/>。</summary>
 public class SqliteEtfShareRepository : IEtfShareRepository
 {
     private const string DateFormat = "yyyy-MM-dd";
@@ -37,11 +37,12 @@ public class SqliteEtfShareRepository : IEtfShareRepository
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO EtfShare (code, trade_date, shares_wan, fetched_at)
-            VALUES ($code, $day, $wan, $at)
+            INSERT INTO EtfShare (market, code, trade_date, shares_wan, fetched_at)
+            VALUES ($market, $code, $day, $wan, $at)
             ON CONFLICT(code, trade_date) DO UPDATE SET
-                shares_wan = excluded.shares_wan, fetched_at = excluded.fetched_at;
+                market = excluded.market, shares_wan = excluded.shares_wan, fetched_at = excluded.fetched_at;
             """;
+        var pMarket = cmd.Parameters.Add("$market", SqliteType.Text);
         var pCode = cmd.Parameters.Add("$code", SqliteType.Text);
         var pDay = cmd.Parameters.Add("$day", SqliteType.Text);
         var pWan = cmd.Parameters.Add("$wan", SqliteType.Real);
@@ -49,6 +50,7 @@ public class SqliteEtfShareRepository : IEtfShareRepository
 
         foreach (var r in rows)
         {
+            pMarket.Value = r.Market;
             pCode.Value = r.Code;
             pDay.Value = r.TradeDate.ToString(DateFormat, CultureInfo.InvariantCulture);
             pWan.Value = r.SharesWan;
@@ -57,11 +59,12 @@ public class SqliteEtfShareRepository : IEtfShareRepository
         tx.Commit();
     }
 
-    public HashSet<DateOnly> GetDays()
+    public HashSet<DateOnly> GetDays(string market)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT DISTINCT trade_date FROM EtfShare;";
+        cmd.CommandText = "SELECT DISTINCT trade_date FROM EtfShare WHERE market = $market;";
+        cmd.Parameters.AddWithValue("$market", market);
         var set = new HashSet<DateOnly>();
         using var r = cmd.ExecuteReader();
         while (r.Read())
@@ -71,22 +74,23 @@ public class SqliteEtfShareRepository : IEtfShareRepository
         return set;
     }
 
-    public List<string> GetCodes()
+    public List<(string Market, string Code)> GetCodes()
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT DISTINCT code FROM EtfShare ORDER BY code;";
-        var list = new List<string>();
+        cmd.CommandText = "SELECT DISTINCT market, code FROM EtfShare ORDER BY market, code;";
+        var list = new List<(string, string)>();
         using var r = cmd.ExecuteReader();
-        while (r.Read()) list.Add(r.GetString(0));
+        while (r.Read()) list.Add((r.GetString(0), r.GetString(1)));
         return list;
     }
 
-    public Dictionary<DateOnly, double> GetByCode(string code)
+    public Dictionary<DateOnly, double> GetByCode(string market, string code)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT trade_date, shares_wan FROM EtfShare WHERE code = $code;";
+        cmd.CommandText = "SELECT trade_date, shares_wan FROM EtfShare WHERE market = $market AND code = $code;";
+        cmd.Parameters.AddWithValue("$market", market);
         cmd.Parameters.AddWithValue("$code", code);
         var map = new Dictionary<DateOnly, double>();
         using var r = cmd.ExecuteReader();

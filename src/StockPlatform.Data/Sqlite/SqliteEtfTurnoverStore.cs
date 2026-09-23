@@ -47,16 +47,17 @@ public class SqliteEtfTurnoverStore
     }
 
     /// <summary>
-    /// 本地名册里的沪市 ETF（StockMeta.type='etf' 且存成 sh 前缀的）。
+    /// 本地名册里某个市场的 ETF（StockMeta.type='etf' 且存成该市场前缀的，如 sh510150）。
     ///
-    /// 只用来**报数**：上交所份额表里没有的 ETF（货币 ETF 就不在那个接口里）这一项校正不了，
+    /// 只用来**报数**：交易所份额表里没有的 ETF（沪市的货币 ETF 就不在上交所那个接口里）这一项校正不了，
     /// 不报出来的话它们会安安静静地停在 0。前缀是新浪 ETF 列表原样给的，不是按代码规则猜的。
     /// </summary>
-    public List<string> ListShanghaiEtfCodes()
+    public List<string> ListEtfCodes(string market)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT code FROM StockMeta WHERE type = 'etf' AND code LIKE 'sh%' ORDER BY code;";
+        cmd.CommandText = "SELECT code FROM StockMeta WHERE type = 'etf' AND substr(code, 1, 2) = $market ORDER BY code;";
+        cmd.Parameters.AddWithValue("$market", market);
         var list = new List<string>();
         using var r = cmd.ExecuteReader();
         while (r.Read()) list.Add(r.GetString(0));

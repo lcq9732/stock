@@ -25,6 +25,8 @@ namespace StockPlatform.Tests;
 ///   ④ 没有前一交易日份额的行判不了，原样不动
 ///   ⑤ 上交所空响应：3 天以前的记进「确认没有」、下次不再问；近几天的不记
 ///   ⑥ 响应骨架不对要抛，不能当成空列表（否则那一天被永久判成没有数据）
+///   ⑦ 深市：深交所按月一个请求、导出单位是份（换算成万份）、Bar 代码是 sz + 代码
+///   ⑧ 最近 3 天的份额每轮都重抓（深交所 T 日晚间的值只是参考）
 ///
 /// 全部打在临时 SQLite 上（假仓储验不到真 SQL），一行都不碰 current.sqlite。
 /// </summary>
@@ -33,6 +35,12 @@ public class EtfTurnoverRecalcTests : IDisposable
     private static readonly DateOnly D0927 = new(2024, 9, 27);
     private static readonly DateOnly D0930 = new(2024, 9, 30);
     private static readonly DateOnly D1008 = new(2024, 10, 8);
+
+    /// <summary>
+    /// 深交所「基金规模·ETF」2024-09-30 的真实 xlsx 导出，裁成表头 + 3 行（159001 / 159915 / 159919），
+    /// 原样保留 inlineStr 单元格和 dimension="A1"——openpyxl 就栽在这上面，所以要拿真文件测。
+    /// </summary>
+    private const string SzseSampleXlsxBase64 = "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";
 
     private readonly string _dbPath;
     private readonly SqliteBarRepository _bars;
@@ -98,8 +106,8 @@ public class EtfTurnoverRecalcTests : IDisposable
         var task = NewTask(provider);
         await task.RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
 
-        Assert.Equal(3, _shares.GetDays().Count);
-        var r = task.LastResult!;
+        Assert.Equal(3, _shares.GetDays("sh").Count);
+        var r = Sh(task);
         Assert.Equal(2, r.Wrong);          // 不复权 + 回测序列（它的换手率抄自不复权）
         Assert.Equal(0, r.Written);
         Assert.Equal(48.38, ReadTurnover("sh510150", Granularity.DayRaw, D0930));   // 没动
@@ -115,7 +123,7 @@ public class EtfTurnoverRecalcTests : IDisposable
 
         await task.RunAsync(new TaskRunArgs(FetchMode.Thorough), CancellationToken.None);
 
-        Assert.Equal(2, task.LastResult!.Written);   // 不复权 + 回测序列
+        Assert.Equal(2, Sh(task).Written);   // 不复权 + 回测序列
         Assert.Equal(83.63, ReadTurnover("sh510150", Granularity.DayAdj, D0930));
         Assert.Equal(83.63, ReadTurnover("sh510150", Granularity.DayRaw, D0930));
         Assert.Equal(83.63, ReadTurnover("sh510150", Granularity.Day, D0930));
@@ -136,7 +144,7 @@ public class EtfTurnoverRecalcTests : IDisposable
 
         await task.RunAsync(new TaskRunArgs(FetchMode.Thorough), CancellationToken.None);
 
-        Assert.Equal(3, task.LastResult!.Missing);   // 09-30 三个口径；10-08 没成交不算
+        Assert.Equal(3, Sh(task).Missing);   // 09-30 三个口径；10-08 没成交不算
         Assert.Equal(83.63, ReadTurnover("sh510150", Granularity.Day, D0930));
         Assert.Equal(83.63, ReadTurnover("sh510150", Granularity.DayRaw, D0930));
         Assert.Equal(0, ReadTurnover("sh510150", Granularity.Day, D1008));
@@ -151,15 +159,15 @@ public class EtfTurnoverRecalcTests : IDisposable
 
         await task.RunAsync(new TaskRunArgs(FetchMode.Thorough), CancellationToken.None);
 
-        Assert.Equal(3, task.LastResult!.UnjudgeableBefore2012 + task.LastResult.UnjudgeableOther);
-        Assert.Equal(0, task.LastResult.Written);
+        Assert.Equal(3, Sh(task).UnjudgeableBeforeFirstDay + Sh(task).UnjudgeableOther);
+        Assert.Equal(0, Sh(task).Written);
         Assert.Equal(0, ReadTurnover("sh510150", Granularity.DayRaw, D0927));
     }
 
     [Fact]
     public async Task 已有份额的日子不再请求()
     {
-        _shares.Upsert([new EtfShareRow("510150", D0927, 202_317.86)]);
+        _shares.Upsert([new EtfShareRow("sh", "510150", D0927, 202_317.86)]);
         var provider = new FakeProvider().With(D0930, ("510150", 349_717.86)).With(D1008, ("510150", 1));
 
         await NewTask(provider).RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
@@ -193,7 +201,7 @@ public class EtfTurnoverRecalcTests : IDisposable
     }
 
     [Fact]
-    public async Task 二零一二年以前的日子一个请求都不发()
+    public async Task 份额源开始有数据以前的日子一个请求都不发()
     {
         var old = new DateOnly(2011, 12, 30);
         _days.Upsert([(old, "szse")]);
@@ -213,8 +221,74 @@ public class EtfTurnoverRecalcTests : IDisposable
 
         await task.RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
 
-        Assert.Equal(["sh511620"], task.LastResult!.NotInSseList);
+        Assert.Equal(["sh511620"], Sh(task).NotInExchangeList);
     }
+
+    [Fact]
+    public async Task 深市_按月请求_Bar代码是sz加代码_补上空值()
+    {
+        // 159915 创业板ETF：2024-09-30 份额 4,256,845.4936 万份（深交所导出 42,568,454,936 份）
+        SaveEtfBars(D1008, volume: 5_000_000, dayTurnover: 0, rawTurnover: 0, code: "sz159915");
+        var sz = new FakeProvider("sz", new DateOnly(2016, 9, 26), EtfShareBatch.Month)
+            .With(D0927, ("159915", 4_200_000))
+            .With(D0930, ("159915", 4_256_845.4936));
+        var task = NewTask(new FakeProvider(), sz);
+
+        await task.RunAsync(new TaskRunArgs(FetchMode.Thorough), CancellationToken.None);
+
+        // 三天在 2024-09 / 10 两个月里：两个请求，而不是三个
+        Assert.Equal([(D0927, D0930), (D1008, D1008)], sz.Requests);
+        Assert.Equal(3, task.LastResult!["sz"].Missing);
+        Assert.Equal(Math.Round(5_000_000 / 4_256_845.4936, 2),
+                     ReadTurnover("sz159915", Granularity.DayRaw, D1008));
+    }
+
+    [Fact]
+    public void 请求规划_按月合并_最近三天有了也重抓()
+    {
+        var today = new DateOnly(2026, 9, 23);
+        var cal = new[] { new DateOnly(2026, 8, 28), new DateOnly(2026, 8, 31), new DateOnly(2026, 9, 1),
+                          new DateOnly(2026, 9, 21), new DateOnly(2026, 9, 22), new DateOnly(2026, 9, 23) };
+        var have = cal.ToHashSet();   // 全都有了
+        var plan = EtfShareFetchPlan.Build(cal, have, new HashSet<DateOnly>(), new DateOnly(2016, 9, 26),
+                                           today, EtfShareBatch.Month);
+
+        // 只有最近 3 天（09-20 之后）要重抓，合成一个 9 月的请求
+        var req = Assert.Single(plan);
+        Assert.Equal([new DateOnly(2026, 9, 21), new DateOnly(2026, 9, 22), new DateOnly(2026, 9, 23)], req.Days);
+    }
+
+    [Fact]
+    public void 请求规划_按天_确认没有的不再问()
+    {
+        var today = new DateOnly(2026, 9, 23);
+        var cal = new[] { D0927, D0930, D1008 };
+        var plan = EtfShareFetchPlan.Build(cal, new HashSet<DateOnly>(), new HashSet<DateOnly> { D0930 },
+                                           new DateOnly(2012, 1, 4), today, EtfShareBatch.Day);
+        Assert.Equal([D0927, D1008], plan.Select(p => p.From));
+    }
+
+    [Fact]
+    public void 解析深交所_真实导出样本_单位份换算成万份()
+    {
+        var rows = SzseEtfShareProvider.Parse(Convert.FromBase64String(SzseSampleXlsxBase64), D0930, D0930);
+        Assert.Equal(3, rows.Count);
+        var cyb = rows.Single(r => r.Code == "159915");
+        Assert.Equal("sz", cyb.Market);
+        Assert.Equal("sz159915", cyb.BarCode);
+        Assert.Equal(4_256_845.4936, cyb.SharesWan, 6);
+        Assert.Contains(rows, r => r.Code == "159001");   // 货币 ETF 深交所是列的
+    }
+
+    [Fact]
+    public void 解析深交所_返回区间外的日子要抛()
+        => Assert.Throws<InvalidOperationException>(() => SzseEtfShareProvider.Parse(
+            Convert.FromBase64String(SzseSampleXlsxBase64), D1008, D1008));
+
+    [Fact]
+    public void 解析深交所_不是xlsx要抛_不能当成空()
+        => Assert.Throws<RateLimitedException>(() => SzseEtfShareProvider.Parse(
+            System.Text.Encoding.UTF8.GetBytes("<html>请稍后再试</html>"), D0930, D0930));
 
     // ─────────────────── 解析（不联网）───────────────────
 
@@ -229,7 +303,7 @@ public class EtfTurnoverRecalcTests : IDisposable
             """;
         var rows = SseEtfShareProvider.Parse(json, D0930);
         Assert.Equal(2, rows.Count);
-        Assert.Equal(new EtfShareRow("510150", D0930, 349_717.86), rows[0]);
+        Assert.Equal(new EtfShareRow("sh", "510150", D0930, 349_717.86), rows[0]);
     }
 
     [Fact]
@@ -254,11 +328,14 @@ public class EtfTurnoverRecalcTests : IDisposable
 
     // ─────────────────── helpers ───────────────────
 
-    private EtfTurnoverRecalcTask NewTask(IEtfShareProvider provider) =>
-        new(_shares, provider, _days, _noData, new SqliteEtfTurnoverStore(_dbPath));
+    private EtfTurnoverRecalcTask NewTask(params IEtfShareProvider[] providers) =>
+        new(_shares, providers, _days, _noData, new SqliteEtfTurnoverStore(_dbPath));
+
+    private static EtfTurnoverAuditResult Sh(EtfTurnoverRecalcTask task) => task.LastResult!["sh"];
 
     /// <summary>前复权、不复权、回测序列三个口径各一行，volume/amount/OHLC 相同，只有换手率按参数给。</summary>
-    private void SaveEtfBars(DateOnly day, double volume, double dayTurnover, double rawTurnover)
+    private void SaveEtfBars(DateOnly day, double volume, double dayTurnover, double rawTurnover,
+                             string code = "sh510150")
     {
         foreach (var (g, t) in new[] { (Granularity.Day, dayTurnover), (Granularity.DayRaw, rawTurnover),
                                        (Granularity.DayAdj, rawTurnover) })
@@ -266,7 +343,7 @@ public class EtfTurnoverRecalcTests : IDisposable
             {
                 new Bar
                 {
-                    Code = "sh510150", Granularity = g, PeriodStart = day.ToDateTime(TimeOnly.MinValue),
+                    Code = code, Granularity = g, PeriodStart = day.ToDateTime(TimeOnly.MinValue),
                     Open = 0.602, Close = 0.589, High = 0.604, Low = 0.532,
                     Volume = volume, Amount = 956_041_900, Turnover = t,
                 },
@@ -309,10 +386,15 @@ public class EtfTurnoverRecalcTests : IDisposable
         return (r.GetDouble(0), r.GetDouble(1), r.GetDouble(2));
     }
 
-    private sealed class FakeProvider : IEtfShareProvider
+    private sealed class FakeProvider(string market = "sh", DateOnly? firstDay = null,
+                                      EtfShareBatch batch = EtfShareBatch.Day) : IEtfShareProvider
     {
         private readonly Dictionary<DateOnly, List<EtfShareRow>> _byDay = new();
         public List<DateOnly> Asked { get; } = [];
+        public List<(DateOnly, DateOnly)> Requests { get; } = [];
+        public string Market => market;
+        public DateOnly FirstDay => firstDay ?? new DateOnly(2012, 1, 4);
+        public EtfShareBatch Batch => batch;
 
 #pragma warning disable CS0067   // 假 provider 不播报状态
         public event Action<string>? OnStatus;
@@ -320,14 +402,20 @@ public class EtfTurnoverRecalcTests : IDisposable
 
         public FakeProvider With(DateOnly day, params (string Code, double Wan)[] rows)
         {
-            _byDay[day] = rows.Select(r => new EtfShareRow(r.Code, day, r.Wan)).ToList();
+            _byDay[day] = rows.Select(r => new EtfShareRow(market, r.Code, day, r.Wan)).ToList();
             return this;
         }
 
-        public Task<List<EtfShareRow>> GetDayAsync(DateOnly day, CancellationToken ct = default)
+        public Task<List<EtfShareRow>> GetAsync(DateOnly from, DateOnly to, CancellationToken ct = default)
         {
-            Asked.Add(day);
-            return Task.FromResult(_byDay.TryGetValue(day, out var rows) ? rows : []);
+            Requests.Add((from, to));
+            var rows = new List<EtfShareRow>();
+            for (var d = from; d <= to; d = d.AddDays(1))
+            {
+                Asked.Add(d);
+                if (_byDay.TryGetValue(d, out var r)) rows.AddRange(r);
+            }
+            return Task.FromResult(rows);
         }
     }
 }
