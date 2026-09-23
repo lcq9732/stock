@@ -234,7 +234,7 @@
                                       IsEnabled="{Binding CanEnable}" VerticalAlignment="Center"
                                       ToolTip="整组开关：没勾则整组不跑，哪怕组里的项各自勾着。" />
                             <TextBox Text="{Binding Name, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
-                                     Width="110" Margin="6,0,0,0" FontWeight="Bold"
+                                     MinWidth="40" Margin="6,0,0,0" FontWeight="Bold"
                                      BorderThickness="0" Background="Transparent"
                                      VerticalContentAlignment="Center" ToolTip="组名，随便改。只用于显示，不影响执行。" />
                             <ComboBox ItemsSource="{Binding RepeatOptions}" DisplayMemberPath="Text"
@@ -270,8 +270,19 @@
                                        Width="52" Margin="4,0,0,0" VerticalContentAlignment="Center"
                                        ToolTip="HH:mm，整组的开始时刻。留空=接着上一组跑。&#10;⚠ 语义是「不早于这个点才开始」，不是「准时开始」：上一组超时的话这一组顺延，不会抢跑。&#10;要让某一项更晚才开始，把它单独拆成一组——组里是串行跑的，给单项设时刻不起作用。" />
                             </StackPanel>
+                            <!-- 空串时整块折叠，免得白占 12px 边距（定时组已有「不早于」+合计时长，不再显示时间段）。 -->
                             <TextBlock Text="{Binding TimelineText}" VerticalAlignment="Center" Margin="12,0,0,0"
-                                       Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                                       Foreground="{DynamicResource Theme.Foreground.Muted}">
+                              <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                  <Style.Triggers>
+                                    <Trigger Property="Text" Value="">
+                                      <Setter Property="Visibility" Value="Collapsed" />
+                                    </Trigger>
+                                  </Style.Triggers>
+                                </Style>
+                              </TextBlock.Style>
+                            </TextBlock>
                             <TextBlock Text="{Binding SummaryText}" VerticalAlignment="Center" Margin="12,0,0,0"
                                        Foreground="{DynamicResource Theme.Foreground.Subtle}" />
                             <TextBlock Text="{Binding ProgressText}" VerticalAlignment="Center" Margin="12,0,0,0"

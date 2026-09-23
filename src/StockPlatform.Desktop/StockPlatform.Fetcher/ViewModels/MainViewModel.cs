@@ -1595,7 +1595,8 @@ public class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// 组头那段时间轴（2026-09-02）："18:00 → 21:12"。
+    /// 组头那段时间轴（2026-09-02）：原先定时组显示"18:00 → 21:12"，2026-09-23 起定时组留空，
+    /// 只剩空闲组/手动组/今天不到期的那几句说明。
     /// 算法跟子项那条一样是**顺序累加**，只是取的是每组第一项的开始和最后一项的结束；
     /// 折叠着的组光看这一行就知道它占掉晚上哪一段。
     /// </summary>
@@ -1623,9 +1624,10 @@ public class MainViewModel : INotifyPropertyChanged
                 .Sum(i => i.Model.EffectiveEstimate.TotalSeconds));
             if (total <= TimeSpan.Zero) { g.TimelineText = ""; continue; }
 
-            var end = start + total;
-            g.TimelineText = $"{start:HH:mm} → {end:HH:mm}";
-            cursor = end;
+            // 2026-09-23 起不再显示"18:00 → 02:19"：组头已有「不早于」和合计时长，时间段重复。
+            // cursor 仍往后推，保持跟子项时间轴同一套累加。
+            g.TimelineText = "";
+            cursor = start + total;
         }
     }
 
