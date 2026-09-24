@@ -24,9 +24,13 @@ namespace StockPlatform.Tasks;
 /// 混在一项里还有个副作用：push2his 被网关拦掉之后，这一项每轮都带一堆错误，
 /// "今天的快照到底抓没抓到"反而被淹没了。拆开之后两项各自成败分明。
 ///
-/// ════ 一批＝一整天 ════
-/// 快照是"一整天要么有要么没有"的事，所以整批 yield 一次：中断就整批不落库、下次重来，
-/// 不会留下半个市场的当天数据（那种残缺事后完全看不出来）。
+/// ════ 一批＝一页（2026-09-24 改）════
+/// 原来是"一批＝一整天"：整轮攒在内存里、最后 yield 一次，中断就整批不落库。跨轮续抓
+/// （09-21）之后这个设计就不对了——一轮拿到的页本来就是有效数据，可一按停止全扔，
+/// 09-24 16:05 那轮拿到约 30 页、一行没进库。现在每拿到一页就 yield 一页、落一次库、记一次页进度，
+/// 停止只丢正在抓的那一页。
+/// "别留下半个市场的当天数据"仍然成立：一天齐没齐由收尾时查库（<see cref="SqliteMoneyFlowDayAudit"/>）
+/// 和缺页清单判，没齐就整项失败、排自动重试。
 ///
 /// ════ 跑完必须回查库（2026-09-16 用户要求）════
 /// 抓取侧的对账（服务端自报 total − 停牌 − 实收）只证明"这一轮请求收全了"，证明不了
@@ -51,8 +55,14 @@ public sealed class MoneyFlowSnapshotTask(
     private int _rows;
     private DateTime? _day;
 
-    /// <summary>这一轮的抓取结果——落库之后要拿它把"哪些页到手了"记进进度表。</summary>
+    /// <summary>这一轮的整轮结果（缺页、对账），正常走完翻页后才有。</summary>
     private MoneyFlowSnapshot? _snap;
+
+    /// <summary>刚 yield 出去的那一页——骨架紧接着调 <see cref="SaveBatchAsync"/>，那里要拿它记页进度。</summary>
+    private MoneyFlowSnapshotPageRows? _page;
+
+    /// <summary>这一轮翻页途中的累计状态（行情时间、服务端总数）。</summary>
+    private MoneyFlowSnapshotRun? _run;
 
     protected override async IAsyncEnumerable<IReadOnlyList<NetInflowDetail>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
@@ -76,7 +86,9 @@ public sealed class MoneyFlowSnapshotTask(
         void Forward(string s) => Report(s);
         snapshot.OnStatus += Forward;
 
-        MoneyFlowSnapshot? snap;
+        _snap = null;
+        _page = null;
+        var run = _run = new MoneyFlowSnapshotRun();
         try
         {
             // 浏览器通道先起来（建 WebView2 + 打开东财页面拿 Cookie，要几秒）。
@@ -93,25 +105,45 @@ public sealed class MoneyFlowSnapshotTask(
             //
             // 跨轮续抓：哪些页已经在手，按**数据自己报的交易日**问库（不是按今天、也不是按
             // 本地交易日历——日历滞后的话会跳过今天没抓过的页，静默丢一整片数据）。
-            snap = await snapshot.FetchAllAsync(ProgressSink, repository.GetSnapshotPages, ct);
+            //
+            // 逐页交出、逐页落库（2026-09-24）：停止时已到手的页不丢，见类注释「一批＝一页」。
+            await foreach (var page in snapshot.FetchPagesAsync(run, ProgressSink, repository.GetSnapshotPages, ct))
+            {
+                // 盘中判据第 1 页回来就定了——不必像原来那样把 60 页抓完再整批扔掉。
+                if (run.IsIntraday)
+                {
+                    var reason = $"分档资金流快照要等收盘清算（行情时间 {run.QuoteTime:M-d HH:mm}）";
+                    Report($"⚠ {reason}——这会儿拿到的是半天的资金流，不入库。收盘后再跑这一项。");
+                    _skipped = reason;
+                    yield break;
+                }
+
+                _day = run.TradeDate;
+
+                // 整页都没有当天的行（全是停牌/残留旧值）：骨架不存空批，页进度只能在这儿记，
+                // 否则这一页每轮都会被当成"缺页"重抓、这天永远凑不齐。
+                if (page.Rows.Count == 0)
+                {
+                    if (_day is { } d0)
+                        repository.MarkSnapshotPages(d0, new Dictionary<int, int> { [page.PageNo] = page.RowsGot },
+                                                     run.QuoteTime ?? DateTime.Now);
+                    continue;
+                }
+
+                _page = page;
+                yield return page.Rows;
+            }
         }
         finally
         {
             snapshot.OnStatus -= Forward;
         }
 
+        var snap = run.ToSnapshot();
         if (snap.TradeDate is not { } day || snap.Rows.Count == 0)
             throw new InvalidOperationException(
                 "分档资金流快照一行都没拿到（接口变了或被限流）——这一项漏一天就永久补不回来了，"
                 + "请看上面的日志确认 push2delay 通不通。");
-
-        if (snap.IsIntraday)
-        {
-            var reason = $"分档资金流快照要等收盘清算（行情时间 {snap.QuoteTime:M-d HH:mm}）";
-            Report($"⚠ {reason}——这会儿拿到的是半天的资金流，不入库。收盘后再跑这一项。");
-            _skipped = reason;
-            yield break;
-        }
 
         _day = day;
         _snap = snap;
@@ -147,29 +179,32 @@ public sealed class MoneyFlowSnapshotTask(
                 _errors.Add(msg);
             }
         }
-
-        yield return snap.Rows;
     }
 
     /// <summary>
-    /// 一轮＝这一轮抓到的那些页，所以就落这一次库。
+    /// 一批＝一页，落一次库、记这一页的进度。
     ///
     /// ⚠ 落库**之后**才记页号进度（2026-09-21）。顺序反了的话，写库失败时进度里已经记着
-    /// "这些页抓过了"，下一轮就会跳过它们——那些票当天的数据从此谁也不会再去补。
+    /// "这一页抓过了"，下一轮就会跳过它——那些票当天的数据从此谁也不会再去补。
     /// </summary>
     protected override Task SaveBatchAsync(IReadOnlyList<NetInflowDetail> batch, CancellationToken ct)
     {
         _rows += repository.Upsert(batch);
 
-        if (_day is { } day && _snap is { } snap && snap.RowsByPage.Count > 0)
-            repository.MarkSnapshotPages(day, snap.RowsByPage, snap.QuoteTime ?? DateTime.Now);
+        if (_day is { } day && _page is { } page)
+            repository.MarkSnapshotPages(day, new Dictionary<int, int> { [page.PageNo] = page.RowsGot },
+                                         _run?.QuoteTime ?? DateTime.Now);
 
         return Task.CompletedTask;
     }
 
     protected override Task OnStoppedAsync(TaskRunStats stats)
     {
-        Report("分档资金流快照中断。快照是整批写的，中断这一批不落库，下次重来即可。");
+        var total = _run is { Total: > 0 } r
+            ? $"，全市场约 {(int)Math.Ceiling(r.Total / (double)EastMoneyMoneyFlowSnapshotProvider.PageSize)} 页"
+            : "";
+        Report($"分档资金流快照已停止：这一轮已落库 {stats.Batches} 页 / {stats.Items} 行{total}。"
+             + "页进度已记，下一轮只补缺的页。");
         return Task.CompletedTask;
     }
 

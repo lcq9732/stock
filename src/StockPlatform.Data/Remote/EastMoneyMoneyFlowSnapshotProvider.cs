@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net.Http;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
@@ -196,13 +197,34 @@ public class EastMoneyMoneyFlowSnapshotProvider
         Func<DateTime, IReadOnlyCollection<int>>? pagesAlreadyHave = null,
         CancellationToken ct = default)
     {
+        var run = new MoneyFlowSnapshotRun();
+        await foreach (var _ in FetchPagesAsync(run, progress, pagesAlreadyHave, ct)) { }
+        return run.ToSnapshot();
+    }
+
+    /// <summary>
+    /// 跟 <see cref="FetchAllAsync"/> 同一套翻页，只是**每拿到一页就交出去一页**（2026-09-24）。
+    ///
+    /// 为什么要逐页交：跨轮续抓（09-21）之后，一轮里已经拿到的页是有效数据，可整轮攒在内存里
+    /// 等最后一次性落库的话，中途一按停止就全扔了——09-24 16:05 那轮拿到约 30 页、
+    /// 停止后一行都没进库，下一轮又从第 1 页抓起。逐页交出去，调用方每页落一次库、记一次进度，
+    /// 停止时只丢正在抓的那一页。
+    ///
+    /// 翻页途中的累计状态（总数、停牌数、缺页、跳过页）写在 <paramref name="run"/> 里，
+    /// 枚举正常走完后用 <see cref="MoneyFlowSnapshotRun.ToSnapshot"/> 拿整轮结果。
+    ///
+    /// 交出去的行已经按"目前为止最新的行情时间"剔掉了日期对不上的、并把 FetchedAt 写成行情时间
+    /// （理由见 <see cref="MoneyFlowSnapshotRun.ToSnapshot"/>）。第 1 页一定最先抓，
+    /// 它的时间戳就是收盘清算那一版，所以逐页判跟整批判结果一样。
+    /// </summary>
+    public async IAsyncEnumerable<MoneyFlowSnapshotPageRows> FetchPagesAsync(
+        MoneyFlowSnapshotRun run,
+        IProgress<string>? progress = null,
+        Func<DateTime, IReadOnlyCollection<int>>? pagesAlreadyHave = null,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
         var fetchedAt = DateTime.Now;
-        var rows = new Dictionary<string, NetInflowDetail>(StringComparer.Ordinal);
-        var rowsByPage = new Dictionary<int, int>();
-        var missing = new List<int>();
-        int total = 0, suspended = 0, consecutiveCuts = 0;
-        DateTime? quoteTime = null;
-        IReadOnlyCollection<int> skip = [];
+        int consecutiveCuts = 0;
 
         // 总页数要等第一页回来才知道（服务端自报 total）。在那之前用保险丝当上界：
         // 翻页判据万一失灵也不会无限打下去。
@@ -211,7 +233,7 @@ public class EastMoneyMoneyFlowSnapshotProvider
         for (int pn = 1; pn <= lastPage; pn++)
         {
             ct.ThrowIfCancellationRequested();
-            if (skip.Contains(pn)) continue;                 // 别处/上一轮已经拿到了
+            if (run.Skip.Contains(pn)) continue;             // 别处/上一轮已经拿到了
 
             var url = $"https://{_host}/api/qt/clist/get?fid=f12&po=0&pz={PageSize}&pn={pn}"
                     + $"&np=1&fltt=2&invt=2&fs={MarketFilter}&fields={Fields}";
@@ -235,7 +257,7 @@ public class EastMoneyMoneyFlowSnapshotProvider
 
             if (page == null)
             {
-                missing.Add(pn);
+                run.Missing.Add(pn);
                 consecutiveCuts++;
                 progress?.Report($"　第 {pn} 页没拿到（{why}）。");
                 if (consecutiveCuts >= GiveUpAfterConsecutiveCuts)
@@ -245,11 +267,11 @@ public class EastMoneyMoneyFlowSnapshotProvider
                     // ⚠ total 还不知道时（第一页就被切）**不要把剩下的页号编出来**：那时 lastPage
                     //   还是保险丝的 200，会报出"缺 200 页"这种吓人又没意义的数字（实际只有 60 页）。
                     //   这一轮本来就一页都没拿到，缺多少页下一轮问服务端就知道了。
-                    if (total > 0)
+                    if (run.Total > 0)
                         for (int rest = pn + 1; rest <= lastPage; rest++)
-                            if (!skip.Contains(rest)) missing.Add(rest);
+                            if (!run.Skip.Contains(rest)) run.Missing.Add(rest);
                     progress?.Report($"连着 {consecutiveCuts} 页没拿到，这一轮到此为止"
-                                   + $"（已拿 {rowsByPage.Count} 页 / {rows.Count} 只，缺 {missing.Count} 页）。");
+                                   + $"（已拿 {run.PagesGot} 页 / {run.Rows.Count} 只，缺 {run.Missing.Count} 页）。");
                     break;
                 }
                 continue;
@@ -259,60 +281,43 @@ public class EastMoneyMoneyFlowSnapshotProvider
 
             // 交易日定下来了（第一页回来那一刻）→ 这才问得了"这一天已经抓过哪些页"。
             // 只问一次：后面每页都问纯属浪费，而且中途换答案会让缺页清单前后不一致。
-            if (quoteTime == null && page.QuoteTime is { } first && pagesAlreadyHave != null)
+            if (run.QuoteTime == null && page.QuoteTime is { } first && pagesAlreadyHave != null)
             {
-                skip = pagesAlreadyHave(first.Date);
-                if (skip.Count > 0)
-                    progress?.Report($"　{first:MM-dd} 上几轮已抓到 {skip.Count} 页，这一轮跳过它们。");
+                run.Skip = pagesAlreadyHave(first.Date);
+                if (run.Skip.Count > 0)
+                    progress?.Report($"　{first:MM-dd} 上几轮已抓到 {run.Skip.Count} 页，这一轮跳过它们。");
             }
 
             if (page.Total > 0)
             {
-                total = page.Total;
+                run.Total = page.Total;
                 // 知道总数之后把上界收到真实页数——保险丝那 200 页只是兜底，
                 // 拿它当"缺页清单"的上界会凭空多出 140 个根本不存在的页。
-                lastPage = (int)Math.Ceiling(total / (double)PageSize);
+                lastPage = (int)Math.Ceiling(run.Total / (double)PageSize);
             }
-            suspended += page.Suspended;
-            if (page.QuoteTime is { } qt && (quoteTime == null || qt > quoteTime)) quoteTime = qt;
+            run.Suspended += page.Suspended;
+            if (page.QuoteTime is { } qt && (run.QuoteTime == null || qt > run.QuoteTime)) run.QuoteTime = qt;
 
-            int before = rows.Count;
-            foreach (var r in page.Rows) rows[r.Code] = r;
+            int before = run.Rows.Count;
+            foreach (var r in page.Rows) run.Rows[r.Code] = r;
 
             // 翻过头了：空 diff，或者**又把上一页还回来**（分页参数没被理会时就是这样，
             // 实测东财这类接口出过）。只看 Rows.Count==0 的话后一种会一路打到保险丝。
-            if (rows.Count == before && page.Suspended == 0) break;
+            if (run.Rows.Count == before && page.Suspended == 0) break;
 
-            rowsByPage[pn] = page.Rows.Count;
+            run.RowsByPage[pn] = page.Rows.Count;
             if (pn % 20 == 0)
-                progress?.Report($"分档资金流快照：已拉 {rowsByPage.Count} 页、{rows.Count} 只"
-                               + (total > 0 ? $"（全市场 {total} 只）" : "") + "。");
+                progress?.Report($"分档资金流快照：已拉 {run.PagesGot} 页、{run.Rows.Count} 只"
+                               + (run.Total > 0 ? $"（全市场 {run.Total} 只）" : "") + "。");
+
+            var kept = page.Rows;
+            if (run.QuoteTime is { } quote)
+            {
+                kept = page.Rows.Where(r => r.TradeDate.Date == quote.Date).ToList();
+                foreach (var r in kept) r.FetchedAt = quote;
+            }
+            yield return new MoneyFlowSnapshotPageRows(pn, page.Rows.Count, kept);
         }
-
-        var snapshot = new MoneyFlowSnapshot(quoteTime, total, suspended, rows.Values.ToList())
-        {
-            RowsByPage = rowsByPage,
-            MissingPages = missing,
-            SkippedPages = skip.Count,
-        };
-
-        // 交易日以整批**最新的** f124 为准，而不是每行各自的时间戳：停牌股的时间戳是当天 08:00、
-        // 正常股是收盘后的 15:3x，取最大才拿得到"这批属于哪个交易日"。
-        // 顺带把日期对不上的行剔掉——长期停牌但还残留着旧值的票，不能把旧值贴上今天的日期。
-        if (snapshot.TradeDate is { } day)
-            snapshot.Rows.RemoveAll(r => r.TradeDate.Date != day);
-
-        // ⚠ 整批的 FetchedAt 改成**行情时间戳**，不是"现在几点"（2026-09-06）。
-        // 这不是洁癖，是补历史那条路的排队判据要靠它：逐股通道按"最久没抓的先抓"排队，
-        // 而快照每天会把全市场每只票的 fetched_at 都刷一遍——要是刷成"现在"，
-        // 5900 只票的时间戳就全一样了，排序退化成原始顺序，于是每轮都从 000001 开始、
-        // 靠后的票永远轮不到（2026-09-04 已经踩过一次同样形状的坑）。
-        // 写成行情时间（如 09-04 15:34）之后，逐股抓过的票时间戳必然更新，
-        // MAX(fetched_at) 就还能区分"这只票被逐股补过历史"和"只有快照带过一行"。
-        if (snapshot.QuoteTime is { } quote)
-            foreach (var r in snapshot.Rows) r.FetchedAt = quote;
-
-        return snapshot;
     }
 
     /// <summary>
@@ -423,6 +428,63 @@ public class EastMoneyMoneyFlowSnapshotProvider
 /// <param name="Rows">这一页解析出来的行。</param>
 public sealed record MoneyFlowSnapshotPage(int Total, DateTime? QuoteTime, int Suspended,
                                              List<NetInflowDetail> Rows);
+
+/// <summary>逐页交出的一页：页号、这一页原始拿到几行（进度表记它）、剔过日期之后的行。</summary>
+public sealed record MoneyFlowSnapshotPageRows(int PageNo, int RowsGot, List<NetInflowDetail> Rows);
+
+/// <summary>
+/// <see cref="EastMoneyMoneyFlowSnapshotProvider.FetchPagesAsync"/> 翻页途中的累计状态。
+/// 逐页枚举带不出返回值，整轮的总数/缺页/跳过页只能放在这里。
+/// </summary>
+public sealed class MoneyFlowSnapshotRun
+{
+    public DateTime? QuoteTime { get; internal set; }
+    public int Total { get; internal set; }
+    public int Suspended { get; internal set; }
+    internal Dictionary<string, NetInflowDetail> Rows { get; } = new(StringComparer.Ordinal);
+    internal Dictionary<int, int> RowsByPage { get; } = [];
+    internal List<int> Missing { get; } = [];
+    internal IReadOnlyCollection<int> Skip { get; set; } = [];
+
+    /// <summary>这一轮到目前为止拿到的页数。</summary>
+    public int PagesGot => RowsByPage.Count;
+
+    /// <summary>这批数据属于哪个交易日；一页都没拿到时是 null。</summary>
+    public DateTime? TradeDate => QuoteTime?.Date;
+
+    /// <summary>行情时间还没到收盘清算——同 <see cref="MoneyFlowSnapshot.IsIntraday"/>。</summary>
+    public bool IsIntraday =>
+        QuoteTime is { } q && q.TimeOfDay < EastMoneyMoneyFlowSnapshotProvider.SettlementTime;
+
+    /// <summary>整轮结果。</summary>
+    public MoneyFlowSnapshot ToSnapshot()
+    {
+        var snapshot = new MoneyFlowSnapshot(QuoteTime, Total, Suspended, Rows.Values.ToList())
+        {
+            RowsByPage = new Dictionary<int, int>(RowsByPage),
+            MissingPages = Missing.ToList(),
+            SkippedPages = Skip.Count,
+        };
+
+        // 交易日以整批**最新的** f124 为准，而不是每行各自的时间戳：停牌股的时间戳是当天 08:00、
+        // 正常股是收盘后的 15:3x，取最大才拿得到"这批属于哪个交易日"。
+        // 顺带把日期对不上的行剔掉——长期停牌但还残留着旧值的票，不能把旧值贴上今天的日期。
+        if (snapshot.TradeDate is { } day)
+            snapshot.Rows.RemoveAll(r => r.TradeDate.Date != day);
+
+        // ⚠ 整批的 FetchedAt 改成**行情时间戳**，不是"现在几点"（2026-09-06）。
+        // 这不是洁癖，是补历史那条路的排队判据要靠它：逐股通道按"最久没抓的先抓"排队，
+        // 而快照每天会把全市场每只票的 fetched_at 都刷一遍——要是刷成"现在"，
+        // 5900 只票的时间戳就全一样了，排序退化成原始顺序，于是每轮都从 000001 开始、
+        // 靠后的票永远轮不到（2026-09-04 已经踩过一次同样形状的坑）。
+        // 写成行情时间（如 09-04 15:34）之后，逐股抓过的票时间戳必然更新，
+        // MAX(fetched_at) 就还能区分"这只票被逐股补过历史"和"只有快照带过一行"。
+        if (snapshot.QuoteTime is { } quote)
+            foreach (var r in snapshot.Rows) r.FetchedAt = quote;
+
+        return snapshot;
+    }
+}
 
 /// <summary>一整轮全市场快照。</summary>
 /// <param name="QuoteTime">整批最新的行情时间戳——交易日和"收盘了没有"都从它推。</param>

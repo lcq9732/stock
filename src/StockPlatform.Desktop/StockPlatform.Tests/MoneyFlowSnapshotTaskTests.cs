@@ -492,6 +492,47 @@ public class MoneyFlowSnapshotTaskTests : IDisposable
         Assert.NotEqual(TaskState.Completed, result.State);
     }
 
+    /// <summary>问到第 <paramref name="cancelAtPage"/> 页时按下"停止"——模拟用户中途停掉这一项。</summary>
+    private sealed class CancelAtPageHandler(HttpMessageHandler inner, int cancelAtPage, CancellationTokenSource cts)
+        : DelegatingHandler(inner)
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.Query.Contains($"pn={cancelAtPage}&")) cts.Cancel();
+            return base.SendAsync(request, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// 2026-09-24 16:05 实况：一轮拿到约 30 页，用户按了停止，整轮一行没进库、下一轮又从第 1 页抓起。
+    /// 改成一页一批之后，停止前已到手的页必须已经落库、进度也记上，下一轮不再问它们。
+    /// </summary>
+    [Fact]
+    public async Task 中途停止_已抓到的页照样落库_下一轮不再重抓()
+    {
+        var quota = new QuotaHandler(AfterClose, totalStocks: 5917, quotaPerRound: 100);
+        using var cts = new CancellationTokenSource();
+        var provider = NewProvider(new CancelAtPageHandler(quota, cancelAtPage: 11, cts));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new MoneyFlowSnapshotTask(_repo, provider).RunAsync(new TaskRunArgs(), cts.Token));
+
+        var day = AfterClose.Date;
+        var got = _repo.GetSnapshotPages(day);
+        // 第 11 页是停止那一刻正在抓的，允许丢；1~10 页必须都在
+        Assert.Equal(Enumerable.Range(1, 10), got.Where(p => p <= 10).OrderBy(p => p));
+        Assert.True(_repo.Count() >= 1000, $"库里只有 {_repo.Count()} 行，停止前的页没落库");
+
+        quota.NextRound();
+        await new MoneyFlowSnapshotTask(_repo, NewProvider(quota)).RunAsync(new TaskRunArgs(), CancellationToken.None);
+        var asked = quota.AskedThisRound.Distinct().ToList();
+        Assert.Equal(1, asked[0]);                                   // 交易日探针
+        Assert.DoesNotContain(asked.Skip(1), p => p is >= 2 and <= 10);
+        Assert.Equal(60, _repo.GetSnapshotPages(day).Count);
+        Assert.Equal(5917, _repo.Count());
+    }
+
     /// <summary>跟 <c>RunAsync</c> 一样，只是收 <see cref="QuotaHandler"/>。</summary>
     private async Task<(TaskRunResult Result, List<TaskProgress> Progress)> RunAsync2(QuotaHandler handler)
     {
