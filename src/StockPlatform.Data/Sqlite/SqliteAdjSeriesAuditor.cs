@@ -23,12 +23,16 @@ public sealed class SqliteAdjSeriesAuditor
     /// 中间结果**必须带出来**：调用方（<c>RunRebuildAdjSeriesAsync</c>）逐只决定"能不能只补增量、
     /// 还是要整段重算"时还要用 <see cref="AdjLatest"/>/<see cref="AdjEarliest"/>/<see cref="StaleEvents"/>，
     /// 不带出去它就得再对 1300 万行的 Bar 表 GROUP BY 三遍。
+    ///
+    /// <see cref="RewrittenRows"/>：已算过的日子里 day_raw 被改写过的票，**不许走增量**
+    /// （见 <see cref="CodesWithRewrittenRows"/>）。只有任务那条路会查它，界面计数给空集。
     /// </summary>
     public sealed record Plan(
         IReadOnlyList<string> Codes,
         IReadOnlyDictionary<string, DateTime> AdjLatest,
         IReadOnlyDictionary<string, DateTime> AdjEarliest,
-        HashSet<string> StaleEvents)
+        HashSet<string> StaleEvents,
+        HashSet<string> RewrittenRows)
     {
         /// <summary>其中因为**除权事件更新**才要重算的只数（那一项要单独报给用户看，
         /// 见 <see cref="CodesWithStaleEvents"/> 里的代价说明）。</summary>
@@ -42,8 +46,13 @@ public sealed class SqliteAdjSeriesAuditor
     ///   · 不复权比它**长**（前面补了历史）——复权因子是从最早那天累乘上来的，起点一变整条线都变；
     ///   · 除权事件本身变了（<see cref="CodesWithStaleEvents"/>）；
     ///   · **不复权的值被改过**（<see cref="CodesWithFresherRawBars"/>，2026-09-10 补）。
+    ///
+    /// <paramref name="checkRewrittenRows"/>：再逐行查一遍 <see cref="CodesWithRewrittenRows"/>
+    /// （全表 JOIN，生产库约 30 秒）。只有【重算回测序列】本身传 true——界面计数每项任务跑完都刷新一次，
+    /// 扛不起这 30 秒；而它查出的票绝大多数本来就被上面第五条认出来了，界面漏报的只是存量里
+    /// 时间戳已被增量盖新的那些（2026-09-29 那批 324 只），计数少报一轮不伤数据。
     /// </summary>
-    public Plan BuildPlan()
+    public Plan BuildPlan(bool checkRewrittenRows = false)
     {
         var repo = new SqliteBarRepository(_dbPath);
         var rawLatest = repo.GetLatestPeriodStartByCode(Granularity.DayRaw);
@@ -52,18 +61,22 @@ public sealed class SqliteAdjSeriesAuditor
         var adjEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayAdj);
         var staleEvents = CodesWithStaleEvents();
         var fresherRaw = CodesWithFresherRawBars();
+        var rewritten = checkRewrittenRows
+            ? CodesWithRewrittenRows()
+            : new HashSet<string>(StringComparer.Ordinal);
 
         var codes = rawLatest
             .Where(kv => !adjLatest.TryGetValue(kv.Key, out var a) || a.Date < kv.Value.Date
                       || !adjEarliest.TryGetValue(kv.Key, out var ae)
                       || (rawEarliest.TryGetValue(kv.Key, out var re) && ae.Date > re.Date)
                       || staleEvents.Contains(kv.Key)
-                      || fresherRaw.Contains(kv.Key))
+                      || fresherRaw.Contains(kv.Key)
+                      || rewritten.Contains(kv.Key))
             .Select(kv => kv.Key)
             .OrderBy(c => c, StringComparer.Ordinal)
             .ToList();
 
-        return new Plan(codes, adjLatest, adjEarliest, staleEvents);
+        return new Plan(codes, adjLatest, adjEarliest, staleEvents, rewritten);
     }
 
     /// <summary>
@@ -113,6 +126,52 @@ public sealed class SqliteAdjSeriesAuditor
         }
         catch { /* 判据取不到就当没有：宁可少算一轮，也不该让界面上的计数抛异常 */ }
         return stale;
+    }
+
+    /// <summary>
+    /// **已经算过的日子**里 day_raw 被改写过、或者跟 day_adj 的量额换手对不上的票——
+    /// 这种票必须整段重算，**不能走增量**（2026-09-29 补）。
+    ///
+    /// ⚠ 为什么 <see cref="CodesWithFresherRawBars"/> 不够：它只决定"要不要算"，不决定"怎么算"。
+    /// 2026-09-17 盘中抓进 323 只 ETF 的 day_raw，09-18 凌晨照着算出了 day_adj；09-20 day_raw
+    /// 被重抓修好，第五条判据也认出了这些票——可它们尾巴上同时长出了新日子，任务走了增量：
+    /// 只追加新的几根、09-17 那行原样不动，时间戳却被盖成新的，此后五条判据**再也认不出来**。
+    /// 体检报「day_adj 多口径不一致」让人去跑【重算回测序列】，而那一项修不了——死循环，
+    /// 回测吃着盘中的半天量额跑了十几天。
+    ///
+    /// 两个条件任一成立：
+    ///   · 时间戳：day_raw 某行的日期在 day_adj 已算过的范围里、而抓取时刻晚于上次重算。
+    ///     已确认的行（当天 16:00 后抓的）写入路径不会刷新（见 <c>InsertOrRefreshUnconfirmed</c>），
+    ///     所以这条只在"旧行真被改写"时成立，日常长尾巴不会误中；
+    ///   · 值：volume/amount/turnover 是从 day_raw 原样抄过去的，逐值比。这一条兜住
+    ///     时间戳已经被盖新的存量，以及改值不刷新时间戳的写入路径。
+    /// </summary>
+    public HashSet<string> CodesWithRewrittenRows()
+    {
+        var hit = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={_dbPath}");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandTimeout = 0;   // 全表 JOIN，生产库约 30 秒，别让默认 30 秒超时掐掉
+            cmd.CommandText = """
+                WITH s AS (SELECT code, MAX(fetched_at) f FROM Bar WHERE granularity='day_adj' GROUP BY code)
+                SELECT DISTINCT a.code
+                FROM Bar a
+                JOIN s ON s.code = a.code
+                JOIN Bar b ON b.code = a.code AND b.granularity = 'day_raw' AND b.period_start = a.period_start
+                WHERE a.granularity = 'day_adj'
+                  AND (b.fetched_at > s.f
+                       OR a.volume IS NOT b.volume
+                       OR a.amount IS NOT b.amount
+                       OR a.turnover IS NOT b.turnover);
+                """;
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) hit.Add(r.GetString(0));
+        }
+        catch { /* 取不到就当没有：退回原来的行为（可能走增量），不该让整轮重算失败 */ }
+        return hit;
     }
 
     /// <summary>只要个数（界面上的"待重算 N 只"）。判据跟 <see cref="BuildPlan"/> 是同一份，

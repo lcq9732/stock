@@ -50,6 +50,24 @@ public static class DelistedTailPlanner
         return list;
     }
 
+    /// <summary>本地最后一根K线距今不超过这么久，就算"还在交易"。跟【补全退市名单】的门槛一致。</summary>
+    public static readonly TimeSpan StillTradingWithin = TimeSpan.FromDays(30);
+
+    /// <summary>
+    /// 名单说退市、本地行情却说还在交易——**不能标退市**（2026-09-28 加）。
+    ///
+    /// 标错的代价是这只票被踢出日常轮询、K线从此停更，而且没有任何地方会报：
+    /// <c>600801 华新建材</c>就是这样被上交所名单误标（只有 B股终止），日K停在 09-16，
+    /// 靠资金流对账才发现。【补全退市名单】早有这道检查，两所官网这条路径以前没有。
+    ///
+    /// 只拦**没有终止日**的行：有明确终止日的是官方给的事实，刚退市的票最后一根K线本来就在
+    /// 30 天内，拦了反而让它多进 30 天日常轮询。
+    /// </summary>
+    public static bool LooksStillTrading(DelistedStockRow row, DateTime? latestBar, DateTime today)
+        => row.DelistDate is null
+           && latestBar is { } l
+           && today.Date - l.Date <= StillTradingWithin;
+
     /// <summary>
     /// 后复权/不复权那两条线各补哪一段。它们的水位线**跟前复权各自独立**，所以要分开算：
     /// 有历史就从它的次日续；**完全没有的**就从终止日往前回看几年，一次把这只退市股的

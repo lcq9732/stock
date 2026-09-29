@@ -331,8 +331,7 @@
                     <GroupBox Grid.Row="3" Header="运行日志" Margin="0,10,0,0">
                         <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                                 IsInactiveSelectionHighlightEnabled="True" />
                     </GroupBox>
                 </Grid>
             </TabItem>
@@ -541,8 +540,7 @@
                     <GroupBox Grid.Row="3" Header="运行日志" Margin="0,10,0,0">
                         <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                                 IsInactiveSelectionHighlightEnabled="True" />
                     </GroupBox>
                 </Grid>
             </TabItem>
@@ -715,8 +713,7 @@
                     <GroupBox Grid.Row="3" Header="今日行动建议" Margin="0,8,0,0">
                         <TextBox Text="{Binding SummaryText, Mode=OneWay}" IsReadOnly="True" FontFamily="Microsoft YaHei" FontSize="13"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" BorderThickness="0"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制" />
+                                 IsInactiveSelectionHighlightEnabled="True" />
                     </GroupBox>
                 </Grid>
             </TabItem>
@@ -1066,8 +1063,7 @@
                     <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
                         <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                                 IsInactiveSelectionHighlightEnabled="True" />
                     </GroupBox>
                 </Grid>
             </TabItem>
@@ -1135,8 +1131,7 @@
                     <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
                         <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                                 IsInactiveSelectionHighlightEnabled="True" />
                     </GroupBox>
                 </Grid>
             </TabItem>
@@ -1190,8 +1185,7 @@
                     <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
                         <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                                 IsInactiveSelectionHighlightEnabled="True" />
                     </GroupBox>
                 </Grid>
             </TabItem>
@@ -1241,8 +1235,7 @@
                     <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
                         <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                                 IsInactiveSelectionHighlightEnabled="True" />
                     </GroupBox>
                 </Grid>
             </TabItem>
@@ -1293,8 +1286,7 @@
                     <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
                         <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                                 IsInactiveSelectionHighlightEnabled="True" />
                     </GroupBox>
                 </Grid>
             </TabItem>
@@ -1350,8 +1342,7 @@
                     <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
                         <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
-                                 IsInactiveSelectionHighlightEnabled="True"
-                                 ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                                 IsInactiveSelectionHighlightEnabled="True" />
                     </GroupBox>
                 </Grid>
             </TabItem>

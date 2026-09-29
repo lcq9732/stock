@@ -95,16 +95,21 @@ public sealed class AdjSeriesRebuildTask(
                  + "（改过复权算法之后用这个，日常别用——一轮几十分钟）...");
             plan = new SqliteAdjSeriesAuditor.Plan(
                 await Task.Run(auditor.AllCodesWithRawBars, ct),
-                // 全量重算不走增量那条路，所以这三份中间结果用不上，给空的
-                new Dictionary<string, DateTime>(), new Dictionary<string, DateTime>(), []);
+                // 全量重算不走增量那条路，所以这四份中间结果用不上，给空的
+                new Dictionary<string, DateTime>(), new Dictionary<string, DateTime>(), [], []);
         }
         else
         {
-            Report("正在统计哪些股票的回测序列要重算（要扫一遍全库的日线索引，通常几十秒，请稍等）…");
-            plan = await Task.Run(auditor.BuildPlan, ct);
+            Report("正在统计哪些股票的回测序列要重算（要扫一遍全库的日线，通常一分钟上下，请稍等）…");
+            // 任务这边要多查一遍"已算过的日子被改写过"（CodesWithRewrittenRows，约 30 秒）——
+            // 那些票只能整段重算，走增量会把改过的旧行永远留在 day_adj 里（2026-09-29 查实）。
+            plan = await Task.Run(() => auditor.BuildPlan(checkRewrittenRows: true), ct);
             if (plan.StaleEventCount > 0)
                 Report($"其中 {plan.StaleEventCount} 只是因为分红/配股记录有更新——"
                      + "复权因子是拿这些事件算的，事件一变整条序列都得重算。");
+            if (plan.RewrittenRows.Count > 0)
+                Report($"其中 {plan.RewrittenRows.Count} 只是已算过的日子里不复权被改写过"
+                     + "（比如盘中行后来被重抓覆盖）——这些只能整段重算，不走增量。");
         }
 
         _todo = plan.Codes.Count;
@@ -280,7 +285,10 @@ public sealed class AdjSeriesRebuildTask(
     ///     只追加尾巴会让新旧两段落在不同基准上，接缝处凭空多出一个假跳空；
     ///   · 新增的日子里**没有除权**；
     ///   · 除权事件本身没变过——因子是从最早那天累乘上来的，中间插进一条新记录，
-    ///     它之后的每一根都得跟着变。
+    ///     它之后的每一根都得跟着变；
+    ///   · 已算过的日子里不复权**没被改写过**（2026-09-29 补，见
+    ///     <see cref="SqliteAdjSeriesAuditor.CodesWithRewrittenRows"/>）——增量只追加尾巴，
+    ///     改过的旧行它碰都不碰，却会把时间戳盖新，此后再也没有判据认得出来。
     /// </summary>
     private AdjRebuildOutcome? TryIncremental(
         string code, List<Bar> raw, List<AdjustFactorCalculator.ExDividend> events,
@@ -296,7 +304,8 @@ public sealed class AdjSeriesRebuildTask(
                                         && e.ExDate.Date <= raw[^1].PeriodStart.Date);
         bool headMatches = plan.AdjEarliest.TryGetValue(code, out var ae0)
                         && ae0.Date <= raw[0].PeriodStart.Date;
-        if (exInNewDays || !headMatches || plan.StaleEvents.Contains(code)) return null;
+        if (exInNewDays || !headMatches || plan.StaleEvents.Contains(code)
+            || plan.RewrittenRows.Contains(code)) return null;
 
         // 从"最后一根已算好的"反推当前因子，直接乘上去
         var tail = _bars.Query(code, Granularity.DayAdj, adjLast, adjLast);

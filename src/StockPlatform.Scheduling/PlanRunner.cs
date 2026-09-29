@@ -45,7 +45,8 @@ public sealed class PlanRunner(
     Action? onRoundFinished = null,
     TimeSpan? quietBudgetOverride = null,
     SourceOccupancy? occupancy = null,
-    DetachedPlanRuns? detached = null)
+    DetachedPlanRuns? detached = null,
+    TimeSpan? skipRetryCooldownOverride = null)
 {
     /// <summary>
     /// 停止时把当前项交出去、下次开始时再认领回来的地方（2026-09-08，见 <see cref="DetachedPlanRuns"/>）。
@@ -96,6 +97,28 @@ public sealed class PlanRunner(
     private TimeSpan MaxQuietFor(FetchPlanItem item)
         => _quietBudgetOverride ?? item.Info.MaxQuiet ?? QuietWatchdog.DefaultMaxQuiet;
 
+    // ── 「本轮没开工」的项让到最后（2026-09-29 用户定的）──────────────────────────
+    // 缘起：09-29 凌晨【板块成分股】因为东财终端文件过期，每轮都记「本轮没开工」（Skipped），
+    // 而 Skipped 的语义是"今天恢复了还该再来"，FindDue 于是立刻又挑中它——00:53 到 07:50
+    // 空转了约 2500 轮，排在它后面的龙虎榜、板块指数、完整性体检等 9 项全被堵了一整夜。
+    // 用户定的规则：某项有问题时别一直在它上面试，**先把后面的任务跑完，全都跑完了才回头试它**。
+    // 回头试也要隔一段（ProblemRetryCooldown），否则只剩它一项时照样是零间隔空转。
+
+    /// <summary>「本轮没开工」的项回头再试之前至少隔这么久。</summary>
+    private static readonly TimeSpan ProblemRetryCooldown = TimeSpan.FromMinutes(15);
+
+    private TimeSpan RetryCooldown => skipRetryCooldownOverride ?? ProblemRetryCooldown;
+
+    /// <summary>
+    /// 这一轮里记过「本轮没开工」的项 → 记下的时刻。只活在内存里：重启程序就当没发生过，
+    /// 第一次照常按顺序跑（那时候多半问题已经排除了）。跑成功/失败之后就移出。
+    /// </summary>
+    private readonly Dictionary<FetchActionId, DateTime> _deferred = [];
+
+    /// <summary>这一项这一轮记过「本轮没开工」，要让到最后再试。跨轮次的旧记录不算。</summary>
+    private bool IsDeferred(FetchPlanItem item, DateTime now)
+        => _deferred.TryGetValue(item.Action, out var at) && at >= item.RoundAnchor(now);
+
     /// <summary>空闲项各自的下一次可跑时刻（跑完 + 冷却）。只活在内存里，重启后重新开始。</summary>
     private readonly Dictionary<FetchActionId, DateTime> _idleNextAllowed = [];
 
@@ -118,10 +141,13 @@ public sealed class PlanRunner(
                 var now = DateTime.Now;
 
                 // ① 有没有**已经到点**的定时项？有就跑，跑多久算多久，后面顺延。
-                var due = FindDue(now);
+                //    「本轮没开工」过的项让到最后：别的都跑完了、而且隔够了冷却才回头试。
+                var due = FindDue(now, out bool isRetry);
                 if (due != null)
                 {
-                    _hadWork = true;
+                    // 回头重试不算"新的一轮活"：否则只剩它一项时，每重试一次就再打一遍"今天的计划跑完了"
+                    if (!isRetry) _hadWork = true;
+                    else log($"↻ 计划：别的项都跑完了，回头再试【{due.Info.Name}】（上次本轮没开工）。");
                     await ExecuteOneAsync(due, null, ct);
                     if (StalledOnRepeat(due, now)) await Task.Delay(Reevaluate, ct);
                     continue;
@@ -169,7 +195,8 @@ public sealed class PlanRunner(
                     //    而实际情况是用户手动跑的任务占着源、好几个空闲项正等着——
                     //    人看着以为活都干完了，其实计划已经停摆了几小时。
                     var blocked = FindBlockedBySource(now);
-                    onState(new PlanRunnerState(true, null, null, null, DescribeIdle(blocked)));
+                    onState(new PlanRunnerState(true, null, null, null,
+                        DescribeRetryPending(now) ?? DescribeIdle(blocked)));
                     await Task.Delay(Reevaluate, ct);
                 }
             }
@@ -252,19 +279,48 @@ public sealed class PlanRunner(
     /// 现在的模型是：**这不是一条队列，是一组各自到期的任务**；优先级和排列顺序只用来决定
     /// "同时到期时谁先跑"。谁到点了谁就有资格跑，不用陪着别人等。
     /// </summary>
-    private FetchPlanItem? FindDue(DateTime now)
+    /// <remarks>
+    /// 分两遍挑（2026-09-29）：先挑这一轮**没出过问题**的；一个都没有了，才回头挑记过
+    /// 「本轮没开工」、而且已经隔够 <see cref="ProblemRetryCooldown"/> 的项
+    /// （<paramref name="isRetry"/>＝true）。见 <see cref="_deferred"/> 的缘起。
+    /// </remarks>
+    private FetchPlanItem? FindDue(DateTime now, out bool isRetry)
     {
-        FetchPlanItem? best = null;
-        int bestPriority = int.MaxValue;
+        FetchPlanItem? best = null, bestRetry = null;
+        int bestPriority = int.MaxValue, bestRetryPriority = int.MaxValue;
 
         // 顺着表格从上往下走：同优先级时先遇到的胜出，所以天然就是"档内按排列顺序"
         foreach (var item in plan.AllItems)
         {
             if (!IsDueNow(item, now)) continue;
             int p = TypePriority(item.Repeat);
-            if (p < bestPriority) { best = item; bestPriority = p; }
+            if (IsDeferred(item, now))
+            {
+                if (now - _deferred[item.Action] < RetryCooldown) continue;
+                if (p < bestRetryPriority) { bestRetry = item; bestRetryPriority = p; }
+            }
+            else if (p < bestPriority) { best = item; bestPriority = p; }
         }
-        return best;
+        isRetry = best is null && bestRetry is not null;
+        return best ?? bestRetry;
+    }
+
+    /// <summary>
+    /// 只剩「本轮没开工」的项在等冷却时的状态文案——不说的话界面会报"今天没有待执行的项了"，
+    /// 人以为都做完了，其实还有项在等着回头重试。
+    /// </summary>
+    private string? DescribeRetryPending(DateTime now)
+    {
+        var waiting = plan.AllItems
+            .Where(i => IsDueNow(i, now) && IsDeferred(i, now))
+            .Select(i => (Item: i, At: _deferred[i.Action] + RetryCooldown))
+            .OrderBy(x => x.At)
+            .ToList();
+        if (waiting.Count == 0) return null;
+        var first = waiting[0];
+        return $"其余项都跑完了；{first.At:HH:mm} 回头再试【{first.Item.Info.Name}】"
+             + (waiting.Count > 1 ? $" 等 {waiting.Count} 项" : "")
+             + $"（上次本轮没开工：{Trim(first.Item.LastMessage ?? "")}）";
     }
 
     /// <summary>
@@ -652,9 +708,12 @@ public sealed class PlanRunner(
             if (outcome == RunOutcome.Skipped && result.SkippedReason is { } why)
             {
                 Finish(item, RunOutcome.Skipped, result.Errors.Count, why, result.Errors);
-                log($"⏸ 计划：【{info.Name}】本轮没开工——{why}。今天恢复之后还会再来。{tail}");
+                _deferred[item.Action] = item.LastEnd!.Value;
+                log($"⏸ 计划：【{info.Name}】本轮没开工——{why}。先接着跑后面的项，"
+                  + $"都跑完了再回头试它（每次至少隔 {Describe(RetryCooldown)}）。{tail}");
                 return;
             }
+            _deferred.Remove(item.Action);
 
             // 空闲项跑完排下一次：什么都没得做就歇久一点，别每 20 分钟去翻一遍库
             if (item.Pacing == RunPacing.WhenIdle)

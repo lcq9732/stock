@@ -55,12 +55,13 @@ public class AdjSeriesRebuildTaskTests : IDisposable
 
     // ─────────────────── 造数据 ───────────────────
 
-    private void Put(string code, string gran, DateTime day, double close, DateTime? fetchedAt = null) =>
+    private void Put(string code, string gran, DateTime day, double close, DateTime? fetchedAt = null,
+                     double volume = 100) =>
         _bars.InsertOrRefreshUnconfirmed([new Bar
         {
             Code = code, Granularity = gran, PeriodStart = day,
             Open = close, Close = close, High = close, Low = close,
-            Volume = 100, Amount = 100 * close * 100, Turnover = 1.5,
+            Volume = volume, Amount = volume * close * 100, Turnover = 1.5,
             FetchedAt = fetchedAt ?? day.AddHours(20),
         }]);
 
@@ -188,6 +189,73 @@ public class AdjSeriesRebuildTaskTests : IDisposable
         Assert.Contains(log, l => l.Contains("1 只整段重算"));
         Assert.Equal(5, Adj("600000").Count);
         Assert.Equal(Days[0], Adj("600000")[0].PeriodStart);
+    }
+
+    /// <summary>
+    /// 已算过的日子里不复权被**改写**了、同时尾巴又长出新日子 ⇒ 必须整段重算（2026-09-29）。
+    ///
+    /// 生产上的原样：09-17 盘中抓进 323 只 ETF 的 day_raw（半天的量额），09-18 凌晨照着算出
+    /// day_adj；09-20 day_raw 被重抓修好。下一轮重算时它们尾巴上有新日子，走了增量——
+    /// 09-17 那行 day_adj 原样留着盘中值，时间戳却被盖新，从此再也没有判据认得出来。
+    /// </summary>
+    [Fact]
+    public async Task 旧行被改写且尾巴长了_不许走增量()
+    {
+        var lastCalc = new DateTime(2026, 9, 8, 2, 0, 0);
+        PutRaw("600000", Days[0], Days[1], Days[3]);
+        // 9-3 先是盘中抓的（上午 10 点、半天的量），day_adj 照它算了
+        Put("600000", Granularity.DayRaw, Days[2], 10, Days[2].AddHours(10), volume: 30);
+        PutAdj("600000", lastCalc, Days[0], Days[1], Days[3]);
+        Put("600000", Granularity.DayAdj, Days[2], 10, lastCalc, volume: 30);
+        // 之后：9-3 被重抓覆盖成全天的量（抓取时刻晚于上次重算），尾巴也长出了 9-7
+        Put("600000", Granularity.DayRaw, Days[2], 10, new DateTime(2026, 9, 9, 22, 0, 0), volume: 100);
+        Put("600000", Granularity.DayRaw, Days[4], 10, new DateTime(2026, 9, 9, 22, 0, 0));
+
+        var (_, log) = await RunAsync();
+
+        Assert.Contains(log, l => l.Contains("0 只只追加了新K线、1 只整段重算"));
+        Assert.Contains(log, l => l.Contains("1 只是已算过的日子里不复权被改写过"));
+        var adj = Adj("600000");
+        Assert.Equal(5, adj.Count);
+        Assert.Equal(100, adj.Single(b => b.PeriodStart == Days[2]).Volume);
+    }
+
+    /// <summary>
+    /// 时间戳**已经被增量盖新**的存量（2026-09-29 那 324 只就是这样）：时间戳那条认不出来，
+    /// 靠量额逐值比认出来——哪怕 day_adj 日期已经跟不复权对齐、五条老判据一条都不成立。
+    /// </summary>
+    [Fact]
+    public async Task 时间戳已盖新的存量_靠量额对不上认出来()
+    {
+        var lastCalc = new DateTime(2026, 9, 8, 2, 0, 0);
+        PutRaw("600000", Days);
+        // day_adj 日期齐全、时间戳比所有不复权都新，但 9-3 的量还是旧的盘中值
+        PutAdj("600000", lastCalc, Days[0], Days[1], Days[3], Days[4]);
+        Put("600000", Granularity.DayAdj, Days[2], 10, lastCalc, volume: 30);
+
+        var (result, log) = await RunAsync();
+
+        Assert.False(result.NothingToDo);
+        Assert.Contains(log, l => l.Contains("1 只整段重算"));
+        Assert.All(Adj("600000"), b => Assert.Equal(100, b.Volume));
+    }
+
+    /// <summary>
+    /// 反过来的保险：日常长尾巴时，新那几根的抓取时刻**必然**晚于上次重算——
+    /// 这不算"旧行被改写"，照样走增量。这条要是误中，每天全市场都整段重算（几十分钟）。
+    /// </summary>
+    [Fact]
+    public async Task 只是新尾巴抓得比上次重算晚_仍走增量()
+    {
+        var lastCalc = new DateTime(2026, 9, 8, 2, 0, 0);
+        PutRaw("600000", Days[..4]);
+        PutAdj("600000", lastCalc, Days[..4]);
+        Put("600000", Granularity.DayRaw, Days[4], 10, new DateTime(2026, 9, 9, 22, 0, 0));
+
+        var (_, log) = await RunAsync();
+
+        Assert.Contains(log, l => l.Contains("1 只只追加了新K线、0 只整段重算"));
+        Assert.DoesNotContain(log, l => l.Contains("被改写过"));
     }
 
     // ─────────────────── ② 整段重算要先删后写 ───────────────────

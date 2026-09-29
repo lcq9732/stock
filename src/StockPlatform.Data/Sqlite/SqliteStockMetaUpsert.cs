@@ -39,8 +39,8 @@ public static class SqliteStockMetaUpsert
         // 再写回 'delisted'，两边来回翻，而退市股一旦变回 'stock' 就重新进入日常轮询，
         // 每天几百个必然落空的请求（project_dividend_delisted_gap 当初就是为了避免这个）。
         //
-        // 退市是不可逆的状态，所以让 delisted 赢。真有"恢复上市"那种极罕见情况，
-        // 手工把 DelistedStock 和这张表里的 delisted 行删掉即可。
+        // 退市是不可逆的状态，所以让 delisted 赢。**误标**的要显式走 <see cref="ReinstateDelisted"/>
+        // 改回来（2026-09-28：600801 被上交所名单误标，就是被这道保护钉死在 delisted 的）。
         cmd.CommandText = """
             INSERT INTO StockMeta (code, name, type, exchange, list_date, last_updated)
             VALUES ($code, $name, $type, '', NULL, $last_updated)
@@ -65,6 +65,28 @@ public static class SqliteStockMetaUpsert
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
+    }
+
+    /// <summary>
+    /// 把误标成 delisted 的个股改回 'stock'（2026-09-28 加）。<see cref="Upsert"/> 故意不让
+    /// 'stock' 覆盖 'delisted'，所以回修必须走这里。只动 type='delisted' 的行，别的类型不碰。
+    /// </summary>
+    public static int ReinstateDelisted(string dbFilePath, IEnumerable<string> codes)
+    {
+        using var conn = new SqliteConnection($"Data Source={dbFilePath}");
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "UPDATE StockMeta SET type = 'stock', last_updated = $at WHERE code = $code AND type = 'delisted';";
+        var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
+        cmd.Parameters.AddWithValue("$at", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+        var n = 0;
+        foreach (var code in codes) { pCode.Value = code; n += cmd.ExecuteNonQuery(); }
+        tx.Commit();
+        return n;
     }
 
     /// <summary>只返回**个股**（type='stock'，以及老库里 type 为 NULL 的行）——个股列表(拉取当天的抓取

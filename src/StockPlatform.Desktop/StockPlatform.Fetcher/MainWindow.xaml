@@ -336,9 +336,7 @@
                           MouseMove="PlanGrid_MouseMove"
                           Drop="PlanGrid_Drop">
                     <DataGrid.RowStyle>
-                        <Style TargetType="DataGridRow" BasedOn="{StaticResource Theme.DataGridRow}">
-                            <Setter Property="ToolTip" Value="按住这一行上下拖动可以在组内改顺序" />
-                        </Style>
+                        <Style TargetType="DataGridRow" BasedOn="{StaticResource Theme.DataGridRow}" />
                     </DataGrid.RowStyle>
                     <DataGrid.Columns>
                         <!-- 编号 组号.序号（2026-09-02）：日更 1.x、季度 2.x、按需 3.x。
@@ -749,8 +747,7 @@ eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填
             <GroupBox Grid.Row="1" Header="运行日志">
                 <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
-                         IsInactiveSelectionHighlightEnabled="True"
-                         ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                         IsInactiveSelectionHighlightEnabled="True" />
             </GroupBox>
         </Grid>
     </Grid>

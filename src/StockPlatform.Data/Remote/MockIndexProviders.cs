@@ -68,6 +68,13 @@ public sealed class MockIndexWeightProvider : IIndexWeightProvider
     /// <summary>这些指数抛异常。</summary>
     public HashSet<string> Throws { get; init; } = [];
 
+    /// <summary>
+    /// 造出来的权重基准日。不给就取上个月末（跟真源一样是月度的）。
+    /// ⚠ 要测"本地还新鲜"的用例必须显式给：上个月末离今天到每月 25 号以后就超过
+    /// <c>IndexWeightTask.FreshDays</c> 了，测试会按日期时红时绿（2026-09-29 踩到）。
+    /// </summary>
+    public DateTime? AsOfDate { get; init; }
+
     public Task<List<IndexWeightRow>> GetWeightsAsync(string indexCode, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -82,7 +89,7 @@ public sealed class MockIndexWeightProvider : IIndexWeightProvider
         }
 
         // 基准日取上个月末——真源是月度更新的，这样"本地这一期还新鲜"那道筛子才验得到。
-        var asOf = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1).AddDays(-1);
+        var asOf = AsOfDate ?? new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1).AddDays(-1);
         var rows = new List<IndexWeightRow>();
         for (int i = 0; i < RowsPerIndex; i++)
             rows.Add(new IndexWeightRow

@@ -62,8 +62,7 @@
                 <TextBox x:Name="BodyText" IsReadOnly="True" BorderThickness="0" Background="Transparent"
                          FontFamily="Consolas, Microsoft YaHei" FontSize="15" Padding="10"
                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                         TextWrapping="Wrap" IsInactiveSelectionHighlightEnabled="True"
-                         ToolTip="可用鼠标拖选、Ctrl+C 复制，Ctrl+A 全选" />
+                         TextWrapping="Wrap" IsInactiveSelectionHighlightEnabled="True" />
             </Border>
         </Grid>
 

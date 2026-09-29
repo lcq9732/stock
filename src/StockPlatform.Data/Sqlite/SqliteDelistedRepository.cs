@@ -89,6 +89,27 @@ public class SqliteDelistedRepository
         return n;
     }
 
+    /// <summary>
+    /// 把误标的行移出名单（2026-09-28 加，给 <c>DelistedTailTask</c> 回修存量用）。
+    /// 只删<b>没有终止日</b>的行——有终止日的是官方给的事实，这里绝不碰。
+    /// </summary>
+    public int DeleteWithoutDelistDate(IEnumerable<string> codes)
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "DELETE FROM DelistedStock WHERE code = $code AND delist_date IS NULL;";
+        var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
+        var n = 0;
+        foreach (var code in codes) { pCode.Value = code; n += cmd.ExecuteNonQuery(); }
+        tx.Commit();
+        return n;
+    }
+
     /// <summary>还没尝试过补"最后几天"K线的代码（tail_fetched_at IS NULL）。</summary>
     public HashSet<string> GetTailPendingCodes()
     {

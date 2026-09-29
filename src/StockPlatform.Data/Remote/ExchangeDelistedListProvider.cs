@@ -12,7 +12,8 @@ namespace StockPlatform.Data.Remote;
 /// - 上交所：query.sse.com.cn/security/stock/getStockListData2.do?stockType=5（jsonp，pageSize=500 一次
 ///   取完；字段 SECURITY_CODE_A/SECURITY_ABBR_A/LISTING_DATE/CHANGE_DATE终止日（部分行为"-"缺失）；
 ///   需带 Referer www.sse.com.cn）
-/// 只保留 A 股代码（00/30/60/68 前缀），B股(200/900)、老三板等剔除。名单是全量快照、总量仅几百条，
+/// 只保留 A 股代码（00/30/60/68 前缀），B股(200/900)、老三板等剔除；上交所"只有 B股终止"的公司行
+/// 也剔除（见 <see cref="IsBShareOnlyTermination"/>）。名单是全量快照、总量仅几百条，
 /// 不需要限流器；单页失败重试3次。
 /// </summary>
 public class ExchangeDelistedListProvider : IDelistedListProvider
@@ -72,6 +73,12 @@ public class ExchangeDelistedListProvider : IDelistedListProvider
             {
                 var code = Str(item, "SECURITY_CODE_A");
                 if (code.Length != 6 || !SsePrefixes.Any(code.StartsWith)) continue;
+                if (IsBShareOnlyTermination(Str(item, "SECURITY_CODE_B"), Str(item, "CHANGE_DATE")))
+                {
+                    OnStatus?.Invoke($"上交所终止上市名单：{code} {Str(item, "SECURITY_ABBR_A")} 只是 B股"
+                                   + $" {Str(item, "SECURITY_CODE_B")} 终止、A股仍在市，不算退市");
+                    continue;
+                }
                 rows.Add(new DelistedStockRow
                 {
                     Code = code,
@@ -152,6 +159,20 @@ public class ExchangeDelistedListProvider : IDelistedListProvider
         }
         throw new RateLimitedException($"请求失败（重试3次）：{url} —— {last?.Message}", last);
     }
+
+    /// <summary>
+    /// 上交所这份名单是**按公司**列的，A/B 股同一行：只有 B股终止上市的公司也在里面，
+    /// 而 <c>SECURITY_CODE_A</c> 照样填着仍在交易的 A股代码（2026-09-28 查出）。
+    ///
+    /// 实例：<c>600801 华新建材</c>——B股 <c>900933</c> 2021 年转 H股后终止，A股照常交易，
+    /// 但这一行被当成 A股退市写进名单、StockMeta 标成 delisted，日更K线从 09-16 起停抓。
+    ///
+    /// 判据：<b>带 B股代码且终止日缺失</b>。实测 139 行里同时带 A/B 代码的 7 行，另外 6 行
+    /// （退市锦港/退市海创/退市绿庭…）都是 A/B 一起退、带终止日；终止日为 "-" 的全表只有华新这一行。
+    /// </summary>
+    public static bool IsBShareOnlyTermination(string securityCodeB, string changeDate)
+        => securityCodeB.Trim() is { Length: > 0 } b && b != "-"
+           && ParseDate(changeDate) is null;
 
     private static string Str(JsonElement item, string key) =>
         item.TryGetProperty(key, out var el) && el.ValueKind == JsonValueKind.String ? el.GetString() ?? "" : "";

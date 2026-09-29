@@ -87,24 +87,49 @@ public sealed class DelistedTailTask(
         }
 
         // 名单入库 + 标 type='delisted'（这两步是这一项的另一半产出，哪怕没有尾巴要补也得做）。
+        // ⚠ 入库前先跟本地行情对一遍（2026-09-28 加）：名单说退市、K线却还在更新的不标，
+        //   存量里这样的行也顺手改回来——见 DelistedTailPlanner.LooksStillTrading。
         // 同步 IO，推线程池。
-        await Task.Run(() =>
+        var (conflicts, reinstated, latestRaw) = await Task.Run(() =>
         {
+            var raw = Bars.GetLatestPeriodStartByCode(Granularity.DayRaw);
+            var today = DateTime.Today;
+            bool StillTrading(DelistedStockRow r) =>
+                DelistedTailPlanner.LooksStillTrading(r, raw.TryGetValue(r.Code, out var l) ? l : null, today);
+
+            var bad = all.Where(StillTrading).ToList();
+            all = all.Where(r => !StillTrading(r)).ToList();
+
+            List<DelistedStockRow> healed;
             lock (SqliteWriteGate.Local)
             {
                 Delisted.Upsert(all);
                 SqliteStockMetaUpsert.Upsert(Paths.CurrentDb,
                     all.Select(r => (r.Code, r.Name)), SqliteStockMetaUpsert.TypeDelisted);
-            }
-        }, ct);
 
-        var (pending, latestHfq, latestRaw) = await Task.Run(() =>
+                healed = Delisted.GetAll().Where(StillTrading).ToList();
+                if (healed.Count > 0)
+                {
+                    var codes = healed.Select(r => r.Code).ToList();
+                    Delisted.DeleteWithoutDelistDate(codes);
+                    SqliteStockMetaUpsert.ReinstateDelisted(Paths.CurrentDb, codes);
+                }
+            }
+            return (bad, healed, raw);
+        }, ct);
+        if (conflicts.Count > 0)
+            Report("⚠ 退市名单与本地行情冲突，这几只不标退市（名单没给终止日，本地K线 30 天内还在更新）："
+                   + string.Join("、", conflicts.Select(r => $"{r.Code} {r.Name}")));
+        if (reinstated.Count > 0)
+            Report($"存量回修：{reinstated.Count} 只之前被误标退市、K线还在更新，已移出退市名单并恢复日常轮询——"
+                   + string.Join("、", reinstated.Select(r => $"{r.Code} {r.Name}")));
+
+        var (pending, latestHfq) = await Task.Run(() =>
         {
             var tailPending = Delisted.GetTailPendingCodes();
             var latestDay = Bars.GetLatestPeriodStartByCode(Granularity.Day);
             var p = DelistedTailPlanner.SelectPending(all, tailPending, latestDay);
-            return (p, Bars.GetLatestPeriodStartByCode(Granularity.DayHfq),
-                       Bars.GetLatestPeriodStartByCode(Granularity.DayRaw));
+            return (p, Bars.GetLatestPeriodStartByCode(Granularity.DayHfq));
         }, ct);
 
         _pending = pending;

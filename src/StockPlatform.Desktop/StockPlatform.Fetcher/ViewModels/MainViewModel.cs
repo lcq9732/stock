@@ -607,6 +607,14 @@ public class MainViewModel : INotifyPropertyChanged
         _pendingLogLines.Enqueue(line);
     }
 
+    /// <summary>
+    /// 界面上最多留这么多行（2026-09-29）。完整日志在 fetch.log 里，界面只是看最近发生了什么。
+    ///
+    /// 缘起：原来不设上限，一夜空转攒到 11 万行、25MB，而日志框每变一次都要把全部行重新拼成
+    /// 一个字符串塞进 TextBox——UI 线程被这件事占满 5 小时，窗口"未响应"、内存涨到 4.6GB。
+    /// </summary>
+    private const int MaxUiLogLines = 2000;
+
     /// <summary>把攒下的日志一次性搬上界面（新的在最上面）。定时器每 120ms 调一次。</summary>
     private void FlushPendingLogLines()
     {
@@ -614,8 +622,11 @@ public class MainViewModel : INotifyPropertyChanged
         var batch = new List<string>();
         while (_pendingLogLines.TryDequeue(out var line)) batch.Add(line);
 
+        // 一批比上限还多就只要最新那段——前面的反正插进去马上又被裁掉
+        int from = Math.Max(0, batch.Count - MaxUiLogLines);
         // 界面是"最新在最上面"，所以这一批要倒着插——插完之后组内先后仍是对的
-        for (int i = batch.Count - 1; i >= 0; i--) LogLines.Insert(0, batch[i]);
+        for (int i = batch.Count - 1; i >= from; i--) LogLines.Insert(0, batch[i]);
+        while (LogLines.Count > MaxUiLogLines) LogLines.RemoveAt(LogLines.Count - 1);
     }
 
     /// <summary>

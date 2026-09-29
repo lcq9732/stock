@@ -121,8 +121,9 @@ public class IndexRosterTaskTests : IDisposable
     [Fact]
     public async Task 指数权重_本地这一期还新鲜就不再问()
     {
-        // 基准日取今天，保证落在 FreshDays 窗口内
-        var p = new MockIndexWeightProvider { NoFileFor = _ => false };
+        // 基准日取今天，保证落在 FreshDays 窗口内。⚠ 必须显式给：模拟源默认给上个月末，
+        //   每月 25 号以后就超出窗口，这条测试会按日期时红时绿（2026-09-29 踩到）。
+        var p = new MockIndexWeightProvider { NoFileFor = _ => false, AsOfDate = DateTime.Today };
         await new IndexWeightTask(p, _indexRepo, _manifest)
             .RunAsync(new TaskRunArgs(FetchMode.Incremental, MaxItems: 3), CancellationToken.None);
 

@@ -280,6 +280,67 @@ public class PlanRobustnessTests
         finally { try { Directory.Delete(h.Dir, true); } catch { } }
     }
 
+    // ══ ③½ 「本轮没开工」的项让到最后（2026-09-29）════════════════════════════
+    // 09-29 凌晨【板块成分股】因东财终端文件过期每轮都记「本轮没开工」，被立刻重挑，
+    // 空转 7 小时约 2500 轮，后面 9 项一夜没跑。用户定的规则：有问题的先让开，
+    // 后面的都跑完了才回头试它，而且回头试要隔一段。
+
+    [Fact]
+    public async Task 本轮没开工的项让后面的先跑_全跑完才回头试()
+    {
+        var h = NewHarness(RepeatKind.Once);
+        try
+        {
+            using var cts = new CancellationTokenSource();
+            var 跑过的 = new List<FetchActionId>();
+            var runner = new PlanRunner(h.Plan, h.Store, h.Paths,
+                execute: (item, deadline, progress, ct) =>
+                {
+                    跑过的.Add(item.Action);
+                    if (item.Action == h.First.Action && 跑过的.Count == 1)
+                        return Task.FromResult(new FetchResult { SkippedReason = "终端文件过期" });
+                    if (跑过的.Count >= 3) cts.Cancel();
+                    return Task.FromResult(new FetchResult());
+                },
+                log: _ => { }, onState: _ => { },
+                skipRetryCooldownOverride: TimeSpan.Zero);
+
+            await RunUntilStopped(runner, cts.Token);
+
+            Assert.Equal([h.First.Action, h.Second.Action, h.First.Action], 跑过的);
+            Assert.Equal(RunOutcome.Ok, h.First.LastOutcome);     // 回头那次成了
+            Assert.Equal(RunOutcome.Ok, h.Second.LastOutcome);
+        }
+        finally { try { Directory.Delete(h.Dir, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task 只剩没开工的项时_冷却没到不会空转重试()
+    {
+        var h = NewHarness(RepeatKind.Once);
+        try
+        {
+            using var cts = new CancellationTokenSource();
+            int 第一项跑了几次 = 0;
+            var runner = new PlanRunner(h.Plan, h.Store, h.Paths,
+                execute: (item, deadline, progress, ct) =>
+                {
+                    if (item.Action != h.First.Action) return Task.FromResult(new FetchResult());
+                    第一项跑了几次++;
+                    return Task.FromResult(new FetchResult { SkippedReason = "终端文件过期" });
+                },
+                log: _ => { }, onState: _ => { },
+                skipRetryCooldownOverride: TimeSpan.FromMinutes(10));
+
+            cts.CancelAfter(TimeSpan.FromSeconds(1.5));
+            await RunUntilStopped(runner, cts.Token);
+
+            Assert.Equal(1, 第一项跑了几次);                        // 原来这 1.5 秒里能空转几千轮
+            Assert.Equal(RunOutcome.Ok, h.Second.LastOutcome);     // 后面那项没被它堵住
+        }
+        finally { try { Directory.Delete(h.Dir, true); } catch { } }
+    }
+
     // ══ ④ 今天的清单要说实话 ══════════════════════════════════════════════
 
     /// <summary>

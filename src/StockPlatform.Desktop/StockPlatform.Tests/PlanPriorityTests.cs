@@ -60,7 +60,9 @@ public class PlanPriorityTests
             log: _ => { },
             onState: _ => { });
         var m = typeof(PlanRunner).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!;
-        return m.Invoke(runner, [now]);
+        // FindDue 多了个 out isRetry（2026-09-29），反射调用要把那个槽位留出来
+        object?[] args = m.GetParameters().Length == 2 ? [now, null] : [now];
+        return m.Invoke(runner, args);
     }
 
     private static FetchPlan PlanOf(params FetchPlanItem[] items)

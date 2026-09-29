@@ -34,8 +34,22 @@ public static class LogText
 
         // 集合内容变化(Insert/Clear)时重刷。日志集合是 get-only、只绑定一次，这里不解绑旧订阅
         // （对象活到程序退出，不会泄漏成问题）。用 Dispatcher 兜底非UI线程的意外来源。
+        //
+        // ⚠ 合并成一次重刷（2026-09-29）：一批日志是逐行 Insert 的，原来每插一行就排一次 Update，
+        //    而 Update 要把**全部行**重新拼接——一批 50 行就是 50 次整段重拼。行数一多，
+        //    UI 线程排队排到永远追不上（实测一夜 11 万行，窗口卡死 5 小时）。
+        //    现在一批改动只排一次，等这批 Insert/RemoveAt 都做完再拼。
+        bool pending = false;
+        void Schedule()
+        {
+            if (pending) return;
+            pending = true;
+            tb.Dispatcher.BeginInvoke(new Action(() => { pending = false; Update(); }),
+                                      System.Windows.Threading.DispatcherPriority.Background);
+        }
+
         if (e.NewValue is INotifyCollectionChanged ncc)
-            ncc.CollectionChanged += (_, _) => tb.Dispatcher.BeginInvoke(new Action(Update));
+            ncc.CollectionChanged += (_, _) => Schedule();
         Update();
     }
 }

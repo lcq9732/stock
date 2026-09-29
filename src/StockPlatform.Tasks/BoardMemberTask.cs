@@ -18,12 +18,13 @@ namespace StockPlatform.Tasks;
 /// 限流下跨好几轮才抓得完，以前只能靠"连续失败熔断"或人点停止收尾，现在
 /// <see cref="TaskRunArgs.MaxItems"/> / <see cref="TaskRunArgs.Deadline"/> 直接落在板块边界上。
 ///
-/// ════ 两道闸 ════
+/// ════ 三道闸 ════
 /// ① **push2 熔断**：限流期间整轮不开工。⚠ 只拦走网络的那几条通道——terminal 读的是东财终端
 ///    落在本地的文件，一个请求都不发，被"东财接口限流中"挡住毫无道理（而且它恰恰是限流时
 ///    唯一还能用的路）。会撞上是因为终端那条也继承 <c>EastMoneyBoardFetcherBase</c>：
 ///    名单那一步退回 push2 失败时会给基类记上 PausedUntil，成分股这边跟着被拦。
 /// ② **连续失败**：15 个连着失败就判定被限流、提前收尾（判据见 <see cref="ConsecutiveFailureGate"/>）。
+/// ③ **终端文件不可用**（2026-09-29）：terminal 通道的本地文件过期/缺失时整轮不开工，不逐板块去撞。
 ///
 /// ════ 先小后大 ════
 /// 排序判据在 <see cref="BoardMemberPlanner"/>——大板块最贵也最容易失败，先把小的收干净。
@@ -70,9 +71,21 @@ public sealed class BoardMemberTask(
         {
             if (fetcher is EastMoneyBoardFetcherBase em3)
             {
-                await em3.PrepareAsync(ct);
+                bool ready = await em3.PrepareAsync(ct);
                 var nic = em3.DescribeBinding();
                 Report(em3.DescribeChannel() + (string.IsNullOrWhiteSpace(nic) ? "" : "；" + nic));
+
+                // ── 闸③：终端本地文件不可用（过期/缺失）——整轮不开工（2026-09-29）──
+                // 这不是限流：一个请求都没发，是文件本身停在几天前，等多久都不会自己好，
+                // 只有人开一次东方财富终端才行。原来照样逐板块去试，15 个全败后被闸②判成"限流"，
+                // 每轮往日志刷几十行、往库里写 15 条失败标记，一夜空转两千多轮（见 PlanRunner._deferred）。
+                // 记「本轮没开工」：计划会先跑后面的项，隔一阵再回头试——人开了终端，下一次就成了。
+                if (!ready && fetcher is EastMoneyTerminalBoardFetcher)
+                {
+                    _skippedReason = "东财终端本地板块文件不可用（多半是过期了），"
+                                   + "开一次东方财富终端、等两分钟让它下发完，下次重试就能抓";
+                    yield break;
+                }
             }
 
             // 名单从库里读——列表那一项没跑也能干活，只是漏掉当天新增的板块（软依赖）。
