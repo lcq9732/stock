@@ -30,6 +30,7 @@ public sealed class StockDayBarTask(
     FetchPaths paths,
     BarSourceHolder sourceHolder,
     IManifestStore manifestStore,
+    ITradingDayRepository? tradingDays,
     int batchSize = BarFetchTaskBase.DefaultBatchSize) : BarFetchTaskBase(paths, sourceHolder)
 {
     public override FetchActionId Id => FetchActionId.StepStockDayBars;
@@ -73,17 +74,24 @@ public sealed class StockDayBarTask(
 
         // 名册和逐只查水位线都是同步 IO，推线程池——骨架不替子类推，首个 await 之前干这些会冻住界面。
         var codes = await Task.Run(LocalStockCodes, ct);
+        int noTradingDay = 0;
         var plan = await Task.Run(() =>
             exactDay ? PlanForDay(codes, day)
             // ⚠ 整段回补用的是**另一份名册**（含退市股），见 BackfillCodes
             : fullBackfill ? PlanFullBackfill(BackfillCodes(), args)
-            : PlanIncremental(codes, DateTime.Today, lookbackYears), ct);
+            : PlanIncremental(codes, Granularity.Day, DateTime.Today, lookbackYears,
+                              tradingDays, out noTradingDay), ct);
+
+        if (noTradingDay > 0)
+            Report($"其中 {noTradingDay} 只从上次抓到的那天到今天没有交易日（按交易日历），不发请求。");
 
         _planned = plan.Count;
         if (plan.Count == 0)
         {
             _nothingToDoReason = fullBackfill
                 ? "个股日K·前复权：指定的年份区间内没有可补的"
+                : noTradingDay > 0
+                ? $"个股日K·前复权：{codes.Count} 只本地都已是最新（上次之后没有新交易日）"
                 : $"个股日K·前复权：{codes.Count} 只本地都已是最新";
             Report($"{_nothingToDoReason}，这一轮无需抓取（一个请求都没发）。");
             yield break;
@@ -156,20 +164,6 @@ public sealed class StockDayBarTask(
         if (skipped > 0)
             Report($"其中 {skipped} 只这一段本地已经齐了、或数据源已探明没有更早数据，整只跳过、不发请求。");
         return plan;
-    }
-
-    /// <summary>增量：每只按自己的水位线续到今天，已经追上的直接跳过、不发请求。</summary>
-    private List<(string Code, DateTime Start, DateTime End)> PlanIncremental(
-        IReadOnlyList<string> codes, DateTime end, int lookbackYears)
-    {
-        var list = new List<(string, DateTime, DateTime)>(codes.Count);
-        foreach (var code in codes)
-        {
-            var start = IncrementalStart(code, Granularity.Day, end, lookbackYears);
-            if (start.Date <= end.Date) list.Add((code, start, end));
-            else CountSkipped();
-        }
-        return list;
     }
 
     /// <summary>

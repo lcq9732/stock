@@ -105,25 +105,46 @@ public sealed class SqliteDayCompletenessAuditor(string dbPath)
         var etfRaw = bars.GetCodesMissingDay(Granularity.DayRaw, latest, previous, SqliteStockMetaUpsert.TypeEtf);
         var index = bars.GetCodesMissingDay(Granularity.Day, latest, previous, SqliteStockMetaUpsert.TypeIndex);
 
+        // 当天全天停牌的不算漏抓（2026-09-30）：官网停复牌记录说它那天没交易，重抓也拿不到，
+        // 记进待办只会让它天天挂在名单里、半夜白抓一轮（09-29 的 300527/600293/600363 就是）。
+        // 指数不停牌，不查。
+        var day = DateOnly.FromDateTime(latest);
+        var suspended = new SqliteSuspensionLookup(dbPath)
+            .FullDaysOf(stock.Concat(etf).Concat(etfRaw).Distinct().ToList(), Granularity.Day, day)
+            .Where(kv => kv.Value.Contains(day))
+            .Select(kv => kv.Key)
+            .ToHashSet(StringComparer.Ordinal);
+
         return
         [
-            BarFinding("个股日K(三口径)", stock, RetryTaskIds.StockDayBars, latest),
-            BarFinding("ETF日K", etf, RetryTaskIds.EtfBars, latest),
-            BarFinding("ETF日K·不复权", etfRaw, RetryTaskIds.EtfRawBars, latest),
-            BarFinding("指数日K", index, RetryTaskIds.IndexBars, latest),
+            BarFinding("个股日K(三口径)", stock, RetryTaskIds.StockDayBars, latest, suspended),
+            BarFinding("ETF日K", etf, RetryTaskIds.EtfBars, latest, suspended),
+            BarFinding("ETF日K·不复权", etfRaw, RetryTaskIds.EtfRawBars, latest, suspended),
+            BarFinding("指数日K", index, RetryTaskIds.IndexBars, latest, new HashSet<string>()),
         ];
     }
 
-    private static DayFinding BarFinding(string label, List<string> missing, string taskId, DateTime day)
-        => new(label,
+    /// <param name="allMissing">那天没有日线的全部代码（含停牌的）。</param>
+    /// <param name="suspended">那天全天停牌的——从名单里剔掉、单独报一句。</param>
+    private static DayFinding BarFinding(string label, List<string> allMissing, string taskId, DateTime day,
+                                         IReadOnlySet<string> suspended)
+    {
+        var halted = allMissing.Where(suspended.Contains).ToList();
+        var missing = allMissing.Where(c => !suspended.Contains(c)).ToList();
+        var haltedNote = halted.Count == 0 ? ""
+            : $"（另有 {halted.Count} 只当天全天停牌：{string.Join("、", halted.Take(8))}"
+              + (halted.Count > 8 ? " 等" : "") + "，官网停复牌记录可查，不算漏抓、不进名单）";
+        return new(label,
             IsBad: missing.Count > 0,
-            Summary: missing.Count == 0 ? $"{label}齐" : $"{label}缺 {missing.Count} 只",
+            Summary: (missing.Count == 0 ? $"{label}齐" : $"{label}缺 {missing.Count} 只")
+                     + (halted.Count > 0 ? $"（{halted.Count} 只停牌）" : ""),
             Detail: missing.Count == 0 ? null
                 : $"{label}：{day:yyyy-MM-dd} 还有 {missing.Count} 只没有日线"
                   + "——多半是数据源盘后还没更新到它们（不是抓取失败），"
-                  + "已记入待重试名单，点【重新拉取失败】补上",
+                  + "已记入待重试名单，点【重新拉取失败】补上" + haltedNote,
             // 名单每次体检都**重建**、不累加：一只票今天补上了，名单里就该没有它。
             Todo: DayTodoAction.RebuildMissingDay, TaskId: taskId, Day: day, Codes: missing);
+    }
 
     /// <summary>
     /// 第②段：日更表的当天。判据本体在 <see cref="SqliteDailyTableAuditor.CheckOneDay"/>，

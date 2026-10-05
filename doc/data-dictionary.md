@@ -66,6 +66,8 @@
 | 抓取状态 | `MissingBarConfirmed` | 逐日白名单："这天数据源确实没有"（区分停牌 vs 漏抓） |
 |  | `BarProbeFloor` 🆕 | 逐段水位："这天之前数据源没有该票K线"（省掉往年回补的重复空跑） |
 |  | `TradingDay` ✨ | 交易日历（深交所官方 + 2004 前本地归纳）——全库判交易日的唯一依据 |
+|  | `Suspension` 🆕 | **沪深交易所官网停复牌记录**（取到的全存：股票/ETF/债券/LOF/B 股，接口每列都有字段；沪 2010 起、深 2008 起）——体检拿它解释"那天为什么没有日K" |
+|  | `SuspensionFetchMonth` 🆕 | 上面那张表每路接口问过哪些月（回补断点续传） |
 |  | `DailyFetchNoData` ✨ | 日频表的空日名单："这天这个源确实没有"（龙虎榜/融资余额回补跳过它） |
 
 > 🆕 = 2026-09-03 新增（东财）。这批数据的共同点：**本地此前完全没有、且没有回退源**。
@@ -1280,6 +1282,53 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | day | TEXT | 交易日 `yyyy-MM-dd` |
 | confirmed_at | TEXT | 确认时刻 |
 | | | **主键** (dataset, day) |
+
+### Suspension — 沪深交易所官网停复牌记录（2026-09-30 新增）
+**写入**：【停复牌】任务（`StockPlatform.Tasks/SuspensionTask.cs`），设计见 `doc/suspension-design.md`。
+**来源**：上交所「停复牌信息」股票（`sqlId=GW_PL_JYTS_TFPXX`，只留 controlType=TR）、基金（`SSE_PL_JYTS_TFPXX_JJ`），
+深交所「停复牌提示」（`CATALOGID=1798`，xlsx 导出）。都按自然月问。
+**取到的全存**（2026-09-30 用户定）：股票、ETF、债券、可转债、LOF、B 股每一行都留；接口每一列都有对应字段（上交所股票 9 列、基金 13 列、深交所 6 列），没有这一列的来源存空串。
+**用途只有一个**：解释"那天为什么没有日K"——【当日完整性体检】【全库数据体检】遇到全天停牌的日子不再记成待办。
+**按接口原样存，不展开成按天**：哪天算全天停牌由 `Logic/Services/SuspensionRule` 判（两所记法不同，深交所要跨月配对）。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| source | TEXT | `sse_stock` / `sse_fund` / `szse` |
+| market | TEXT | `sh` / `sz` |
+| code | TEXT | 6 位裸码（Bar 里 ETF 带市场前缀、个股不带） |
+| event_key | TEXT | 同一条记录的键（`SuspensionRow.Key`），**不含结束日**——上交所还在停牌的记录复牌后补上结束日要覆盖旧行 |
+| name | TEXT | 证券简称（当时的） |
+| start_day | TEXT | 停牌日 `yyyy-MM-dd`；深交所复牌记录可能为空 |
+| start_time | TEXT | 深交所：`open`（开市起停）/ `HH:mm:ss`（盘中才停）；上交所恒空 |
+| end_day | TEXT | ⚠ **两所含义不同**：上交所＝最后一个停牌日（含）；深交所＝**复牌日**（那天有交易）。空＝还没复牌 |
+| end_time | TEXT | 深交所复牌时刻（`open` / `10:30:00` …） |
+| kind | TEXT | 上交所 `LXTP` 连续停牌 / `LSTP` 临时停牌；深交所「停牌期限」原文（`1天` `1小时` `停牌` `取消停牌` `特停` `今起复牌` …） |
+| stop_time | TEXT | 上交所：`WH` 全天 / `915` `13` `AM` `PM` 盘中一段；深交所恒空 |
+| reason | TEXT | 停牌原因（上交所股票 stopReason / 基金 startStopReason / 深交所「停牌原因」） |
+| end_reason | TEXT | 复牌原因（上交所 endStopReason） |
+| control_type | TEXT | 上交所股票查询的品种：`TR` 股票 / `GB` 债券 / `CB` 可转债 |
+| end_kind | TEXT | 上交所基金 endStopType |
+| start_type | TEXT | 上交所基金 startType（实测多为字符串 `null`，原样存） |
+| end_type | TEXT | 上交所基金 endType |
+| date_source | TEXT | 上交所基金 dateSource |
+| full_name | TEXT | 上交所基金 expandAbbr（扩位简称，如「纳指ETF国泰」） |
+| fetched_at | TEXT | |
+| | | **主键** (source, market, code, event_key) |
+
+**哪些算全天停牌**（2026-09-30 逐日比对定的，详见设计文档）：上交所 `LXTP` 或 `stop_time='WH'` 的 [start_day, end_day]；
+深交所 [停牌日（盘中才停从次日起）, 复牌日)，没写复牌的配后面第一条复牌记录/下一条事件/本地停牌后第一根日K。
+**⚠ 别拿它判"这天必须没有日K"**：官网有开了头没收尾的记录（000656 在 2017-07-19），只能用来解释缺口。
+
+### SuspensionFetchMonth — 停复牌问过哪些月（2026-09-30 新增）
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| source | TEXT | 同上 |
+| month | TEXT | `yyyy-MM-01` |
+| rows | INTEGER | 接口返回多少条 |
+| fetched_at | TEXT | |
+| | | **主键** (source, month) |
+
+最近两个月每轮都重问（还在停牌的复牌后才补结束日），更早的问过一次就不再问；「首次整段回补」全部重问。
 
 ## 公告
 

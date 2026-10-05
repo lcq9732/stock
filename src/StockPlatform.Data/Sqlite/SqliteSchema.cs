@@ -558,6 +558,51 @@ public static class SqliteSchema
                 PRIMARY KEY (code, trade_date)
             );
 
+            -- 沪深交易所官网的停复牌记录（2026-09-30，见 doc/suspension-design.md）。
+            -- **取到的全存**（用户定）：股票、ETF、债券、可转债、LOF、B 股每一行都留，接口的每一列都有对应字段
+            -- （上交所股票 9 列、基金 13 列、深交所 6 列）。
+            --
+            -- 用途：解释"那天为什么没有日K"——当日完整性体检、全库体检遇到全天停牌的日子不再记成待办。
+            -- **按接口原样的语义存**，不预先展开成按天：深交所长期停牌分「停牌」「取消停牌」两条记，
+            -- 常隔好几个月，要拿到这只票的全部记录才配得上对（判据在 Logic 的 SuspensionRule）。
+            --
+            -- event_key 见 SuspensionRow.Key：**不含结束日**——上交所还在停牌的记录复牌后才补上结束日，
+            -- 键要不变才能覆盖掉那条"没有结束日"的旧行，否则这只票会永远被判成还在停牌。
+            -- code 是 6 位裸码；Bar 里 ETF 存成 market || code、个股是裸码。
+            CREATE TABLE IF NOT EXISTS Suspension (
+                source     TEXT NOT NULL,   -- sse_stock / sse_fund / szse
+                market     TEXT NOT NULL,   -- sh / sz
+                code       TEXT NOT NULL,
+                event_key  TEXT NOT NULL,
+                name       TEXT,
+                start_day  TEXT,            -- yyyy-MM-dd；深交所「取消停牌」可能没有
+                start_time TEXT,            -- 深交所：open / HH:mm:ss；上交所恒空
+                end_day    TEXT,            -- 上交所：最后一个停牌日（含）；深交所：复牌日（那天有交易）
+                end_time   TEXT,
+                kind       TEXT,            -- 上交所 LXTP/LSTP；深交所「停牌期限」原文
+                stop_time  TEXT,            -- 上交所 WH（全天）/ 915 / 13 …；深交所恒空
+                reason     TEXT,
+                end_reason   TEXT,          -- 复牌原因（上交所 endStopReason；深交所没有）
+                control_type TEXT,          -- 上交所股票查询的品种：TR 股票 / GB 债券 / CB 可转债
+                end_kind     TEXT,          -- 上交所基金 endStopType
+                start_type   TEXT,          -- 上交所基金 startType
+                end_type     TEXT,          -- 上交所基金 endType
+                date_source  TEXT,          -- 上交所基金 dateSource
+                full_name    TEXT,          -- 上交所基金 expandAbbr（扩位简称）
+                fetched_at TEXT,
+                PRIMARY KEY (source, market, code, event_key)
+            );
+            CREATE INDEX IF NOT EXISTS ix_suspension_code ON Suspension(code);
+
+            -- 停复牌每一路接口问过哪些月份（回补中断后接着问；最近两个月每轮重问，见 SuspensionFetchPlan）。
+            CREATE TABLE IF NOT EXISTS SuspensionFetchMonth (
+                source     TEXT NOT NULL,
+                month      TEXT NOT NULL,   -- yyyy-MM-01
+                rows       INTEGER,
+                fetched_at TEXT,
+                PRIMARY KEY (source, month)
+            );
+
             -- 业绩预告（2026-09-03，东财 RPT_PUBLIC_OP_NEWPREDICT）。本地此前完全没有这份数据。
             --
             -- 值钱在三点：① 比正式财报早一个月以上（Q3预告10月中 vs 财报10月底；年报预告1月底 vs 年报4月）；
@@ -1166,6 +1211,11 @@ public static class SqliteSchema
         AddColumnIfMissing(conn, "TopShareholder", "change_direction", "TEXT");
         // 2026-09-23：EtfShare 当天先只有沪市、后加深市。先建过表的库补 market 列，老行都是沪市。
         AddColumnIfMissing(conn, "EtfShare", "market", "TEXT NOT NULL DEFAULT 'sh'");
+        // 2026-09-30：停复牌改成"取到的全存"（接口每一列都有字段）。建表当天就改了，
+        // 补这几句只是防着被上一版 exe 按旧结构建过表的库。
+        foreach (var col in new[] { "end_reason", "control_type", "end_kind", "start_type", "end_type",
+                                    "date_source", "full_name" })
+            AddColumnIfMissing(conn, "Suspension", col, "TEXT");
         // 2026-08-29：监管指标区分来源——pdf / ocr / ocr_confirmed / manual，取值和含义见
         // Logic.Models.MetricSources。有它才能保证**重解析不会覆盖掉人拍板过的数据**
         // （见 SqliteBankRegulatoryRepository.Upsert 的 ON CONFLICT … WHERE），

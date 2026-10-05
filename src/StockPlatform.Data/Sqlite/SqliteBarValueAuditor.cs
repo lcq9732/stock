@@ -89,7 +89,11 @@ public sealed class SqliteBarValueAuditor
     /// <param name="Granularity">口径。</param>
     /// <param name="Day">交易日。</param>
     /// <param name="Kind">见 <see cref="AuditFindingKind"/>。一行可能同时中几条，那就返回几条。</param>
-    public sealed record RowIssue(string Code, string Granularity, DateTime Day, string Kind);
+    /// <param name="TurnoverOnly">只对 V3（<see cref="AuditFindingKind.Inconsistent"/>）有意义：
+    /// 量、额都对得上、**只有换手率不同**。ETF 的这类归【ETF换手率校正】修，见
+    /// <see cref="AuditFindingKind.EtfTurnover"/>——是不是 ETF 由调用方按名册判，这里不猜代码规则。</param>
+    public sealed record RowIssue(string Code, string Granularity, DateTime Day, string Kind,
+                                  bool TurnoverOnly = false);
 
     /// <summary>
     /// 聚合成**段**的问题（一个 code × 一个口径 × 一类问题 = 一段）——体检用这个，不用行级。
@@ -102,8 +106,11 @@ public sealed class SqliteBarValueAuditor
     /// 于是上限可以彻底去掉。
     /// </summary>
     /// <param name="Days">这一段里命中判据的**行数**（不是区间长度）。</param>
+    /// <param name="TurnoverOnly">同 <see cref="RowIssue.TurnoverOnly"/>。V3 按它分段：
+    /// 同一只票同一口径"只差换手率"的行和"量额也不对"的行各成一段，因为修它们的任务可能不同。</param>
     public sealed record IssueSegment(
-        string Code, string Granularity, string Kind, DateTime From, DateTime To, int Days);
+        string Code, string Granularity, string Kind, DateTime From, DateTime To, int Days,
+        bool TurnoverOnly = false);
 
     /// <summary>
     /// 扫出所有单行问题（V1 盘中固化 / V2 关键列 NULL / V4 OHLC 不自洽 / V6 量额比率异常）。
@@ -245,10 +252,10 @@ public sealed class SqliteBarValueAuditor
     /// <summary>把 V3 的命中流式聚合成段（体检用，无条数上限，理由见 <see cref="IssueSegment"/>）。</summary>
     public List<IssueSegment> CrossGranularitySegments(DateTime cutoff, DateTime? since = null)
     {
-        var acc = new Dictionary<(string, string), (DateTime Min, DateTime Max, int N)>();
+        var acc = new Dictionary<(string, string, bool), (DateTime Min, DateTime Max, int N)>();
         foreach (var i in ReadCrossGranularity(cutoff, since, null))
         {
-            var key = (i.Code, i.Granularity);
+            var key = (i.Code, i.Granularity, i.TurnoverOnly);
             if (acc.TryGetValue(key, out var cur))
                 acc[key] = (i.Day < cur.Min ? i.Day : cur.Min, i.Day > cur.Max ? i.Day : cur.Max, cur.N + 1);
             else
@@ -256,9 +263,10 @@ public sealed class SqliteBarValueAuditor
         }
         return acc
             .Select(kv => new IssueSegment(kv.Key.Item1, kv.Key.Item2, AuditFindingKind.Inconsistent,
-                                           kv.Value.Min, kv.Value.Max, kv.Value.N))
+                                           kv.Value.Min, kv.Value.Max, kv.Value.N, kv.Key.Item3))
             .OrderBy(x => x.Code, StringComparer.Ordinal)
             .ThenBy(x => x.Granularity, StringComparer.Ordinal)
+            .ThenBy(x => x.TurnoverOnly)
             .ToList();
     }
 
@@ -274,29 +282,33 @@ public sealed class SqliteBarValueAuditor
         conn.Open();
         using var cmd = conn.CreateCommand();
         var codeFilter = CodeFilter(codes, "a.code");
+        // 三列各算一个"对不上"标志，外层再筛——顺带得出"只差换手率"（TurnoverOnly），不多扫一遍表。
         cmd.CommandText = $"""
-            SELECT b.code, b.granularity, b.period_start
-            FROM Bar a
-            JOIN Bar b ON b.code = a.code AND b.period_start = a.period_start
-            WHERE a.granularity = $base
-              AND b.granularity IN ($g1, $g2, $g3)
-              AND a.period_start <= $cutoff
-              AND ($since IS NULL OR a.period_start >= $since)
-              {codeFilter}
-              AND (
-                   -- volume 是**硬事实**：同源抓回来必须逐值相同，1e-6 只留浮点噪声的余量
-                   ABS(COALESCE(a.volume, 0) - COALESCE(b.volume, 0)) > 1e-6 * MAX(ABS(COALESCE(a.volume, 0)), 1)
-                   -- amount 放过**一个量化刻度**（见 AmountQuantumYuan）：源只有百元精度，
-                   -- 两个端点各自四舍五入，偶尔会落在相邻的两格上
-                OR ABS(COALESCE(a.amount, 0) - COALESCE(b.amount, 0))
-                     > {AmountQuantumYuan} + 1e-6 * MAX(ABS(COALESCE(a.amount, 0)), 1)
-                   -- turnover 是数据源**算出来的派生值**（成交量 ÷ 流通股本），而各口径是不同时刻
-                   -- 抓的：期间股本一变（解禁/增发），同一天的换手率就被重算成另一个数。
-                   -- 2026-09-09 实测 000153 的 08-27：volume/amount 完全一致，turnover 7.39 vs 7.36
-                   -- （相隔 5 天抓的），拿 1e-6 去判会报出一堆修不掉的段。放宽到 2% 或绝对 0.05。
-                OR ABS(COALESCE(a.turnover, 0) - COALESCE(b.turnover, 0))
-                     > MAX(0.05, 0.02 * ABS(COALESCE(a.turnover, 0)))
-              );
+            SELECT code, granularity, period_start, (vol_bad = 0 AND amt_bad = 0) AS turnover_only
+            FROM (
+                SELECT b.code, b.granularity, b.period_start,
+                       -- volume 是**硬事实**：同源抓回来必须逐值相同，1e-6 只留浮点噪声的余量
+                       ABS(COALESCE(a.volume, 0) - COALESCE(b.volume, 0))
+                         > 1e-6 * MAX(ABS(COALESCE(a.volume, 0)), 1) AS vol_bad,
+                       -- amount 放过**一个量化刻度**（见 AmountQuantumYuan）：源只有百元精度，
+                       -- 两个端点各自四舍五入，偶尔会落在相邻的两格上
+                       ABS(COALESCE(a.amount, 0) - COALESCE(b.amount, 0))
+                         > {AmountQuantumYuan} + 1e-6 * MAX(ABS(COALESCE(a.amount, 0)), 1) AS amt_bad,
+                       -- turnover 是数据源**算出来的派生值**（成交量 ÷ 流通股本），而各口径是不同时刻
+                       -- 抓的：期间股本一变（解禁/增发），同一天的换手率就被重算成另一个数。
+                       -- 2026-09-09 实测 000153 的 08-27：volume/amount 完全一致，turnover 7.39 vs 7.36
+                       -- （相隔 5 天抓的），拿 1e-6 去判会报出一堆修不掉的段。放宽到 2% 或绝对 0.05。
+                       ABS(COALESCE(a.turnover, 0) - COALESCE(b.turnover, 0))
+                         > MAX(0.05, 0.02 * ABS(COALESCE(a.turnover, 0))) AS turn_bad
+                FROM Bar a
+                JOIN Bar b ON b.code = a.code AND b.period_start = a.period_start
+                WHERE a.granularity = $base
+                  AND b.granularity IN ($g1, $g2, $g3)
+                  AND a.period_start <= $cutoff
+                  AND ($since IS NULL OR a.period_start >= $since)
+                  {codeFilter}
+            )
+            WHERE vol_bad OR amt_bad OR turn_bad;
             """;
         cmd.Parameters.AddWithValue("$base", Granularity.Day);
         cmd.Parameters.AddWithValue("$g1", Granularity.DayHfq);
@@ -309,7 +321,8 @@ public sealed class SqliteBarValueAuditor
         using var r = cmd.ExecuteReader();
         while (r.Read())
             yield return new RowIssue(r.GetString(0), r.GetString(1),
-                DateTime.Parse(r.GetString(2)), AuditFindingKind.Inconsistent);
+                DateTime.Parse(r.GetString(2)), AuditFindingKind.Inconsistent,
+                TurnoverOnly: r.GetInt64(3) != 0);
     }
 
     /// <summary>

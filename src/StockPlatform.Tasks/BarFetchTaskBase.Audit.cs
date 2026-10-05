@@ -212,7 +212,8 @@ public abstract partial class BarFetchTaskBase
                 {
                     var d = new Dictionary<(string, string, string), List<DateTime>>();
                     foreach (var i in auditor.RowIssues(cutoff, codes: codes)
-                                             .Concat(auditor.CrossGranularityMismatch(cutoff, codes: codes)))
+                                             .Concat(auditor.CrossGranularityMismatch(cutoff, codes: codes)
+                                                            .Where(x => !x.TurnoverOnly || !TurnoverOnlyIsOthers)))
                     {
                         var key = (i.Code, i.Granularity, i.Kind);
                         if (!d.TryGetValue(key, out var days)) d[key] = days = [];
@@ -255,17 +256,20 @@ public abstract partial class BarFetchTaskBase
              + "。⚠ 还在的**不会**进「数据源确实没有」白名单——那是给停牌用的，"
              + "值错进去等于发永久豁免，所以它会一直报到真修好为止。");
 
-        // ETF 的「多口径不一致」重抓修不好（2026-09-23 查实）：腾讯的 ETF 换手率口径不统一，
-        // 有时 ÷前一交易日份额、有时 ÷当天份额，同一天两个接口还可能各用一种，同一时刻重抓还是那个数。
-        // 待办照常留着报警，这里只指一条能修的路。
-        int etfInconsistent = still.Count(r => r.EffectiveReason == AuditFindingKind.Inconsistent
-                                               && EtfTurnoverRule.LooksLikeEtfBarCode(r.Code));
-        if (etfInconsistent > 0)
-            Report($"　其中 {etfInconsistent} 段是 ETF 的多口径不一致——多半只是换手率对不上"
-                 + "（腾讯两个接口那天一个按前一交易日份额、一个按当天份额算），重新拉取修不好，"
-                 + "请跑【ETF换手率校正】（先「日常增量」看报告，再「彻底重查」写回）。");
+        // （这里原来有一句"其中 N 段是 ETF 的多口径不一致，请跑【ETF换手率校正】"，2026-09-29 删：
+        //  那类段体检已经记在【ETF换手率校正】名下、由它自己补，不会再落到K线任务这里。）
         BacklogParts.Add($"值问题 修好 {fixedTotal}/{ranges.Count} 段");
     }
+
+    /// <summary>
+    /// "量额一致、只差换手率"的多口径不一致**不归本任务修**（复查时不算它"还没修好"）。
+    ///
+    /// ETF 的这类归【ETF换手率校正】（<see cref="AuditFindingKind.EtfTurnover"/>，2026-09-29）：
+    /// 本任务重抓写回的是腾讯的换手率，口径本来就可能不对。要是复查还拿换手率说事，
+    /// 这一段就永远划不掉，每轮都去重抓覆盖——正好把校正好的值冲回去。量额修好了就算本任务修好了。
+    /// 个股的换手率差异是股本变动造成的，重抓能修，所以默认 false。
+    /// </summary>
+    protected virtual bool TurnoverOnlyIsOthers => false;
 
     private static MissingBarRange ToRange(RetryTarget t) => new()
     {
@@ -293,6 +297,7 @@ public abstract partial class BarFetchTaskBase
         AuditFindingKind.NullValue => "关键列NULL",
         AuditFindingKind.Ohlc => "OHLC不自洽",
         AuditFindingKind.Inconsistent => "多口径量额对不上",
+        AuditFindingKind.EtfTurnover => "ETF换手率口径",
         _ => reason,
     };
 }

@@ -98,7 +98,7 @@ public class StockDayBarBackfillTests : IDisposable
     {
         var source = new NamedBarSource(
             "Mock", new MockBarFetcher(), new MockStockListProvider(() => []));
-        var task = new StockDayBarTask(_paths, new BarSourceHolder(source), _manifest, batchSize: 30);
+        var task = new StockDayBarTask(_paths, new BarSourceHolder(source), _manifest, tradingDays: null, batchSize: 30);
         var log = new List<string>();
         task.OnProgress += p => log.Add(p.Text);
         var result = await task.RunAsync(args, CancellationToken.None);

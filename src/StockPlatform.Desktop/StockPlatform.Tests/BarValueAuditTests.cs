@@ -37,14 +37,14 @@ public class BarValueAuditTests : IDisposable
     /// <summary>一条各方面都正常的行：ratio = 10000/(100×1.0)/… 这里凑成 100（手口径）。</summary>
     private void Ok(string code, string gran = Granularity.Day, DateTime? day = null,
                     double close = 10, double volume = 100, double? amount = null,
-                    DateTime? fetchedAt = null)
+                    DateTime? fetchedAt = null, double turnover = 1.5)
     {
         var d = day ?? Day;
         _bars.InsertOrRefreshUnconfirmed([new Bar
         {
             Code = code, Granularity = gran, PeriodStart = d,
             Open = close, Close = close, High = close, Low = close,
-            Volume = volume, Amount = amount ?? volume * close * 100, Turnover = 1.5,
+            Volume = volume, Amount = amount ?? volume * close * 100, Turnover = turnover,
             FetchedAt = fetchedAt ?? d.AddHours(20),
         }]);
     }
@@ -366,6 +366,45 @@ public class BarValueAuditTests : IDisposable
         Assert.Single(segs);
         Assert.Equal(2, segs[0].Days);
         Assert.Equal(AuditFindingKind.Inconsistent, segs[0].Kind);
+    }
+
+    /// <summary>
+    /// V3 要报出"量额一致、只差换手率"（2026-09-29）：ETF 的这类归【ETF换手率校正】修，
+    /// 跟量额也不对的那类修法不同。510150 在 2024-09-30：前复权 83.63、不复权 48.38。
+    /// </summary>
+    [Fact]
+    public void V3_只差换手率的行带TurnoverOnly标志()
+    {
+        Ok("sh510150", Granularity.Day, volume: 16_919_316, turnover: 83.63);
+        Ok("sh510150", Granularity.DayRaw, volume: 16_919_316, turnover: 48.38);
+
+        var hit = Assert.Single(_auditor.CrossGranularityMismatch(Cutoff));
+        Assert.Equal(AuditFindingKind.Inconsistent, hit.Kind);   // 判据层不改类别，归属由体检按名册定
+        Assert.True(hit.TurnoverOnly);
+    }
+
+    [Fact]
+    public void V3_量也不对的行不算只差换手率()
+    {
+        Ok("sh510150", Granularity.Day, volume: 16_919_316, turnover: 83.63);
+        Ok("sh510150", Granularity.DayRaw, volume: 93_619, turnover: 48.38);
+
+        Assert.False(Assert.Single(_auditor.CrossGranularityMismatch(Cutoff)).TurnoverOnly);
+    }
+
+    /// <summary>同一只票同一口径两类行各成一段——修它们的任务可能不一样，混成一段就派不对了。</summary>
+    [Fact]
+    public void V3_只差换手率和量额不对的分成两段()
+    {
+        Ok("sh510150", Granularity.Day, Day, volume: 1000, turnover: 8);
+        Ok("sh510150", Granularity.DayRaw, Day, volume: 1000, turnover: 4);          // 只差换手率
+        Ok("sh510150", Granularity.Day, Day.AddDays(1), volume: 1000, turnover: 8);
+        Ok("sh510150", Granularity.DayRaw, Day.AddDays(1), volume: 30, turnover: 8); // 量不对
+
+        var segs = _auditor.CrossGranularitySegments(Cutoff);
+        Assert.Equal(2, segs.Count);
+        Assert.Equal(Day, segs.Single(s => s.TurnoverOnly).From);
+        Assert.Equal(Day.AddDays(1), segs.Single(s => !s.TurnoverOnly).From);
     }
 
     // ─────────────────── 2026-09-09 生产实测暴露的两个误报 ───────────────────

@@ -62,7 +62,10 @@ public sealed class RetryFailedTask(
             RetryTaskIds.IndexCons, RetryTaskIds.IndexWeight,
             RetryTaskIds.Shareholder, RetryTaskIds.Dividend,
             RetryTaskIds.StockDayBars, RetryTaskIds.StockHfqBars, RetryTaskIds.StockRawBars,
-            RetryTaskIds.EtfBars, RetryTaskIds.IndexBars, RetryTaskIds.DelistedTails,
+            RetryTaskIds.EtfBars,
+            // 排在【ETF日K】后面：量额先由它修好，换手率再按官方份额校正（校正是拿成交量去除的）
+            RetryTaskIds.EtfTurnoverFix,
+            RetryTaskIds.IndexBars, RetryTaskIds.DelistedTails,
         };
         return backlog.Actionable.Select(i => i.TaskId).Distinct(StringComparer.Ordinal)
             .OrderBy(id => Array.IndexOf(order, id) is var i && i >= 0 ? i : int.MaxValue)

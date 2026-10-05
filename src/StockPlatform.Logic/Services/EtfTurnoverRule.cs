@@ -72,13 +72,7 @@ public static class EtfTurnoverRule
             : EtfTurnoverVerdict.Wrong;
     }
 
-    /// <summary>
-    /// Bar 里一只代码像不像沪深 ETF（sh5 / sz15 开头 + 6 位）。
-    ///
-    /// 只给**提示文案**用（【重新拉取失败】复查后提醒去跑【ETF换手率校正】），不参与任何数据判断——
-    /// 校正任务的名单来自交易所份额表本身，不猜代码规则。
-    /// </summary>
-    public static bool LooksLikeEtfBarCode(string code)
-        => code.Length == 8 && (code.StartsWith("sh5", StringComparison.Ordinal)
-                                || code.StartsWith("sz15", StringComparison.Ordinal));
+    // LooksLikeEtfBarCode（按 sh5/sz15 猜是不是 ETF）删于 2026-09-29：它只给【重新拉取失败】里
+    // 一句"请跑【ETF换手率校正】"的提示用，那类待办现在由全库体检按名册直接记在校正任务名下，
+    // 提示没了。是不是 ETF 一律看 StockMeta.type，不按代码规则猜。
 }

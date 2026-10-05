@@ -124,6 +124,15 @@ public sealed class RetryBacklog
         return string.Join(" · ", parts);
     }
 
+    /// <summary>【重新拉取失败】那格的 tooltip：<see cref="Describe"/> 最多列 <see cref="MaxDescribeParts"/> 项、
+    /// 格子窄时还会被截，这里逐行列出全部 Actionable。</summary>
+    public string DescribeActionableLines()
+    {
+        var list = Actionable;
+        if (list.Count == 0) return "无失败";
+        return string.Join("\n", list.Select(i => $"· {i.Describe()}"));
+    }
+
     /// <summary>【全库数据体检】那行的 tooltip：逐行列**全部**，并注明哪些不是重取能补的。</summary>
     public string DescribeAll()
     {
@@ -178,7 +187,8 @@ public sealed class RetryBacklog
             //   把它标成了 false，是误读）。
             (RetryTodoKind.ValueIssue, _) => (RetryKind.ValueIssues, ValueReasonLabel(t), "段", true),
             (RetryTodoKind.MissingDay, _) =>
-                (RetryKind.MissingDay, t.Day is { } d ? $"{d:MM-dd}日线" : "当天日线", "只", true),
+                // 带上任务名：个股/ETF/指数各记一条，不带的话一行里并排三个「09-28日线 1 只」，看着像重复了
+                (RetryKind.MissingDay, BarLabelOf(t) + " " + (t.Day is { } d ? $"{d:MM-dd}日线" : "当天日线"), "只", true),
             (RetryTodoKind.MissingDays, _) => (RetryKind.NetInflowDays, "资金流缺失日", "天", true),
             // 残缺日按**任务**分标签：MissingDays 那条把名字写死成"资金流缺失日"了，
             // 照抄的话两融的残缺日会顶着资金流的名字显示出来。
@@ -233,6 +243,7 @@ public sealed class RetryBacklog
             AuditFindingKind.NullValue => "空值",
             AuditFindingKind.Ohlc => "OHLC 不自洽",
             AuditFindingKind.Inconsistent => "多口径不一致",
+            AuditFindingKind.EtfTurnover => "ETF换手率口径",
             AuditFindingKind.Ratio => "比例异常",
             _ => "值问题",
         };

@@ -97,6 +97,47 @@ public class DayCompletenessTaskTests : IDisposable
         Assert.Empty(result.Errors);
     }
 
+    /// <summary>
+    /// 当天全天停牌的不算漏抓（2026-09-30）：官网停复牌记录说它那天没交易，记进待办只会让它
+    /// 天天挂在名单里、半夜白抓一轮（09-29 的 300527/600293/600363 就是这样）。
+    /// 没停牌的照样记——停复牌数据只用来解释缺口，不能把真漏抓的也盖掉。
+    /// </summary>
+    [Fact]
+    public async Task 当天全天停牌的不进待办_没停牌的照记()
+    {
+        Seed("600293", SqliteStockMetaUpsert.TypeStock, hasLatest: false);   // 上交所连续停牌
+        Seed("sz159972", SqliteStockMetaUpsert.TypeEtf, hasLatest: false);   // 深交所「1天」
+        Seed("600000", SqliteStockMetaUpsert.TypeStock, hasLatest: false);   // 真漏抓
+        new SqliteTradingDayRepository(_paths.CurrentDb)
+            .Upsert(Days.Select(d => (DateOnly.FromDateTime(d), "szse")));
+        var latest = DateOnly.FromDateTime(Latest);
+        var repo = new SqliteSuspensionRepository(_paths.CurrentDb);
+        repo.Upsert([
+            new SuspensionRow(SuspensionSource.SseStock, "sh", "600293", "三峡新材",
+                latest, "", null, "", "LXTP", "", "拟筹划重大资产重组"),
+            new SuspensionRow(SuspensionSource.Szse, "sz", "159972", "5年地方债ETF",
+                latest, SuspensionRow.AtOpen, latest.AddDays(1), SuspensionRow.AtOpen, "1天", "", "重大事项"),
+        ]);
+
+        await RunAsync();
+
+        var m = _manifest.Load();
+        Assert.Equal("600000", Assert.Single(m.Todo(RetryTaskIds.StockDayBars, RetryTodoKind.MissingDay)!.Targets).Code);
+        Assert.Null(m.Todo(RetryTaskIds.EtfBars, RetryTodoKind.MissingDay));   // 唯一缺的那只是停牌
+    }
+
+    /// <summary>停复牌表还空着（没跑过【停复牌】）＝不知道谁停牌，行为跟没有这个功能时一样。</summary>
+    [Fact]
+    public async Task 没有停复牌数据时照旧全记()
+    {
+        Seed("600293", SqliteStockMetaUpsert.TypeStock, hasLatest: false);
+
+        await RunAsync();
+
+        Assert.Equal("600293",
+            Assert.Single(_manifest.Load().Todo(RetryTaskIds.StockDayBars, RetryTodoKind.MissingDay)!.Targets).Code);
+    }
+
     [Fact]
     public async Task 缺了就记进各自任务的待办_而且不算失败()
     {

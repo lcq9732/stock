@@ -52,6 +52,12 @@ public static class RetryTaskIds
     /// </summary>
     public const string QfqRepair = "RepairQfq";
 
+    /// <summary>
+    /// 【ETF换手率校正】（2026-09-29）。全库体检查出的 <see cref="AuditFindingKind.EtfTurnover"/>
+    /// 归它——那类问题重抓修不好，只有它按官方份额能修。
+    /// </summary>
+    public const string EtfTurnoverFix = "StepEtfTurnoverFix";
+
     /// <summary>分档资金流·逐股补历史（push2his）。NetInflowDetail 的残缺日归它——
     /// 另一条通道【分档资金流快照】走 push2delay，接口**只给最近一个交易日**，补不了历史。</summary>
     public const string MoneyFlowDetail = "FetchMoneyFlowDetail";

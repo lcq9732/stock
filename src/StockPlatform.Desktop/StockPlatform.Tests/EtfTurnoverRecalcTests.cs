@@ -331,6 +331,77 @@ public class EtfTurnoverRecalcTests : IDisposable
     private EtfTurnoverRecalcTask NewTask(params IEtfShareProvider[] providers) =>
         new(_shares, providers, _days, _noData, new SqliteEtfTurnoverStore(_dbPath));
 
+    // ─────────────────── 只补待办（2026-09-29）───────────────────
+    // 全库体检把"ETF 只差换手率"记在本任务名下，【重新拉取失败】派它来补。
+
+    private StockPlatform.Data.Orchestration.JsonManifestStore NewManifest(params RetryTarget[] todo)
+    {
+        var store = new StockPlatform.Data.Orchestration.JsonManifestStore(
+            Path.Combine(Path.GetDirectoryName(_dbPath)!, Path.GetFileNameWithoutExtension(_dbPath) + "_manifest.json"));
+        var m = store.Load();
+        m.SetTodo(RetryTaskIds.EtfTurnoverFix, RetryTodoKind.ValueIssue, todo);
+        store.Save(m);
+        return store;
+    }
+
+    private EtfTurnoverRecalcTask NewBacklogTask(IManifestStore store, FakeProvider provider) =>
+        new(_shares, [provider], _days, _noData, new SqliteEtfTurnoverStore(_dbPath),
+            store, new SqliteBarValueAuditor(_dbPath));
+
+    private static RetryTarget Todo0930(string gran = Granularity.DayRaw) => new()
+    {
+        Code = "sh510150", Gran = gran,
+        From = D0930.ToDateTime(TimeOnly.MinValue), To = D0930.ToDateTime(TimeOnly.MinValue),
+        Days = 1, Tries = 8, Reason = AuditFindingKind.EtfTurnover,
+    };
+
+    [Fact]
+    public async Task 只补待办_按本地份额写回_移出名单_不联网()
+    {
+        SaveEtfBars(D0930, volume: 16_919_316, dayTurnover: 83.63, rawTurnover: 48.38);
+        _shares.Upsert([new EtfShareRow("sh", "510150", D0927, 202_317.86),
+                        new EtfShareRow("sh", "510150", D0930, 349_717.86)]);
+        var store = NewManifest(Todo0930());
+        var provider = new FakeProvider();
+
+        var task = NewBacklogTask(store, provider);
+        Assert.True(task.HandlesBacklog);
+        var r = await task.RunAsync(new TaskRunArgs(FetchMode.FillBacklog), CancellationToken.None);
+
+        Assert.False(r.NothingToDo);
+        Assert.Empty(provider.Requests);                                              // 一个请求都没发
+        Assert.Equal(83.63, ReadTurnover("sh510150", Granularity.DayRaw, D0930));    // ÷ 前一交易日份额
+        Assert.Null(store.Load().Todo(RetryTaskIds.EtfTurnoverFix, RetryTodoKind.ValueIssue));
+    }
+
+    /// <summary>修不好的留着、Tries 加一，**不进白名单**（同K线值问题：值错进去等于永久豁免）。</summary>
+    [Fact]
+    public async Task 只补待办_份额没了修不好_留在名单且Tries加一()
+    {
+        SaveEtfBars(D0930, volume: 16_919_316, dayTurnover: 83.63, rawTurnover: 48.38);
+        var store = NewManifest(Todo0930());    // 本地一条份额都没有
+
+        await NewBacklogTask(store, new FakeProvider())
+            .RunAsync(new TaskRunArgs(FetchMode.FillBacklog), CancellationToken.None);
+
+        var left = Assert.Single(store.Load().Todo(RetryTaskIds.EtfTurnoverFix, RetryTodoKind.ValueIssue)!.Targets);
+        Assert.Equal(9, left.Tries);
+        Assert.Equal(AuditFindingKind.EtfTurnover, left.Reason);
+        Assert.Equal(48.38, ReadTurnover("sh510150", Granularity.DayRaw, D0930));    // 没瞎改
+    }
+
+    [Fact]
+    public async Task 只补待办_没有欠着的就NothingToDo()
+    {
+        var r = await NewBacklogTask(NewManifest(), new FakeProvider())
+            .RunAsync(new TaskRunArgs(FetchMode.FillBacklog), CancellationToken.None);
+        Assert.True(r.NothingToDo);
+    }
+
+    [Fact]
+    public void 没给manifest就不声明自己补待办()
+        => Assert.False(NewTask(new FakeProvider()).HandlesBacklog);
+
     private static EtfTurnoverAuditResult Sh(EtfTurnoverRecalcTask task) => task.LastResult!["sh"];
 
     /// <summary>前复权、不复权、回测序列三个口径各一行，volume/amount/OHLC 相同，只有换手率按参数给。</summary>

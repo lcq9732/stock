@@ -57,14 +57,31 @@ public sealed class EtfTurnoverAuditResult
 /// 从 EtfShare 表本身（交易所列过的全部 ETF），Bar 里按 市场 + 代码 找——这是 ETF 在 Bar 里存的形式
 /// （前缀是新浪 ETF 列表接口原样给的，见 SqliteMarginShortBalanceFiller.IsShanghaiByStoredPrefix）。
 /// 不按代码规则猜市场。
+///
+/// ════ 【只补待办】（2026-09-29）════
+/// 【全库数据体检】把"ETF 量额一致、只差换手率"（<see cref="AuditFindingKind.EtfTurnover"/>）记在
+/// 本任务名下，【重新拉取失败】按归属派过来。这一档**不联网**：只对待办里那几只、用本地已有的
+/// 官方份额重算写回（体检记待办时已经筛过——前一交易日没有份额的判不了，不会记进来），
+/// 写完用体检同一条判据复查，对上的移出名单，对不上的留着、Tries 加一（不进白名单，同K线值问题）。
+/// 不联网是故意的：【重新拉取失败】声明的数据源里没有交易所，份额每天在日常计划里本来就会补。
 /// </summary>
 public sealed class EtfTurnoverRecalcTask(
     IEtfShareRepository shares,
     IReadOnlyList<IEtfShareProvider> providers,
     ITradingDayRepository tradingDays,
     IDailyFetchNoDataRepository noData,
-    SqliteEtfTurnoverStore bars) : FetchTaskBase<EtfShareRow>
+    SqliteEtfTurnoverStore bars,
+    IManifestStore? manifestStore = null,
+    SqliteBarValueAuditor? valueAuditor = null) : FetchTaskBase<EtfShareRow>
 {
+    /// <summary>值问题复查的截止线——跟体检、K线任务那边是同一个 2 天。</summary>
+    private const int ValueRecheckSettleDays = 2;
+
+    /// <summary>体检记下的待办由本任务自己补（见类注释「只补待办」）。</summary>
+    public override bool HandlesBacklog => manifestStore != null && valueAuditor != null;
+
+    /// <summary>【只补待办】这一轮要补的段；null＝不是这一档或者没有欠着的。</summary>
+    private List<RetryTarget>? _backlog;
     /// <summary>日志里列几条错值样例（每个市场）。</summary>
     public const int MaxSamples = 8;
 
@@ -82,6 +99,24 @@ public sealed class EtfTurnoverRecalcTask(
     protected override async IAsyncEnumerable<IReadOnlyList<EtfShareRow>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
+        _backlog = null;
+        if (args.Mode == FetchMode.FillBacklog)
+        {
+            // 只补待办：不补份额（不联网），活全在 OnCompletedAsync 里——那里本来就是"检查并写回"。
+            var todo = manifestStore is null ? null
+                     : await Task.Run(() => manifestStore.Load()
+                           .Todo(RetryTaskIds.EtfTurnoverFix, RetryTodoKind.ValueIssue), ct);
+            if (todo is not { Targets.Count: > 0 })
+            {
+                Report("ETF换手率校正没有欠着的待办。");
+                yield break;
+            }
+            _backlog = todo.Targets.ToList();
+            Report($"补体检记下的 ETF 换手率：{_backlog.Count} 段、"
+                 + $"{_backlog.Select(t => t.Code).Distinct().Count()} 只——只用本地已有的官方份额重算写回，不联网…");
+            yield break;
+        }
+
         var today = DateOnly.FromDateTime(DateTime.Today);
         var calendar = await Task.Run(() => tradingDays.GetAll().Select(DateOnly.FromDateTime).ToList(), ct);
 
@@ -141,6 +176,9 @@ public sealed class EtfTurnoverRecalcTask(
     protected override async Task<TaskRunResult?> OnCompletedAsync(
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
+        if (args.Mode == FetchMode.FillBacklog)
+            return await FillBacklogAsync(ct);
+
         bool write = args.Mode == FetchMode.Thorough;
         Report(write
             ? "开始检查并写回 ETF 换手率（彻底重查：错值和空值改成「成交量 ÷ 前一交易日官方份额」）…"
@@ -163,7 +201,10 @@ public sealed class EtfTurnoverRecalcTask(
             progress: Summary(results.Values, write));
     }
 
-    private Dictionary<string, EtfTurnoverAuditResult> Audit(bool write, CancellationToken ct)
+    /// <param name="onlyBarCodes">只查这些（带前缀的 Bar 代码）。null＝交易所列过的全部——
+    /// 【只补待办】传待办里那几只。</param>
+    private Dictionary<string, EtfTurnoverAuditResult> Audit(bool write, CancellationToken ct,
+                                                             IReadOnlySet<string>? onlyBarCodes = null)
     {
         var calendar = tradingDays.GetAll().Select(DateOnly.FromDateTime).OrderBy(d => d).ToList();
         var prevOf = new Dictionary<DateOnly, DateOnly>(calendar.Count);
@@ -175,11 +216,15 @@ public sealed class EtfTurnoverRecalcTask(
 
         foreach (var p in providers)
         {
-            var codes = allCodes.Where(c => c.Market == p.Market).Select(c => c.Code).ToList();
+            var codes = allCodes.Where(c => c.Market == p.Market
+                                         && (onlyBarCodes == null || onlyBarCodes.Contains(p.Market + c.Code)))
+                                .Select(c => c.Code).ToList();
             var r = new EtfTurnoverAuditResult { Market = p.Market, Codes = codes.Count };
             results[p.Market] = r;
             var listed = codes.Select(c => p.Market + c).ToHashSet(StringComparer.Ordinal);
-            r.NotInExchangeList.AddRange(bars.ListEtfCodes(p.Market).Where(c => !listed.Contains(c)));
+            // 名册里有、交易所没列的那批只在全量检查时报（只补待办时名单是挑过的，不相干）
+            if (onlyBarCodes == null)
+                r.NotInExchangeList.AddRange(bars.ListEtfCodes(p.Market).Where(c => !listed.Contains(c)));
             foreach (var g in SqliteEtfTurnoverStore.Granularities) r.ByGranularity[g] = (0, 0);
 
             foreach (var code in codes)
@@ -241,6 +286,75 @@ public sealed class EtfTurnoverRecalcTask(
             }
         }
         return results;
+    }
+
+    /// <summary>
+    /// 【只补待办】：只对待办里那几只重算写回，再按体检同一条判据复查、落账。
+    /// 复查只认"只差换手率"的行——量额本身对不上是另一类问题（归【ETF日K】），不是本任务修得好的。
+    /// </summary>
+    private async Task<TaskRunResult?> FillBacklogAsync(CancellationToken ct)
+    {
+        if (_backlog is not { Count: > 0 } targets || manifestStore is null || valueAuditor is null)
+            return TaskRunResult.Ok(nothingToDo: true, progress: "没有欠着的待办");
+
+        var codes = targets.Select(t => t.Code).Distinct(StringComparer.Ordinal).ToList();
+        var cutoff = DateTime.Today.AddDays(-ValueRecheckSettleDays);
+
+        var (results, live) = await Task.Run(() =>
+        {
+            var res = Audit(write: true, ct, codes.ToHashSet(StringComparer.Ordinal));
+            var d = new Dictionary<(string, string), List<DateTime>>();
+            foreach (var i in valueAuditor.CrossGranularityMismatch(cutoff, codes: codes).Where(x => x.TurnoverOnly))
+            {
+                if (!d.TryGetValue((i.Code, i.Granularity), out var days)) d[(i.Code, i.Granularity)] = days = [];
+                days.Add(i.Day);
+            }
+            return (res, d);
+        }, ct);
+        LastResult = results;
+
+        var still = new List<RetryTarget>();
+        foreach (var t in targets)
+        {
+            var range = new MissingBarRange
+            {
+                Code = t.Code,
+                Granularity = string.IsNullOrEmpty(t.Gran) ? Granularity.Day : t.Gran,
+                From = t.From ?? DateTime.MinValue,
+                To = t.To ?? DateTime.MaxValue,
+                Days = t.Days,
+                Tries = t.Tries,
+                Reason = AuditFindingKind.EtfTurnover,
+            };
+            live.TryGetValue((range.Code, range.Granularity), out var days);
+            if (ValueIssueRecheck.Survives(range, days) is { } s)
+                still.Add(new RetryTarget
+                {
+                    Code = s.Code, Gran = s.Granularity, From = s.From, To = s.To,
+                    Days = s.Days, Tries = s.Tries, Reason = AuditFindingKind.EtfTurnover,
+                });
+        }
+
+        await Task.Run(() =>
+        {
+            lock (SqliteWriteGate.Local)
+            {
+                var m = manifestStore.Load();
+                m.SetTodo(RetryTaskIds.EtfTurnoverFix, RetryTodoKind.ValueIssue, still);
+                manifestStore.Save(m);
+            }
+        }, ct);
+
+        int written = results.Values.Sum(r => r.Written);
+        int fixedCount = targets.Count - still.Count;
+        Report($"　ETF换手率待办：写回 {written:N0} 行，修好 {fixedCount} 段、还在 {still.Count} 段"
+             + (still.Count > 0
+                 ? "（" + string.Join("、", still.Take(MaxSamples).Select(s => $"{s.Code} {s.From:yyyy-MM-dd}"))
+                   + (still.Count > MaxSamples ? " 等" : "")
+                   + "）——还在的**不会**进「数据源确实没有」白名单，一直报到真修好为止"
+                 : "。"));
+        return TaskRunResult.Ok(nothingToDo: false,
+            progress: $"待办修好 {fixedCount}/{targets.Count} 段，写回 {written:N0} 行");
     }
 
     private IEnumerable<string> Describe(EtfTurnoverAuditResult r, bool write)

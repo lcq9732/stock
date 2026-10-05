@@ -474,7 +474,8 @@
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.FailedRetryText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="这一行要补的全部待办，按类型分开计数——量词不同是故意的：&#10;　· 失败名单：K线/资金流/指数成分/权重/股东/分红按「只」，市值是整轮扫描所以按「轮」&#10;　· 【全库数据体检】查出的历史空洞按「段」，后面跟着涉及多少个交易日（段数≈请求数、决定要跑多久）&#10;&#10;⚠ 只列**点这一行会下降**的项。体检查出的「值问题」（行在但值错）也归这一行补，只是补法和复查方式跟缺行不一样。&#10;要看全部待补（含以后可能出现的、这一行补不了的项）去【全库数据体检】那一行的提示。&#10;&#10;名单为空时秒过。另外后台还有一套自动重试：跑完 1 小时后、且不早于当天 21:00，最多 3 轮，没进展就停。" />
+                                                   ToolTip="{Binding DataContext.FailedRetryDetail,
+                                                             RelativeSource={RelativeSource AncestorType=Window}}" />
                                         <!-- 【全库数据体检】那一行：它是发现者，所以问题的全貌归它显示（2026-09-13）。
                                              行内一句汇总，tooltip 列全部待办——含【重新拉取失败】补不了的值问题。
                                              ⚠ 这两段文字绑的是 PlanItemViewModel 自己的属性（由 MainViewModel 推进来），
@@ -503,38 +504,37 @@
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.PendingQfqRepairText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="除权后前复权基准变了、还等着整段重取的股票数。&#10;日常抓取会自动比对最近 400 天把它们检出来；这一行负责慢慢补，取过的不会重取。&#10;名单存在 data/local/manifest.json，关程序也不会丢。" />
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                                         <TextBlock VerticalAlignment="Center"
                                                    Visibility="{Binding IsFetchFinancials, Converter={StaticResource BoolToVis}}"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.PendingFinancialsText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="还有多少只股票的财务报表没补齐。&#10;判据有两条，任一落后就要重抓：① 报告期不够新（按法定披露截止日算）② 科目集版本落后（旧版代码抓的、科目不全）。&#10;这个接口配额很严，每轮上限 300 只，全市场要跨几天补完。" />
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                                         <TextBlock VerticalAlignment="Center"
                                                    Visibility="{Binding IsImportManual, Converter={StaticResource BoolToVis}}"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.ManualFillText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="PDF 解析不出来的监管指标会列成「待手工回填清单.csv」(在 data
-eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填——不显示的话根本不知道有活等着自己干。&#10;流程:①【金融监管指标】跑完自动生成清单 ②用 Excel 打开只填「填这里」一列 ③点这一行的「执行」写回库 ④以后重新解析不会覆盖你填的值。" />
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                                         <TextBlock VerticalAlignment="Center"
                                                    Visibility="{Binding IsFetchEarnings, Converter={StaticResource BoolToVis}}"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.PendingEarningsText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="本期还有多少只股票没披露财报——就是每天要复查披露日的那批。&#10;预约日会改（实测 12% 改过，提前的比延后的还多），所以没披露的必须天天看一眼。&#10;已经披露完的不再重抓。" />
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                                         <TextBlock VerticalAlignment="Center"
                                                    Visibility="{Binding IsFetchRawBars, Converter={StaticResource BoolToVis}}"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.PendingRawBarsText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="还差多少只个股没补不复权日线。&#10;日常那一根增量已经并进【拉取全部】和【拉取当天】，这一项只管首次回补十年历史。&#10;所以这个数正常应该是 0；不是 0 时点一次「执行」补上即可。" />
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                                         <TextBlock VerticalAlignment="Center"
                                                    Visibility="{Binding IsFetchMoneyFlow, Converter={StaticResource BoolToVis}}"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.PendingMoneyFlowText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="还有多少只个股没抓过分档资金流。&#10;⚠ 这一项跟别的「还差多少」不一样：接口只给最近约120个交易日、全市场5900只按配额每天只抓百来只，跑满一圈要两个月，所以「今天待抓5800只」是常态、不代表落后。&#10;真正要盯的是「从没抓过」那个数——它归零才算历史铺满了一轮，之后只是按最久没抓的顺序轮换维护。&#10;排队顺序是最久没抓的优先，所以不用担心代码靠后的票轮不到。" />
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                                         <!-- 【分档资金流快照】那一行：显示**当天齐没齐**，缺了标红（2026-09-16 用户要求）。
                                              这一格跟旁边那些"还差多少只"不是一类：那些是慢慢补的进度，晚几天没关系；
                                              这一份数据的接口只给最近一个交易日，今天没拿到、下一个交易日开盘后就永久没了，
@@ -544,7 +544,7 @@ eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填
                                                    Visibility="{Binding IsMoneyFlowSnapshot, Converter={StaticResource BoolToVis}}"
                                                    Text="{Binding DataContext.MoneyFlowDayText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="最近一个交易日的分档资金流齐不齐——拿「当天有日线的个股数」当期望，库里有多少行就该是多少。&#10;实测这两个数只差 0 或 1 只，所以差 3 只以上就是真缺了。&#10;&#10;⚠ 标红 = 现在就得重跑这一行：这个接口**只给最近一个交易日**，下一个交易日开盘后那天的分档资金流就永久取不回来了（事后只能逐股补，5500 个请求换一天）。&#10;重跑是整天按主键去重合并，已有的行不受影响。&#10;&#10;显示「无法核对」= 当天的个股日线自己还没抓完，期望值不可信，先把日K补齐。">
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}">
                                             <TextBlock.Style>
                                                 <Style TargetType="TextBlock">
                                                     <Setter Property="Foreground" Value="{DynamicResource Theme.Foreground.Subtle}" />
@@ -563,19 +563,19 @@ eports 下),要人对着年报把数填上。&#10;这里显示还剩几项没填
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.PendingBoardMembersText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="还有多少个板块的成分股要抓。&#10;判据是「7 天内抓过没有」——所以补完一轮后这个数会归零，过 7 天再重新出现，跟【分档资金流】那种天天几千的不一样。&#10;1031 个板块约 2500 个 push2 请求、限流下一轮跑不完是常态，逐板块落库，下轮自动跳过已抓好的。&#10;这个数长期停着不降，说明被限流挡住了，看日志里的失败原因。" />
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                                         <TextBlock VerticalAlignment="Center"
                                                    Visibility="{Binding IsRebuildAdj, Converter={StaticResource BoolToVis}}"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.PendingAdjRebuildText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="还有多少只个股的回测序列要重算（不复权比它新，或者还没算过）。纯本地计算，不联网。" />
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                                         <TextBlock VerticalAlignment="Center"
                                                    Visibility="{Binding IsTradingCalendar, Converter={StaticResource BoolToVis}}"
                                                    Foreground="{DynamicResource Theme.Foreground.Subtle}"
                                                    Text="{Binding DataContext.TradingCalendarText,
                                                           RelativeSource={RelativeSource AncestorType=Window}}"
-                                                   ToolTip="本地交易日历覆盖到哪一天（TradingDay 表里最后一天）。&#10;⚠ 正常情况下这个日期在**未来**：当月是边长边拉的，11 月起还会一路拉到次年 12 月（交易所年底才发布下一年的日历）。&#10;所以「只到今天之前」就是该再取一次的信号；显示「已到 xxxx-xx-xx」说明日历够用了，不用管。&#10;「缺 2005 前」= 2005 年以前那段要靠本地K线归纳，本地当时没有那么早的K线所以空着——补过历史K线之后，把模式换成「首次整段回补」跑一次这一项就补上了。" />
+                                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
                                         <StackPanel Orientation="Horizontal" Margin="0,0,10,0"
                                                     Visibility="{Binding NeedsLookback, Converter={StaticResource BoolToVis}}">
                                             <TextBlock Text="新标的补" VerticalAlignment="Center"

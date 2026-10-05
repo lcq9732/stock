@@ -646,7 +646,22 @@ public partial class App : Application
                         new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
                 ],
                 tradingDayRepository, dailyNoDataRepository,
-                new SqliteEtfTurnoverStore(paths.CurrentDb)));
+                new SqliteEtfTurnoverStore(paths.CurrentDb),
+                // 全库体检把"ETF 只差换手率"记在它名下（2026-09-29），【重新拉取失败】派它来补
+                manifestStore, new SqliteBarValueAuditor(paths.CurrentDb)));
+        // 【停复牌】2026-09-30，见 doc/suspension-design.md。三路官网接口各一个限流器，都是 1 并发、
+        // 1 秒间隔（跟【ETF换手率校正】的份额源同一套配置）；三路按顺序跑，不并发。
+        taskRegistry.Register(FetchActionId.StepSuspension,
+            () => new SuspensionTask(
+                [
+                    new SseStockSuspensionProvider(
+                        new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                    new SseFundSuspensionProvider(
+                        new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                    new SzseSuspensionProvider(
+                        new RateLimiter(maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
+                ],
+                new SqliteSuspensionRepository(paths.CurrentDb)));
         // 【拉取行业分类】2026-09-10 从 orchestrator 迁过来（判据见
         // doc/full-audit-task-migration-design.md §0：迁移成本 + 维护成本，老方式耦合）。
         // 它只有一批（整表快照），MaxItems/Deadline 对它没意义，理由见 IndustryTask 类注释。
@@ -661,7 +676,9 @@ public partial class App : Application
         // doc/full-audit-task-migration-design.md §0）：它要长大，而且正需要框架的流式落账 +
         // 分批/截止——原来扫完才一次性 Save，三遍扫描半小时，中途停等于全白跑。
         taskRegistry.Register(FetchActionId.StepFullAudit,
-            () => new FullAuditTask(paths.CurrentDb, manifestStore, dailyNoDataRepository));
+            () => new FullAuditTask(paths.CurrentDb, manifestStore, dailyNoDataRepository,
+                // 判"ETF 换手率有没有任务能修"（前一交易日有没有官方份额），2026-09-29
+                new SqliteEtfShareRepository(paths.CurrentDb), tradingDayRepository));
         // 【重算回测序列】2026-09-10 从 orchestrator 迁过来：依赖只有一个 db 路径，
         // 不碰 manifest、不占数据源、调用点只有一个——老任务里最容易迁的一类。
         taskRegistry.Register(FetchActionId.RebuildAdjSeries,
@@ -736,12 +753,12 @@ public partial class App : Application
         //   · 后复权/不复权：同一个类注册两次（口径参数化），带"探一只 + 失败率熔断"两道闸；
         //     不复权多一个「首次整段回补」模式，判据走 RawBarCompletenessRule。
         taskRegistry.Register(FetchActionId.StepStockDayBars,
-            () => new StockDayBarTask(paths, barSourceHolder, manifestStore));
+            () => new StockDayBarTask(paths, barSourceHolder, manifestStore, tradingDayRepository));
         taskRegistry.Register(FetchActionId.StepStockHfqBars,
-            () => new StockAdjustedBarTask(paths, barSourceHolder, manifestStore,
+            () => new StockAdjustedBarTask(paths, barSourceHolder, manifestStore, tradingDayRepository,
                                            FetchActionId.StepStockHfqBars, Granularity.DayHfq));
         taskRegistry.Register(FetchActionId.StepStockRawBars,
-            () => new StockAdjustedBarTask(paths, barSourceHolder, manifestStore,
+            () => new StockAdjustedBarTask(paths, barSourceHolder, manifestStore, tradingDayRepository,
                                            FetchActionId.StepStockRawBars, Granularity.DayRaw));
 
         // 【重取前复权】2026-09-22 迁过来（最后一个还在老路上的K线类动作）。消费前复权那一路

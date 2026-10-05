@@ -44,6 +44,9 @@ public sealed class EtfBarTask(
     /// <summary>它只有前复权一路，日志里按标的类型叫。</summary>
     protected override string BacklogLabel => "ETF";
 
+    /// <summary>ETF 只差换手率的归【ETF换手率校正】（见基类同名属性）。</summary>
+    protected override bool TurnoverOnlyIsOthers => true;
+
     /// <summary>行里没填「新标的补 N 年」时用的年数。</summary>
     private const int DefaultLookbackYears = 3;
 

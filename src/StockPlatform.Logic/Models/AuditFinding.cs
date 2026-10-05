@@ -42,6 +42,18 @@ public static class AuditFindingKind
     /// <summary>同日多口径的 volume/amount/turnover 对不上。</summary>
     public const string Inconsistent = "inconsistent";
 
+    /// <summary>
+    /// ETF 的多口径不一致里**量额都对得上、只有换手率不同**的那类（2026-09-29）。
+    ///
+    /// 单独成一类是因为**修它的任务不一样**：腾讯的 ETF 换手率口径不统一（有时 ÷当天份额），
+    /// 重抓拿回来的还是那个数，只有【ETF换手率校正】按"÷前一交易日官方份额"能修。
+    /// 以前它跟别的不一致混在 <see cref="Inconsistent"/> 里、记在个股日K名下，【重新拉取失败】
+    /// 就派个股日K去重抓覆盖——把校正好的值又冲回去，26 段在名单里挂了好几轮。
+    /// 由【全库数据体检】按名册判出（判据层只报"只差换手率"，是不是 ETF 看 StockMeta），
+    /// 归属 <see cref="RetryTaskIds.EtfTurnoverFix"/>。
+    /// </summary>
+    public const string EtfTurnover = "etf_turnover";
+
     /// <summary>OHLC 不自洽（high &lt; max(open,close) 之类）。</summary>
     public const string Ohlc = "ohlc";
 

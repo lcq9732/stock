@@ -39,6 +39,7 @@ public sealed class StockAdjustedBarTask(
     FetchPaths paths,
     BarSourceHolder sourceHolder,
     IManifestStore manifestStore,
+    ITradingDayRepository? tradingDays,
     FetchActionId id,
     string granularity,
     int batchSize = BarFetchTaskBase.DefaultBatchSize) : BarFetchTaskBase(paths, sourceHolder)
@@ -103,11 +104,17 @@ public sealed class StockAdjustedBarTask(
         else
         {
             var codes = await Task.Run(LocalStockCodes, ct);
-            plan = await Task.Run(() => PlanIncremental(codes, today, lookbackYears), ct);
+            int noTradingDay = 0;
+            plan = await Task.Run(() => PlanIncremental(codes, granularity, today, lookbackYears,
+                                                        tradingDays, out noTradingDay), ct);
+            if (noTradingDay > 0)
+                Report($"其中 {noTradingDay} 只从上次抓到的那天到今天没有交易日（按交易日历），不发请求。");
             _planned = plan.Count;
             if (plan.Count == 0)
             {
-                _nothingToDoReason = $"{Kind}日K：{codes.Count} 只本地都已是最新";
+                _nothingToDoReason = noTradingDay > 0
+                    ? $"{Kind}日K：{codes.Count} 只本地都已是最新（上次之后没有新交易日）"
+                    : $"{Kind}日K：{codes.Count} 只本地都已是最新";
                 Report($"{_nothingToDoReason}，这一轮无需抓取（一个请求都没发）。");
                 yield break;
             }
@@ -170,20 +177,6 @@ public sealed class StockAdjustedBarTask(
             Report("⚠ " + Errors[^1]);
             return false;
         }
-    }
-
-    /// <summary>增量：每只按**这个口径自己的**水位线续抓（所以前复权已是最新不影响它）。</summary>
-    private List<(string Code, DateTime Start, DateTime End)> PlanIncremental(
-        IReadOnlyList<string> codes, DateTime end, int lookbackYears)
-    {
-        var list = new List<(string, DateTime, DateTime)>(codes.Count);
-        foreach (var code in codes)
-        {
-            var start = IncrementalStart(code, granularity, end, lookbackYears);
-            if (start.Date <= end.Date) list.Add((code, start, end));
-            else CountSkipped();
-        }
-        return list;
     }
 
     /// <summary>

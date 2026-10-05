@@ -72,7 +72,7 @@ public class BarProbeFloorWriteTests : IDisposable
     {
         SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, [("600000", "测试")]);
         var source = new NamedBarSource("Mock", new MockBarFetcher(), new MockStockListProvider(() => []));
-        var task = new StockDayBarTask(_paths, new BarSourceHolder(source), _manifest, batchSize: 30);
+        var task = new StockDayBarTask(_paths, new BarSourceHolder(source), _manifest, tradingDays: null, batchSize: 30);
         await task.RunAsync(new TaskRunArgs(Mode: FetchMode.FirstBackfill,
                                             YearStart: yearStart, YearEnd: yearEnd),
                             CancellationToken.None);

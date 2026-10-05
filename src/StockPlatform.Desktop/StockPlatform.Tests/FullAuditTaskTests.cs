@@ -342,4 +342,168 @@ public class FullAuditTaskTests : IDisposable
             .Single(r => r.EffectiveReason == AuditFindingKind.Intraday);
         Assert.Equal(1, intraday.Tries);      // 继承，没清零
     }
+
+    // ─────────────────── ③ 值问题按"谁能修"定归属（2026-09-29）───────────────────
+    // 【重新拉取失败】自己不干活，按待办上记的任务去派。以前值问题只按口径归到个股日K，
+    // ETF 只差换手率的也被派去重抓覆盖——把【ETF换手率校正】修好的值冲回去，26 段挂了好几轮。
+
+    private void Put(string code, string gran, DateTime day, double volume = 1000, double turnover = 5,
+                     DateTime? fetchedAt = null) =>
+        _bars.InsertOrRefreshUnconfirmed([new Bar
+        {
+            Code = code, Granularity = gran, PeriodStart = day,
+            Open = 1, Close = 1, High = 1, Low = 1, Volume = volume, Amount = volume * 100, Turnover = turnover,
+            FetchedAt = fetchedAt ?? day.AddHours(20),
+        }]);
+
+    /// <summary>一只 ETF：前复权、不复权三天齐全、值一致（不会被报空洞，也没有值问题）。</summary>
+    private void CleanEtf(string code)
+    {
+        Meta(code, SqliteStockMetaUpsert.TypeEtf);
+        foreach (var d in Days)
+        {
+            Put(code, Granularity.Day, d);
+            Put(code, Granularity.DayRaw, d);
+        }
+    }
+
+    /// <summary>带份额仓储和交易日历的体检（能判"ETF 换手率有没有任务能修"）。</summary>
+    private FullAuditTask NewTaskWithShares(params (string Market, string Code, DateTime Day, double Wan)[] shares)
+    {
+        var repo = new SqliteEtfShareRepository(_dbPath);
+        repo.EnsureSchema();
+        repo.Upsert(shares.Select(s => new EtfShareRow(s.Market, s.Code, DateOnly.FromDateTime(s.Day), s.Wan)).ToList());
+        var days = new SqliteTradingDayRepository(_dbPath);
+        days.EnsureSchema();
+        days.Upsert(Days.Select(d => (DateOnly.FromDateTime(d), "szse")));
+        return new FullAuditTask(_dbPath, _manifest, etfShares: repo, tradingDays: days);
+    }
+
+    private List<RetryTarget> ValueTodos(string taskId) =>
+        _manifest.Load().Todo(taskId, RetryTodoKind.ValueIssue)?.Targets ?? [];
+
+    private static async Task<List<string>> RunLogged(FullAuditTask task)
+    {
+        var log = new List<string>();
+        task.OnProgress += p => log.Add(p.Text);
+        await task.RunAsync(Args(), CancellationToken.None);
+        return log;
+    }
+
+    [Fact]
+    public async Task ETF只差换手率_记在ETF换手率校正名下()
+    {
+        // ⚠ 特殊那行要先写：已确认的行后写覆盖不了（InsertOrRefreshUnconfirmed）
+        Put("sh510150", Granularity.DayRaw, Days[1], turnover: 2);    // 量额一致、只有换手率不同
+        CleanEtf("sh510150");
+
+        await RunLogged(NewTaskWithShares(("sh", "510150", Days[0], 100_000)));
+
+        var t = Assert.Single(ValueTodos(RetryTaskIds.EtfTurnoverFix));
+        Assert.Equal("sh510150", t.Code);
+        Assert.Equal(Granularity.DayRaw, t.Gran);
+        Assert.Equal(Days[1], t.From);
+        Assert.Equal(AuditFindingKind.EtfTurnover, t.Reason);
+        // K线任务名下一条都没有——它们重抓修不好，还会冲掉校正好的值
+        Assert.Empty(ValueTodos(RetryTaskIds.StockRawBars));
+        Assert.Empty(ValueTodos(RetryTaskIds.EtfBars));
+    }
+
+    /// <summary>前一交易日没有官方份额：没有任务能修，只报数、不进名单（否则永远挂着）。</summary>
+    [Fact]
+    public async Task ETF换手率前一交易日没有份额_只报数不进名单()
+    {
+        Put("sh510150", Granularity.DayRaw, Days[1], turnover: 2);
+        CleanEtf("sh510150");
+
+        var log = await RunLogged(NewTaskWithShares());   // 一条份额都没有
+
+        Assert.DoesNotContain(_manifest.Load().Todos, x => x.Kind == RetryTodoKind.ValueIssue);
+        Assert.Contains(log, l => l.Contains("前一交易日没有官方份额") && l.Contains("只报数"));
+    }
+
+    [Fact]
+    public async Task ETF量额不对_归ETF日K()
+    {
+        Put("sh510150", Granularity.DayRaw, Days[1], volume: 30);    // 量本身不对，重抓能修
+        CleanEtf("sh510150");
+
+        await RunLogged(NewTaskWithShares(("sh", "510150", Days[0], 100_000)));
+
+        var t = Assert.Single(ValueTodos(RetryTaskIds.EtfBars));
+        Assert.Equal(AuditFindingKind.Inconsistent, t.Reason);
+        Assert.Equal(Granularity.DayRaw, t.Gran);                    // 按每段自己的口径去抓
+        Assert.Empty(ValueTodos(RetryTaskIds.StockRawBars));
+        Assert.Empty(ValueTodos(RetryTaskIds.EtfTurnoverFix));
+    }
+
+    [Fact]
+    public async Task 指数的值问题_归指数日K()
+    {
+        Meta("sz399001", SqliteStockMetaUpsert.TypeIndex);
+        Put("sz399001", Granularity.Day, Days[0]);
+        Put("sz399001", Granularity.Day, Days[1], fetchedAt: Days[1].AddHours(10));   // 盘中固化
+        Put("sz399001", Granularity.Day, Days[2]);
+
+        await RunLogged(NewTask());
+
+        var t = Assert.Single(ValueTodos(RetryTaskIds.IndexBars));
+        Assert.Equal("sz399001", t.Code);
+        Assert.Equal(AuditFindingKind.Intraday, t.Reason);
+        Assert.Empty(ValueTodos(RetryTaskIds.StockDayBars));     // 以前按口径落在这里
+    }
+
+    [Fact]
+    public async Task 个股只差换手率_仍归个股日K()
+    {
+        Meta("600000", SqliteStockMetaUpsert.TypeStock);
+        Put("600000", Granularity.DayRaw, Days[1], turnover: 2);     // 先写，理由同上
+        foreach (var d in Days)
+        {
+            Put("600000", Granularity.Day, d);
+            Put("600000", Granularity.DayRaw, d);
+        }
+
+        await RunLogged(NewTask());
+
+        var t = Assert.Single(ValueTodos(RetryTaskIds.StockRawBars));
+        Assert.Equal(AuditFindingKind.Inconsistent, t.Reason);   // 个股换手率差是股本变动，重抓能修
+        Assert.Empty(ValueTodos(RetryTaskIds.EtfTurnoverFix));
+    }
+
+    /// <summary>
+    /// 历史空洞正好是官网记载的全天停牌（2026-09-30）：重抓也拿不到，不进名单——
+    /// 以前要白补两轮才被判"数据源确实没有"。不是停牌的那天照样报。
+    /// </summary>
+    [Fact]
+    public async Task 空洞是全天停牌就不进名单_不是停牌的照报()
+    {
+        Meta("600363", SqliteStockMetaUpsert.TypeStock);
+        Meta("600000", SqliteStockMetaUpsert.TypeStock);
+        Insert("600363", Granularity.Day, Days[0], Days[2]);    // 9-2 停牌
+        Insert("600000", Granularity.Day, Days[0], Days[2]);    // 9-2 真漏了
+        new SqliteTradingDayRepository(_dbPath).Upsert(Days.Select(d => (DateOnly.FromDateTime(d), "szse")));
+        var d1 = DateOnly.FromDateTime(Days[1]);
+        new SqliteSuspensionRepository(_dbPath).Upsert([
+            new SuspensionRow(SuspensionSource.SseStock, "sh", "600363", "联创光电", d1, "", d1, "", "LSTP", "WH", "重要公告"),
+        ]);
+
+        var log = await RunLogged(NewTask());
+
+        var gaps = Bars().Where(r => r.EffectiveReason == AuditFindingKind.Gap && r.Granularity == Granularity.Day).ToList();
+        Assert.Equal("600000", Assert.Single(gaps).Code);
+        Assert.Contains(log, l => l.Contains("1 只共 1 天是官网记载的全天停牌"));
+    }
+
+    [Fact]
+    public async Task 板块指数的值问题_只报数不进名单()
+    {
+        Meta("BK0001", SqliteStockMetaUpsert.TypeBoard);
+        Put("BK0001", Granularity.Day, Days[1], fetchedAt: Days[1].AddHours(10));   // 盘中固化
+
+        var log = await RunLogged(NewTask());
+
+        Assert.DoesNotContain(_manifest.Load().Todos.SelectMany(x => x.Targets), t => t.Code == "BK0001");
+        Assert.Contains(log, l => l.Contains("板块指数的 1 段**不进名单**"));
+    }
 }

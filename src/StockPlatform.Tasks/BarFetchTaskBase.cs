@@ -266,6 +266,52 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
     }
 
     /// <summary>
+    /// 增量计划：每只按 <paramref name="granularity"/> 自己的水位线续到 <paramref name="end"/>，
+    /// 两种情况不发请求、记作跳过——① 已经追上；② 窗口里没有交易日（2026-10-05，
+    /// 判据见 <see cref="IncrementalWindowCalculator.NoTradingDayIn"/>）。
+    /// <paramref name="noTradingDay"/> 是②的只数，调用方拿去单独报，别跟"本地已是最新"混在一起。
+    /// </summary>
+    protected List<(string Code, DateTime Start, DateTime End)> PlanIncremental(
+        IReadOnlyList<string> codes, string granularity, DateTime end, int lookbackYears,
+        ITradingDayRepository? tradingDays, out int noTradingDay)
+    {
+        var calendar = OfficialTradingCalendar(tradingDays);
+        var list = new List<(string, DateTime, DateTime)>(codes.Count);
+        noTradingDay = 0;
+        foreach (var code in codes)
+        {
+            var start = IncrementalStart(code, granularity, end, lookbackYears);
+            if (start.Date > end.Date) CountSkipped();
+            else if (IncrementalWindowCalculator.NoTradingDayIn(calendar, start, end))
+            {
+                CountSkipped();
+                noTradingDay++;
+            }
+            else list.Add((code, start, end));
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// TradingDay 表（官方日历）。表空或读失败返回 null——判据会放行去抓，只是节假日照旧空跑。
+    /// ⚠ 跟 <see cref="LocalTradingCalendar"/> 不是一回事：那个从K线归纳、只到本地最新一根。
+    /// </summary>
+    private TradingCalendar? OfficialTradingCalendar(ITradingDayRepository? tradingDays)
+    {
+        if (tradingDays == null) return null;
+        try
+        {
+            var days = tradingDays.GetAll();
+            return days.Count > 0 ? new TradingCalendar(days) : null;
+        }
+        catch (Exception ex)
+        {
+            Report($"⚠ 读交易日历失败（{ex.Message}），这一轮不按交易日跳过，节假日会照旧发请求。");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// 整段回补的窗口，按调用方给的年份区间**收窄**（2026-09-22，判据见
     /// <see cref="BackfillWindowRule"/>）。
     ///

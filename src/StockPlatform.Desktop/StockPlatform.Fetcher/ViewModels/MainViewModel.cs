@@ -108,6 +108,7 @@ public class MainViewModel : INotifyPropertyChanged
         {
             Set(ref _failedRetry, value);
             Raise(nameof(FailedRetryText));
+            Raise(nameof(FailedRetryDetail));
             Raise(nameof(HasFailed));
             PushBacklogToPlanItems();
         }
@@ -115,6 +116,10 @@ public class MainViewModel : INotifyPropertyChanged
 
     /// <summary>按钮上那行字。还没统计出来时明说，别冒充"无失败"。</summary>
     public string FailedRetryText => _failedRetry?.Describe() ?? "失败名单还没读到";
+
+    /// <summary>那一格的 tooltip：逐行列全部（格子里最多 3 项、窄了还会截）。固定说明在 ⓘ 里（catalog Note）。</summary>
+    public string FailedRetryDetail => _failedRetry?.DescribeActionableLines()
+        ?? "失败名单还没读到——程序启动后在后台统计，库大时要几十秒。";
 
     private int _pendingQfqRepair = -1;   // -1 = 还没算出来，别跟"0 已补齐"混为一谈
     /// <summary>

@@ -162,4 +162,33 @@ public class RetryDispatchTests
             Assert.Equal(label, item.Label);
         }
     }
+
+    /// <summary>
+    /// ETF 只差换手率的待办归【ETF换手率校正】（2026-09-29）：派给它，排在【ETF日K】后面
+    /// （量额先修好，换手率是拿成交量去除的），界面上叫"ETF换手率口径"而不是笼统的"多口径不一致"。
+    /// </summary>
+    [Fact]
+    public void ETF换手率待办_派给校正任务_排在ETF日K之后()
+    {
+        var m = new Manifest();
+        m.SetTodo(RetryTaskIds.IndexBars, RetryTodoKind.ValueIssue,
+                  [new RetryTarget { Code = "sz399001", Gran = Granularity.Day, Reason = AuditFindingKind.Intraday }]);
+        m.SetTodo(RetryTaskIds.EtfTurnoverFix, RetryTodoKind.ValueIssue,
+                  [new RetryTarget { Code = "sh510150", Gran = Granularity.DayRaw, Reason = AuditFindingKind.EtfTurnover }]);
+        m.SetTodo(RetryTaskIds.EtfBars, RetryTodoKind.ValueIssue,
+                  [new RetryTarget { Code = "sh510300", Gran = Granularity.DayRaw, Reason = AuditFindingKind.Inconsistent }]);
+
+        var backlog = Backlog(m);
+        Assert.Equal(new[] { RetryTaskIds.EtfBars, RetryTaskIds.EtfTurnoverFix, RetryTaskIds.IndexBars },
+                     RetryFailedTask.DispatchOrder(backlog));
+        Assert.Contains(backlog.Actionable, i => i.TaskId == RetryTaskIds.EtfTurnoverFix && i.Label == "ETF换手率口径");
+    }
+
+    /// <summary>派过去的任务得认领得了：catalog 声明了「只补待办」模式。</summary>
+    [Fact]
+    public void ETF换手率校正_catalog声明了只补待办模式()
+    {
+        var action = FetchTaskCatalog.All.Single(a => a.Id == FetchActionId.StepEtfTurnoverFix);
+        Assert.True(action.SupportedModes.HasFlag(FetchMode.FillBacklog));
+    }
 }

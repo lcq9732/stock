@@ -89,12 +89,24 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
 
     private int _totalRanges, _totalDays;
 
+    /// <summary>代码 → 名册里的标的类型（stock / etf / index）。值问题定归属要用：
+    /// 同样是"多口径不一致"，个股、ETF、指数该派去修的任务不一样（见 <see cref="OwnerOfValueFinding"/>）。</summary>
+    private Dictionary<string, string> _typeOf = new(StringComparer.Ordinal);
+
+    // 判"ETF 换手率能不能裁判"要用（前一交易日有没有官方份额）。缺了就不判、一律记待办——
+    // 老调用点和测试不传也照常跑，只是少了"判不了的只报数"那一层。
+    private readonly IEtfShareRepository? _etfShares;
+    private readonly ITradingDayRepository? _tradingDays;
+
     public FullAuditTask(
-        string dbPath, IManifestStore manifestStore, IDailyFetchNoDataRepository? dailyNoData = null)
+        string dbPath, IManifestStore manifestStore, IDailyFetchNoDataRepository? dailyNoData = null,
+        IEtfShareRepository? etfShares = null, ITradingDayRepository? tradingDays = null)
     {
         _dbPath = dbPath;
         _manifestStore = manifestStore;
         _dailyNoData = dailyNoData;
+        _etfShares = etfShares;
+        _tradingDays = tradingDays;
         _bars = new SqliteBarRepository(dbPath);
         _audit = new SqliteMissingBarRepository(dbPath);
     }
@@ -116,6 +128,8 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             .GroupBy(i => i.Type, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.Select(i => i.Code).ToList(), StringComparer.Ordinal);
         List<string> CodesOf(string type) => byType.TryGetValue(type, out var l) ? l : [];
+        _typeOf = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var i in instruments) _typeOf[i.Code] = i.Type;
 
         var cutoff = DateTime.Today.AddDays(-SettleDays);
 
@@ -262,7 +276,9 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
         bool thorough, string label, CancellationToken ct)
     {
         var found = new List<AuditFinding>();
-        int scanned = 0, withGaps = 0, days = 0;
+        int scanned = 0, withGaps = 0, days = 0, haltedCodes = 0, haltedDays = 0;
+        var suspensions = new SqliteSuspensionLookup(_dbPath);
+        var asOf = DateOnly.FromDateTime(DateTime.Today);
 
         // 「整只票一根都没有这个口径」FindGaps 是查不出来的——它只看每只票自己 [最早,最晚] 区间内的
         // 洞，一根都没有的票根本进不了那张区间表。这类问题跟"缺几天"完全是两回事（多半是那一项
@@ -277,9 +293,20 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             var gaps = _audit.FindGaps(batch, gran,
                 MarketIndexCatalog.ShanghaiCompositeSymbol, ignoreConfirmed: thorough);
 
+            // 官网记载全天停牌的日子不算空洞（2026-09-30）：重抓也拿不到，以前要白补两轮才进白名单。
+            // 只查有空洞的那几只。停牌判据拿同一口径的日K判"复牌了没有"。
+            var halted = suspensions.FullDaysOf(
+                gaps.Where(g => g.Value.Count > 0).Select(g => g.Key).ToList(), gran, asOf);
+
             foreach (var (code, gapDays) in gaps)
             {
                 var settled = gapDays.Where(d => d.Date <= cutoff).ToList();
+                if (halted.TryGetValue(code, out var off))
+                {
+                    int before = settled.Count;
+                    settled = settled.Where(d => !off.Contains(DateOnly.FromDateTime(d))).ToList();
+                    if (settled.Count < before) { haltedCodes++; haltedDays += before - settled.Count; }
+                }
                 if (settled.Count == 0) continue;
                 // 空洞不连续时取包络：一次请求覆盖整段，比逐日请求划算得多
                 found.Add(new AuditFinding(AuditFindingKind.Gap, scope, code, gran,
@@ -297,6 +324,7 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
 
         found.Add(new AuditFinding(AuditFindingKind.Note, scope, Note:
             $"　{label}：{codes.Count} 只，{withGaps} 只有空洞、共 {days} 个交易日"
+            + (haltedDays > 0 ? $"；另有 {haltedCodes} 只共 {haltedDays} 天是官网记载的全天停牌，不算空洞、不进名单" : "")
             + (none > 0 ? $"；另有 {none} 只**一根都没有**（该口径从没抓过，要整段回补）" : "")));
         return found;
     }
@@ -683,15 +711,28 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
         Report("值体检 回测序列：day_adj 跟它的输入 day_raw 是否对齐…");
         var drift = v.AdjVsRawDrift(cutoff);
 
-        var all = segs.Concat(cross).ToList();
+        // ── ETF 只差换手率的，单独成一类，归【ETF换手率校正】（2026-09-29）──
+        // 重抓修不好（腾讯给的就是那个口径），混在"多口径不一致"里会被派给K线任务去重抓覆盖，
+        // 把校正好的值冲回去。day_adj 照旧不管（本地重算的）。
+        var etfTurnoverSegs = cross
+            .Where(s => s.TurnoverOnly && s.Granularity != Granularity.DayAdj
+                     && TypeOf(s.Code) == SqliteStockMetaUpsert.TypeEtf)
+            .ToList();
+        var etfTurnover = SplitEtfTurnover(v, cutoff, etfTurnoverSegs);
+        var all = segs.Concat(cross.Except(etfTurnoverSegs)).ToList();
 
-        // ── 进待补名单：四类值问题，但**排除 day_adj** ──
+        // ── 进待补名单：四类值问题，但**排除 day_adj 和板块指数** ──
         // day_adj 是本地重算的产物、抓不来。放进名单的后果是它永远被跳过、Tries 一动不动，
         // 每轮体检重报一次（2026-09-09 生产实测：1555 段盘中固化 + 4301 段量额不一致全是它）。
-        // 它的处置跟 V5 一样：只报数，去跑【重算回测序列】。
+        // 它的处置跟 V5 一样：只报数，去跑【重算回测序列】。板块指数同理（本地合成的，
+        // 没有哪个任务能去抓它——以前按口径记在个股日K名下，那边拿 BK 代码去抓只会白发请求）。
         foreach (var g in all.Where(x => x.Kind != AuditFindingKind.Ratio
-                                      && x.Granularity != Granularity.DayAdj))
+                                      && x.Granularity != Granularity.DayAdj
+                                      && TypeOf(x.Code) != SqliteStockMetaUpsert.TypeBoard))
             found.Add(new AuditFinding(g.Kind, ValueScope, g.Code, g.Granularity, g.From, g.To, g.Days));
+        foreach (var g in etfTurnover.Judgeable)
+            found.Add(new AuditFinding(AuditFindingKind.EtfTurnover, ValueScope,
+                                       g.Code, g.Granularity, g.From, g.To, g.Days));
 
         // ── 汇总行 ──
         void Line(string kind, string label, string howToFix)
@@ -705,11 +746,16 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             var sample = hit.OrderByDescending(x => x.Days).Take(3)
                 .Select(x => $"{x.Code} {x.From:MM-dd}起{x.Days}行");
             var adj = hit.Where(x => x.Granularity == Granularity.DayAdj).ToList();
+            var board = hit.Where(x => x.Granularity != Granularity.DayAdj
+                                    && TypeOf(x.Code) == SqliteStockMetaUpsert.TypeBoard).ToList();
 
             found.Add(Note($"　值体检 {label}：{hit.Sum(x => x.Days)} 行 / {hit.Count} 段"
                          + $"（{string.Join("、", byGran)}；最多的 {string.Join("、", sample)}）——{howToFix}"
                          + (adj.Count > 0
                              ? $"\n　　其中 day_adj 的 {adj.Count} 段**不进名单**（本地重算的，抓不来）：跑【重算回测序列】"
+                             : "")
+                         + (board.Count > 0
+                             ? $"\n　　其中板块指数的 {board.Count} 段**不进名单**（本地合成的，抓不来）：跑【板块指数合成】"
                              : "")));
         }
 
@@ -724,6 +770,21 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
         Line(AuditFindingKind.Inconsistent, "多口径量额对不上",
             "同源盘后本该逐值相同（实测 112,473 天 0 差异）。已进待补名单，"
             + "重抓时**只覆盖量额换手三列**、不动 OHLC");
+
+        found.Add(Note(etfTurnover.Judgeable.Count == 0 && etfTurnover.UnjudgeableRows == 0
+            ? "　值体检 ETF换手率口径：没有"
+            : $"　值体检 ETF换手率口径（量额一致、只有换手率不同）："
+              + (etfTurnover.Judgeable.Count > 0
+                  ? $"{etfTurnover.Judgeable.Sum(x => x.Days)} 行 / {etfTurnover.Judgeable.Count} 段已记在"
+                    + "【ETF换手率校正】名下——重抓修不好（腾讯给的就是那个口径），"
+                    + "由它按「成交量 ÷ 前一交易日官方份额」写回，【重新拉取失败】会派它去补"
+                  : "没有能校正的")
+              + (etfTurnover.UnjudgeableRows > 0
+                  ? $"；另有 {etfTurnover.UnjudgeableRows} 行前一交易日没有官方份额"
+                    + $"（{string.Join("、", etfTurnover.UnjudgeableSamples)}"
+                    + (etfTurnover.UnjudgeableRows > etfTurnover.UnjudgeableSamples.Count ? " 等" : "")
+                    + "，多为交易所开始公布份额以前的日子或货币 ETF），没有任务能修，**只报数、不进名单**"
+                  : "")));
 
         var ratio = all.Where(x => x.Kind == AuditFindingKind.Ratio).ToList();
         found.Add(Note(ratio.Count == 0
@@ -751,6 +812,83 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
     /// </summary>
     private static AuditFinding Note(string text) =>
         new(AuditFindingKind.Note, ValueScope, Note: text);
+
+    /// <summary>名册里的类型；名册里没有的给空串（按个股处理，跟改之前一样）。</summary>
+    private string TypeOf(string code) => _typeOf.GetValueOrDefault(code, "");
+
+    /// <summary>
+    /// ETF 只差换手率的段里，哪些**有任务能修**（2026-09-29）。
+    ///
+    /// 【ETF换手率校正】按"成交量 ÷ 前一交易日官方份额"算，所以前一交易日没有份额的行
+    /// （沪市 2012 年、深市 2016 年以前交易所不公布；货币 ETF 上交所不列）它也修不了——
+    /// 那种记进名单只会永远挂着。原则是**有任务能修才记待办**，修不了的只报数。
+    ///
+    /// 要判就得落到行级：段只有首尾和行数，一段里可能一半能判一半不能。所以对这些 ETF
+    /// 再按行查一次 V3（只查这几只，很快），能判的行重新聚成段。
+    /// 份额仓储或日历没给时不判、整段照记（老调用点/测试的行为不变）。
+    /// </summary>
+    private (List<SqliteBarValueAuditor.IssueSegment> Judgeable, int UnjudgeableRows, List<string> UnjudgeableSamples)
+        SplitEtfTurnover(SqliteBarValueAuditor v, DateTime cutoff, List<SqliteBarValueAuditor.IssueSegment> segs)
+    {
+        if (segs.Count == 0) return ([], 0, []);
+        if (_etfShares == null || _tradingDays == null)
+            return (segs.Select(s => s with { Kind = AuditFindingKind.EtfTurnover }).ToList(), 0, []);
+
+        var calendar = _tradingDays.GetAll().Select(d => d.Date).Distinct().OrderBy(d => d).ToList();
+        var prevOf = new Dictionary<DateTime, DateTime>(calendar.Count);
+        for (int i = 1; i < calendar.Count; i++) prevOf[calendar[i]] = calendar[i - 1];
+
+        var sharesOf = new Dictionary<string, Dictionary<DateOnly, double>>(StringComparer.Ordinal);
+        bool CanJudge(string code, DateTime day)
+        {
+            if (!prevOf.TryGetValue(day.Date, out var prev)) return false;
+            if (!sharesOf.TryGetValue(code, out var byDay))
+                sharesOf[code] = byDay = code.Length > 2
+                    ? _etfShares.GetByCode(code[..2], code[2..])
+                    : new Dictionary<DateOnly, double>();
+            return EtfTurnoverRule.Expected(1, byDay.TryGetValue(DateOnly.FromDateTime(prev), out var s) ? s : null) != null;
+        }
+
+        var codes = segs.Select(s => s.Code).Distinct(StringComparer.Ordinal).ToList();
+        var rows = v.CrossGranularityMismatch(cutoff, codes: codes)
+            .Where(r => r.TurnoverOnly && r.Granularity != Granularity.DayAdj)
+            .ToList();
+
+        var judgeable = new List<SqliteBarValueAuditor.RowIssue>();
+        var samples = new List<string>();
+        int unjudgeable = 0;
+        foreach (var r in rows)
+        {
+            if (CanJudge(r.Code, r.Day)) { judgeable.Add(r); continue; }
+            unjudgeable++;
+            if (samples.Count < 3) samples.Add($"{r.Code} {r.Day:yyyy-MM-dd}");
+        }
+
+        var segsOut = judgeable
+            .GroupBy(r => (r.Code, r.Granularity))
+            .Select(g => new SqliteBarValueAuditor.IssueSegment(
+                g.Key.Code, g.Key.Granularity, AuditFindingKind.EtfTurnover,
+                g.Min(x => x.Day), g.Max(x => x.Day), g.Count(), TurnoverOnly: true))
+            .OrderBy(s => s.Code, StringComparer.Ordinal).ThenBy(s => s.Granularity, StringComparer.Ordinal)
+            .ToList();
+        return (segsOut, unjudgeable, samples);
+    }
+
+    /// <summary>
+    /// 值问题 → **能修它的那个任务**（2026-09-29）。【重新拉取失败】自己不干活，按待办上记的
+    /// 任务去派；这里记错了，派过去的任务就只能白忙（或者更糟：修坏别人修好的）。
+    ///
+    /// 跟空洞的 <see cref="TaskIdOfScope"/> 同一个原则、同一套归法（ETF 不分口径都归
+    /// 【ETF日K】，它按每一段自己的口径去抓），只多了一条：
+    /// ETF 只差换手率的 → 【ETF换手率校正】（重抓修不好，见 <see cref="AuditFindingKind.EtfTurnover"/>）。
+    ///
+    /// 以前这里只看口径（<c>RetryTaskIds.ForGranularity</c>），ETF、指数的值问题全落到个股日K名下。
+    /// </summary>
+    private string OwnerOfValueFinding(string code, string gran, string reason)
+    {
+        if (reason == AuditFindingKind.EtfTurnover) return RetryTaskIds.EtfTurnoverFix;
+        return TaskIdOfScope(TypeOf(code), gran);
+    }
 
     /// <summary>
     /// 值体检的落账：**值类记录整体替换**。
@@ -794,7 +932,7 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
             })
             .ToList();
 
-        foreach (var g in fresh.GroupBy(t => RetryTaskIds.ForGranularity(t.Gran)))
+        foreach (var g in fresh.GroupBy(t => OwnerOfValueFinding(t.Code, t.Gran!, t.Reason!)))
         {
             manifest.SetTodo(g.Key, RetryTodoKind.ValueIssue,
                 g.OrderBy(t => t.Code, StringComparer.Ordinal)

@@ -54,4 +54,21 @@ public static class IncrementalWindowCalculator
         var (periodStart, fetchedAt) = latest.Value;
         return IsConfirmedFinal(fetchedAt, periodStart) ? periodStart.AddDays(1) : periodStart;
     }
+
+    /// <summary>
+    /// 增量窗口 [<paramref name="start"/>, <paramref name="end"/>] 里**确定一个交易日都没有**——
+    /// 是就不用发请求（2026-10-05）。
+    ///
+    /// 为什么要有它：计划层只跳周六周日，工作日的节假日照跑；而增量窗口只判"起点没过终点"，
+    /// 国庆 10-01、10-02 两天，水位停在 09-30 的全市场每只都是 [10-01, 今天]，个股三口径
+    /// 各发 5572 个请求、各跑 1.5 小时、写入 0 行。
+    ///
+    /// <paramref name="calendar"/> 用 TradingDay 表（官方日历），**不能**用从K线归纳的日历——
+    /// 那个只到本地最新一根，判不了今天。日历为空或覆盖不到窗口起点时返回 false（放行去抓），
+    /// 跟 <see cref="TradingCalendar.CoversFrom"/> 的规矩一致。
+    /// </summary>
+    public static bool NoTradingDayIn(TradingCalendar? calendar, DateTime start, DateTime end)
+        => calendar is { Count: > 0 }
+           && calendar.CoversFrom(start)
+           && !calendar.HasAnyIn(start, end);
 }
