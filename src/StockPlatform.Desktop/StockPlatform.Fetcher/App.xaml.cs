@@ -563,7 +563,9 @@ public partial class App : Application
             () => new EtfRawBarTask(paths, new SqliteBarRepository(paths.CurrentDb), dividendRepository,
                 ProbeBars(3),
                 // manifestStore 是给【只补待办】用的（2026-09-21）：它只会有 missing_day 那一类。
-                manifestStore));
+                manifestStore,
+                // 交易日历：节假日有除权事件的那几百只不再空发请求（2026-10-06）。
+                tradingDayRepository));
         // 【补全退市名单】2026-09-17。巨潮的全市场名单减去在市名单，差集里确实交易过的补进 DelistedStock。
         // 修的是两所官网名单的两个洞：科创板退市股整类缺失、已换代码的老号没有。
         // 限流器 1 并发：候选通常几十只，一只一个探测请求。
@@ -745,7 +747,7 @@ public partial class App : Application
         taskRegistry.Register(FetchActionId.StepIndexBars,
             () => new IndexBarTask(paths, barSourceHolder, manifestStore));
         taskRegistry.Register(FetchActionId.StepEtfBars,
-            () => new EtfBarTask(paths, barSourceHolder, etfListProvider, manifestStore));
+            () => new EtfBarTask(paths, barSourceHolder, etfListProvider, manifestStore, tradingDayRepository));
 
         // 【个股日K】三个口径 2026-09-21 迁到新任务框架（第③步）。三项各有各的水位线、
         // 各记各的失败名单（taskId 分域），所以是三个独立任务而不是一个带开关的。
@@ -860,7 +862,7 @@ public partial class App : Application
         //   一批 30 只、组内并发，于是 1.75 小时的活第一次能分批跑、能中途停。
         //   见 doc/netinflow-task-design.md。
         taskRegistry.Register(FetchActionId.StepNetInflow,
-            () => new NetInflowTask(netInflowFetcher, manifestStore, paths));
+            () => new NetInflowTask(netInflowFetcher, manifestStore, paths, tradingDayRepository));
 
         // 【融资余额】2026-09-18 迁到新任务框架——它是 DailyRefetcherFor 里最后一个 case，
         //   迁完那个入口表整个消失（见 doc/margin-task-design.md）。四道闸走共用的

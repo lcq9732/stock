@@ -275,7 +275,7 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
         IReadOnlyList<string> codes, string granularity, DateTime end, int lookbackYears,
         ITradingDayRepository? tradingDays, out int noTradingDay)
     {
-        var calendar = OfficialTradingCalendar(tradingDays);
+        var calendar = OfficialTradingCalendar.Load(tradingDays, s => Report(s));
         var list = new List<(string, DateTime, DateTime)>(codes.Count);
         noTradingDay = 0;
         foreach (var code in codes)
@@ -292,24 +292,6 @@ public abstract partial class BarFetchTaskBase(FetchPaths paths, BarSourceHolder
         return list;
     }
 
-    /// <summary>
-    /// TradingDay 表（官方日历）。表空或读失败返回 null——判据会放行去抓，只是节假日照旧空跑。
-    /// ⚠ 跟 <see cref="LocalTradingCalendar"/> 不是一回事：那个从K线归纳、只到本地最新一根。
-    /// </summary>
-    private TradingCalendar? OfficialTradingCalendar(ITradingDayRepository? tradingDays)
-    {
-        if (tradingDays == null) return null;
-        try
-        {
-            var days = tradingDays.GetAll();
-            return days.Count > 0 ? new TradingCalendar(days) : null;
-        }
-        catch (Exception ex)
-        {
-            Report($"⚠ 读交易日历失败（{ex.Message}），这一轮不按交易日跳过，节假日会照旧发请求。");
-            return null;
-        }
-    }
 
     /// <summary>
     /// 整段回补的窗口，按调用方给的年份区间**收窄**（2026-09-22，判据见

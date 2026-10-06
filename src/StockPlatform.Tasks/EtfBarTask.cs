@@ -30,6 +30,7 @@ public sealed class EtfBarTask(
     BarSourceHolder sourceHolder,
     IStockListProvider etfListProvider,
     IManifestStore manifestStore,
+    ITradingDayRepository? tradingDays,
     int batchSize = BarFetchTaskBase.DefaultBatchSize) : BarFetchTaskBase(paths, sourceHolder)
 {
     public override FetchActionId Id => FetchActionId.StepEtfBars;
@@ -123,6 +124,7 @@ public sealed class EtfBarTask(
         // 整段回补那一路**不看水位线**：缺的往往是开头不是尾巴（日更那根按回看年数只填了最近
         // 几年），按水位线续永远补不到前面。窗口是 A股开市首日~今天，再按年份区间收窄。
         List<(string Code, (DateTime Start, DateTime End) Window)> plan;
+        int noTradingDay = 0;
         if (fullBackfill)
         {
             // 整段回补：逐只算缺口（水位表 + 本地已覆盖 + 交易日历，见 PlanGaps）
@@ -139,16 +141,13 @@ public sealed class EtfBarTask(
         }
         else
         {
-            plan = await Task.Run(() => etfs
-                .Select(e => (e.Code, Window: (Start: IncrementalStart(e.Code, Granularity.Day, today, lookbackYears),
-                                               End: today)))
-                .Where(w =>
-                {
-                    if (w.Window.Start.Date <= w.Window.End.Date) return true;
-                    CountSkipped();
-                    return false;
-                })
-                .ToList(), ct);
+            // 跟个股日K同一套（2026-10-06）：已追上的、窗口里没有交易日的都不发请求。
+            plan = await Task.Run(() =>
+                PlanIncremental(etfs.Select(e => e.Code).ToList(), Granularity.Day, today, lookbackYears,
+                                tradingDays, out noTradingDay)
+                    .Select(p => (p.Code, Window: (p.Start, p.End))).ToList(), ct);
+            if (noTradingDay > 0)
+                Report($"其中 {noTradingDay} 只从上次抓到的那天到今天没有交易日（按交易日历），不发请求。");
         }
 
         _planned = plan.Count;
@@ -159,7 +158,9 @@ public sealed class EtfBarTask(
             //    而条件根本不会变（标的还是最新的），就成了空转——实测连打 5 轮之后
             //    才被"连着 5 轮瞬间跑完"那道护栏拦下（2026-09-21 验证时踩到）。
             //    真正该用 Skipped 的是下面那个 Abort（名单接口不可达）。
-            _nothingToDoReason = $"ETF日K：{etfs.Count} 只本地都已是最新";
+            _nothingToDoReason = noTradingDay > 0
+                ? $"ETF日K：{etfs.Count} 只本地都已是最新（上次之后没有新交易日）"
+                : $"ETF日K：{etfs.Count} 只本地都已是最新";
             Report($"{_nothingToDoReason}，这一轮无需抓取（一个请求都没发）。");
             yield break;
         }

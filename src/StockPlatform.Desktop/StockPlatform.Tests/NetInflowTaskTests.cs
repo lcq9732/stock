@@ -79,8 +79,8 @@ public class NetInflowTaskTests : IDisposable
         }
     }
 
-    private NetInflowTask NewTask(FakeFetcher f, int batchSize = 2) =>
-        new(f, _manifest, _paths, batchSize);
+    private NetInflowTask NewTask(FakeFetcher f, int batchSize = 2, ITradingDayRepository? tradingDays = null) =>
+        new(f, _manifest, _paths, tradingDays, batchSize);
 
     private int RowsOf(string code) => _repo.Query(code).Count;
 
@@ -341,5 +341,91 @@ public class NetInflowTaskTests : IDisposable
         Assert.Equal(Codes.Length, f.Asked.Select(a => a.Code).Distinct().Count());   // 全市场
         Assert.True(_repo.CountRowsByDay([day])[day] > 0);
         Assert.Empty(_manifest.Load().Todo(RetryTaskIds.NetInflow, RetryTodoKind.MissingDays)?.Targets ?? []);
+    }
+
+    // ── 节假日：窗口里没有交易日就不发请求（2026-10-06）──────────────────
+
+    /// <summary>四只票都追到三天前（收盘后抓的），窗口是 [前天, 今天]。</summary>
+    private DateTime SeedWatermark()
+    {
+        var mark = Today.AddDays(-3);
+        _repo.Upsert(Codes.Select(c => new NetInflow
+        {
+            Code = c, PeriodStart = mark, MainNetInflow = 1, FetchedAt = mark.AddHours(20),
+        }).ToList());
+        return mark;
+    }
+
+    /// <summary>
+    /// 真 SQLite 的 TradingDay 表：水位往前一个月天天开市，之后 <paramref name="closedDays"/> 天休市，
+    /// 再往后天天开市。不跳周末——只关心窗口里有没有交易日，跳了反而让结果随测试当天变。
+    /// </summary>
+    private SqliteTradingDayRepository SeedCalendar(DateTime mark, int closedDays)
+    {
+        var repo = new SqliteTradingDayRepository(_paths.CurrentDb);
+        repo.EnsureSchema();
+        var days = new List<(DateOnly, string)>();
+        for (var d = mark.AddDays(-30); d <= Today.AddDays(10); d = d.AddDays(1))
+            if (d <= mark || d > mark.AddDays(closedDays))
+                days.Add((DateOnly.FromDateTime(d), ITradingDayRepository.SzseSource));
+        repo.Upsert(days);
+        return repo;
+    }
+
+    /// <summary>⭐ 水位之后到今天全是休市：一个请求都不发，结论是"没活可干"。</summary>
+    [Fact]
+    public async Task 增量_窗口全在休市里_不发请求()
+    {
+        var cal = SeedCalendar(SeedWatermark(), closedDays: 3);
+        var f = new FakeFetcher();
+        var task = NewTask(f, tradingDays: cal);
+        var log = new List<string>();
+        task.OnProgress += p => log.Add(p.Text);
+
+        var r = await task.RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
+
+        Assert.Empty(f.Asked);
+        Assert.True(r.NothingToDo);
+        Assert.Contains(log, l => l.Contains($"其中 {Codes.Length} 只") && l.Contains("没有交易日"));
+    }
+
+    /// <summary>对照：休市只到昨天、今天开市——照常抓。</summary>
+    [Fact]
+    public async Task 增量_窗口里有交易日_照常抓()
+    {
+        var cal = SeedCalendar(SeedWatermark(), closedDays: 2);
+        var f = new FakeFetcher();
+
+        await NewTask(f, tradingDays: cal).RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
+
+        Assert.Equal(Codes.Length, f.Asked.Count);
+    }
+
+    /// <summary>对照：日历表是空的就是老行为，照发请求。</summary>
+    [Fact]
+    public async Task 增量_日历表空_照常抓()
+    {
+        SeedWatermark();
+        var cal = new SqliteTradingDayRepository(_paths.CurrentDb);
+        cal.EnsureSchema();
+        var f = new FakeFetcher();
+
+        await NewTask(f, tradingDays: cal).RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
+
+        Assert.Equal(Codes.Length, f.Asked.Count);
+    }
+
+    /// <summary>「只抓指定的那一天」不看交易日：人点名要哪天就抓哪天。</summary>
+    [Fact]
+    public async Task 指定某一天_休市日也照抓()
+    {
+        var mark = SeedWatermark();
+        var cal = SeedCalendar(mark, closedDays: 3);
+        var f = new FakeFetcher();
+
+        await NewTask(f, tradingDays: cal).RunAsync(
+            new TaskRunArgs(FetchMode.SpecificDay, Day: DateOnly.FromDateTime(Today)), CancellationToken.None);
+
+        Assert.Equal(Codes.Length, f.Asked.Count);
     }
 }

@@ -3,6 +3,7 @@ using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 using StockPlatform.Scheduling;
 using StockPlatform.Scheduling.Tasks;
 
@@ -49,7 +50,8 @@ public sealed class EtfRawBarTask(
     SqliteBarRepository bars,
     IDividendRepository dividends,
     IBarDataFetcher fetcher,
-    IManifestStore? manifestStore = null) : FetchTaskBase<Bar>
+    IManifestStore? manifestStore = null,
+    ITradingDayRepository? tradingDays = null) : FetchTaskBase<Bar>
 {
     /// <summary>闸门那一页往回取多久——腾讯一页硬顶 640 根，700 个自然日约 480 个交易日，
     /// 稳稳落在一页内（只发一个请求）。</summary>
@@ -72,13 +74,20 @@ public sealed class EtfRawBarTask(
     public override bool HandlesBacklog => manifestStore != null;
 
     private int _copied, _fetched, _probeFailed, _skipped, _rows;
+
+    /// <summary>有除权事件、但窗口里没有交易日而跳过的只数（也计入 _skipped，单独报）。</summary>
+    private int _noTradingDay;
+
+    /// <summary>本轮的官方交易日历；null＝不按交易日跳过（见 <see cref="OfficialTradingCalendar"/>）。</summary>
+    private TradingCalendar? _calendar;
     private string? _skippedReason;
     private DateTime? _backlogDay;
 
     protected override async IAsyncEnumerable<IReadOnlyList<Bar>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
-        _copied = _fetched = _probeFailed = _skipped = _rows = 0;
+        _copied = _fetched = _probeFailed = _skipped = _rows = _noTradingDay = 0;
+        _calendar = null;
         _backlogDay = null;
         bool whole = args.Mode.HasFlag(FetchMode.FirstBackfill);
 
@@ -125,6 +134,7 @@ public sealed class EtfRawBarTask(
                          .ToHashSet(StringComparer.Ordinal);
             return (list, ev);
         }, ct);
+        if (!whole) _calendar = await Task.Run(() => OfficialTradingCalendar.Load(tradingDays, s => Report(s)), ct);
 
         Report($"ETF {codes.Count} 只，其中 {withEvents.Count} 只有除权事件（必须抓），"
                + $"{codes.Count - withEvents.Count} 只没有（先验后复制）", 0, codes.Count);
@@ -159,6 +169,14 @@ public sealed class EtfRawBarTask(
         {
             var from = whole || rawLatest is null ? HistoryStart : rawLatest.Value.AddDays(1);
             if (!whole && rawLatest is not null && rawLatest.Value.Date >= today) { _skipped++; return []; }
+            // 窗口里一个交易日都没有就不发请求（2026-10-06）：节假日这 325 只每只一个请求、
+            // 一轮 9 分钟、写入 0 行。判据见 IncrementalWindowCalculator.NoTradingDayIn。
+            if (!whole && rawLatest is not null && IncrementalWindowCalculator.NoTradingDayIn(_calendar, from, today))
+            {
+                _skipped++;
+                _noTradingDay++;
+                return [];
+            }
             return await FetchAsync(code, from, today, ct);
         }
 
@@ -262,7 +280,8 @@ public sealed class EtfRawBarTask(
         }
 
         Report($"完成：写入 {_rows:N0} 行——抓了 {_fetched} 只、从 day 复制 {_copied} 只、"
-               + $"无事可做 {_skipped} 只");
+               + $"无事可做 {_skipped} 只"
+               + (_noTradingDay > 0 ? $"（其中 {_noTradingDay} 只有除权事件、但上次之后没有新交易日，不发请求）" : ""));
         if (_probeFailed > 0)
             Report($"　⚠ {_probeFailed} 只没过闸门（day 与 day_raw 不一致但事件源里没记）——"
                    + "已改为老实抓，但这说明 fund_cqcx 漏了事件，值得查");

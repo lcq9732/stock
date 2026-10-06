@@ -38,6 +38,7 @@ public sealed class NetInflowTask(
     INetInflowFetcher fetcher,
     IManifestStore manifestStore,
     FetchPaths paths,
+    ITradingDayRepository? tradingDays,
     int batchSize = NetInflowTask.DefaultBatchSize) : FetchTaskBase<NetInflowTask.CodeResult>
 {
     public override FetchActionId Id => FetchActionId.StepNetInflow;
@@ -72,6 +73,9 @@ public sealed class NetInflowTask(
     private readonly ConcurrentBag<string> _failed = [];
 
     private int _planned, _done, _rows;
+
+    /// <summary>本轮因为"窗口里没有交易日"而跳过的只数（见 <see cref="PlanFor"/>）。</summary>
+    private int _noTradingDay;
     private string? _skipped;
     private FetchMode _mode;
     private string? _backlogLine;
@@ -88,7 +92,7 @@ public sealed class NetInflowTask(
         _errors.Clear();
         _attempted.Clear();
         _failed.Clear();
-        _planned = _done = _rows = 0;
+        _planned = _done = _rows = _noTradingDay = 0;
         _skipped = _backlogLine = null;
         _mode = args.Mode;
         _sw.Restart();
@@ -108,9 +112,13 @@ public sealed class NetInflowTask(
         // 排期要逐只查水位线，都是同步 IO。骨架不替子类推线程池，首个 await 之前干这些会冻住界面。
         var plan = await Task.Run(() => Plan(args), ct);
         _planned = plan.Count;
+        if (_noTradingDay > 0)
+            Report($"其中 {_noTradingDay} 只从上次抓到的那天到今天没有交易日（按交易日历），不发请求。");
         if (plan.Count == 0)
         {
-            _skipped = "资金净流入：所有标的都已经抓到最新了";
+            _skipped = _noTradingDay > 0
+                ? "资金净流入：所有标的都已经抓到最新了（上次之后没有新交易日）"
+                : "资金净流入：所有标的都已经抓到最新了";
             Report($"{_skipped}，本轮不用抓。");
             yield break;
         }
@@ -244,6 +252,12 @@ public sealed class NetInflowTask(
     ///   · 从没抓过 → 往前 <see cref="InitialLookbackDays"/> 天；
     ///   · 水位线早于终点 → 从水位线的下一天续抓；
     ///   · 水位线就是终点那天 → 看它是不是**收盘后**抓的：是就跳过，不是就重抓那天（见类注释 ⚠）。
+    ///
+    /// 增量还有一道（2026-10-06）：窗口里**一个交易日都没有**就跳过、不发请求
+    /// （<see cref="IncrementalWindowCalculator.NoTradingDayIn"/>）。计划层只跳周末，国庆这种
+    /// 工作日的节假日照跑——10-01/02/05 三天，全市场每只窗口都是 [10-01, 今天]，
+    /// 逐只请求 5572 次、各跑 1 小时 45 分到 2 小时、写入 0 行。
+    /// 「只抓指定的那一天」不走这道：人点名要哪天就抓哪天。
     /// </summary>
     private List<(string Code, DateTime Start, DateTime End)> Plan(TaskRunArgs args)
     {
@@ -303,6 +317,7 @@ public sealed class NetInflowTask(
         IReadOnlyList<string> codes, DateTime end, bool exactDayOnly)
     {
         var list = new List<(string, DateTime, DateTime)>();
+        var calendar = exactDayOnly ? null : OfficialTradingCalendar.Load(tradingDays, s => Report(s));
         foreach (var code in codes)
         {
             DateTime start;
@@ -321,7 +336,9 @@ public sealed class NetInflowTask(
                 else start = IncrementalWindowCalculator.IsConfirmedFinal(info.Value.FetchedAt, end)
                     ? end.AddDays(1) : end;
             }
-            if (start.Date <= end.Date) list.Add((code, start, end));
+            if (start.Date > end.Date) continue;
+            if (IncrementalWindowCalculator.NoTradingDayIn(calendar, start, end)) { _noTradingDay++; continue; }
+            list.Add((code, start, end));
         }
         return list;
     }
