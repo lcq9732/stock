@@ -495,6 +495,66 @@ public class FullAuditTaskTests : IDisposable
         Assert.Contains(log, l => l.Contains("1 只共 1 天是官网记载的全天停牌"));
     }
 
+    // ─────────── 尾部缺口（2026-10-16，见 doc/ipo-issue-design.md §7）───────────
+
+    private void Calendar() =>
+        new SqliteTradingDayRepository(_dbPath).Upsert(Days.Select(d => (DateOnly.FromDateTime(d), "szse")));
+
+    /// <summary>
+    /// 最后一根之后缺的日子：没有停牌记录的当空洞进名单；停牌中的、已摘牌的（sh560650 那种）不进，
+    /// 汇总里按原因分开说。
+    /// </summary>
+    [Fact]
+    public async Task 尾部缺口_真缺进名单_停牌和摘牌不进()
+    {
+        // 日历往前补 5 个交易日：尾部判断不看历史不足 5 个交易日的票（新股），3 天的日历会被整体跳过
+        DateTime[] before = [new(2026, 8, 25), new(2026, 8, 26), new(2026, 8, 27), new(2026, 8, 28), new(2026, 8, 31)];
+        Insert(Anchor, Granularity.Day, before);
+        new SqliteTradingDayRepository(_dbPath).Upsert(before.Select(d => (DateOnly.FromDateTime(d), "szse")));
+        Calendar();
+        DateTime[] head = [.. before, Days[0]];
+        // 各放一只齐的：不然整个口径都落后，体检会先判成"这一项最近没跑成"、不逐只分类
+        Meta("600000", SqliteStockMetaUpsert.TypeStock);
+        Insert("600000", Granularity.Day, [.. before, .. Days]);
+        Meta("sh510300", SqliteStockMetaUpsert.TypeEtf);
+        Insert("sh510300", Granularity.Day, [.. before, .. Days]);
+        Meta("600011", SqliteStockMetaUpsert.TypeStock);
+        Insert("600011", Granularity.Day, head);                         // 真缺 9-2、9-3
+        Meta("600293", SqliteStockMetaUpsert.TypeStock);
+        Insert("600293", Granularity.Day, head);                         // 9-2 起连续停牌、还没复牌
+        Meta("sh560650", SqliteStockMetaUpsert.TypeEtf);
+        Insert("sh560650", Granularity.Day, head);                       // 9-2 停牌、当天摘牌
+        var d1 = DateOnly.FromDateTime(Days[1]);
+        new SqliteSuspensionRepository(_dbPath).Upsert([
+            new SuspensionRow(SuspensionSource.SseStock, "sh", "600293", "三峡新材", d1, "", null, "", "LXTP", "", "拟筹划重大资产重组"),
+            new SuspensionRow(SuspensionSource.SseFund, "sh", "560650", "中证50", d1, "", d1, "", "LXTP", "", "拟退市摘牌",
+                              EndReason: "摘牌"),
+        ]);
+
+        var log = await RunLogged(NewTask());
+
+        var gaps = Bars().Where(r => r.EffectiveReason == AuditFindingKind.Gap && r.Granularity == Granularity.Day).ToList();
+        var g = Assert.Single(gaps);
+        Assert.Equal(("600011", Days[1], Days[2]), (g.Code, g.From, g.To));
+        Assert.True(log.Any(l => l.Contains("停牌中 1 只、已摘牌 0 只") && l.Contains("其余 1 只")),
+                    string.Join(Environment.NewLine, log));   // 个股·前复权
+        Assert.Contains(log, l => l.Contains("ETF") && l.Contains("已摘牌 1 只"));
+    }
+
+    /// <summary>最近两天还没结算，归【当日完整性体检】管——全库体检不报。</summary>
+    [Fact]
+    public async Task 尾部最近两天不报()
+    {
+        var yesterday = DateTime.Today.AddDays(-1);
+        Insert(Anchor, Granularity.Day, yesterday);                      // 日历多一天：昨天
+        Meta("600012", SqliteStockMetaUpsert.TypeStock);
+        Insert("600012", Granularity.Day, Days);
+
+        await RunLogged(NewTask());
+
+        Assert.DoesNotContain(Bars(), r => r.Code == "600012");
+    }
+
     [Fact]
     public async Task 板块指数的值问题_只报数不进名单()
     {

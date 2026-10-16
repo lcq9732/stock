@@ -31,7 +31,8 @@ public class DelistedTailPlannerTests
         var got = Select([Row("600000", Delist)], ["600000"], ("600000", new DateTime(2026, 8, 10)));
 
         var t = Assert.Single(got);
-        Assert.Equal(Delist, t.DelistDate);
+        Assert.Equal(Delist, t.End);
+        Assert.False(t.WholeHistory);
         Assert.Equal(new DateTime(2026, 8, 11), t.DayStart);   // 从本地最后一根的**次日**续
     }
 
@@ -49,10 +50,65 @@ public class DelistedTailPlannerTests
     public void 没有终止日_不补()
         => Assert.Empty(Select([Row("600000", null)], ["600000"], ("600000", new DateTime(2026, 8, 10))));
 
-    /// <summary>本地一根都没有的不在这里补——那是【拉取区间数据】的活。</summary>
+    /// <summary>本地一根都没有的不算补尾巴——归下面的整段缺失。</summary>
     [Fact]
     public void 本地没有历史_不补()
         => Assert.Empty(Select([Row("600000", Delist)], ["600000"]));
+
+    // ── 整段缺失（本地一根前复权都没有，2026-10-16）──
+
+    private static readonly DateTime Today = new(2026, 10, 16);
+
+    private static List<DelistedTailPlanner.Target> Whole(
+        IEnumerable<DelistedStockRow> all, string[] tailPending, params (string Code, DateTime Latest)[] latestDay)
+        => DelistedTailPlanner.SelectWholeHistory(
+            all, tailPending.ToHashSet(StringComparer.Ordinal),
+            latestDay.ToDictionary(x => x.Code, x => x.Latest), Today);
+
+    /// <summary>巨潮补进来的那批没有终止日——照样补，补到今天（数据源只给到它最后交易那天）。</summary>
+    [Fact]
+    public void 整段缺失_没有终止日_从开市首日补到今天()
+    {
+        var t = Assert.Single(Whole([Row("688287", null)], ["688287"]));
+
+        Assert.True(t.WholeHistory);
+        Assert.Equal(IncrementalWindowCalculator.AShareMarketOpen, t.DayStart);
+        Assert.Equal(Today, t.End);
+    }
+
+    [Fact]
+    public void 整段缺失_有终止日_补到终止日()
+        => Assert.Equal(Delist, Assert.Single(Whole([Row("600087", Delist)], ["600087"])).End);
+
+    /// <summary>每只只抓一次：抓过（成功或数据源确实没有）就打了标记，不再碰。</summary>
+    [Fact]
+    public void 整段缺失_已尝试过_不补()
+        => Assert.Empty(Whole([Row("688287", null)], tailPending: []));
+
+    /// <summary>本地有前复权的归补尾巴那一类，两类不重叠。</summary>
+    [Fact]
+    public void 本地有前复权_不算整段缺失()
+        => Assert.Empty(Whole([Row("600000", Delist)], ["600000"], ("600000", new DateTime(2026, 8, 10))));
+
+    /// <summary>后复权/不复权：整段缺失的票该口径没有历史时也从开市首日起，不是只回看几年。</summary>
+    [Fact]
+    public void 整段缺失_后复权窗口从开市首日起()
+    {
+        var t = new DelistedTailPlanner.Target("688287", "退市观典", Today,
+                                               IncrementalWindowCalculator.AShareMarketOpen, WholeHistory: true);
+
+        Assert.Equal((IncrementalWindowCalculator.AShareMarketOpen, Today), DelistedTailPlanner.WindowFor(t, null, 3));
+        Assert.Equal((new DateTime(2026, 6, 9), Today),
+                     DelistedTailPlanner.WindowFor(t, new DateTime(2026, 6, 8), 3));   // 有历史照旧从次日续
+    }
+
+    [Fact]
+    public void 补尾巴_后复权窗口照旧回看几年()
+    {
+        var t = new DelistedTailPlanner.Target("600000", "退市X", Delist, new DateTime(2026, 8, 11));
+
+        Assert.Equal((Delist.AddYears(-3), Delist), DelistedTailPlanner.WindowFor(t, null, 3));
+    }
 
     // ── 后复权/不复权的窗口（水位线跟前复权各自独立）──
 

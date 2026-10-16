@@ -118,6 +118,111 @@ public class FullAuditTests : IDisposable
         Assert.DoesNotContain("600005", _bars.GetLatestPeriodStartByCode(Granularity.DayRaw).Keys);
     }
 
+    // ─────────── 起点＝ min(第一根, 上市日)，不早于水位表（2026-10-16，见 doc/ipo-issue-design.md §6）───────────
+
+    private void Exec(string sql, params (string, object)[] ps)
+    {
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_dbPath}");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var (n, v) in ps) cmd.Parameters.AddWithValue(n, v);
+        cmd.ExecuteNonQuery();
+    }
+
+    private void ListDate(string code, string date)
+    {
+        SqliteStockMetaUpsert.Upsert(_dbPath, [(code, code)], SqliteStockMetaUpsert.TypeStock);
+        Exec("UPDATE StockMeta SET list_date = $d WHERE code = $c;", ("$d", date), ("$c", code));
+    }
+
+    /// <summary>301371 敷尔佳：2023-08-01 上市，不复权从 08-31 才有——上市头几天以前永远查不出来。</summary>
+    [Fact]
+    public void 上市日早于第一根_头几天算空洞()
+    {
+        Insert("301371", Granularity.DayRaw, Days[2]);
+        ListDate("301371", "2026-09-01");
+
+        Assert.Equal([Days[0], Days[1]], _audit.FindGaps(["301371"], Granularity.DayRaw, Anchor)["301371"]);
+    }
+
+    /// <summary>1990 年代老股上市头几天数据源本来就没有，水位表确认过——不报。</summary>
+    [Fact]
+    public void 水位表确认之前没有的那段不报()
+    {
+        Insert("600605", Granularity.Day, Days[2]);
+        ListDate("600605", "2026-09-01");
+        Exec("INSERT INTO BarProbeFloor (code, granularity, no_data_before, probed_at) VALUES ('600605','day','2026-09-02','x');");
+
+        Assert.Equal([Days[1]], _audit.FindGaps(["600605"], Granularity.Day, Anchor)["600605"]);
+    }
+
+    /// <summary>600018 上港集团：吸收合并后重新上市，上市日 2006、K线 2000 年就有——起点不动。</summary>
+    [Fact]
+    public void 上市日晚于第一根_起点不动()
+    {
+        Insert("600018", Granularity.Day, Days);
+        ListDate("600018", "2026-09-03");
+
+        Assert.Empty(_audit.FindGaps(["600018"], Granularity.Day, Anchor));
+    }
+
+    /// <summary>名册里没有上市日（退市股、还没跑过【新股发行】）——跟以前一样从第一根算。</summary>
+    [Fact]
+    public void 没有上市日的照旧从第一根算()
+    {
+        Insert("600007", Granularity.Day, Days[2]);
+        SqliteStockMetaUpsert.Upsert(_dbPath, [("600007", "x")], SqliteStockMetaUpsert.TypeStock);
+
+        Assert.Empty(_audit.FindGaps(["600007"], Granularity.Day, Anchor));
+    }
+
+    // ─────────── 终点：个股/ETF 延伸到日历最后一天（2026-10-16，见 doc/ipo-issue-design.md §7）───────────
+
+    private void Meta(string code, string type) => SqliteStockMetaUpsert.Upsert(_dbPath, [(code, code)], type);
+
+    /// <summary>某个口径悄悄停更了：最后一根之后缺的日子以前永远查不出来。</summary>
+    [Fact]
+    public void 个股最后几天没有_算空洞()
+    {
+        Meta("600008", SqliteStockMetaUpsert.TypeStock);
+        Insert("600008", Granularity.DayRaw, Days[0]);
+
+        Assert.Equal([Days[1], Days[2]], _audit.FindGaps(["600008"], Granularity.DayRaw, Anchor)["600008"]);
+    }
+
+    [Fact]
+    public void ETF也延伸()
+    {
+        Meta("sh510300", SqliteStockMetaUpsert.TypeEtf);
+        Insert("sh510300", Granularity.Day, Days[0], Days[1]);
+
+        Assert.Equal([Days[2]], _audit.FindGaps(["sh510300"], Granularity.Day, Anchor)["sh510300"]);
+    }
+
+    /// <summary>板块指数本地合成、板块撤销后自然不再更新；指数不停牌——都不延伸。名册里没有类型的也不延伸。</summary>
+    [Fact]
+    public void 板块和指数和没有类型的不延伸()
+    {
+        Meta("BK0001", SqliteStockMetaUpsert.TypeBoard);
+        Insert("BK0001", Granularity.Day, Days[0]);
+        Meta("sz399001", SqliteStockMetaUpsert.TypeIndex);
+        Insert("sz399001", Granularity.Day, Days[0]);
+        Insert("600009", Granularity.Day, Days[0]);       // 名册里没有
+
+        Assert.Empty(_audit.FindGaps(["BK0001", "sz399001", "600009"], Granularity.Day, Anchor));
+    }
+
+    /// <summary>day_adj 落后于不复权是【重算回测序列】还没跑，体检另有一行专门报——不延伸，免得报两遍。</summary>
+    [Fact]
+    public void 回测序列不延伸()
+    {
+        Meta("600010", SqliteStockMetaUpsert.TypeStock);
+        Insert("600010", Granularity.DayAdj, Days[0]);
+
+        Assert.Empty(_audit.FindGaps(["600010"], Granularity.DayAdj, Anchor));
+    }
+
     [Fact]
     public void 老manifest没有口径字段时_默认按前复权()
     {

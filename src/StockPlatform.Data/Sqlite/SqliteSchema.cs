@@ -1,4 +1,5 @@
 ﻿using Microsoft.Data.Sqlite;
+using StockPlatform.Logic.Models;
 
 namespace StockPlatform.Data.Sqlite;
 
@@ -1216,6 +1217,7 @@ public static class SqliteSchema
         foreach (var col in new[] { "end_reason", "control_type", "end_kind", "start_type", "end_type",
                                     "date_source", "full_name" })
             AddColumnIfMissing(conn, "Suspension", col, "TEXT");
+        EnsureIpoIssue(conn);
         // 2026-08-29：监管指标区分来源——pdf / ocr / ocr_confirmed / manual，取值和含义见
         // Logic.Models.MetricSources。有它才能保证**重解析不会覆盖掉人拍板过的数据**
         // （见 SqliteBankRegulatoryRepository.Upsert 的 ON CONFLICT … WHERE），
@@ -1406,6 +1408,27 @@ public static class SqliteSchema
     /// 里那段说明），新库走到这儿时表都还没有，不判这一下 ALTER TABLE 会报 no such table。
     /// 已有同名列也直接返回：EnsureSchema 要能反复调。
     /// </summary>
+    /// <summary>
+    /// 新股发行表 IpoIssue（2026-10-16，见 doc/ipo-issue-design.md）——东财 RPTA_APP_IPOAPPLY 的**全部 151 列**，
+    /// 一列一个字段（用户定"取到的全存"）。列太多，不手写进上面那段 SQL，而是按 Logic 里的列目录
+    /// <see cref="IpoIssueColumns"/> 生成：列名＝东财原名转小写，SECURITY_CODE 存成主键 code；
+    /// 数值 REAL、文本和日期 TEXT（日期存 yyyy-MM-dd，带时刻的原样）。
+    /// 目录以后加了列，下面的 AddColumnIfMissing 会给老库补上。
+    /// </summary>
+    private static void EnsureIpoIssue(SqliteConnection conn)
+    {
+        string Type(IpoColumn c) => c.Kind == IpoColumnKind.Number ? "REAL" : "TEXT";
+        var cols = IpoIssueColumns.All.Where(c => c.Api != IpoIssueColumns.CodeColumn).ToList();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "CREATE TABLE IF NOT EXISTS IpoIssue (\n    code TEXT PRIMARY KEY,\n"
+                + string.Join("", cols.Select(c => $"    {c.Db} {Type(c)},\n"))
+                + "    fetched_at TEXT\n);";
+            cmd.ExecuteNonQuery();
+        }
+        foreach (var c in cols) AddColumnIfMissing(conn, "IpoIssue", c.Db, Type(c));
+    }
+
     private static void AddColumnIfMissing(SqliteConnection conn, string table, string column, string columnType)
     {
         if (!TableExists(conn, table)) return;

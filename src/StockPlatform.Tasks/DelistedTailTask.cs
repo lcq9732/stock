@@ -11,7 +11,8 @@ namespace StockPlatform.Tasks;
 
 /// <summary>
 /// 【退市股收尾】（2026-09-21 从编排器迁到新框架，K线六项的最后一步）——
-/// 刷新退市名单，并给"本地跟踪过、但最后一根K线还早于终止日"的票补完最后那几天。
+/// 刷新退市名单，并给"本地跟踪过、但最后一根K线还早于终止日"的票补完最后那几天；
+/// 本地一根K线都没有的退市股（多是【补全退市名单】补进来的）整段补齐（2026-10-16 加）。
 ///
 /// ════ 补的是一个真实存在的数据黑洞 ════
 /// 一只股票退市后，日常清单里它还在、数据源却已经不再给新数据；而它**最后几个交易日**
@@ -124,11 +125,14 @@ public sealed class DelistedTailTask(
             Report($"存量回修：{reinstated.Count} 只之前被误标退市、K线还在更新，已移出退市名单并恢复日常轮询——"
                    + string.Join("、", reinstated.Select(r => $"{r.Code} {r.Name}")));
 
+        // 整段缺失那一类按**本地退市名单**挑，不按刚取到的两所名单——【补全退市名单】从巨潮/档案
+        // 补进来的票（科创板退市股、换代码的老号）两所名单里本来就没有，正是一根K线都没有的那批。
         var (pending, latestHfq) = await Task.Run(() =>
         {
             var tailPending = Delisted.GetTailPendingCodes();
             var latestDay = Bars.GetLatestPeriodStartByCode(Granularity.Day);
             var p = DelistedTailPlanner.SelectPending(all, tailPending, latestDay);
+            p.AddRange(DelistedTailPlanner.SelectWholeHistory(Delisted.GetAll(), tailPending, latestDay, DateTime.Today));
             return (p, Bars.GetLatestPeriodStartByCode(Granularity.DayHfq));
         }, ct);
 
@@ -140,18 +144,24 @@ public sealed class DelistedTailTask(
             yield break;
         }
 
-        Report($"退市名单已刷新（{all.Count} 只），其中 {pending.Count} 只本地缺最后几天，正在补...");
+        int whole = pending.Count(t => t.WholeHistory);
+        Report($"退市名单已刷新（{all.Count} 只），"
+             + (pending.Count > whole ? $"{pending.Count - whole} 只本地缺最后几天" : "")
+             + (pending.Count > whole && whole > 0 ? "、" : "")
+             + (whole > 0 ? $"{whole} 只本地一根K线都没有（整段补）" : "")
+             + "，正在补...");
 
         // ── ① 前复权 ──
         await foreach (var batch in RunLegAsync(Granularity.Day, "前复权",
-                           pending.Select(t => (t.Code, t.DayStart, t.DelistDate)).ToList(), probe: false, ct))
+                           pending.Select(t => (t.Code, t.DayStart, t.End)).ToList(), probe: false, ct))
             yield return batch;
 
         // ── ②③ 后复权 / 不复权 ──
         // 这两条线**保留"起飞前探一只"那道闸**（2026-09-21 用户定：等价优先）。
-        // ⚠ 探的是最近一年——退市久了的票那一年本来就没有数据，探测会判失败、整条腿跳过。
-        //   实际影响很小：这里的 pending 基本都是刚退市的（最后几天就在最近一年内），
-        //   但这是个已知的脆弱点，记在这儿。
+        // ⚠ 只补尾巴时探的是最近一年——退市久了的票那一年本来就没有数据，探测会判失败、整条腿跳过。
+        //   实际影响很小：补尾巴的基本都是刚退市的（最后几天就在最近一年内），但这是个已知的脆弱点。
+        //   有整段缺失的票时改探**它自己的整段窗口**（2026-10-16）：那批大多退市多年，
+        //   最近一年必然是空的；而它们都是【补全退市名单】确认过"给得出日K"才进名单的。
         foreach (var (gran, kind, latest) in new[]
                  {
                      (Granularity.DayHfq, "后复权", latestHfq),
@@ -161,20 +171,23 @@ public sealed class DelistedTailTask(
             var windows = pending.Select(t =>
             {
                 var (s, e) = DelistedTailPlanner.WindowFor(
-                    t.DelistDate, latest.TryGetValue(t.Code, out var l) ? l : null, DefaultLookbackYears);
+                    t, latest.TryGetValue(t.Code, out var l) ? l : null, DefaultLookbackYears);
                 return (t.Code, s, e);
             }).ToList();
 
-            await foreach (var batch in RunLegAsync(gran, kind, windows, probe: true, ct))
+            await foreach (var batch in RunLegAsync(gran, kind, windows, probe: true, ct,
+                               wholeHistory: pending.Where(t => t.WholeHistory).Select(t => t.Code).ToHashSet()))
                 yield return batch;
         }
     }
 
     /// <summary>跑一个口径：（可选）先探一只，再按批抓。</summary>
+    /// <param name="wholeHistory">整段缺失的代码——有的话探它们里的一只、用它自己的窗口（见调用处 ⚠）。</param>
     private async IAsyncEnumerable<IReadOnlyList<CodeBars>> RunLegAsync(
         string granularity, string kind,
         IReadOnlyList<(string Code, DateTime Start, DateTime End)> windows, bool probe,
-        [EnumeratorCancellation] CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct,
+        IReadOnlySet<string>? wholeHistory = null)
     {
         var todo = windows.Where(w => w.Start.Date <= w.End.Date).ToList();
         if (todo.Count == 0)
@@ -189,7 +202,13 @@ public sealed class DelistedTailTask(
             yield break;
         }
 
-        if (probe && !await ProbeAsync(todo[0].Code, granularity, kind, ct)) yield break;
+        if (probe)
+        {
+            var today = DateTime.Today;
+            var p = todo.FirstOrDefault(w => wholeHistory?.Contains(w.Code) == true);
+            var (code, start, end) = p.Code is null ? (todo[0].Code, today.AddYears(-1), today) : p;
+            if (!await ProbeAsync(code, granularity, kind, start, end, ct)) yield break;
+        }
 
         int batchIndex = 0, done = 0;
         foreach (var batch in todo.Chunk(_batchSize))
@@ -205,12 +224,12 @@ public sealed class DelistedTailTask(
     }
 
     /// <summary>探一只：抓不到就整条线跳过，不做无谓的空跑。</summary>
-    private async Task<bool> ProbeAsync(string probeCode, string granularity, string kind, CancellationToken ct)
+    private async Task<bool> ProbeAsync(
+        string probeCode, string granularity, string kind, DateTime start, DateTime end, CancellationToken ct)
     {
-        var today = DateTime.Today;
         try
         {
-            var (_, bars) = await Source.Fetcher.FetchAsync(probeCode, granularity, today.AddYears(-1), today, ct);
+            var (_, bars) = await Source.Fetcher.FetchAsync(probeCode, granularity, start, end, ct);
             if (bars.Count == 0)
                 throw new InvalidOperationException("接口返回空数据（可能是返回格式变了，或该代码已无数据）");
             return true;
@@ -218,7 +237,7 @@ public sealed class DelistedTailTask(
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            Errors.Add($"退市股{kind}探测失败（用 {probeCode} 试抓最近一年）：{ex.Message}。"
+            Errors.Add($"退市股{kind}探测失败（用 {probeCode} 试抓 {start:yyyy-MM-dd}~{end:yyyy-MM-dd}）：{ex.Message}。"
                      + "本轮跳过这一条线——前复权不受影响。");
             Report("⚠ " + Errors[^1]);
             return false;

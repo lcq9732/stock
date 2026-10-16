@@ -234,6 +234,23 @@ public class SuspensionTests : IDisposable
         Assert.Equal([D(1, 24)], days);
     }
 
+    /// <summary>
+    /// 摘牌之后也不该有K线（2026-10-16）：sh560650 停牌原因"拟退市摘牌"、复牌原因"摘牌"、结束日 08-21——
+    /// 之后的日子跟停牌日一样并进集合。只认复牌原因：停牌原因写"拟退市"只是要退、还没退。
+    /// </summary>
+    [Fact]
+    public void 摘牌之后的日子也算_只认复牌原因()
+    {
+        var gone = new SuspensionRow(SuspensionSource.SseFund, "sh", "560650", "", D(2, 24), "", D(2, 25), "",
+            "LXTP", "", "拟退市摘牌", EndReason: "摘牌");
+        Assert.Equal(D(2, 25), SuspensionRule.DelistDay([gone]));
+        Assert.Equal(5, Full(null, gone).Count);                            // 2-24 ~ 2-28：停牌 2 天 + 摘牌后 3 天
+
+        var notYet = gone with { EndReason = "复牌" };
+        Assert.Null(SuspensionRule.DelistDay([notYet]));
+        Assert.Equal(2, Full(null, notYet).Count);
+    }
+
     [Fact]
     public void 复牌记录的几种写法都认()
     {

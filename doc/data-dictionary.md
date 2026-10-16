@@ -66,6 +66,7 @@
 | 抓取状态 | `MissingBarConfirmed` | 逐日白名单："这天数据源确实没有"（区分停牌 vs 漏抓） |
 |  | `BarProbeFloor` 🆕 | 逐段水位："这天之前数据源没有该票K线"（省掉往年回补的重复空跑） |
 |  | `TradingDay` ✨ | 交易日历（深交所官方 + 2004 前本地归纳）——全库判交易日的唯一依据 |
+|  | `IpoIssue` 🆕 | **新股发行**（东财全部 151 列：发行价、上市日、中签率、发行市盈率、首日表现……；在市 A 股 1990 起，不含退市股） |
 |  | `Suspension` 🆕 | **沪深交易所官网停复牌记录**（取到的全存：股票/ETF/债券/LOF/B 股，接口每列都有字段；沪 2010 起、深 2008 起）——体检拿它解释"那天为什么没有日K" |
 |  | `SuspensionFetchMonth` 🆕 | 上面那张表每路接口问过哪些月（回补断点续传） |
 |  | `DailyFetchNoData` ✨ | 日频表的空日名单："这天这个源确实没有"（龙虎榜/融资余额回补跳过它） |
@@ -1282,6 +1283,170 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | day | TEXT | 交易日 `yyyy-MM-dd` |
 | confirmed_at | TEXT | 确认时刻 |
 | | | **主键** (dataset, day) |
+
+### IpoIssue — 新股发行（2026-10-16 新增）
+**写入**：【新股发行】任务（`StockPlatform.Tasks/IpoIssueTask.cs`），设计见 `doc/ipo-issue-design.md`。
+**来源**：东财 datacenter `RPTA_APP_IPOAPPLY`，**全部 151 列一列一个字段**（用户定"取到的全存"）。列名＝东财原名转小写；`SECURITY_CODE` 存成主键 `code`。数值 REAL，文本/日期 TEXT；日期 "yyyy-MM-dd 00:00:00" 存成 yyyy-MM-dd，带具体时刻的原样。列目录在 `Logic/Models/IpoIssue.cs`（拿全量响应生成的）。
+**覆盖**：1990 年起在市的全部 A 股（沪深主板/创业板/科创板 + 北交所，2026-10-16 共 5,640 只），含还没上市的新股；**不含退市股**（338 只只查到 2 只——以后找到数据源一次补，不进程序）、不含吸收合并/换股上市的（600023、000333 等 24 只没有首发）。
+**上市日顺带写进 `StockMeta.list_date`**（只改名册里已有的个股）。跟本地首根日K比：5,520 一致、33 不一致——不一致的是**本地缺了上市头几周的K线**（301371 敷尔佳等 2023-08 上市的创业板股），不是接口错。
+**⚠ 标 🔄 的列是抓取那一刻的值**，每次抓取都覆盖，别当历史数据用；首日开收盘价这类是上市首日的、不会变。
+下表"有值"＝2026-10-16 全量 5,640 行里不为空的行数（没写含义的列照东财原名，含义待查证）。
+
+| 字段 | 类型 | 有值 | 含义 |
+|---|---|---|---|
+| secucode | TEXT | 5640 | 带交易所后缀的代码（001381.SZ） |
+| code | TEXT | 5640 | 6 位代码（库里存成主键 code） |
+| apply_code | TEXT | 4934 | 申购代码 |
+| apply_date | TEXT（日期） | 5640 | 申购日 |
+| listing_date | TEXT（日期） | 5635 | **上市日**（还没上市的为空） |
+| trade_market | TEXT | 5640 | 交易所 |
+| market_type_new | TEXT | 5640 |  |
+| ballot_pay_date | TEXT（日期） | 3913 | 中签缴款日 |
+| assign_date | TEXT（日期） | 4031 |  |
+| online_issue_date | TEXT（日期） | 5280 | 网上发行日 |
+| offline_placing__date | TEXT（日期） | 3684 | 网下配售日（2006~2008 年的老股带具体时刻，原样存） |
+| ballot_num_date | TEXT（日期） | 4389 | 中签号公布日 |
+| issue_price | REAL | 5640 | **发行价**（元） |
+| predict_issue_price | REAL | 5281 |  |
+| predict_issue_price1 | REAL | 5281 |  |
+| predict_issue_price2 | REAL | 5281 |  |
+| issue_num | REAL | 5638 | 发行数量（万股） |
+| online_issue_num | REAL | 4394 | 网上发行数量（股） |
+| online_apply_upper | REAL | 4141 | 网上申购上限（股） |
+| after_issue_pe | REAL | 5221 | 发行市盈率 |
+| predict_issue_pe | REAL | 1358 |  |
+| predict_pe | REAL | 1364 |  |
+| industry_pe_ratio | REAL | 2994 |  |
+| industry_pe | REAL | 5238 | 行业市盈率 |
+| online_issue_lwr | REAL | 5080 | 网上中签率（%） |
+| total_raise_funds | REAL | 5144 | 募资总额（亿元） |
+| issue_way | TEXT | 5280 | 发行方式 |
+| industry_code | TEXT | 3011 |  |
+| offline_vap_ratio | REAL | 3723 |  |
+| offline_vas_multiple | REAL | 3726 |  |
+| online_va_num | REAL | 4387 |  |
+| offline_vap_object | REAL | 3729 |  |
+| online_va_shares | REAL | 4387 |  |
+| offline_vats | REAL | 3729 |  |
+| offline_placing_upper | REAL | 3668 |  |
+| ballot_num | TEXT | 4030 |  |
+| total_apply_num | REAL | 3049 |  |
+| initial_multiple | REAL | 3042 | 初步询价倍数 |
+| offline_placing_num | REAL | 3690 |  |
+| top_apply_marketcap | REAL | 4141 |  |
+| mzyq_pay_fund | REAL | 5279 |  |
+| industry_name | TEXT | 2953 | 所属行业 |
+| market_cap_confirmdate | TEXT | 5282 |  |
+| open_price | REAL | 5635 | 上市首日开盘价 |
+| close_price | REAL | 5634 | 上市首日收盘价 |
+| turnoverrate | REAL | 5627 | 上市首日换手率（%） |
+| ld_close_change | REAL | 5634 | 首日收盘涨幅（%） |
+| ld_open_premium | REAL | 5635 | 首日开盘溢价（%） |
+| ld_high_chang | REAL | 5279 | 首日最高涨幅（%） |
+| open_average_price | REAL | 3907 |  |
+| open_date | TEXT（日期） | 3911 |  |
+| bvps | REAL | 3269 | 每股净资产 |
+| security_name | TEXT | 5640 | 证券简称 |
+| total_change | REAL | 5621 |  |
+| profit | REAL | 5269 |  |
+| continuous_1word_num | TEXT | 3849 |  |
+| market_type | TEXT | 5640 |  |
+| limit_up_price | REAL | 5282 | 上市首日涨停价 |
+| org_type | TEXT | 5282 |  |
+| trade_market_code | TEXT | 5640 |  |
+| change_rate 🔄 | REAL | 5619 | 当日涨跌幅（%） |
+| lately_price 🔄 | REAL | 5619 | 最新价 |
+| change 🔄 | REAL | 5619 | 当日涨跌额 |
+| is_ballot_num | REAL | 5282 |  |
+| pe_ttm 🔄 | REAL | 4871 | 市盈率 TTM |
+| open_changerate | REAL | 4448 |  |
+| security_type_code | TEXT | 5640 |  |
+| continuous_n1word_num | TEXT | 4663 |  |
+| security_inner_code | TEXT | 5640 |  |
+| kb_trade_date | TEXT（日期） | 5261 |  |
+| average_price | REAL | 5257 |  |
+| predict_pe_three | REAL | 5282 |  |
+| market | TEXT | 5282 | 板块（沪深主板/创业板/科创板/风险警示板；北交所为空） |
+| online_apply_price | REAL | 1 |  |
+| online_fund_upper | REAL | 3781 |  |
+| freecap_avg_lower | REAL | 2508 |  |
+| offline_ep_object | REAL | 3393 |  |
+| info_code | TEXT | 4842 |  |
+| start_date | TEXT（日期） | 3913 |  |
+| main_business | TEXT | 5640 | 主营业务 |
+| eachballot_shares | TEXT | 5282 | 每签股数 |
+| up_date 🔄 | TEXT（日期） | 5282 | 东财更新日（＝抓取当天） |
+| predict_onapply_upper | REAL | 4036 |  |
+| predict_onfund_upper | REAL | 4036 |  |
+| par_value | REAL | 5273 | 面值 |
+| orig_transfer_num | REAL | 66 |  |
+| freecap_avg_date | TEXT（日期） | 2556 |  |
+| page_predict_price1 | REAL | 9 |  |
+| page_predict_price2 | REAL | 9 |  |
+| page_predict_price3 | REAL | 9 |  |
+| page_predict_pe1 | REAL | 10 |  |
+| page_predict_pe2 | REAL | 9 |  |
+| page_predict_pe3 | REAL | 8 |  |
+| ld_average_price | REAL | 5272 |  |
+| is_valid | TEXT | 5282 |  |
+| apply_date_num 🔄 | REAL | 5640 | 申购至今天数 |
+| industry_pe_new | REAL | 5604 | 行业市盈率（新口径） |
+| continuous_1word_px | REAL | 3870 |  |
+| total_issue_num | REAL | 5640 |  |
+| online_es_multiple | REAL | 4386 |  |
+| issue_way_explain | TEXT | 5279 |  |
+| price_way | TEXT | 358 |  |
+| result_notice_date | TEXT（日期） | 358 |  |
+| select_listing_date | TEXT（日期） | 356 |  |
+| online_pay_date | TEXT（日期） | 358 |  |
+| online_refund_date | TEXT（日期） | 358 |  |
+| is_beijing | REAL | 5640 | 是否北交所（1/0） |
+| per_shares_income | REAL | 355 |  |
+| online_issue_ratio | REAL | 357 |  |
+| offfline_initial_multiple | REAL | 45 |  |
+| newest_price 🔄 | REAL | 0 |  |
+| org_code | TEXT | 5640 |  |
+| type | TEXT | 5640 |  |
+| amplitude | REAL | 5629 |  |
+| review_date | TEXT（日期） | 4077 | 上会/审核日 |
+| predict_raise_funds | REAL | 4966 |  |
+| total_shares | REAL | 5282 | 发行后总股本（股） |
+| recommend_org | TEXT | 5238 | 保荐机构 |
+| underwriter_org | TEXT | 5229 | 主承销商 |
+| security_name_full | TEXT | 5282 | 公司全称 |
+| issue_state | TEXT | 5282 |  |
+| netflowin | REAL | 3682 |  |
+| ipo_yield | REAL | 5272 |  |
+| freeze_fund | REAL | 1400 |  |
+| board_code | TEXT | 5281 |  |
+| is_registration | TEXT | 5640 |  |
+| trade_market_cst | TEXT | 5640 |  |
+| current_oneword_num | REAL | 3926 |  |
+| is_unopen | REAL | 5281 |  |
+| continuous_oneword_num | REAL | 1610 |  |
+| od_high_change | REAL | 3936 |  |
+| suspension_state | TEXT | 1 |  |
+| registered_type | TEXT | 1229 |  |
+| is_1year 🔄 | REAL | 5640 |  |
+| is_calendar_data | TEXT | 5282 |  |
+| security_name_abbr | TEXT | 5640 |  |
+| offline_vats_nonunit | REAL | 3684 |  |
+| online_vashares_nonunit | REAL | 4030 |  |
+| enquiry_share_num | REAL | 3049 |  |
+| is_riskwarning | REAL | 5282 |  |
+| netsumfina | REAL | 5483 |  |
+| dec_sumfina | REAL | 5503 |  |
+| tnew_price 🔄 | REAL | 5640 | 最新价 |
+| tchange_rate 🔄 | REAL | 5640 | 相对发行价累计涨幅（%） |
+| is_registration_new | TEXT | 5640 |  |
+| is_profit | TEXT | 5282 |  |
+| star_sign | TEXT | 5281 |  |
+| online_apply_lower | REAL | 358 |  |
+| apply_amt_upper | REAL | 358 |  |
+| offfline_initial_multiple_bj | REAL | 45 |  |
+| is_1year_apply 🔄 | REAL | 5640 |  |
+| fetched_at | TEXT | | 写入时刻 |
+| | | | **主键** code |
 
 ### Suspension — 沪深交易所官网停复牌记录（2026-09-30 新增）
 **写入**：【停复牌】任务（`StockPlatform.Tasks/SuspensionTask.cs`），设计见 `doc/suspension-design.md`。

@@ -29,7 +29,8 @@ public sealed class SqliteMissingBarRepository(string dbPath)
     }
 
     /// <summary>
-    /// 找出这一批标的在自己 <c>[最早, 最晚]</c> 区间内缺掉的交易日。
+    /// 找出这一批标的在自己 <c>[起点, 最晚]</c> 区间内缺掉的交易日。起点是第一根K线和上市日里更早的那个
+    /// （不早于水位表确认"之前没有"的日子），见方法体里的注释。
     ///
     /// 交易日历用**上证指数的前复权日线**：它不停牌不退市，是全库现成的交易日锚，
     /// 这样就不用在本地维护一份 A 股节假日日历（那玩意每年都要更新、还容易忘）。
@@ -65,16 +66,48 @@ public sealed class SqliteMissingBarRepository(string dbPath)
 
         // 思路：交易日历 × 每只票的存续区间 = 它"本该有"的那些日子，
         // 再 LEFT JOIN 实际日线找空洞，最后 LEFT JOIN 白名单排掉已确认拿不到的。
+        //
+        // 存续区间的起点（2026-10-16 改，见 doc/ipo-issue-design.md §6）：原来是这只票自己的第一根K线，
+        // 于是**上市日到第一根之间缺的那几天永远查不出来**——2023-08 上市的 26 只创业板股不复权少了
+        // 头 8~22 天（301371 敷尔佳从 08-31 才有，上市是 08-01），前复权/后复权却是齐的，体检一直全绿。
+        // 现在起点＝ min(第一根, 上市日)，但不早于水位表 BarProbeFloor 里"数据源确认这天之前没有"的日子
+        // （1990~1993 年那几只老股上市头几天数据源本来就没有，09-12 探测确认过，不该再报）。
+        //   · 上市日读名册 StockMeta.list_date（【新股发行】写的）；没有的（退市股、还没跑过那一项）照旧从第一根算；
+        //   · 本地K线比上市日还早的（600018 吸收合并后重新上市，上市日 2006、K线 2000 年就有）起点不动。
+        // 体检报空洞、【重新拉取失败】补完复查都走这一个方法，所以两边自动是同一个判据——
+        // 只在体检那边加的话，复查看不到这一段，补不上的也会被当成"已补齐"划掉。
+        //
+        // 终点（2026-10-16 改，见 doc/ipo-issue-design.md §7）：原来是这只票自己的最后一根，于是**最后一根之后
+        // 缺的日子也永远查不出来**——某个口径悄悄停更了，体检照样全绿；原先只有一行"最新一根停在 10 个交易日
+        // 以内"的只报不补的提示（分不清长期停牌和漏抓）。现在**个股和 ETF** 的终点延伸到交易日历的最后一天：
+        //   · 停牌、摘牌的日子不在这里排——体检拿官网停复牌记录扣（SqliteSuspensionLookup），这里只管"该有没有"；
+        //   · 指数不停牌、用不着；板块指数是本地合成的，板块撤销后自然不再更新，延伸只会制造噪音；
+        //   · day_adj 不延伸：它落后于不复权是【重算回测序列】还没跑，体检另有"落后于不复权"一行专门报；
+        //   · 日历最后那一两天还没结算——体检自己按 cutoff 截（最近两天归【当日完整性体检】），
+        //     【重新拉取失败】的复查只看待办那一段的日期范围，多出来的日子不影响它。
         cmd.CommandText = $"""
             WITH cal AS (
                 SELECT period_start AS d FROM Bar
                 WHERE code = $cal AND granularity = $calg
             ),
-            rng AS (
+            span AS (
                 SELECT code, MIN(period_start) lo, MAX(period_start) hi
                 FROM Bar
                 WHERE granularity = $g AND code IN ({inList})
                 GROUP BY code
+            ),
+            rng AS (
+                SELECT s.code,
+                       CASE WHEN m.list_date IS NOT NULL AND m.list_date <> ''
+                            THEN MIN(s.lo, MAX(substr(m.list_date, 1, 10) || ' 00:00:00',
+                                               COALESCE(substr(f.no_data_before, 1, 10) || ' 00:00:00', '')))
+                            ELSE s.lo END AS lo,
+                       CASE WHEN m.type IN ('stock', 'etf') AND $g <> 'day_adj'
+                            THEN MAX(s.hi, COALESCE((SELECT MAX(d) FROM cal), s.hi))
+                            ELSE s.hi END AS hi
+                FROM span s
+                LEFT JOIN StockMeta m ON m.code = s.code
+                LEFT JOIN BarProbeFloor f ON f.code = s.code AND f.granularity = $g
             )
             SELECT r.code, c.d
             FROM rng r

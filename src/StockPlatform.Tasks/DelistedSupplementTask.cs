@@ -84,7 +84,10 @@ namespace StockPlatform.Tasks;
 ///
 /// <c>delist_date</c> 一律留 <c>null</c>——巨潮不给终止日，而这一列本来就允许缺失
 /// （上交所那边转板/吸收合并的行也是 null）。<see cref="DelistedTailTask"/> 的"补最后几天"
-/// 只处理有终止日的行，所以留空不会让它去做无意义的重抓。
+/// 只处理有终止日的行，所以留空不会让它去做无意义的重抓；这里补进来的票本地一根K线都没有时，
+/// 由它的"整段缺失"那一类补到今天（2026-10-16 加，补一次就打已尝试标记）。
+/// 探测时拉到的那一整段前复权**不在这里存**：只有一个口径，后复权/不复权还得另抓，
+/// 而这一项管的是名单、不写K线。
 /// </summary>
 public sealed class DelistedSupplementTask(
     FetchPaths paths,

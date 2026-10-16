@@ -1069,10 +1069,8 @@ public class MainViewModel : INotifyPropertyChanged
 
     private CancellationTokenSource? _autoRetryCts;
     private int _autoRetryRound;
+    /// <summary>上一次排程时的待重试总量（逐只那几类的股票数 + 市值那一轮算 1）——判断自动重试有没有进展。</summary>
     private int _autoRetryLastPending;
-
-    /// <summary>待重试的总量（逐只那几类的股票数 + 市值那一轮算 1）——用来判断自动重试有没有进展。</summary>
-    private int PendingRetryCount() => _failedRetry?.ActionableCount ?? 0;
 
     /// <summary>
     /// 把待办清单推给【全库数据体检】那一行（2026-09-13）。
@@ -1118,7 +1116,22 @@ public class MainViewModel : INotifyPropertyChanged
     {
         CancelAutoRetryTimer();
 
-        if (!HasFailed)
+        // ⚠ 先现读 manifest 里的待办，别用缓存的 FailedRetry（2026-10-16）：调用方刚发起的
+        //   RefreshFailedCodeCount 是后台异步的，这会儿还没写回——用缓存会拿这一轮开始前的旧名单判，
+        //   名单明明清零了还排一次重试（见 AutoRetryPolicy 的说明）。manifest 只有几十 KB，同步读毫秒级。
+        //   读不出来就退回缓存，至少不比以前差。
+        try { FailedRetry = _orchestrator.GetRetryBacklog(); }
+        catch { /* 退回缓存 */ }
+        if (FailedRetry is not { } backlog)
+        {
+            AutoRetryText = "";
+            return;
+        }
+
+        int pending = backlog.ActionableCount;
+        var decision = AutoRetryPolicy.Decide(backlog, _autoRetryRound, _autoRetryLastPending, AutoRetryMaxRounds);
+
+        if (decision == AutoRetryDecision.Cleared)
         {
             if (_autoRetryRound > 0) Log("自动重试：待重试名单已清零，不再继续。");
             _autoRetryRound = 0;
@@ -1126,8 +1139,7 @@ public class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        int pending = PendingRetryCount();
-        if (_autoRetryRound > 0 && pending >= _autoRetryLastPending)
+        if (decision == AutoRetryDecision.NoProgress)
         {
             Log($"自动重试：这一轮之后待重试数量没有减少（{_autoRetryLastPending} → {pending}），停止自动重试"
               + "——剩下的多半是当天停牌、或数据源确实没有那天数据的票，需要人工判断。");
@@ -1136,7 +1148,7 @@ public class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        if (_autoRetryRound >= AutoRetryMaxRounds)
+        if (decision == AutoRetryDecision.MaxRounds)
         {
             Log($"自动重试：已经连着自动重试 {_autoRetryRound} 轮，仍有 {FailedRetryText} 没补齐，不再自动继续"
               + "——需要的话请手动点\"重新拉取失败股票\"。");

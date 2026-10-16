@@ -47,6 +47,20 @@ public sealed class SqliteSuspensionLookup(string dbPath)
         return result;
     }
 
+    /// <summary>这些代码里**已摘牌**的，各自的摘牌日（判据见 <see cref="SuspensionRule.DelistDay"/>）。查不到就是空。</summary>
+    public Dictionary<string, DateOnly> DelistDaysOf(IReadOnlyCollection<string> barCodes)
+    {
+        var result = new Dictionary<string, DateOnly>(StringComparer.Ordinal);
+        if (barCodes.Count == 0) return result;
+        try
+        {
+            foreach (var (code, rows) in new SqliteSuspensionRepository(dbPath).GetByBarCodes(barCodes))
+                if (SuspensionRule.DelistDay(rows) is { } d) result[code] = d;
+        }
+        catch (SqliteException) { /* 不知道＝没摘牌，跟没有这个功能时一样 */ }
+        return result;
+    }
+
     /// <summary>一只票某个口径有日K的日子，升序（走主键前缀，很快）。</summary>
     private static List<DateOnly> BarDays(SqliteConnection conn, string code, string granularity)
     {

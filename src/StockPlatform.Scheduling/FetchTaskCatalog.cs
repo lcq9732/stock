@@ -143,6 +143,12 @@ public enum FetchActionId
     /// "那天为什么没有日K"，全天停牌的日子不再记成待办。
     /// </summary>
     StepSuspension,
+
+    /// <summary>
+    /// 新股发行（2026-10-16，见 doc/ipo-issue-design.md）：东财新股发行表全部 151 列（发行价、上市日、
+    /// 中签率、发行市盈率……），上市日顺带写进名册 StockMeta.list_date。
+    /// </summary>
+    FetchIpoIssue,
 }
 
 /// <summary>
@@ -922,6 +928,22 @@ public static class FetchTaskCatalog
             FetchActionParams.None,
             SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
             Sources: [DataSourceId.Exchange]),
+
+        new(FetchActionId.FetchIpoIssue, "新股发行", "东财 datacenter", QuotaGroup.Mixed,
+            TimeSpan.FromMinutes(1), "每日",
+            "从东财新股发行表取**全部 151 列**：发行价、发行市盈率、行业市盈率、募资额、申购日、中签率、"
+            + "网下/网上发行量、保荐机构、主营业务、上市日、上市首日开收盘价和换手……一列一个字段，取到的全存。\n"
+            + "**上市日顺带写进名册**（StockMeta.list_date，那一列以前一直是空的）；只改名册里已有的个股，不新建名册行。\n"
+            + "**覆盖**：1990 年起在市的全部 A 股（沪深主板、创业板、科创板、北交所，约 5,640 只），含还没上市的新股；"
+            + "**不含退市股**、不含吸收合并/换股上市的（那些没有首发记录）。\n"
+            + "**两档**：「日常增量」＝申购日在最近一年的（一两个请求；新股上市后才补上上市日和首日数据，"
+            + "回看一年把这段盖住）；「首次整段回补」＝全量，约 12 个请求。\n"
+            + "⚠ 有十来列是**抓取那一刻的行情**（最新价、涨跌幅、相对发行价累计涨幅、PE_TTM……），每次抓取都会覆盖，"
+            + "别当历史数据用；首日开收盘价这类是上市首日的，不会变。数据字典里逐列标了。\n"
+            + "抓完核对行数：拿到的必须等于接口自报的总数，对不上整项报失败。",
+            FetchActionParams.None,
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
+            Sources: [DataSourceId.EmDataCenter]),
 
         new(FetchActionId.StepDayCoverage, "当日完整性体检", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(2), "每工作日",
@@ -1838,6 +1860,9 @@ public static class FetchTaskCatalog
         // 平时每天 6 个请求（三路接口 × 最近两个月）。
         FetchActionId.StepSuspension => PlanGroupKind.Daily,
 
+        // 【新股发行】（2026-10-16）日更：几乎每个交易日都有新股申购或上市，一两个请求。
+        FetchActionId.FetchIpoIssue => PlanGroupKind.Daily,
+
         // 【回购公告进展】（2026-09-11）必须日更：首次回购是**次一交易日**披露的，
         // 晚一天就失去意义——那正是这一项唯一要等的信号。
         FetchActionId.StepPlanWatch => PlanGroupKind.Daily,
@@ -2035,6 +2060,8 @@ public static class FetchTaskCatalog
         // 【业绩预告/快报】跟公告放一起：都是"公司今天发了什么"，而且预告本来就是一种公告。
         // 首轮 3 分钟、之后十几页。
         FetchActionId.FetchEarningsForecast,
+        // 【新股发行】（2026-10-16）也是"今天发了什么"一族，一两个请求，放在这儿不挡前面的K线和资金。
+        FetchActionId.FetchIpoIssue,
         // ── 收尾与合成 ──
         FetchActionId.StepDelistedTails,
         // 【当日覆盖率体检】提到板块**之前**（2026-09-03）：它只吃指数日K + 个股日K
@@ -2045,16 +2072,18 @@ public static class FetchTaskCatalog
         FetchActionId.StepSuspension,
         FetchActionId.StepDayCoverage,
         FetchActionId.FetchEarningsSchedule,
-        // 【板块成分】+【板块指数合成】挪到日更靠后（2026-09-03）：换成东财之后要逐个板块查
-        // 官方成分名单（1000+ 个板块、约 20 分钟，首轮还可能被限流跨几轮才抓完）。
-        // 前面那些"当天必须拿到"的数据不该等它。两项必须**挨着**：合成不仅要用刚抓到的成分，
-        // 还负责把板块涨跌幅/成交额回填进 Board 表——只跑前者的话热度页涨跌幅会是 0。
-        FetchActionId.StepBoardList,
-        FetchActionId.StepBoardIndex,
         // ── 补漏与本地重算（消费前面产生的名单，所以在最后）──
         FetchActionId.RetryFailed,
         FetchActionId.RepairQfq,
         FetchActionId.RebuildAdjSeries,
+        // 【板块成分】+【板块指数合成】挪到日更靠后（2026-09-03）：换成东财之后要逐个板块查
+        // 官方成分名单（1000+ 个板块、约 20 分钟，首轮还可能被限流跨几轮才抓完）。
+        // 前面那些"当天必须拿到"的数据不该等它。两项必须**挨着**：合成不仅要用刚抓到的成分，
+        // 还负责把板块涨跌幅/成交额回填进 Board 表——只跑前者的话热度页涨跌幅会是 0。
+        // 2026-10-16 再挪到【重算回测序列】后面：合成拿成分股的 day_adj 累乘（10-06 给它加了这个软前置），
+        // 排在前面的话当天用的是前一天的回测序列。用户自己的计划早就手动调成这个顺序了，这里只是让模板跟上。
+        FetchActionId.StepBoardList,
+        FetchActionId.StepBoardIndex,
         // 【ETF换手率校正】（2026-09-23 从按需挪进日更）。**唯一的前置是 ETF日K / ETF日K·不复权**
         // （在前面的K线族里）：它检查的就是当天新抓的这两套。
         // ⚠ 跟【重算回测序列】**没有先后依赖**：那一项写 day_adj 时换手率原样抄 day_raw

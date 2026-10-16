@@ -15,19 +15,26 @@ namespace StockPlatform.Logic.Services;
 /// ① **有终止日**——上交所部分行（转板/吸收合并）没有这个字段，没有就算不出要补到哪天；
 /// ② **没尝试过**（<c>tail_fetched_at IS NULL</c>）——这个标记不可少：停牌后才退市的股票
 ///    K线止于停牌日、**永远**早于终止日，没有标记就会每天徒劳重抓；
-/// ③ **本地已有历史，且最后一根早于终止日**——本地一根都没有的不在这里补
-///    （那是【拉取区间数据】的活，退市股历史补过就不会再变，每天重扫毫无意义）。
+/// ③ **本地已有历史，且最后一根早于终止日**——本地一根都没有的走下面「整段缺失」那一类。
 ///
 /// 正常情况下结果是 0 只，偶尔 1~2 只新退市的。
+///
+/// ════ 另一类：整段缺失（<see cref="SelectWholeHistory"/>，2026-10-16 加）════
+/// 本地**一根前复权都没有**的退市股。原来说"那是【拉取区间数据】的活"，可整段回补是手动跑的，
+/// 而【补全退市名单】从巨潮/档案补进来的票（没有终止日）入名单之后就再没人管：
+/// 2026-10-16 实测 19 只一根K线都没有（688287 观典防务等），腾讯其实有它们的完整历史。
+/// 这一类**不要求终止日**（没有就补到今天——数据源只给到它最后交易的那天），
+/// 照样只认没尝试过的，每只只抓一次。
 /// </summary>
 public static class DelistedTailPlanner
 {
-    /// <summary>要补尾巴的一只退市股。</summary>
+    /// <summary>要补的一只退市股。</summary>
     /// <param name="Code">代码。</param>
     /// <param name="Name">终止上市时的简称。</param>
-    /// <param name="DelistDate">终止上市日——补到这天为止。</param>
-    /// <param name="DayStart">前复权从哪天续（本地最后一根的次日）。</param>
-    public sealed record Target(string Code, string Name, DateTime DelistDate, DateTime DayStart);
+    /// <param name="End">补到这天为止：终止日；整段缺失又没有终止日的是今天。</param>
+    /// <param name="DayStart">前复权从哪天起：补尾巴是本地最后一根的次日，整段缺失是 A股开市首日。</param>
+    /// <param name="WholeHistory">整段缺失（本地一根前复权都没有）——三个口径都从头抓。</param>
+    public sealed record Target(string Code, string Name, DateTime End, DateTime DayStart, bool WholeHistory = false);
 
     /// <summary>挑出要补尾巴的票（三条条件见类注释）。</summary>
     /// <param name="all">数据源给的全部终止上市公司。</param>
@@ -46,6 +53,33 @@ public static class DelistedTailPlanner
             if (!latestDay.TryGetValue(r.Code, out var latest)) continue;
             if (latest.Date >= delist.Date) continue;
             list.Add(new Target(r.Code, r.Name, delist, latest.AddDays(1)));
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// 挑出整段缺失的票：没尝试过、本地一根前复权都没有。
+    ///
+    /// 起点固定是 A股开市首日，不用上市日：腾讯从截止日往前翻页、翻到上市那天自己停，
+    /// 起点早不多发请求；而上市日有缺的（退市股原来全空），拿它当起点反而可能漏掉开头。
+    /// </summary>
+    /// <param name="all">本地退市名单（含【补全退市名单】补进来、没有终止日的那些）。</param>
+    /// <param name="tailPending">还没尝试过的代码集合。</param>
+    /// <param name="latestDay">每只票本地前复权最后一根的日期——在这里面的就不是整段缺失。</param>
+    /// <param name="today">没有终止日的补到这天。</param>
+    public static List<Target> SelectWholeHistory(
+        IEnumerable<DelistedStockRow> all,
+        IReadOnlySet<string> tailPending,
+        IReadOnlyDictionary<string, DateTime> latestDay,
+        DateTime today)
+    {
+        var list = new List<Target>();
+        foreach (var r in all)
+        {
+            if (!tailPending.Contains(r.Code)) continue;
+            if (latestDay.ContainsKey(r.Code)) continue;
+            list.Add(new Target(r.Code, r.Name, (r.DelistDate ?? today).Date,
+                                IncrementalWindowCalculator.AShareMarketOpen, WholeHistory: true));
         }
         return list;
     }
@@ -76,4 +110,14 @@ public static class DelistedTailPlanner
     public static (DateTime Start, DateTime End) WindowFor(
         DateTime delistDate, DateTime? latestOfGranularity, int lookbackYears)
         => (latestOfGranularity is { } l ? l.AddDays(1) : delistDate.AddYears(-lookbackYears), delistDate);
+
+    /// <summary>
+    /// 同上，按一只要补的票算。整段缺失的票该口径没有历史时从 A股开市首日起——
+    /// 它前复权都是从头抓的，后复权/不复权只回看几年，回测序列就只剩最后几年。
+    /// </summary>
+    public static (DateTime Start, DateTime End) WindowFor(
+        Target t, DateTime? latestOfGranularity, int lookbackYears)
+        => t.WholeHistory && latestOfGranularity is null
+            ? (IncrementalWindowCalculator.AShareMarketOpen, t.End)
+            : WindowFor(t.End, latestOfGranularity, lookbackYears);
 }

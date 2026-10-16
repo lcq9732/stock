@@ -38,8 +38,8 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
     /// <summary>一个交易日过去多久才算"数据源确实该有了"。T+1 发布 + 盘后逐步更新，留 2 天很宽松。</summary>
     private const int SettleDays = 2;
 
-    /// <summary>尾巴落后超过这么多个交易日的不算"漏抓"：长期停牌的在市股票一停就是几个月。</summary>
-    private const int TailSuspectLimit = 10;
+    // TailSuspectLimit（尾巴只数 10 个交易日以内的）删于 2026-10-16：有了官网停复牌记录，
+    // 长期停牌和漏抓分得开了，不用再拿天数猜。见 CoverageShape ②。
 
     /// <summary>日期列表最多列几个，超了截断。</summary>
     private const int MaxListedDays = 8;
@@ -390,8 +390,8 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
     /// 尾巴停在几天前。判据是纯函数，在 <see cref="CoverageShapeAuditor"/> 里单独测。
     ///
     /// 尾巴分两档：**全局**（某个口径所有票里最新那根都落后了 → 这一项最近根本没跑成，几乎零误报）；
-    /// **个别票**（只有几只落后 → 多半是那几只当天没抓到，但长期停牌的也长这样，所以只数落后在
-    /// <see cref="TailSuspectLimit"/> 个交易日以内的）。
+    /// **个别票**（只有几只落后）——按官网停复牌记录分成停牌中、已摘牌、其余（其余的落后天数由
+    /// <c>FindGaps</c> 当空洞报进待补名单，2026-10-16 起）。
     /// </summary>
     private List<string> CoverageShape(
         Func<string, List<string>> codesOf, DateTime cutoff, CancellationToken ct)
@@ -459,16 +459,30 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
                 continue;
             }
 
+            // 个别票落后（2026-10-16 改）：以前只数 10 个交易日以内的、只报不补——分不清长期停牌和漏抓。
+            // 现在 FindGaps 的终点已经延伸到日历最后一天，没有停牌/摘牌记录的落后天数会作为空洞进待补名单
+            // （见上面各个面那一行）；这里只按原因把落后的票分开说清楚。
             var tails = CoverageShapeAuditor.FindLateTails(
-                calendar, latest, Only(Earliest(gran), codes))
-                .Where(g => g.TradingDays <= TailSuspectLimit)
-                .ToList();
+                calendar, latest, Only(Earliest(gran), codes)).ToList();
             if (tails.Count == 0) continue;
 
-            var worst = tails.OrderByDescending(g => g.TradingDays).Take(3)
-                .Select(g => $"{g.Code} 停在 {g.Actual:MM-dd}");
-            lines.Add($"　{label}：{tails.Count} 只的最新一根停在 {TailSuspectLimit} 个交易日以内的过去"
-                    + $"（{string.Join("、", worst)}…）——多半是临时停牌，长于这个的不计（那是长期停牌）");
+            var tailCodes = tails.Select(t => t.Code).ToList();
+            var lookup = new SqliteSuspensionLookup(_dbPath);
+            var lastDay = DateOnly.FromDateTime(calendar[^1]);
+            var delisted = lookup.DelistDaysOf(tailCodes);
+            var halted = lookup.FullDaysOf(tailCodes, gran, lastDay)
+                .Where(kv => kv.Value.Contains(lastDay)).Select(kv => kv.Key)
+                .Where(c => !delisted.ContainsKey(c)).ToHashSet(StringComparer.Ordinal);
+            var rest = tails.Where(t => !delisted.ContainsKey(t.Code) && !halted.Contains(t.Code))
+                .OrderByDescending(g => g.TradingDays).ToList();
+
+            lines.Add($"　{label}：{tails.Count} 只的最新一根早于 {calendar[^1]:MM-dd}——"
+                    + $"停牌中 {halted.Count} 只、已摘牌 {delisted.Count} 只（官网停复牌记录可查，不算缺口）"
+                    + (rest.Count > 0
+                        ? $"；其余 {rest.Count} 只没有停牌记录，落后的日子当空洞记进待补名单"
+                          + $"（{string.Join("、", rest.Take(3).Select(g => $"{g.Code} 停在 {g.Actual:MM-dd}"))}"
+                          + (rest.Count > 3 ? " 等" : "") + "）"
+                        : ""));
         }
 
         return lines;

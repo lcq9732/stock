@@ -653,6 +653,11 @@ public partial class App : Application
                 manifestStore, new SqliteBarValueAuditor(paths.CurrentDb)));
         // 【停复牌】2026-09-30，见 doc/suspension-design.md。三路官网接口各一个限流器，都是 1 并发、
         // 1 秒间隔（跟【ETF换手率校正】的份额源同一套配置）；三路按顺序跑，不并发。
+        // 【新股发行】2026-10-16，见 doc/ipo-issue-design.md。复用 emDataCenter——东财 datacenter 的任务
+        // 共用一个限流器，各限各的会把总请求频率翻倍。
+        taskRegistry.Register(FetchActionId.FetchIpoIssue,
+            () => new IpoIssueTask(new EastMoneyIpoIssueProvider(emDataCenter),
+                                   new SqliteIpoIssueRepository(paths.CurrentDb)));
         taskRegistry.Register(FetchActionId.StepSuspension,
             () => new SuspensionTask(
                 [

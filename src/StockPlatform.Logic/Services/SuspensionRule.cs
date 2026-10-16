@@ -76,8 +76,28 @@ public static class SuspensionRule
                 AddRange(days, calendar, start, last);
             }
         }
+
+        // 摘牌之后也没有K线（2026-10-16）：sh560650 中证50ETF 07-02 起停牌、08-21 摘牌，名册里还挂着 ETF——
+        // 体检把终点延伸到今天之后，摘牌后的每一天都会被当成缺口，补两轮拿不到进白名单、第二天又多一天，
+        // 永远在名单里打转。摘牌跟全天停牌一样是"这天不该有K线"，并进同一个集合。
+        if (DelistDay(list) is { } gone)
+            AddRange(days, calendar, gone.AddDays(1), asOf);
         return days;
     }
+
+    /// <summary>
+    /// 摘牌日（最后一个停牌日，之后再没有交易）：上交所记录的**复牌原因**写着"摘牌"或"终止上市"。
+    /// 只认复牌原因——停牌原因里的"拟退市摘牌"只是要退，还没退（2026-10-16 实测 sh560650：停牌原因
+    /// "拟退市摘牌"、复牌原因"摘牌"、结束日 08-21）。深交所退市是不写复牌的停牌，上面已经算到今天了。
+    /// </summary>
+    public static DateOnly? DelistDay(IEnumerable<SuspensionRow> rows) =>
+        rows.Where(r => r.EndDay is not null
+                        && (r.EndReason.Contains("摘牌", StringComparison.Ordinal)
+                            || r.EndReason.Contains("终止上市", StringComparison.Ordinal)))
+            .Select(r => r.EndDay!.Value)
+            .OrderBy(d => d)
+            .Cast<DateOnly?>()
+            .FirstOrDefault();
 
     /// <summary>深交所的复牌记录（「取消停牌」「今起复牌」「复牌」「取消特停」「今起恢复交易」）。</summary>
     public static bool IsResume(SuspensionRow r) =>
