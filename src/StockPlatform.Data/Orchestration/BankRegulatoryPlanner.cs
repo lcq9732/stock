@@ -18,6 +18,7 @@ namespace StockPlatform.Data.Orchestration;
 /// 先按证监会门类圈候选：金融业（J）一百来只，加上**还没有行业归属**的票（新股，实测几十只）——
 /// 新上市的银行在行业数据跟上之前也落在这一类里，漏不掉。再只对这些票读最新一期快照，
 /// 用跟任务同一个判据（<see cref="FinancialInstitutionRoster.Classify"/>）认类型。
+/// 认出来之后再去掉已退市的（名单标了退市且 30 天没成交，见 <see cref="DelistedNoTrading"/>）。
 /// 不拿 BankReportFetchState 里的代码当名单：那张表里混着非金融股（002594 比亚迪、600998 九州通，
 /// 是早年重解析把子公司年报当成下错的文件留下的 wrong_file 行）。
 ///
@@ -48,6 +49,13 @@ public class BankRegulatoryPlanner(FetchPaths paths)
     /// <summary>老期次补文件时公告列表里找不到——见 <see cref="Deterministic"/>。</summary>
     public const string NotListed = "not_listed";
 
+    /// <summary>
+    /// 标了退市、而且这么久没有成交，才算真退市（2026-10-21）。
+    /// 只看退市名单不行：名单误标过（上交所"只 B 股退市"的行也填了 A 股代码，600801 被误标停更过），
+    /// 一只误标、其实还在交易的银行券商会被静默跳过，新年报永远不解析。还在交易就照样检查。
+    /// </summary>
+    internal static readonly TimeSpan DelistedNoTrading = TimeSpan.FromDays(30);
+
     public BankRegulatoryPlan Plan(DateTime today)
     {
         today = today.Date;
@@ -63,6 +71,22 @@ public class BankRegulatoryPlanner(FetchPaths paths)
         var institutions = FinancialInstitutionRoster.Classify(finRepo.GetLatestSnapshotByCodes(candidates));
         // 一家都认不出（财务报表还没抓过）：让任务走原来那条路，它会把"请先拉取财务报表"报出来
         if (institutions.Count == 0) return BankRegulatoryPlan.Full("候选里一家金融机构都认不出来");
+
+        // 已退市的不进检查（2026-10-21）：600837 海通证券 2025-03 被合并退市，财务还在库里、照样认得出是券商，
+        // 而它不会再出新报告——"公告列表里没找到中报"就每周被拉进来一次，每次连带一刻钟的重解析。
+        // 判据见 DelistedNoTrading：名单标了退市 **且** 30 天没有成交。成交日期只对这一百来家逐只查（走索引）。
+        var delistedMarked = SqliteStockMetaUpsert.GetByTypes(paths.CurrentDb, SqliteStockMetaUpsert.TypeDelisted)
+            .Select(x => x.Code)
+            .Concat(new SqliteDelistedRepository(paths.CurrentDb).GetAll().Select(r => r.Code))
+            .ToHashSet(StringComparer.Ordinal);
+        var bars = new SqliteBarRepository(paths.CurrentDb);
+        var delisted = institutions
+            .Where(x => delistedMarked.Contains(x.Code)
+                        && (bars.GetLatestPeriodStart(x.Code, Granularity.DayRaw) is not { } last
+                            || today - last.Date > DelistedNoTrading))
+            .Select(x => x.Code)
+            .ToHashSet(StringComparer.Ordinal);
+        institutions = institutions.Where(x => !delisted.Contains(x.Code)).ToList();
 
         var states = new SqliteBankRegulatoryRepository(paths.CurrentDb).GetAllStates();
         var halfYear = new SqliteEarningsScheduleRepository(paths.CurrentDb).GetLatestHalfYearDisclosureByCode(today);
@@ -104,6 +128,7 @@ public class BankRegulatoryPlanner(FetchPaths paths)
         return new BankRegulatoryPlan(false, null, institutions.Count, work, fresh, retry, refill)
         {
             RefillKeys = refillKeys,
+            Delisted = delisted.Count,
         };
     }
 
@@ -146,11 +171,15 @@ public record BankRegulatoryPlan(
     /// </summary>
     public IReadOnlySet<(string Code, DateTime Period)> RefillKeys { get; init; } = new HashSet<(string, DateTime)>();
 
+    /// <summary>认得出是金融机构、但已退市而不检查的家数（2026-10-21，见 BankRegulatoryPlanner.DelistedNoTrading）。</summary>
+    public int Delisted { get; init; }
+
     public string Describe() =>
-        FullRun
+        (FullRun
             ? $"金融监管指标：{FullRunReason}，按全市场认机构、逐家检查。"
             : Work.Count == 0
                 ? $"金融监管指标：{InstitutionCount} 家机构都没有新披露的年报/中报要解析，也没有要补的文件，无需执行。"
                 : $"金融监管指标：{InstitutionCount} 家机构里有 {Work.Count} 家要处理"
-                  + $"（新披露 {Fresh} 期、上次没成再试 {Retry} 期、补丢失的文件 {Refill} 期）。";
+                  + $"（新披露 {Fresh} 期、上次没成再试 {Retry} 期、补丢失的文件 {Refill} 期）。")
+        + (Delisted > 0 ? $"另有 {Delisted} 家已退市，不检查。" : "");
 }

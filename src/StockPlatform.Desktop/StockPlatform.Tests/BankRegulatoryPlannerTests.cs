@@ -208,6 +208,85 @@ public class BankRegulatoryPlannerTests : IDisposable
         Assert.True(plan.Work.ContainsKey(newBank));
     }
 
+    // ── 已退市的不检查（2026-10-21）──────────────────────────────
+
+    private const string Haitong = "600837";
+
+    /// <summary>一家认得出是券商、中报已披露却一直没解析成的机构（海通证券那种）。</summary>
+    private void BrokerWithStuckInterim(string code)
+    {
+        Industry(code, "J");
+        new SqliteFinancialRepository(_paths.CurrentDb).ReplaceByCode(code,
+        [
+            new FinancialValue { Code = code, ReportDate = H1, Key = FinancialKeys.Revenue, Value = 100e8 },
+            new FinancialValue { Code = code, ReportDate = H1, Key = FinancialKeys.BrokerageNet, Value = 30e8 },
+        ]);
+        Disclosed(code, H1, DateTime.Today.AddDays(-60));
+        State(code, H1, "no_pdf", 8);              // 公告列表里没找到，周重试已到期
+        Disclosed(Bank, H1, DateTime.Today.AddDays(-60));
+        State(Bank, H1, "ok", 50);
+    }
+
+    private void MarkDelistedInMeta(string code)
+        => SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, [(code, code)], SqliteStockMetaUpsert.TypeDelisted);
+
+    private void LastTraded(string code, DateTime day)
+    {
+        var repo = new SqliteBarRepository(_paths.CurrentDb);
+        repo.EnsureSchema();
+        repo.InsertOrRefreshUnconfirmed([new Bar
+        {
+            Code = code, Granularity = Granularity.DayRaw, PeriodStart = day,
+            Open = 10, Close = 10, High = 10, Low = 10, Volume = 1, Amount = 10, FetchedAt = DateTime.Now,
+        }]);
+    }
+
+    [Fact]
+    public void 标了退市且一年多没成交_不检查()
+    {
+        BrokerWithStuckInterim(Haitong);
+        MarkDelistedInMeta(Haitong);
+        LastTraded(Haitong, new DateTime(2025, 2, 5));
+
+        var plan = Plan();
+        Assert.True(plan.NothingToDo);
+        Assert.Equal(1, plan.Delisted);
+        Assert.Contains("另有 1 家已退市", plan.Describe());
+    }
+
+    [Fact]
+    public void 退市名单表里有_一根K线都没有_不检查()
+    {
+        BrokerWithStuckInterim(Haitong);
+        var repo = new SqliteDelistedRepository(_paths.CurrentDb);
+        repo.EnsureSchema();
+        repo.Upsert([new DelistedStockRow { Code = Haitong, Name = Haitong, Exchange = "sse", DelistDate = new DateTime(2025, 3, 4) }]);
+
+        Assert.True(Plan().NothingToDo);
+    }
+
+    [Fact]
+    public void 标了退市但最近还在交易_误标照样检查()
+    {
+        // 600801 那种：上交所"只 B 股退市"的行也填了 A 股代码，A 股其实还在交易
+        BrokerWithStuckInterim(Haitong);
+        MarkDelistedInMeta(Haitong);
+        LastTraded(Haitong, DateTime.Today.AddDays(-1));
+
+        var plan = Plan();
+        Assert.True(plan.Work.ContainsKey(Haitong));
+        Assert.Equal(0, plan.Delisted);
+    }
+
+    [Fact]
+    public void 没标退市的长期停牌_照样检查()
+    {
+        BrokerWithStuckInterim(Haitong);
+        LastTraded(Haitong, DateTime.Today.AddDays(-200));   // 停牌公司仍可能披露报告
+
+        Assert.True(Plan().Work.ContainsKey(Haitong));
+    }
+
     [Fact]
     public void 全新库没有行业数据_退回全量()
     {
