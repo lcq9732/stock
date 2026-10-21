@@ -1681,9 +1681,14 @@ public static class FetchTaskCatalog
             + "还没解析成功、本地 PDF 文件丢了、或者上次是网络报错/新浪还没挂出 PDF（隔天再试）。"
             + "都没有就几秒结束、一个请求都不发——一年里真正有活的大约只有 3–4 月和 8 月那二三十个工作日。\n"
             + "有活的那天：先用当前规则把本地已有 PDF 重解析一遍（不联网，十几分钟），再只给有活的那几家查公告、下 PDF。\n"
-            + "PDF 下到了但解析不出指标的（no_match 等）不自动重试——再下一遍结果一样，它们在「待手工回填清单」里。",
+            + "PDF 下到了但解析不出指标的（no_match 等）不自动重试——再下一遍结果一样，它们在「待手工回填清单」里。\n"
+            + "**「整段回补」**：不看开工检查、也不看哪些期已经解析过，把所有机构的公告列表重新过一遍"
+            + "（约 200 个列表页请求，已下载的 PDF 不重下，十几分钟）。标题规则改过、或者想把漏掉的老期次补回来时手动跑一次。",
             DependsOn: FetchActionId.FetchFinancials,
             SoftDependsOn: [FetchActionId.FetchEarningsSchedule],
+            // 「整段回补」2026-10-21 才声明：任务代码早就认 FirstBackfill（refetchAll），但目录没声明，
+            // 计划页上就没有模式可选——标题规则修好后（工行/平安）想把老期次补回来时发现点不出来。
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
             // PDF 有几 MB，单个下载的 HttpClient 超时就设到 3 分钟（BankReportFetcher）；
             // 再叠上解析一个大 PDF 的时间，5 分钟的默认阈值太贴脸。
             // 2026-09-19 从 10 分钟抬到 30：实测（09-15 日志）它开工前**哑了 16 分 42 秒**——
