@@ -88,7 +88,52 @@ public class ReportTitleRankTests
     {
         Assert.Equal(-1, Rank("2025年年度报告", "中报"));
         Assert.Equal(-1, Rank("2025年半年度报告", "年报"));
+        // 2026-10-21 放宽之后也不能串：工行写法、平安写法
+        Assert.Equal(-1, Rank("工商银行：2026半年度报告", "年报"));
+        Assert.Equal(-1, Rank("中国平安：2026年中期报告", "年报"));
+        Assert.Equal(-1, Rank("工商银行：2025年度报告", "中报"));
     }
+
+    /// <summary>
+    /// ⚠ **工商银行、中国平安那两种写法**（2026-10-21 补）。标题来自东财公告接口，跟新浪列表页同一份标题：
+    ///   · 工商银行「2025年度报告」「2026半年度报告」——年份后少一个/没有「年」；
+    ///   · 中国平安的中报叫「2026年中期报告」。
+    /// 原来的规则只认「XXXX年年度报告」「XXXX年半年度报告」，这两家整页被当成"不是年报中报"：
+    /// 工行的监管指标一期都没有、平安一期中报都没有，而且没有任何痕迹。
+    /// </summary>
+    [Theory]
+    [InlineData("工商银行：2025年度报告", "年报", 2025)]
+    [InlineData("工商银行:工商银行2024年度报告", "年报", 2024)]
+    [InlineData("工商银行：2026半年度报告", "中报", 2026)]
+    [InlineData("工商银行:工商银行2022半年度报告", "中报", 2022)]
+    [InlineData("中国平安：2026年中期报告", "中报", 2026)]
+    [InlineData("中国平安保险（集团）股份有限公司2023年中期报告", "中报", 2023)]
+    public void 工行平安的写法认得出_年份也取得出(string title, string kind, int year)
+    {
+        Assert.Equal(0, Rank(title, kind));
+        Assert.Equal(year, SinaReportIndex.TitleReportYear(title, kind));
+    }
+
+    /// <summary>放宽之后，摘要、H股版、季报照样挡住。</summary>
+    [Theory]
+    [InlineData("工商银行：2026半年度报告摘要", "中报")]
+    [InlineData("中国平安：2026年中期报告摘要", "中报")]
+    [InlineData("工商银行：H股公告-2026中期报告", "中报")]
+    [InlineData("工商银行：2025年度报告摘要", "年报")]
+    [InlineData("工商银行：2026年第一季度报告", "中报")]
+    [InlineData("工商银行：2026年第一季度报告", "年报")]
+    public void 放宽后摘要港版季报照样排除(string title, string kind)
+        => Assert.Equal(-1, Rank(title, kind));
+
+    /// <summary>原来就认得的写法，年份照样取得出（取年份的规则一起改了，不能改坏老路）。</summary>
+    [Theory]
+    [InlineData("2025年年度报告", "年报", 2025)]
+    [InlineData("2026年半年度报告", "中报", 2026)]
+    [InlineData("2022年半年度报告2", "中报", 2022)]
+    [InlineData("2024年半年报", "中报", 2024)]
+    [InlineData("2024年年报", "年报", 2024)]
+    public void 老写法年份照样取得出(string title, string kind, int year)
+        => Assert.Equal(year, SinaReportIndex.TitleReportYear(title, kind));
 
     /// <summary>2 档兜底：连"年度报告"都不完整，只是像。正常轮不到，但不能排除掉。</summary>
     [Theory]

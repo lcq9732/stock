@@ -85,8 +85,31 @@ public class SinaReportIndex
     private static readonly Regex PdfLink = new(
         @"(https?://file\.finance\.sina\.com\.cn/[^""'\s]+\.(?:PDF|pdf))", RegexOptions.Compiled);
 
-    /// <summary>从标题解析报告期："2026年半年度报告"→2026-06-30，"2025年年度报告"→2025-12-31。</summary>
-    private static readonly Regex TitleYear = new(@"(\d{4})\s*年", RegexOptions.Compiled);
+    // 报告正文标题的"核心"——年份 + 报告名（2026-10-21 放宽）。年份后的「年」字可有可无、中报认「中期报告」：
+    //   · 工商银行写「2025年度报告」「2026半年度报告」（年份后少一个/没有「年」）；
+    //   · 中国平安的中报写「2026年中期报告」（H 股口径）。
+    // 原来只认「XXXX年年度报告」「XXXX年半年度报告」，这两家就被当成"不是年报中报"整页过滤掉——
+    // 工行的监管指标一期都没有、平安一期中报都没有，而且一点痕迹都不留。
+    private const string AnnualCore = @"(\d{4})\s*年?\s*年度报告";
+    private const string InterimCore = @"(\d{4})\s*年?\s*(?:半年度|中期)报告";
+    // 简写兜底（2 档）："2024年半年报""2024年年报"
+    private const string AnnualShort = @"(\d{4})\s*年?\s*年报";
+    private const string InterimShort = @"(\d{4})\s*年?\s*半年报";
+
+    /// <summary>
+    /// 从标题解析报告年份："2026年半年度报告""2026半年度报告"→2026，"2025年度报告"→2025。
+    /// 只从**报告名那一段**取，不取标题里随便哪个年份——原来用 "(\d{4})\s*年" 取第一处，
+    /// 「2026半年度报告」年份后没有「年」，就取不出来（2026-10-21 随标题规则一起改）。
+    /// </summary>
+    internal static int? TitleReportYear(string title, string kind)
+    {
+        foreach (var pattern in kind == KindInterim ? new[] { InterimCore, InterimShort } : [AnnualCore, AnnualShort])
+        {
+            var m = Regex.Match(title, pattern);
+            if (m.Success && int.TryParse(m.Groups[1].Value, out var y)) return y;
+        }
+        return null;
+    }
 
     /// <summary>
     /// 标题里出现这些词就不是正文。
@@ -121,15 +144,14 @@ public class SinaReportIndex
         foreach (var bad in TitleBlockers)
             if (title.Contains(bad, StringComparison.OrdinalIgnoreCase)) return -1;
 
-        string core = kind == KindInterim ? @"\d{4}\s*年\s*半年度报告" : @"\d{4}\s*年\s*年度报告";
+        string core = kind == KindInterim ? InterimCore : AnnualCore;
 
         // 0 档：干干净净以"XXXX年年度报告"结尾（允许「（A股）」「（修订版）」这类版本后缀）
         if (Regex.IsMatch(title, core + @"\s*(（[^）]*）|\([^)]*\))?\s*$")) return 0;
         // 1 档：正文标题带了别的零碎（"…年度报告2"、末尾跟编号/日期之类）
         if (Regex.IsMatch(title, core)) return 1;
         // 2 档：连"年度报告"都不完整，只是像（"2024年半年报"）。兜底，正常轮不到
-        if (kind == KindInterim && Regex.IsMatch(title, @"\d{4}\s*年\s*半年报")) return 2;
-        if (kind != KindInterim && Regex.IsMatch(title, @"\d{4}\s*年\s*年报")) return 2;
+        if (Regex.IsMatch(title, kind == KindInterim ? InterimShort : AnnualShort)) return 2;
         return -1;
     }
 
@@ -178,8 +200,7 @@ public class SinaReportIndex
                 int r = TitleRank(title, kind);
                 if (r < 0) continue;
 
-                var ym = TitleYear.Match(title);
-                if (!ym.Success || !int.TryParse(ym.Groups[1].Value, out var year)) continue;
+                if (TitleReportYear(title, kind) is not { } year) continue;
                 var date = kind == KindInterim ? new DateTime(year, 6, 30) : new DateTime(year, 12, 31);
 
                 // 期数够了就别再往里加新的报告期（同一期的其它候选还是要收）
