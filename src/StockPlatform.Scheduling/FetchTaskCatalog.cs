@@ -126,7 +126,11 @@ public enum FetchActionId
     // ───── 新式任务（2026-09-08 起，实现在 StockPlatform.Tasks，见 IFetchTask）─────
     StepTradingCalendar,
 
-    /// <summary>把 Bar.volume 里按"股"存的历史行改成"手"（2026-09-10）。纯本地、幂等。</summary>
+    /// <summary>
+    /// 把 Bar.volume 里按"股"存的历史行改成"手"（2026-09-10）。
+    /// ⚠ **2026-10-20 退役**：volume 改存股之后它会把全库除以 100（判据是"比值≈1 就当成按股存"），
+    /// 枚举值留着只为让老计划文件读得进来（见 <see cref="StepLhbMigrate"/> 的说明）。
+    /// </summary>
     StepFixVolumeUnit,
 
     /// <summary>按「融券余量 × 当日收盘价」补算沪市缺失的融券余额（2026-09-16）。纯本地、幂等。</summary>
@@ -149,6 +153,12 @@ public enum FetchActionId
     /// 中签率、发行市盈率……），上市日顺带写进名册 StockMeta.list_date。
     /// </summary>
     FetchIpoIssue,
+
+    /// <summary>
+    /// 成交量改存股（2026-10-20，见 doc/unit-normalization-inventory.md）：Bar.volume 全表 ×100，一次性。
+    /// 没做完之前调度器不放行别的任务；新版 Fetcher 启动时自动开跑。
+    /// </summary>
+    StepBarVolumeShares,
 }
 
 /// <summary>
@@ -792,9 +802,11 @@ public static class FetchTaskCatalog
             Retired: true,
             SupportedModes: FetchMode.Incremental),
 
-        new(FetchActionId.StepFixVolumeUnit, "统一成交量单位", "本地查库·不联网", QuotaGroup.Local,
+        new(FetchActionId.StepFixVolumeUnit, "统一成交量单位（已退役）", "本地查库·不联网", QuotaGroup.Local,
             TimeSpan.FromMinutes(5), "一次性",
-            "把 Bar.volume 里按\"股\"存进去的历史行改成\"手\"。**一个请求都不发**，纯 UPDATE。\n"
+            "⚠ **2026-10-20 退役**：Bar.volume 改存股之后，这一项的判据（比值≈1 就当成按股存、除以 100）"
+            + "会把全库除回手，所以从计划里删掉、不再注册。下面是退役前的说明。\n"
+            + "把 Bar.volume 里按\"股\"存进去的历史行改成\"手\"。**一个请求都不发**，纯 UPDATE。\n"
             + "**修的是什么**：三个数据源口径不一样——腾讯主板给手、**科创板给股**；新浪一律给股；"
             + "东财都给手。而两个 fetcher 原来把源给的数字原样入库，于是这一列里并存两种单位："
             + "2026-09-08 那天全市场日线，主板 3203 只、创业板 1404 只、北交所 342 只是手，"
@@ -815,7 +827,25 @@ public static class FetchTaskCatalog
             // 它是**一条 SQL，没有可切分的心跳单位**，喂不了狗（对比：按只/按天的循环都改成
             // 每单位喂狗了，见 QuietWatchdog.IBeatOnlySink）。所以这一项只能抬阈值。
             // 手动点的时候没事（那条路没有看门狗），但它是可以被排进计划的。
+            Retired: true,
             MaxQuiet: TimeSpan.FromMinutes(30)),
+
+        new(FetchActionId.StepBarVolumeShares, "成交量改存股", "本地查库·不联网", QuotaGroup.Local,
+            TimeSpan.FromMinutes(20), "一次性",
+            "把 Bar.volume 全表从**手**改成**股**（ETF 是份），×100。**一个请求都不发**，纯本地 UPDATE。\n"
+            + "**为什么**：入库一律存基本单位（股、元、份），比例存百分数（2026-10-20 用户定，"
+            + "见 doc/unit-normalization-inventory.md）。三个数据源的口径各不一样（腾讯主板给手、科创板给股；"
+            + "新浪给股；东财给手），解析时已经统一换成股（BarVolumeUnit.ToShares），这一项负责库里的存量。\n"
+            + "**范围**：个股、ETF、指数、板块指数，day / day_raw / day_hfq / day_adj 四个口径，约 8,300 万行。\n"
+            + "**新版 Fetcher 启动时自动开跑**，做完之前**别的任务一律不开工**（记成本轮没开工，做完自动接上）——"
+            + "做到一半时同一只票新旧两种单位混着，这时候抓数据、算板块、做体检都会出错。"
+            + "迁移期间也别开分析程序（它会显示一行提醒）。\n"
+            + "**能停能续**：按 rowid 顺序每 50 万个一批、一批一个事务，停了下次接着做，不会乘两遍；"
+            + "做完记进 DataMigration（bar_volume_shares），以后再跑什么都不改。\n"
+            + "只改 volume 一列，不碰 fetched_at——改的是单位不是值，不会触发【重算回测序列】。",
+            FetchActionParams.None,
+            // 整表 UPDATE 按批喂狗（每批几秒），不需要抬 MaxQuiet
+            SupportedModes: FetchMode.Incremental),
 
         new(FetchActionId.StepEtfTurnoverFix, "ETF换手率校正", "沪深交易所官网（ETF 份额）+ 本地计算", QuotaGroup.Exchange,
             TimeSpan.FromMinutes(2), "每日",
@@ -1963,6 +1993,10 @@ public static class FetchTaskCatalog
             // 它是一次性迁移工具：09-10 跑过一次把 2004 年至今 26.8 万行从新浪换成东财，
             // 之后没有再用的场合（重算派生列该走本地重算、不该重发 580 个请求）。
             [FetchActionId.StepLhbMigrate] = [],
+
+            // 【统一成交量单位】退役（2026-10-20），**没有等价项**：volume 改存股之后它的判据会把全库
+            // 除回手。计划里有它的那一行原地删掉；存量的单位换算由一次性的【成交量改存股】负责。
+            [FetchActionId.StepFixVolumeUnit] = [],
 
             [FetchActionId.BackfillDaily] =
             [

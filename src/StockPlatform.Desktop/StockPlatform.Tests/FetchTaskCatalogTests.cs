@@ -345,7 +345,6 @@ public class FetchTaskCatalogTests
     {
         var floors = new Dictionary<FetchActionId, TimeSpan>
         {
-            [FetchActionId.StepFixVolumeUnit] = TimeSpan.FromMinutes(25),
             [FetchActionId.BankRegulatory] = TimeSpan.FromMinutes(25),
             [FetchActionId.StepFillShortBalance] = TimeSpan.FromMinutes(10),
         };

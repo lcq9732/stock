@@ -79,9 +79,8 @@ public class EastMoneyCompanyProfileProvider
             FoundDate = Str(el, "FOUND_DATE"),
             ListingDate = Str(el, "LISTING_DATE"),
             ListingState = Str(el, "LISTING_STATE"),
-            // ⚠ 这两个差 1 万倍：REG_CAPITAL 是万元、REG_CAPITALY 是元。
-            //   宁德时代 462677.041 万 = 4626770410 元。列名分别叫 _wan 和不带后缀，别搞反。
-            RegCapitalWan = Num(el, "REG_CAPITAL"),
+            // 注册资本取 REG_CAPITALY（元）。接口另给的 REG_CAPITAL 是同一个数的万元版
+            // （宁德时代 462677.041 万 = 4626770410 元），不存：2026-10-20 核对 6050 行全部等于 REG_CAPITALY ÷ 1e4。
             RegCapital = Num(el, "REG_CAPITALY"),
             Currency = Str(el, "CURRENCY"),
             Province = Str(el, "PROVINCE"),

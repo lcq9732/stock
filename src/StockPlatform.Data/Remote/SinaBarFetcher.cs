@@ -148,10 +148,10 @@ public class SinaBarFetcher : IBarDataFetcher
                 Close = double.Parse(row.GetProperty("close").GetString()!, CultureInfo.InvariantCulture),
                 High = double.Parse(row.GetProperty("high").GetString()!, CultureInfo.InvariantCulture),
                 Low = double.Parse(row.GetProperty("low").GetString()!, CultureInfo.InvariantCulture),
-                // ⚠ 新浪给的是**股**，全板块都是（2026-09-10 实测：600000 给 50,532,458，
-                // 而当天真实成交是 505,325 手）。库里统一存"手"，所以这里必须换算——
-                // 原来直接原样存，每触发一次腾讯回退就往那只票历史里掺一段股口径的行。
-                Volume = BarVolumeUnit.ToLots(code,
+                // 新浪给的是**股**，全板块都是（2026-09-10 实测：600000 给 50,532,458，
+                // 而当天真实成交是 505,325 手）。库里 2026-10-20 起也存股，原样即可；
+                // 仍走 BarVolumeUnit，让"哪个源什么口径"只在一处定义。
+                Volume = BarVolumeUnit.ToShares(code,
                     double.Parse(row.GetProperty("volume").GetString()!, CultureInfo.InvariantCulture),
                     BarVolumeUnit.Source.Sina),
                 // 新浪这个接口不直接给成交额/换手率，只能留0——这样的行事后可以用"回填成交额/

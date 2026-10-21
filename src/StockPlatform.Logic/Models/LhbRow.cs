@@ -52,8 +52,8 @@ public class LhbRow
     /// </summary>
     public double? Volume { get; set; }
 
-    /// <summary>成交额（万元）。东财的 ACCUM_AMOUNT 是**元**，写库前除以 1e4 对齐新浪历史口径
-    /// ——2026-09-09 逐条比过，两源换算后比值精确为 1.000000。</summary>
+    /// <summary>成交额（**元**，东财 ACCUM_AMOUNT 原样）。2026-10-20 前存万元（÷1e4 对齐新浪老口径），已迁移。
+    /// 多日累计类上榜原因（三日累计偏离等）是那几天的累计成交额，不等于当天日K的成交额。</summary>
     public double Amount { get; set; }
 
     public string Reason { get; set; } = "";       // 上榜指标；东财源下是交易所原文

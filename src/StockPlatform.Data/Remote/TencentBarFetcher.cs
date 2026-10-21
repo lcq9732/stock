@@ -18,7 +18,7 @@ namespace StockPlatform.Data.Remote;
 /// paging, but each row also carries 换手率(%) and 成交额(万元), so Bar.Turnover/Bar.Amount are now
 /// populated (previously left at 0). Cross-checked 成交额 against EastMoney's native kline amount
 /// field for 贵州茅台 (403521.69万元 ≈ EastMoney的4035216946元, 精确到万元) before switching.
-/// Volume stays in 手 (unchanged), same as the old endpoint.
+/// The endpoint gives volume in 手 (科创板 in 股); stored in 股 since 2026-10-20 via BarVolumeUnit.ToShares.
 /// </summary>
 public class TencentBarFetcher : IBarDataFetcher
 {
@@ -189,9 +189,9 @@ public class TencentBarFetcher : IBarDataFetcher
                 var high = double.Parse(row[3].GetString()!, CultureInfo.InvariantCulture);
                 var low = double.Parse(row[4].GetString()!, CultureInfo.InvariantCulture);
                 var volume = len > 5 ? double.Parse(row[5].GetString()!, CultureInfo.InvariantCulture) : 0;
-                volume = BarVolumeUnit.ToLots(code, volume, BarVolumeUnit.Source.Tencent);
+                volume = BarVolumeUnit.ToShares(code, volume, BarVolumeUnit.Source.Tencent);   // 入库存股（2026-10-20）
 
-                // newfqkline 每行结构：[0]日期 [1]开 [2]收 [3]高 [4]低 [5]成交量(手) [6]{}(占位对象，忽略)
+                // newfqkline 每行结构：[0]日期 [1]开 [2]收 [3]高 [4]低 [5]成交量(手；科创板是股) [6]{}(占位对象，忽略)
                 // [7]换手率(%) [8]成交额(万元) [9]""。都做长度+类型保护，缺字段就按0（这样万一接口
                 // 退回老的只到[5]的格式、或者某行字段不全，也不会抛异常）。换手率原样存百分数（10.43
                 // 表示10.43%，跟 QuoteDetailWindow 的"{Turnover:F2}%"显示一致）；成交额从万元换成元

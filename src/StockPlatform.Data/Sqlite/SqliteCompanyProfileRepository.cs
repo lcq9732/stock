@@ -44,7 +44,7 @@ public class SqliteCompanyProfileRepository : ICompanyProfileRepository
             p.CommandText = """
                 INSERT INTO CompanyProfile
                     (code, full_name, abbr, name_en, org_form, found_date, listing_date, listing_state,
-                     reg_capital_wan, reg_capital, currency, province, city, district,
+                     reg_capital, currency, province, city, district,
                      reg_address, address, postcode, industry_csrc, emp_num,
                      legal_person, actual_holder, final_holder, holder_name, holder_ratio,
                      chairman, president, secretary, publish_person,
@@ -52,7 +52,7 @@ public class SqliteCompanyProfileRepository : ICompanyProfileRepository
                      reg_num, law_firm, accountfirm, cpa, ah_change, main_business,
                      org_code_em, report_date, fetched_at)
                 VALUES ($code,$full,$abbr,$en,$form,$found,$listing,$lstate,
-                        $capw,$cap,$cur,$prov,$city,$dist,
+                        $cap,$cur,$prov,$city,$dist,
                         $regaddr,$addr,$post,$ind,$emp,
                         $legal,$actual,$final,$hname,$hratio,
                         $chair,$pres,$sec,$pub,
@@ -63,7 +63,7 @@ public class SqliteCompanyProfileRepository : ICompanyProfileRepository
                     full_name=excluded.full_name, abbr=excluded.abbr, name_en=excluded.name_en,
                     org_form=excluded.org_form, found_date=excluded.found_date,
                     listing_date=excluded.listing_date, listing_state=excluded.listing_state,
-                    reg_capital_wan=excluded.reg_capital_wan, reg_capital=excluded.reg_capital,
+                    reg_capital=excluded.reg_capital,
                     currency=excluded.currency, province=excluded.province, city=excluded.city,
                     district=excluded.district, reg_address=excluded.reg_address,
                     address=excluded.address, postcode=excluded.postcode,
@@ -93,7 +93,7 @@ public class SqliteCompanyProfileRepository : ICompanyProfileRepository
             { var q = c.CreateParameter(); q.ParameterName = name; c.Parameters.Add(q); return q; }
 
             var pp = new[] { "$code","$full","$abbr","$en","$form","$found","$listing","$lstate",
-                             "$capw","$cap","$cur","$prov","$city","$dist","$regaddr","$addr","$post",
+                             "$cap","$cur","$prov","$city","$dist","$regaddr","$addr","$post",
                              "$ind","$emp","$legal","$actual","$final","$hname","$hratio","$chair",
                              "$pres","$sec","$pub","$sectel","$tel","$fax","$email","$web","$regnum",
                              "$law","$acct","$cpa","$ah","$main","$orgcode","$rdate","$at" }
@@ -111,7 +111,7 @@ public class SqliteCompanyProfileRepository : ICompanyProfileRepository
                 pp["$abbr"].Value = O(x.Abbr);   pp["$en"].Value = O(x.NameEn);
                 pp["$form"].Value = O(x.OrgForm); pp["$found"].Value = O(x.FoundDate);
                 pp["$listing"].Value = O(x.ListingDate); pp["$lstate"].Value = O(x.ListingState);
-                pp["$capw"].Value = N(x.RegCapitalWan);  pp["$cap"].Value = N(x.RegCapital);
+                pp["$cap"].Value = N(x.RegCapital);
                 pp["$cur"].Value = O(x.Currency); pp["$prov"].Value = O(x.Province);
                 pp["$city"].Value = O(x.City);   pp["$dist"].Value = O(x.District);
                 pp["$regaddr"].Value = O(x.RegAddress); pp["$addr"].Value = O(x.Address);

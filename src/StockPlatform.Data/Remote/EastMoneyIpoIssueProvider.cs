@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Remote;
 
@@ -78,7 +79,20 @@ public sealed class EastMoneyIpoIssueProvider(EastMoneyDataCenterClient dc) : II
             values[p.Name] = Value(p.Value, col, stats);
         }
         if (values.GetValueOrDefault(IpoIssueColumns.CodeColumn) is not string code || code.Length == 0) return null;
+        ToBaseUnits(code, values);
         return new IpoIssueRow { Code = code, Values = values };
+    }
+
+    /// <summary>
+    /// 万股/万元/亿元的列换成股/元（2026-10-20，系数和依据见 <see cref="IpoIssueColumns.UnitFactors"/>）。
+    /// 沪深和北交所有三列单位不同，按同一行的 IS_BEIJING 选系数。
+    /// </summary>
+    private static void ToBaseUnits(string code, Dictionary<string, object?> values)
+    {
+        var beijing = IpoIssueColumns.IsBeijing(code, values.GetValueOrDefault("IS_BEIJING") as double?);
+        foreach (var api in IpoIssueColumns.UnitFactors.Keys)
+            if (values.GetValueOrDefault(api) is double v)
+                values[api] = UnitScale.Apply(v, IpoIssueColumns.FactorOf(api, beijing));
     }
 
     private static object? Value(JsonElement v, IpoColumn col, IpoFetchStats? stats)

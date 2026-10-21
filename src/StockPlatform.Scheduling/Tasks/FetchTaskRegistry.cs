@@ -89,6 +89,17 @@ public sealed class FetchTaskRegistry(IManifestStore? manifestStore = null)
     public IReadOnlyCollection<FetchActionId> Registered => _factories.Keys;
 
     /// <summary>
+    /// 全局准入闸（2026-10-20）：返回非空＝这一项现在不许开工，返回的就是原因（记成「本轮没开工」，
+    /// 计划过一会儿自动再来）。null＝放行。
+    ///
+    /// 放在这里是因为**所有任务都从 <see cref="RunAsync"/> 过**——计划、手动【执行】、
+    /// 【重新拉取失败】分派的子任务，一处拦住就没有漏网的路。
+    /// 目前只有一个用途：【成交量改存股】没做完之前，库里同一只票新旧两种单位混着，
+    /// 别的任务一律不放行（见 <c>BarVolumeMigrationGate</c>）。
+    /// </summary>
+    public Func<FetchActionId, string?>? RunGate { get; set; }
+
+    /// <summary>
     /// 这个动作的**待办**是不是由任务自己补（2026-09-18）——见
     /// <see cref="IFetchTask.HandlesBacklog"/>。
     ///
@@ -125,6 +136,12 @@ public sealed class FetchTaskRegistry(IManifestStore? manifestStore = null)
         CancellationToken ct, Action<IFetchTask>? subscribe = null)
     {
         var task = Create(id) ?? throw new InvalidOperationException($"没注册的新式任务：{id}");
+
+        if (RunGate?.Invoke(id) is { } blocked)
+        {
+            progress?.Report($"【{FetchTaskCatalog.Info(id).Name}】本轮没开工：{blocked}");
+            return TaskRunResult.Skipped(blocked).ToFetchResult();
+        }
 
         if (progress != null)
         {

@@ -804,7 +804,7 @@ public sealed class FullAuditTask : FetchTaskBase<AuditFinding>
         found.Add(Note(ratio.Count == 0
             ? "　值体检 量额比率：没有"
             : $"　值体检 量额比率：{ratio.Sum(x => x.Days)} 行 / {ratio.Count} 段的 amount/(volume×close)"
-              + "不在 ≈100（手）或 ≈1（科创板按股）附近"
+              + "不在 ≈1 附近（volume 存股；≈100 说明有写入路径按手存了）"
               + $"（最多的 {string.Join("、", ratio.OrderByDescending(x => x.Days).Take(3).Select(x => $"{x.Code} {x.Days}行"))}）"
               + "——**不进待补名单**：数据源自己给错的重抓也拿回同样的值（603999 那种），"
               + "要修得先查成因。只对个股判（指数/板块的 close 是点位、没这个倍数关系）"));

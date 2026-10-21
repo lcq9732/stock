@@ -175,7 +175,7 @@ public class SqliteStockEventSource
         yield return new WatchEvent(nd, WatchCategory.EarningsForecast, string.Join("  ", bits));
     }
 
-    // ── 股东增减持：同一天多笔按方向聚合。⚠ change_shares 单位是万股 ──
+    // ── 股东增减持：同一天多笔按方向聚合（change_shares 是股，2026-10-20 前库里存万股、已迁移）──
     private static IEnumerable<WatchEvent> HolderChange(SqliteConnection conn, string code)
     {
         using var cmd = conn.CreateCommand();
@@ -193,7 +193,7 @@ public class SqliteStockEventSource
         if (IsStale(nd, StaleHolderDays)) yield break;
 
         var bits = new List<string> { r.IsDBNull(1) ? "股东变动" : $"股东{r.GetString(1)}" };
-        if (Dbl(r, 2) is { } sh) bits.Add($"{Math.Abs(sh):0.##} 万股");
+        if (Dbl(r, 2) is { } sh) bits.Add($"{Fmt(Math.Abs(sh))}股");
         if (Dbl(r, 3) is { } ratio) bits.Add($"占 {Math.Abs(ratio):0.##}%");
         if (Dbl(r, 4) is { } after) bits.Add($"剩 {after:0.##}%");
         yield return new WatchEvent(nd, WatchCategory.HolderChange, string.Join("  ", bits));

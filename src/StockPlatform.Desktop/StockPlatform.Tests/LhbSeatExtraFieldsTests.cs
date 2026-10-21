@@ -16,9 +16,9 @@ namespace StockPlatform.Tests;
 ///
 /// 这里的 JSON 是 2026-09-06 从接口实抓的原样响应（600127，2026-09-04 那天的榜），
 /// 不是手编的——手编样本最容易把口径写成自己以为的样子，而这三个字段的坑正好在口径上：
-/// <c>TOTAL_BUYRIO</c> 是**小数**（0.0103 = 1.03%），跟同一条记录里 <c>CHANGE_RATE</c>
-/// 用百分数（-2.92 = -2.92%）不一致。<see cref="RatioIsFractionOfAccumAmount"/> 用接口自己
-/// 给的 ACCUM_AMOUNT 把这个关系钉死，将来谁改解析改错了单位，这条会红。
+/// 接口的 <c>TOTAL_BUYRIO</c> 是**小数**（0.0103 = 1.03%），跟同一条记录里 <c>CHANGE_RATE</c>
+/// 用百分数（-2.92 = -2.92%）不一致；入库 ×100 存百分数（2026-10-20 起）。<see cref="RatioIsPercentOfAccumAmount"/>
+/// 用接口自己给的 ACCUM_AMOUNT 把这个关系钉死，将来谁改解析改错了单位，这条会红。
 /// </summary>
 public class LhbSeatExtraFieldsTests : IDisposable
 {
@@ -75,33 +75,32 @@ public class LhbSeatExtraFieldsTests : IDisposable
     public void ParsesThreeAddedFields()
     {
         var buy = Parse(BuyJson, isBuy: true);
-        Assert.Equal(0.01027924072, buy.BuyRatio!.Value, 12);
+        Assert.Equal(1.027924072, buy.BuyRatio!.Value, 10);
         Assert.Null(buy.SellRatio);                      // 买方榜不给卖出占比
         Assert.Equal("137001004001", buy.ChangeType);
 
         var sell = Parse(SellJson, isBuy: false);
         Assert.Null(sell.BuyRatio);
-        Assert.Equal(0.010923685302, sell.SellRatio!.Value, 12);
+        Assert.Equal(1.0923685302, sell.SellRatio!.Value, 10);
         Assert.Equal("137001004001", sell.ChangeType);
     }
 
     /// <summary>
-    /// 口径钉死：ratio = 该席位金额 / 当日总成交额，是**小数**。
+    /// 口径钉死：ratio = 该席位金额 / 当日总成交额 × 100，是**百分数**（接口给小数，入库 ×100）。
     /// 用接口自己给的 ACCUM_AMOUNT 反算，两边必须对上——这同时也证明了
-    /// 不单独存 ACCUM_AMOUNT 是安全的（需要时 Buy / BuyRatio 就能反推出来）。
+    /// 不单独存 ACCUM_AMOUNT 是安全的（需要时 Buy / BuyRatio × 100 就能反推出来）。
     /// </summary>
     [Fact]
-    public void RatioIsFractionOfAccumAmount()
+    public void RatioIsPercentOfAccumAmount()
     {
         var buy = Parse(BuyJson, isBuy: true);
-        Assert.Equal(buy.Buy!.Value / AccumAmount, buy.BuyRatio!.Value, 10);
-        Assert.InRange(buy.BuyRatio.Value, 0d, 1d);      // 小数域，不是 0~100
+        Assert.Equal(buy.Buy!.Value / AccumAmount * 100, buy.BuyRatio!.Value, 8);
 
         var sell = Parse(SellJson, isBuy: false);
-        Assert.Equal(sell.Sell!.Value / AccumAmount, sell.SellRatio!.Value, 10);
+        Assert.Equal(sell.Sell!.Value / AccumAmount * 100, sell.SellRatio!.Value, 8);
 
         // 反推当日总成交额
-        Assert.Equal(AccumAmount, buy.Buy.Value / buy.BuyRatio.Value, 0);
+        Assert.Equal(AccumAmount, buy.Buy.Value / buy.BuyRatio.Value * 100, 0);
     }
 
     /// <summary>三列要真的落到库里并读得回来——建表和整日替换两条路径都覆盖到。</summary>
@@ -122,14 +121,14 @@ public class LhbSeatExtraFieldsTests : IDisposable
 
         Assert.True(r.Read());
         Assert.Equal(1L, r.GetInt64(0));
-        Assert.Equal(0.01027924072, r.GetDouble(1), 12);
+        Assert.Equal(1.027924072, r.GetDouble(1), 10);
         Assert.True(r.IsDBNull(2));
         Assert.Equal("137001004001", r.GetString(3));
 
         Assert.True(r.Read());
         Assert.Equal(0L, r.GetInt64(0));
         Assert.True(r.IsDBNull(1));
-        Assert.Equal(0.010923685302, r.GetDouble(2), 12);
+        Assert.Equal(1.0923685302, r.GetDouble(2), 10);
     }
 
     /// <summary>

@@ -815,10 +815,11 @@ public class CapitalDiagnosisAnalyzer
         }
 
         double total = list.Sum(b => b.DealAmount ?? 0);
-        double weighted = list.Sum(b => (b.DealAmount ?? 0) * (b.PremiumRatio ?? 0) * 100) / total;
-        double simple = list.Average(b => (b.PremiumRatio ?? 0) * 100);
+        // PremiumRatio 是百分数（2026-10-20 起入库就是；之前存小数、这里自己 ×100）
+        double weighted = list.Sum(b => (b.DealAmount ?? 0) * (b.PremiumRatio ?? 0)) / total;
+        double simple = list.Average(b => b.PremiumRatio ?? 0);
         double ShareBy(Func<double, bool> f) =>
-            list.Where(b => f((b.PremiumRatio ?? 0) * 100)).Sum(b => b.DealAmount ?? 0) / total;
+            list.Where(b => f(b.PremiumRatio ?? 0)).Sum(b => b.DealAmount ?? 0) / total;
         double flat = ShareBy(p => Math.Abs(p) < BlockFlatBand);
         double disc = ShareBy(p => p < BlockDiscount);
         double prem = ShareBy(p => p > BlockPremium);
@@ -850,7 +851,7 @@ public class CapitalDiagnosisAnalyzer
         if (Math.Abs(weighted - simple) > 0.3)
         {
             // 判据：溢价率离加权值很远、金额却微不足道的那几笔，正是拉偏笔数平均的元凶。
-            var odd = list.Where(b => Math.Abs((b.PremiumRatio ?? 0) * 100 - weighted) > BlockPremium
+            var odd = list.Where(b => Math.Abs((b.PremiumRatio ?? 0) - weighted) > BlockPremium
                                       && (b.DealAmount ?? 0) / total < 0.02)
                           .OrderBy(b => b.DealAmount).ToList();
             if (odd.Count > 0)

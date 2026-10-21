@@ -34,8 +34,13 @@ public enum EtfTurnoverVerdict
 /// 代价是 2024-11 以后腾讯按 ÷T 给的那十几万行会被改掉，这是有意的。
 ///
 /// ════ 单位 ════
-/// Bar.volume 在 ETF 上是**手**（1 手 = 100 份），份额统一存**万份**（上交所原样、深交所导出是份、provider 里换算），于是
-/// 换手率(%) = 手 × 100 ÷ (万份 × 10⁴) × 100 = 手 ÷ 万份。
+/// Bar.volume 和份额都存**份**（2026-10-20 起；之前成交量存手、份额存万份），于是
+/// 换手率(%) = 成交份 ÷ 份额 × 100 = (成交份 ÷ 100) ÷ (份额 ÷ 10⁴)。
+/// ⚠ 代码里故意写成"(量 ÷ 100) ÷ (份 ÷ 1e4)"而不是等价的"量 ÷ 份 × 100"：
+/// · 量 ÷ 100 还原出原来存的"手"——ETF 成交量是整数手，×100 再 ÷100 是精确的；
+/// · 份 ÷ 1e4 还原出原来存的"万份"——跟改单位前库里的值逐位相同（同一个十进制数的最近 double，153 万行全验）。
+/// 于是换手率跟改之前**逐位一致**：【ETF换手率校正】会把算出来的值写回库，换种写法在四舍五入边界上
+/// 差一位就会凭空重写一批行。
 /// 保留两位小数跟腾讯一致。
 ///
 /// ⚠ 不拿东财/搜狐当裁判：东财 f61 用的是**当前**份额去除历史成交量（510150 在 2024-09-30 给 60.40），
@@ -47,23 +52,23 @@ public static class EtfTurnoverRule
     public const double Tolerance = 0.01 + 1e-9;
 
     /// <summary>
-    /// 期望换手率(%)。<paramref name="prevShareWan"/> 缺失或不是正数时返回 null（判不了）。
+    /// 期望换手率(%)。<paramref name="prevShares"/> 缺失或不是正数时返回 null（判不了）。
     /// </summary>
-    /// <param name="volumeLots">当天成交量（手）。</param>
-    /// <param name="prevShareWan">前一交易日官方份额（万份）。</param>
-    public static double? Expected(double volumeLots, double? prevShareWan)
-        => prevShareWan is > 0
-            ? Math.Round(volumeLots / prevShareWan.Value, 2, MidpointRounding.AwayFromZero)
+    /// <param name="volume">当天成交量（份）。</param>
+    /// <param name="prevShares">前一交易日官方份额（份）。</param>
+    public static double? Expected(double volume, double? prevShares)
+        => prevShares is > 0
+            ? Math.Round(volume / 100 / (prevShares.Value / 1e4), 2, MidpointRounding.AwayFromZero)
             : null;
 
     /// <summary>裁判一行。</summary>
-    /// <param name="volumeLots">库里的成交量（手）。</param>
+    /// <param name="volume">库里的成交量（份）。</param>
     /// <param name="stored">库里的换手率。</param>
-    /// <param name="prevShareWan">前一交易日官方份额（万份），没有就是 null。</param>
-    public static EtfTurnoverVerdict Judge(double? volumeLots, double? stored, double? prevShareWan)
+    /// <param name="prevShares">前一交易日官方份额（份），没有就是 null。</param>
+    public static EtfTurnoverVerdict Judge(double? volume, double? stored, double? prevShares)
     {
-        if (volumeLots is not > 0) return EtfTurnoverVerdict.NotApplicable;
-        if (Expected(volumeLots.Value, prevShareWan) is not { } expected) return EtfTurnoverVerdict.Unjudgeable;
+        if (volume is not > 0) return EtfTurnoverVerdict.NotApplicable;
+        if (Expected(volume.Value, prevShares) is not { } expected) return EtfTurnoverVerdict.Unjudgeable;
         // 成交极小时期望值本身会四舍五入成 0.00，那时库里的 0 是对的，不算缺
         if (stored is null or 0)
             return expected == 0 ? EtfTurnoverVerdict.Consistent : EtfTurnoverVerdict.Missing;

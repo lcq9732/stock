@@ -1,6 +1,7 @@
 ﻿using System.Globalization;
 using System.Text.Json;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Remote;
 
@@ -133,8 +134,9 @@ public class EastMoneyLhbSeatProvider : ILhbSeatDayFetcher
             TradeId = Str(el, "TRADE_ID"),
             ClosePrice = Num(el, "CLOSE_PRICE"),
             ChangeRate = Num(el, "CHANGE_RATE"),
-            BuyRatio = Num(el, "TOTAL_BUYRIO"),
-            SellRatio = Num(el, "TOTAL_SELLRIO"),
+            // 接口给小数，入库存百分数（2026-10-20，doc/unit-normalization-inventory.md）
+            BuyRatio = UnitScale.Apply(Num(el, "TOTAL_BUYRIO"), UnitScale.Percent),
+            SellRatio = UnitScale.Apply(Num(el, "TOTAL_SELLRIO"), UnitScale.Percent),
             ChangeType = Str(el, "CHANGE_TYPE"),
             FetchedAt = DateTime.Now,
         };

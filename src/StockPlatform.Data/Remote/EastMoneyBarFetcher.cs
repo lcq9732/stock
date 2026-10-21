@@ -134,7 +134,9 @@ public class EastMoneyBarFetcher : IBarDataFetcher
                     Close = double.Parse(parts[2], CultureInfo.InvariantCulture),
                     High = double.Parse(parts[3], CultureInfo.InvariantCulture),
                     Low = double.Parse(parts[4], CultureInfo.InvariantCulture),
-                    Volume = double.Parse(parts[5], CultureInfo.InvariantCulture),
+                    // 东财给手，入库存股（2026-10-20，doc/unit-normalization-inventory.md）。原来这里不走 BarVolumeUnit、原样存手
+                    Volume = BarVolumeUnit.ToShares(code, double.Parse(parts[5], CultureInfo.InvariantCulture),
+                                                    BarVolumeUnit.Source.EastMoney),
                     Amount = double.Parse(parts[6], CultureInfo.InvariantCulture),
                     // 涨跌幅(parts[8])不再存储，消费端用收盘价现算（见 2026-07-14 变更记录）。
                     Turnover = parts.Length > 10 ? double.Parse(parts[10], CultureInfo.InvariantCulture) : 0,

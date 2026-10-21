@@ -69,15 +69,13 @@ public class CompanyProfileRepositoryTests : IDisposable
     }
 
     [Fact]
-    public void 注册资本万元和元不能搞反()
+    public void 注册资本取元那一列()
     {
         // ★ REG_CAPITAL 是万元、REG_CAPITALY 是元，差 1 万倍，字段名完全看不出来。
-        //   搞反了整份数据的量级就错了，而 4.6 亿和 46 亿看起来都"像个正常的注册资本"。
+        //   只存元那一列（2026-10-20 删了万元那列 reg_capital_wan：6050 行全部等于元÷1e4，纯重复）。
+        //   取错了整份数据的量级就错了，而 4.6 亿和 46 亿看起来都"像个正常的注册资本"。
         var (p, _) = EastMoneyCompanyProfileProvider.Parse(J(Row), Now)!.Value;
-
-        Assert.Equal(462677.041, p.RegCapitalWan);
         Assert.Equal(4626770410, p.RegCapital);
-        Assert.Equal(p.RegCapital!.Value, p.RegCapitalWan!.Value * 10000, 0.5);   // 关系钉死
     }
 
     [Theory]

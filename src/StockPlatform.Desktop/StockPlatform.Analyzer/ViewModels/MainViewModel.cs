@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using StockPlatform.Analyzer.Watchlist;
 using StockPlatform.Data.Orchestration;
+using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 
@@ -199,6 +200,10 @@ public class MainViewModel : INotifyPropertyChanged
                 text = latest == null
                     ? "数据文件存在，但里面没有任何日线数据"
                     : $"本地数据最新到 {latest:yyyy-MM-dd}";
+                // 【成交量改存股】（2026-10-20）没做完时，库里同一只票的成交量新旧两种单位混着，
+                // 量比、放量、市场热度这类量能指标会算错。迁移由 Fetcher 做，这里只提醒一句。
+                if (!new SqliteBarVolumeMigration(_paths.CurrentDb).IsDone())
+                    text += "　⚠ 成交量还没改存股（Fetcher 的【成交量改存股】没做完），量能相关的指标暂时不准";
             }
             catch (Exception ex)
             {

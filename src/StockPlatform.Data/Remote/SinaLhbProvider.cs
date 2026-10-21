@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Remote;
 
@@ -111,8 +112,9 @@ public class SinaLhbProvider : ILhbProvider
                 StockName = tds[2],
                 ClosePrice = ParseD(tds[3]),
                 Deviation = ParseD(tds[4]),
-                Volume = ParseD(tds[5]),
-                Amount = ParseD(tds[6]),
+                // 新浪表头是"成交量(万股)""成交额(万元)"，入库存股/元（2026-10-20，doc/unit-normalization-inventory.md）
+                Volume = UnitScale.Apply(ParseD(tds[5]), UnitScale.Wan),
+                Amount = UnitScale.Apply(ParseD(tds[6]), UnitScale.Wan),
                 Reason = reason,
                 FetchedAt = now,
                 Source = LhbSources.Sina,

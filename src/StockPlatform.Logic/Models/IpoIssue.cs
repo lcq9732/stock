@@ -1,4 +1,5 @@
 using System.Globalization;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Logic.Models;
 
@@ -201,6 +202,46 @@ public static class IpoIssueColumns
         "NEWEST_PRICE", "LATELY_PRICE", "TNEW_PRICE", "CHANGE", "CHANGE_RATE", "TCHANGE_RATE",
         "PE_TTM", "UP_DATE", "APPLY_DATE_NUM", "IS_1YEAR", "IS_1YEAR_APPLY",
     };
+
+    /// <summary>
+    /// 入库换算系数（2026-10-20，见 doc/unit-normalization-inventory.md）：接口给万股/万元/亿元的列乘成股/元。
+    /// ⚠ 有三列**沪深和北交所单位不一样**，所以分两个系数，按同一行的 IS_BEIJING 选（见 <see cref="IsBeijing"/>）。
+    ///
+    /// 系数是拿 2026-10-16 全量 5,640 行逐行乘除互证定的（不是看中位数）：
+    /// · ISSUE_NUM 万股：÷总股本 5,249 行落在 1e-5~1e-4；北交所 DEC_SUMFINA(元)÷(ISSUE_NUM×1e4×发行价) 358 行全是 1。
+    /// · OFFLINE_VATS / TOTAL_APPLY_NUM 万股：跟 OFFLINE_VATS_NONUNIT / ENQUIRY_SHARE_NUM（股）比，3,684 / 3,049 行全差 1e-4。
+    /// · ONLINE_VA_SHARES：沪深跟 ONLINE_VASHARES_NONUNIT 比 4,030 行全差 1e-4（万股）；北交所＝网上发行量×申购倍数（股）。
+    /// · TOTAL_RAISE_FUNDS / PREDICT_RAISE_FUNDS / DEC_SUMFINA / NETSUMFINA：沪深÷(发行量×发行价) 全落在 1e-8 量级（亿元）；
+    ///   北交所前两列为空、后两列全是 1（元）。
+    /// · TOP_APPLY_MARKETCAP / APPLY_AMT_UPPER 万元：688981 申购上限 421000 股 ↔ 421；北交所＝上限股数×发行价÷1e4。
+    /// 其余数值列已是股/元/百分数（ORIG_TRANSFER_NUM 股、OFFLINE_VAP_RATIO 百分数、PER_SHARES_INCOME/PROFIT 每签元……）。
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, (decimal ShSz, decimal Bj)> UnitFactors =
+        new Dictionary<string, (decimal, decimal)>(StringComparer.Ordinal)
+        {
+            ["ISSUE_NUM"] = (UnitScale.Wan, UnitScale.Wan),
+            ["TOTAL_ISSUE_NUM"] = (UnitScale.Wan, UnitScale.Wan),
+            ["OFFLINE_VATS"] = (UnitScale.Wan, UnitScale.Wan),
+            ["TOTAL_APPLY_NUM"] = (UnitScale.Wan, UnitScale.Wan),
+            ["TOP_APPLY_MARKETCAP"] = (UnitScale.Wan, UnitScale.Wan),
+            ["APPLY_AMT_UPPER"] = (UnitScale.Wan, UnitScale.Wan),
+            ["TOTAL_RAISE_FUNDS"] = (UnitScale.Yi, UnitScale.Yi),
+            ["PREDICT_RAISE_FUNDS"] = (UnitScale.Yi, UnitScale.Yi),
+            ["DEC_SUMFINA"] = (UnitScale.Yi, 1m),
+            ["NETSUMFINA"] = (UnitScale.Yi, 1m),
+            ["ONLINE_VA_SHARES"] = (UnitScale.Wan, 1m),
+        };
+
+    /// <summary>该列在这一行该乘的系数（不在 <see cref="UnitFactors"/> 里的是 1）。</summary>
+    public static decimal FactorOf(string api, bool beijing) =>
+        UnitFactors.TryGetValue(api, out var f) ? (beijing ? f.Bj : f.ShSz) : 1m;
+
+    /// <summary>
+    /// 这一行是不是北交所：看同一行的 IS_BEIJING（全量 5,640 行跟号段逐只对得上，老的 83x/43x 也标 1）；
+    /// 没给就按代码号段判（<see cref="MarketClassifier"/>）。
+    /// </summary>
+    public static bool IsBeijing(string code, double? isBeijingFlag) =>
+        isBeijingFlag is { } f ? f == 1 : MarketClassifier.Classify(code) == MarketBoard.Beijing;
 }
 
 /// <summary>

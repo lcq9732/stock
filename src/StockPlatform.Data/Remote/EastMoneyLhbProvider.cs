@@ -135,8 +135,9 @@ public class EastMoneyLhbProvider : ILhbProvider, ILhbRangeProvider
             ClosePrice = Num(el, "CLOSE_PRICE") ?? 0,
             Reason = reason,
 
-            // 东财给的是元，历史行（新浪）存的是万元——统一到万元，否则同一列两个量纲。
-            Amount = (Num(el, "ACCUM_AMOUNT") ?? 0) / 1e4,
+            // 东财给的就是元，原样存（2026-10-20 起；之前 ÷1e4 存万元是为了跟新浪老行对齐，
+            // 新浪老行已在 09-10 换源时整段替换掉，存量已迁移，见 doc/unit-normalization-inventory.md）。
+            Amount = Num(el, "ACCUM_AMOUNT") ?? 0,
 
             // 这两列东财没有，留给 LhbDeviationDeriver 用本地日K补
             Deviation = null,

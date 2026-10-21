@@ -25,7 +25,10 @@ public class BlockTrade
     public double? DealPrice { get; set; }
     public double? DealVolume { get; set; }
     public double? DealAmount { get; set; }
-    /// <summary>折溢价率（%），负数=折价。</summary>
+    /// <summary>
+    /// 折溢价率（%），负数=折价，基准=当日收盘价（成交价/收盘价−1）。接口给的是小数（0.075），
+    /// 解析时 ×100（2026-10-20 起；之前存小数、诊断那边自己乘 100，已迁移并删掉补偿）。
+    /// </summary>
     public double? PremiumRatio { get; set; }
     public double? ClosePrice { get; set; }
     public double? ChangeRate { get; set; }
@@ -42,17 +45,17 @@ public class BlockTrade
 
     /// <summary>
     /// 接口的 <c>DISCOUNT_RATIO</c>。⚠ <b>名字叫折价率，实际是相对"前收盘价"的溢价率，
-    /// 而且单位跟 <see cref="PremiumRatio"/> 不一样</b>——两个都别照名字用。
+    /// 基准跟 <see cref="PremiumRatio"/> 不一样</b>——两个都别照名字用。
     ///
     /// 2026-09-06 用实抓样本钉死（000338 潍柴动力 2020-06-10，成交价 15.05）：
-    ///   PremiumRatio   = 0.075        = 15.05 / 收盘价 14.0  − 1   → <b>小数</b>，基准=当日收盘
+    ///   PREMIUM_RATIO  = 0.075        = 15.05 / 收盘价 14.0  − 1   → 接口给<b>小数</b>，入库 ×100 = 7.5
     ///   DiscountRatio  = 5.985915…    = 15.05 / 前收盘 14.2  − 1   → <b>百分数</b>，基准=前收盘
-    /// 两者差 100 倍且基准不同，混用会得出完全错的折溢价。见 BlockTradeExtraFieldsTests。
+    /// 入库后两者都是百分数，但基准不同，不能互相替代。见 MarketEventExtraFieldsTests。
     /// </summary>
     public double? DiscountRatio { get; set; }
     /// <summary>
     /// 本笔成交量占流通股 / 占总股本的比例，<b>都是百分数</b>（0.2269 = 0.2269%）——
-    /// 注意跟同一张表里用小数的 <see cref="PremiumRatio"/> 不一致。
+    /// （<see cref="PremiumRatio"/> 2026-10-20 起也存百分数了。）
     ///
     /// 实测 000338：DealVolume 1800 万 / TotalShares 79.34 亿 = 0.2269%，与 TOTAL_SHARES_RATIO
     /// 给的 0.226875 吻合。<see cref="FreeSharesRatio"/> 的分母是**全部流通股**，对 A+H 公司
@@ -175,16 +178,16 @@ public class ShareLift
     /// <summary>限售股types：首发原股东限售股份/定向增发机构配售股份…同一天可能有多类，进主键。</summary>
     public string ShareType { get; set; } = "";
 
-    /// <summary>本次解禁股数（万股）。</summary>
+    /// <summary>本次解禁股数（股；接口给万股，解析时 ×1e4）。</summary>
     public double? LiftShares { get; set; }
-    /// <summary>解禁市值（万元）。</summary>
+    /// <summary>解禁市值（元；接口给万元，解析时 ×1e4）。</summary>
     public double? LiftMarketCap { get; set; }
     /// <summary>
-    /// 占流通股比例 / 占总股本比例。⚠ <b>是小数不是百分数</b>（0.0846 = 8.46%），
-    /// 跟同一条记录里用百分数的 <see cref="Before20Change"/>（-4.81 = -4.81%）不一致。
+    /// 占流通股比例 / 占总股本比例（%，8.46 = 8.46%）。接口给的是小数（0.0846），解析时 ×100，
+    /// 跟同一条记录里的 <see cref="Before20Change"/> 一致（2026-10-20 起；之前存的是小数，已迁移）。
     ///
-    /// 实测 000065 北方国际 2026-08-03：本次解禁 9005.6285 / 解禁前已流通 106501.8573
-    /// = 0.08456，与接口 FREE_RATIO 吻合。
+    /// 实测 000065 北方国际 2026-08-03：本次解禁 9005.6285 万股 / 解禁前已流通 106501.8573 万股
+    /// = 8.456%，与接口 FREE_RATIO 0.08456 吻合。
     /// </summary>
     public double? FreeRatio { get; set; }
     public double? TotalRatio { get; set; }
@@ -192,12 +195,12 @@ public class ShareLift
     public int? HolderCount { get; set; }
 
     /// <summary>
-    /// 解禁前的已流通股数（万股，接口 <c>FREE_SHARES</c>）——<see cref="FreeRatio"/> 的分母。
+    /// 解禁前的已流通股数（股，接口 <c>FREE_SHARES</c> 给万股）——<see cref="FreeRatio"/> 的分母。
     /// 存它是为了能验算比例：实测 000065 本次解禁 9005.6285 / 已流通 106501.8573 = 8.456%，
     /// 与接口给的 FREE_RATIO 吻合。
     /// </summary>
     public double? PreFreeShares { get; set; }
-    /// <summary>本次解禁后仍未流通的股数（万股）——看解禁进度还剩多少。</summary>
+    /// <summary>本次解禁后仍未流通的股数（股；接口给万股）——看解禁进度还剩多少。</summary>
     public double? NonFreeShares { get; set; }
     /// <summary>解禁前 20 日涨跌幅（%）。</summary>
     public double? Before20Change { get; set; }
@@ -226,7 +229,7 @@ public class HolderChange
 
     /// <summary>变动方向："增持"/"减持"。</summary>
     public string Direction { get; set; } = "";
-    /// <summary>变动股数（万股），带符号。</summary>
+    /// <summary>变动股数（股，带符号；接口给万股，解析时 ×1e4）。</summary>
     public double? ChangeShares { get; set; }
     /// <summary>
     /// 变动占**总股本**的比例（%），取自接口 <c>AFTER_CHANGE_RATE</c>。
@@ -238,7 +241,7 @@ public class HolderChange
     /// 想要占流通股的比例用 <see cref="ChangeFreeRatio"/>。
     /// </summary>
     public double? ChangeRatio { get; set; }
-    /// <summary>变动后持股数（万股）与持股比例（%）。</summary>
+    /// <summary>变动后持股数（股；接口给万股）与持股比例（%）。</summary>
     public double? AfterShares { get; set; }
     public double? AfterRatio { get; set; }
     /// <summary>变动区间起止。</summary>

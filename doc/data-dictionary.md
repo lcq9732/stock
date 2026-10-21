@@ -80,7 +80,7 @@
 > | 坑 | 实情 | 用的时候要怎么做 |
 > |---|---|---|
 > | `BlockTrade` 只有一半是股票 | A股 48%、可转债/债券 41%、基金 2%、其他 9%（B股、国债） | 按代码前缀筛 `00/30/60/68/4/8`，否则折溢价率分布被债券整个带偏（含债券时看着是 -100%~+290%，只看A股才是 -76%~+80%、均值 -6.3%） |
-> | `premium_ratio` 是**小数不是百分数** | `-0.0628` = 折价 6.28%。跟 `deal_price/close_price-1` 逐行核对 57.4 万行 **100% 相符** | 展示时自己乘 100 |
+> | `premium_ratio` 接口给的是**小数** | 接口 `-0.0628` = 折价 6.28%。跟 `deal_price/close_price-1` 逐行核对 57.4 万行 **100% 相符** | ✅ 2026-10-20 起入库 ×100 存**百分数**（-6.28），存量已迁移；资本诊断里自己乘 100 的补偿已删 |
 > | `OrgSurvey` 只有**滚动一年** | 接口自报 283,922 行、最早 2025-09-05；其余各表都回溯到 2016 | 不是抓漏了，是接口就这么多。想要长历史只能靠每天抓、慢慢养 |
 > | `ShareLift` 含**未来**日期 | 2,848 行是还没发生的解禁计划（最远 2035） | 当日程表用；做历史统计要加 `free_date <= 今天` |
 > | 各表都有少量非 A 股 | B股/北交所等，占 1%~6% | 同上，按前缀筛 |
@@ -98,9 +98,9 @@
 >
 > | 新坑 | 实情 | 用的时候要怎么做 |
 > |---|---|---|
-> | `discount_ratio` 名不副实，且**跟 `premium_ratio` 单位、基准都不同** | 同一行 000338：`premium_ratio` = 0.075 = 成交价/**当日收盘**−1（**小数**）；`discount_ratio` = 5.9859 = 成交价/**前收盘**−1（**百分数**）。两个样本各自吻合到 10 位 | 别照名字用，也别拿一个推另一个。要折溢价用 `premium_ratio` 并自己乘 100 |
+> | `discount_ratio` 名不副实，且**跟 `premium_ratio` 基准不同** | 同一行 000338：接口 `PREMIUM_RATIO` = 0.075 = 成交价/**当日收盘**−1（小数，入库 ×100 = 7.5）；`discount_ratio` = 5.9859 = 成交价/**前收盘**−1（百分数）。两个样本各自吻合到 10 位 | 别照名字用，也别拿一个推另一个。要折溢价用 `premium_ratio`（2026-10-20 起已是百分数） |
 > | `BlockTrade.change_rate_*` 是**滞后字段** | 东财事后才算：2026-09-04 那批股票行**全是 null**，2016-01-05 / 2020-06-10 的全部有值 | 只抓「水位线→今天」这四列永远填不上，所以增量要额外往前回看 30 天。⚠ 这个回看正是重复行的放大器（见上一条）——2026-09-17 改成整日替换后回看才真正安全，反复跑多少次都不会多行 |
-> | `ShareLift` 的比例是**小数**，涨跌幅是**百分数** | 同一行 000065：`free_ratio` = 0.0846 = 8.46%，而 `before20_change` = -4.81 = -4.81% | 同一张表里两种单位，混用差 100 倍 |
+> | `ShareLift` 接口给的比例是**小数**、股数是**万股** | 同一行 000065：接口 `FREE_RATIO` = 0.0846、`CURRENT_FREE_SHARES` = 9005.6285（万股），而 `B20_ADJCHRATE` = -4.81（%） | ✅ **2026-10-20 起入库已统一**：`lift_shares`/`pre_free_shares`/`non_free_shares` 存股、`lift_market_cap` 存元、`free_ratio`/`total_ratio` 存百分数（8.46），存量已迁移。`HolderChange.change_shares`/`after_shares` 同日起存股（原万股） |
 > | `change_rate_quotes` 实测**全期 0 行有值** | 2026-09-07 回填 11.1 万行后统计：0%。东财这一列根本不填，不是抓漏了 | 别用。列留着不占空间，等东财哪天开始给再说 |
 > | ⚠ 排序键不足→**静默丢行**（2026-09-07 已修） | `BlockTrade` 原排序 `TRADE_DATE,SECURITY_CODE` 定不了唯一序（一只股票一天几十笔），深分页跨页重复。实测 2016-03：2435 行返回、5 行重复、入库只剩 2430。全期累计**丢 773 行（0.164%）**；`HolderChange` 丢 120 行 | 已给两张表补上定序列（`DAILY_RANK` / `HOLDER_NAME,END_DATE`），实测重复归零。⚠ **当时说的"重跑一次回填"一直没做成**——那时界面上根本点不到整段回补（`forceStart` 声明了没接线），直到 2026-09-19 开放「首次整段回补」才补上：`HolderChange` 实测**补回 27 行**（0.024%） |
 > | ⚠ 排序键不足：**另外两张表当时漏修了**（2026-09-19 补） | 2026-09-07 只给 `BlockTrade` / `HolderChange` 补了定序列，同批的 `OrgSurvey`（主键五列，排序只有 `NOTICE_DATE,SECURITY_CODE`）和 `ShareLift`（主键三列，排序只有 `FREE_DATE,SECURITY_CODE`）照旧。同一公司同一天本来就常有十几家机构，分页边界上顺序不稳 ⇒ 跨页重复 + 遗漏，**而遗漏那半一声不吭** | 已补 `RECEIVE_OBJECT,RECEIVE_START_DATE,NUM` / `FREE_SHARES_TYPE`，并**当天整段回补完毕**（2026-09-19 12:08–12:36，27 分 51 秒）：`OrgSurvey` 297521 → **297536（补回 15 行，0.005%）**、`HolderChange` 111570 → **111597（+27 行）**、`ShareLift` 全量重取自动补齐。⭐ 顺带是"顺延幂等"的实机证据：这一轮重写 286680 行而净增只有 15 行——顺延若不幂等会长出成千上万副本。今后要再用：【拉取市场事件】模式选「首次整段回补」→【执行】，**跑完改回「增量」** |
@@ -160,21 +160,29 @@
 | granularity | TEXT | `day` / `week` / `month` |
 | period_start | TEXT | 周期起始日＝该期**第一个交易日**（`BarAggregator` 取 `bars[0]`，不是周一/月初：2026 年 8 月的月线是 `08-03`，因为 8-01 是周六） |
 | open / close / high / low | REAL | 开/收/高/低（前复权） |
-| volume | REAL | 成交量（**手**）。三家源口径不同，进库前统一换算，见下方"成交量单位" |
+| volume | REAL | 成交量（**股**；ETF 是份）。2026-10-20 前存**手**，已由【成交量改存股】全表 ×100。三家源口径不同，进库前统一换算，见下方"成交量单位" |
 | amount | REAL | 成交额（元；2026-07-10 前腾讯老接口为 0，已回填） |
 | turnover | REAL | 换手率（%）。⚠ ETF：腾讯大约 2022 年年中以前全是 0；沪市之后口径不统一（2024-10 前多数 ÷前一交易日份额、之后多数 ÷当天份额），深市一直 ÷前一交易日——跑【ETF换手率校正】按 `EtfShare` 统一成「成交量 ÷ 前一交易日份额」 |
 | fetched_at | TEXT | 抓取时刻 |
 | | | **主键** (code, granularity, period_start) |
 
-**成交量单位（2026-09-10 统一）**
+**成交量单位（2026-09-10 统一成手；2026-10-20 改存股）**
 
-`volume` 的单位是**手**（1 手 = 100 股）。这不是自然形成的——三家数据源给的口径根本不同：
+`volume` 的单位是**股**（ETF 是份；指数、板块指数是成分股的股数合计）。2026-10-20 入库单位统一时从"手"改过来
+（`doc/unit-normalization-inventory.md`）：解析出口 `BarVolumeUnit.ToShares` 换算，存量由一次性任务
+【成交量改存股】`StepBarVolumeShares` 全表 ×100（按 rowid 分批、能停能续，做完记 `DataMigration.bar_volume_shares`；
+没做完之前调度器不放行别的任务）。整数在 SQL 里乘、带小数的（科创板历史上的 317113.34 手、板块加总）
+走 decimal，跟新抓的值逐位相同；不碰 `fetched_at`。
 
-| | 主板 / 创业板 / 北交所 | 科创板 688·689 |
+三家数据源给的口径根本不同：
+
+| | 主板 / 创业板 / 北交所 / ETF / 指数 | 科创板 688·689 |
 |---|---|---|
-| 腾讯 | 手 | **股** |
-| 新浪 | **股** | **股** |
-| 东财 | 手 | 手 |
+| 腾讯 | 手（入库 ×100） | **股**（原样） |
+| 新浪 | **股**（原样） | **股**（原样） |
+| 东财 | 手（入库 ×100） | 手（入库 ×100） |
+
+下面是 2026-09-10 统一成手时的经过（当时的目标单位是手，现在是股，道理一样）。
 
 而两个 fetcher 原来把源给的数字原样入库，于是这一列里长期并存两种单位：2026-09-08 那天全市场
 日线，主板 3203 只、创业板 1404 只、北交所 342 只是手，**科创板 613 只是股**，差 100 倍。
@@ -186,7 +194,8 @@
 现在的处置：
 
 - **解析出口归一化**：`Logic/Services/BarVolumeUnit.cs`，判据走 `MarketClassifier`（不许自写代码前缀）
-- **历史修正**：任务【统一成交量单位】`StepFixVolumeUnit`，纯本地、幂等。判据不按代码前缀——
+- **历史修正**：任务【统一成交量单位】`StepFixVolumeUnit`（⚠ **2026-10-20 已退役**：改存股之后它的
+  "比值≈1 就当成按股存、除以 100"会把全库除回手），纯本地、幂等。判据不按代码前缀——
   要修的不止科创板，实测涉及 **616 只**（科创板 613 + 新浪回退掺进来的 3 只）。
   **三组口径三套判据**，决定用哪套的是"这个口径的 close 是不是真实成交价"：
 
@@ -202,8 +211,8 @@
   于是 day 还是股、day_raw 已是手，同一只票两个口径差 100 倍。
   「只有 `day_raw` 的 close 是真实成交价」这句话体检 V6 的注释里本来就写着——写新判据时
   没把它应用过去。教训：**任何拿 close 做分母的判据，先问一句这个口径复权没有。**
-- **体检守着**：`SqliteBarValueAuditor` 的 V6 判据 2026-09-10 收紧，只允许 ≈100；
-  以后任何源再掺进股口径都会被报出来
+- **体检守着**：`SqliteBarValueAuditor` 的 V6 判据 2026-09-10 收紧，只允许一种口径
+  （当时 ≈100；2026-10-20 起存股，区间是 [0.5, 2.5]）；以后任何源再掺进另一种口径（比如 ≈100 的手）都会被报出来
 - **顺带拆掉了新浪回退**（`TencentThenSinaBarFetcher`）：它是股口径混入的路径，
   而实测只触发过 1 次（DNS 抖动），`RateLimiter` 本来就重试 3 次。现在三次都失败进
   【重新拉取失败】名单
@@ -532,7 +541,7 @@
 | market | TEXT | `sh` / `sz`。Bar 里同一只存成 market + code（sh510150 / sz159915） |
 | code | TEXT | 6 位裸码 |
 | trade_date | TEXT | 统计日 `yyyy-MM-dd` |
-| shares_wan | REAL | 总份额，**万份** |
+| shares | REAL | 总份额，**份**（2026-10-20 前列名 `shares_wan`、存万份，已迁移改名；沪市接口给万份 ×1e4，深市导出给的就是份） |
 | fetched_at | TEXT | 抓取时刻 |
 | | | **主键** (code, trade_date)——两市 ETF 代码段不重叠（沪 5 开头、深 1 开头） |
 
@@ -565,7 +574,7 @@ reason 全是"涨幅偏离值达7%的证券"，对应值却分别是当日涨跌
 | close_price | REAL | 收盘价 |
 | deviation | REAL | 对应值（随上榜指标而定）。东财不给，本地派生，来路见 `deviation_source` |
 | volume | REAL | 成交量。**已作废、全表 NULL**，理由见下方"两列缺口" |
-| amount | REAL | 成交额（**万元**；东财的 `ACCUM_AMOUNT` 是元，写库前 ÷1e4） |
+| amount | REAL | 成交额（**元**，东财 `ACCUM_AMOUNT` 原样；2026-10-20 前 ÷1e4 存万元，已迁移）。多日累计类上榜原因是那几天的累计额 |
 | reason | TEXT | 上榜指标。东财源下是**交易所原文**（"有价格涨跌幅限制的日收盘价格涨幅偏离值达到7%的前五只证券"），新浪源下是粗类（"涨幅偏离值达7%的证券"） |
 | fetched_at | TEXT | 抓取时刻 |
 | change_rate | REAL | 当日涨跌幅 %（东财源独有，下同） |
@@ -1038,8 +1047,7 @@ reason 全是"涨幅偏离值达7%的证券"，对应值却分别是当日涨跌
 | org_form | TEXT | 企业性质 |
 | found_date / listing_date | TEXT | 成立日 / 上市日 |
 | listing_state | TEXT | **上市状态**，见下表。这一列是【补全退市名单】的第二个候选来源 |
-| reg_capital_wan | REAL | 注册资本（**万元**） |
-| reg_capital | REAL | 注册资本（**元**） |
+| reg_capital | REAL | 注册资本（**元**，东财 `REG_CAPITALY`） |
 | currency | TEXT | 币种 |
 | province / city / district | TEXT | 地域分析用 |
 | reg_address / address / postcode | TEXT | 注册地 / 办公地 / 邮编 |
@@ -1056,9 +1064,8 @@ reason 全是"涨幅偏离值达7%的证券"，对应值却分别是当日涨跌
 | org_code_em | TEXT | 东财机构号，排查时对得上它那边 |
 | report_date | TEXT | 档案数据截止日 |
 
-⚠ **`reg_capital_wan` 和 `reg_capital` 差 1 万倍**，光看名字看不出来：东财 `REG_CAPITAL`
-是万元、`REG_CAPITALY` 是元。宁德时代 462677.041 万 = 4626770410 元。
-搞反了整份数据的量级就错，而 4.6 亿和 46 亿看起来都"像个正常的注册资本"。
+⚠ 东财 `REG_CAPITAL` 是万元、`REG_CAPITALY` 是元，光看名字看不出来（宁德时代 462677.041 万 = 4626770410 元）。
+只存元那一列；原来的 `reg_capital_wan`（万元）2026-10-20 删了——6050 行全部等于 `reg_capital` ÷ 1e4，纯重复。
 
 ⚠ 全表 7000 行里有港股等非 A 股，按 `SECUCODE` 后缀过滤只留 SH/SZ/BJ（剩 5634，
 库里 6040 含退市股）。
@@ -1284,12 +1291,23 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | confirmed_at | TEXT | 确认时刻 |
 | | | **主键** (dataset, day) |
 
+### DataMigration — 存量数据一次性迁移记账（2026-10-20 新增）
+**写入**：`SqliteDataMigrations.Apply`（每次 `SqliteSchema.EnsureSchema` 末尾调用，Fetcher / Analyzer 谁先启动谁做）。
+改值类迁移（乘两遍就错）跑完记一行、有记录就不再跑；改值和记账在同一个事务里。新库建表时空表也会记上（rows=0）。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| id | TEXT 主键 | 迁移名，见 `doc/unit-normalization-inventory.md`。`unit_batch1`＝入库单位统一第一批（ShareLift / HolderChange / IpoIssue 换成股/元/百分数）；第二批一张表一条：`unit_batch2_lhb`（Lhb.amount 万元→元）、`unit_batch2_lhbseat`（买卖占比→百分数）、`unit_batch2_blocktrade`（premium_ratio→百分数）、`unit_batch2_etfshare`（shares_wan 改名 shares、存份）、`unit_batch2_profile`（删 reg_capital_wan） |
+| applied_at | TEXT | 执行时刻 |
+| rows | INTEGER | 改了多少行（各表合计） |
+
 ### IpoIssue — 新股发行（2026-10-16 新增）
 **写入**：【新股发行】任务（`StockPlatform.Tasks/IpoIssueTask.cs`），设计见 `doc/ipo-issue-design.md`。
 **来源**：东财 datacenter `RPTA_APP_IPOAPPLY`，**全部 151 列一列一个字段**（用户定"取到的全存"）。列名＝东财原名转小写；`SECURITY_CODE` 存成主键 `code`。数值 REAL，文本/日期 TEXT；日期 "yyyy-MM-dd 00:00:00" 存成 yyyy-MM-dd，带具体时刻的原样。列目录在 `Logic/Models/IpoIssue.cs`（拿全量响应生成的）。
 **覆盖**：1990 年起在市的全部 A 股（沪深主板/创业板/科创板 + 北交所，2026-10-16 共 5,640 只），含还没上市的新股；**不含退市股**（338 只只查到 2 只——以后找到数据源一次补，不进程序）、不含吸收合并/换股上市的（600023、000333 等 24 只没有首发）。
 **上市日顺带写进 `StockMeta.list_date`**（只改名册里已有的个股）。跟本地首根日K比：5,520 一致、33 不一致——不一致的是**本地缺了上市头几周的K线**（301371 敷尔佳等 2023-08 上市的创业板股），不是接口错。
 **⚠ 标 🔄 的列是抓取那一刻的值**，每次抓取都覆盖，别当历史数据用；首日开收盘价这类是上市首日的、不会变。
+**单位（2026-10-20 起）**：一律股/元/百分数。接口给万股/万元/亿元的 11 列在解析时换算，存量已一次性迁移（`DataMigration.unit_batch1`），系数和逐行互证依据见 `IpoIssueColumns.UnitFactors`、`doc/unit-normalization-inventory.md`。
 下表"有值"＝2026-10-16 全量 5,640 行里不为空的行数（没写含义的列照东财原名，含义待查证）。
 
 | 字段 | 类型 | 有值 | 含义 |
@@ -1310,7 +1328,7 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | predict_issue_price | REAL | 5281 |  |
 | predict_issue_price1 | REAL | 5281 |  |
 | predict_issue_price2 | REAL | 5281 |  |
-| issue_num | REAL | 5638 | 发行数量（万股） |
+| issue_num | REAL | 5638 | 发行数量（**股**；接口给万股，入库换算 ×1e4） |
 | online_issue_num | REAL | 4394 | 网上发行数量（股） |
 | online_apply_upper | REAL | 4141 | 网上申购上限（股） |
 | after_issue_pe | REAL | 5221 | 发行市盈率 |
@@ -1319,21 +1337,21 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | industry_pe_ratio | REAL | 2994 |  |
 | industry_pe | REAL | 5238 | 行业市盈率 |
 | online_issue_lwr | REAL | 5080 | 网上中签率（%） |
-| total_raise_funds | REAL | 5144 | 募资总额（亿元） |
+| total_raise_funds | REAL | 5144 | 募资总额（**元**；接口亿元，×1e8；北交所为空） |
 | issue_way | TEXT | 5280 | 发行方式 |
 | industry_code | TEXT | 3011 |  |
-| offline_vap_ratio | REAL | 3723 |  |
+| offline_vap_ratio | REAL | 3723 | 网下配售比例（%；＝网下配售量÷网下有效申购量×100，3677 行吻合） |
 | offline_vas_multiple | REAL | 3726 |  |
 | online_va_num | REAL | 4387 |  |
 | offline_vap_object | REAL | 3729 |  |
-| online_va_shares | REAL | 4387 |  |
-| offline_vats | REAL | 3729 |  |
+| online_va_shares | REAL | 4387 | 网上有效申购股数（**股**；⚠ 接口沪深给万股、北交所给股，沪深 ×1e4） |
+| offline_vats | REAL | 3729 | 网下有效申购股数（**股**；接口万股，×1e4；换完＝offline_vats_nonunit） |
 | offline_placing_upper | REAL | 3668 |  |
 | ballot_num | TEXT | 4030 |  |
-| total_apply_num | REAL | 3049 |  |
+| total_apply_num | REAL | 3049 | 网下询价申购总量（**股**；接口万股，×1e4） |
 | initial_multiple | REAL | 3042 | 初步询价倍数 |
 | offline_placing_num | REAL | 3690 |  |
-| top_apply_marketcap | REAL | 4141 |  |
+| top_apply_marketcap | REAL | 4141 | 顶格申购需配市值（**元**；接口万元，×1e4；北交所＝申购资金上限） |
 | mzyq_pay_fund | REAL | 5279 |  |
 | industry_name | TEXT | 2953 | 所属行业 |
 | market_cap_confirmdate | TEXT | 5282 |  |
@@ -1348,7 +1366,7 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | bvps | REAL | 3269 | 每股净资产 |
 | security_name | TEXT | 5640 | 证券简称 |
 | total_change | REAL | 5621 |  |
-| profit | REAL | 5269 |  |
+| profit | REAL | 5269 | 每签（500 股）收益（元） |
 | continuous_1word_num | TEXT | 3849 |  |
 | market_type | TEXT | 5640 |  |
 | limit_up_price | REAL | 5282 | 上市首日涨停价 |
@@ -1377,9 +1395,9 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | eachballot_shares | TEXT | 5282 | 每签股数 |
 | up_date 🔄 | TEXT（日期） | 5282 | 东财更新日（＝抓取当天） |
 | predict_onapply_upper | REAL | 4036 |  |
-| predict_onfund_upper | REAL | 4036 |  |
+| predict_onfund_upper | REAL | 4036 | 预计顶格申购资金（元） |
 | par_value | REAL | 5273 | 面值 |
-| orig_transfer_num | REAL | 66 |  |
+| orig_transfer_num | REAL | 66 | 老股转让数量（股） |
 | freecap_avg_date | TEXT（日期） | 2556 |  |
 | page_predict_price1 | REAL | 9 |  |
 | page_predict_price2 | REAL | 9 |  |
@@ -1392,7 +1410,7 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | apply_date_num 🔄 | REAL | 5640 | 申购至今天数 |
 | industry_pe_new | REAL | 5604 | 行业市盈率（新口径） |
 | continuous_1word_px | REAL | 3870 |  |
-| total_issue_num | REAL | 5640 |  |
+| total_issue_num | REAL | 5640 | 发行总数（**股**；接口万股，×1e4） |
 | online_es_multiple | REAL | 4386 |  |
 | issue_way_explain | TEXT | 5279 |  |
 | price_way | TEXT | 358 |  |
@@ -1401,7 +1419,7 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | online_pay_date | TEXT（日期） | 358 |  |
 | online_refund_date | TEXT（日期） | 358 |  |
 | is_beijing | REAL | 5640 | 是否北交所（1/0） |
-| per_shares_income | REAL | 355 |  |
+| per_shares_income | REAL | 355 | 每签（100 股）收益（元，只有北交所） |
 | online_issue_ratio | REAL | 357 |  |
 | offfline_initial_multiple | REAL | 45 |  |
 | newest_price 🔄 | REAL | 0 |  |
@@ -1409,15 +1427,15 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | type | TEXT | 5640 |  |
 | amplitude | REAL | 5629 |  |
 | review_date | TEXT（日期） | 4077 | 上会/审核日 |
-| predict_raise_funds | REAL | 4966 |  |
+| predict_raise_funds | REAL | 4966 | 预计募资（**元**；接口亿元，×1e8） |
 | total_shares | REAL | 5282 | 发行后总股本（股） |
 | recommend_org | TEXT | 5238 | 保荐机构 |
 | underwriter_org | TEXT | 5229 | 主承销商 |
 | security_name_full | TEXT | 5282 | 公司全称 |
 | issue_state | TEXT | 5282 |  |
-| netflowin | REAL | 3682 |  |
+| netflowin | REAL | 3682 | （元；含义待查证） |
 | ipo_yield | REAL | 5272 |  |
-| freeze_fund | REAL | 1400 |  |
+| freeze_fund | REAL | 1400 | 冻结资金（元） |
 | board_code | TEXT | 5281 |  |
 | is_registration | TEXT | 5640 |  |
 | trade_market_cst | TEXT | 5640 |  |
@@ -1430,19 +1448,19 @@ K线族之前：名册刚刷新完，算出来的候选最准，而新摘牌的�
 | is_1year 🔄 | REAL | 5640 |  |
 | is_calendar_data | TEXT | 5282 |  |
 | security_name_abbr | TEXT | 5640 |  |
-| offline_vats_nonunit | REAL | 3684 |  |
-| online_vashares_nonunit | REAL | 4030 |  |
-| enquiry_share_num | REAL | 3049 |  |
+| offline_vats_nonunit | REAL | 3684 | 网下有效申购股数（股） |
+| online_vashares_nonunit | REAL | 4030 | 网上有效申购股数（股，只有沪深） |
+| enquiry_share_num | REAL | 3049 | 网下询价申购股数（股） |
 | is_riskwarning | REAL | 5282 |  |
-| netsumfina | REAL | 5483 |  |
-| dec_sumfina | REAL | 5503 |  |
+| netsumfina | REAL | 5483 | 实际募资净额（**元**；⚠ 同上，沪深 ×1e8、北交所不动） |
+| dec_sumfina | REAL | 5503 | 实际募资总额（**元**；⚠ 接口沪深给亿元、北交所给元，沪深 ×1e8、北交所不动） |
 | tnew_price 🔄 | REAL | 5640 | 最新价 |
 | tchange_rate 🔄 | REAL | 5640 | 相对发行价累计涨幅（%） |
 | is_registration_new | TEXT | 5640 |  |
 | is_profit | TEXT | 5282 |  |
 | star_sign | TEXT | 5281 |  |
 | online_apply_lower | REAL | 358 |  |
-| apply_amt_upper | REAL | 358 |  |
+| apply_amt_upper | REAL | 358 | 申购资金上限（**元**；接口万元，×1e4；只有北交所） |
 | offfline_initial_multiple_bj | REAL | 45 |  |
 | is_1year_apply 🔄 | REAL | 5640 |  |
 | fetched_at | TEXT | | 写入时刻 |

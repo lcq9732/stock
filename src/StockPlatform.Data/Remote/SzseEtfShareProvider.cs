@@ -4,6 +4,7 @@ using System.Text;
 using ExcelDataReader;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Remote;
 
@@ -118,9 +119,10 @@ public class SzseEtfShareProvider : IEtfShareProvider
             throw new InvalidOperationException(
                 $"深交所基金规模 xlsx 表头变了：{string.Join(" | ", Enumerable.Range(0, reader.FieldCount).Select(i => Cell(reader, i)))}");
         var sizeHeader = Cell(reader, 3);
-        double perWan = sizeHeader.Contains("万份") ? 1
-                      : sizeHeader.Contains("份") ? 1e4
-                      : throw new InvalidOperationException($"深交所基金规模 xlsx 的规模列单位认不出来：{sizeHeader}");
+        // 入库存份（2026-10-20 起；之前存万份）。表头写万份就 ×1e4，写份就原样。
+        decimal toShares = sizeHeader.Contains("万份") ? UnitScale.Wan
+                         : sizeHeader.Contains("份") ? 1m
+                         : throw new InvalidOperationException($"深交所基金规模 xlsx 的规模列单位认不出来：{sizeHeader}");
 
         var rows = new List<EtfShareRow>();
         while (reader.Read())
@@ -137,7 +139,7 @@ public class SzseEtfShareProvider : IEtfShareProvider
             if (!double.TryParse(Cell(reader, 3).Replace(",", ""), NumberStyles.Float,
                     CultureInfo.InvariantCulture, out var size) || size <= 0)
                 continue;
-            rows.Add(new EtfShareRow("sz", code, day, size / perWan));
+            rows.Add(new EtfShareRow("sz", code, day, UnitScale.Apply(size, toShares)));
         }
         return rows;
     }

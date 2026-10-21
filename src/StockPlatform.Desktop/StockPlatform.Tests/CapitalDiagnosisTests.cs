@@ -323,8 +323,8 @@ public class CapitalDiagnosisTests
             {
                 // 一大笔平价 + 两小笔深折价，加权后应当仍是平价
                 new() { TradeDate = day, DealAmount = 10e8, PremiumRatio = 0, BuyerName = "机构专用", SellerName = "机构专用" },
-                new() { TradeDate = day, DealAmount = 288e4, PremiumRatio = -0.187 },
-                new() { TradeDate = day, DealAmount = 288e4, PremiumRatio = -0.187 },
+                new() { TradeDate = day, DealAmount = 288e4, PremiumRatio = -18.7 },   // 百分数（2026-10-20 起）
+                new() { TradeDate = day, DealAmount = 288e4, PremiumRatio = -18.7 },
             },
         };
 
@@ -350,7 +350,7 @@ public class CapitalDiagnosisTests
             BlockTrades = new List<BlockTrade>
             {
                 new() { TradeDate = day, DealAmount = 997e6, PremiumRatio = 0 },
-                new() { TradeDate = day, DealAmount = 3e6, PremiumRatio = -0.187 },
+                new() { TradeDate = day, DealAmount = 3e6, PremiumRatio = -18.7 },
             },
         };
 

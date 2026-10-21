@@ -14,7 +14,7 @@ namespace StockPlatform.Tests;
 /// 换源这件事的全部风险都在**口径**上，手编样本只会把口径写成自己以为的样子。
 ///
 /// 三类各盯一件事：
-///   · <b>解析</b>：单位换算（东财给元、库里存万元）和滞后字段的 null。
+///   · <b>解析</b>：单位（东财给元、库里也存元——2026-10-20 前存万元）和滞后字段的 null。
 ///   · <b>等价</b>：同一天同一只票，东财解析出来的值跟库里新浪那份历史对得上——
 ///     这是"敢换"的依据，钉在测试里，将来谁改了解析口径这条会红。
 ///   · <b>派生</b>：东财不给"对应值"和"成交量"，本地怎么算的。每条规则的命中率都在
@@ -69,14 +69,13 @@ public class LhbEastMoneySourceTests
     }
 
     /// <summary>
-    /// 成交额：东财 <c>ACCUM_AMOUNT</c> 是**元**，库里这一列历史上存的是**万元**（新浪口径）。
-    /// 不换算的话同一列里会并存两个量纲，而且差 10000 倍这种错在图表上一眼看不出来——
-    /// 只会让所有按成交额排序/筛选的分析悄悄失真。
+    /// 成交额：东财 <c>ACCUM_AMOUNT</c> 是**元**，原样存元（2026-10-20 起入库统一存基本单位；
+    /// 之前 ÷1e4 存万元跟新浪老口径对齐，个股档案拿它当元显示，21.79 亿显示成了"21.79万"）。
     /// </summary>
     [Fact]
-    public void ConvertsAmountToWanYuan()
+    public void StoresAmountInYuan()
     {
-        Assert.Equal(217921.248, Parse(RowJson).Amount, 3);
+        Assert.Equal(2179212480d, Parse(RowJson).Amount);
     }
 
     /// <summary>东财这张表没有"对应值"和"成交量"两列，provider 一律留 null 不瞎填——
@@ -133,7 +132,7 @@ public class LhbEastMoneySourceTests
         var r = Parse(RowJson);
 
         Assert.Equal(sinaClose, r.ClosePrice);
-        Assert.Equal(sinaAmountWan, r.Amount, 3);
+        Assert.Equal(sinaAmountWan * 1e4, r.Amount, 0);   // 新浪给万元，库里存元
     }
 
     /// <summary>

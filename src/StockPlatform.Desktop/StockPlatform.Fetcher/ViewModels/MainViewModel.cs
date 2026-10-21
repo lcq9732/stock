@@ -1370,6 +1370,9 @@ public class MainViewModel : INotifyPropertyChanged
         _planTimer.Start();
         RecalcTimeline();
 
+        // 排在自动开始计划之前：计划先起来也没关系（别的任务会被准入闸记成没开工），但先排它日志更顺
+        QueueBarVolumeMigrationIfPending();
+
         if (_plan.AutoStartOnLaunch)
         {
             // 等界面真正显示出来再开始，别在构造函数里就发起网络请求
@@ -1381,6 +1384,39 @@ public class MainViewModel : INotifyPropertyChanged
                 }),
                 DispatcherPriority.ApplicationIdle);
         }
+    }
+
+    /// <summary>
+    /// 【成交量改存股】还没做完就自动开跑（2026-10-20，用户定"新版打开后自动排第一"）。
+    /// 它是一次性的整表迁移：没做完之前准入闸（BarVolumeMigrationGate）不放行任何别的任务，
+    /// 所以不能等人去点——不跑它，计划里每一项都只会记成"本轮没开工"。
+    /// 做完之后这里每次启动只是查一下 DataMigration，不会再跑。
+    /// </summary>
+    private void QueueBarVolumeMigrationIfPending()
+    {
+        bool done;
+        try
+        {
+            done = new SqliteBarVolumeMigration(_paths.CurrentDb).IsDone();
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ 查【成交量改存股】做没做完时出错：{ex.Message}");
+            return;
+        }
+        if (done) return;
+
+        var vm = PlanItems.FirstOrDefault(x => x.Model.Action == FetchActionId.StepBarVolumeShares);
+        if (vm == null)
+        {
+            Log("⚠【成交量改存股】还没做完，但计划里找不到这一项——别的任务会一直不开工，请检查计划文件。");
+            return;
+        }
+        Log("检测到【成交量改存股】还没做完（Bar.volume 手 → 股，一次性、纯本地）：马上自动开跑，"
+            + "做完之前别的任务不开工。迁移期间请别开分析程序。");
+        Dispatcher.CurrentDispatcher.BeginInvoke(
+            new Action(async () => await RunPlanItemCoreAsync(vm, "自动执行")),
+            DispatcherPriority.ApplicationIdle);
     }
 
     /// <summary>

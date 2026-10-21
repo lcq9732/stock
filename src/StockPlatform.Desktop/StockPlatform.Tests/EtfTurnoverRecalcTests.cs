@@ -72,35 +72,35 @@ public class EtfTurnoverRecalcTests : IDisposable
     [Fact]
     public void 期望值_按前一交易日份额算_对上腾讯前复权()
     {
-        Assert.Equal(83.63, EtfTurnoverRule.Expected(16_919_316, 202_317.86));
+        Assert.Equal(83.63, EtfTurnoverRule.Expected(1_691_931_600, 2_023_178_600.0));
         // 除以当天份额得到的正是不复权接口那天给的值
-        Assert.Equal(48.38, EtfTurnoverRule.Expected(16_919_316, 349_717.86));
+        Assert.Equal(48.38, EtfTurnoverRule.Expected(1_691_931_600, 3_497_178_600.0));
     }
 
     [Theory]
-    [InlineData(16_919_316.0, 83.63, 202_317.86, EtfTurnoverVerdict.Consistent)]
-    [InlineData(16_919_316.0, 83.62, 202_317.86, EtfTurnoverVerdict.Consistent)]   // 末位差一格算一致
-    [InlineData(16_919_316.0, 48.38, 202_317.86, EtfTurnoverVerdict.Wrong)]
-    [InlineData(16_919_316.0, 0.0, 202_317.86, EtfTurnoverVerdict.Missing)]
-    [InlineData(16_919_316.0, 83.63, null, EtfTurnoverVerdict.Unjudgeable)]
-    [InlineData(0.0, 0.0, 202_317.86, EtfTurnoverVerdict.NotApplicable)]
-    [InlineData(1.0, 0.0, 202_317.86, EtfTurnoverVerdict.Consistent)]            // 期望值本身就是 0.00
+    [InlineData(1_691_931_600.0, 83.63, 2_023_178_600.0, EtfTurnoverVerdict.Consistent)]
+    [InlineData(1_691_931_600.0, 83.62, 2_023_178_600.0, EtfTurnoverVerdict.Consistent)]   // 末位差一格算一致
+    [InlineData(1_691_931_600.0, 48.38, 2_023_178_600.0, EtfTurnoverVerdict.Wrong)]
+    [InlineData(1_691_931_600.0, 0.0, 2_023_178_600.0, EtfTurnoverVerdict.Missing)]
+    [InlineData(1_691_931_600.0, 83.63, null, EtfTurnoverVerdict.Unjudgeable)]
+    [InlineData(0.0, 0.0, 2_023_178_600.0, EtfTurnoverVerdict.NotApplicable)]
+    [InlineData(1.0, 0.0, 2_023_178_600.0, EtfTurnoverVerdict.Consistent)]            // 期望值本身就是 0.00
     public void 判据_五种结果(double volume, double stored, double? prevShare, EtfTurnoverVerdict want)
         => Assert.Equal(want, EtfTurnoverRule.Judge(volume, stored, prevShare));
 
     [Fact]
     public void 判据_库里是NULL也算空值()
-        => Assert.Equal(EtfTurnoverVerdict.Missing, EtfTurnoverRule.Judge(16_919_316, null, 202_317.86));
+        => Assert.Equal(EtfTurnoverVerdict.Missing, EtfTurnoverRule.Judge(1_691_931_600, null, 2_023_178_600.0));
 
     // ─────────────────── 任务（真 SQLite）───────────────────
 
     [Fact]
     public async Task 日常增量_补份额_只报告不写库()
     {
-        SaveEtfBars(D0930, volume: 16_919_316, dayTurnover: 83.63, rawTurnover: 48.38);
+        SaveEtfBars(D0930, volume: 1_691_931_600, dayTurnover: 83.63, rawTurnover: 48.38);
         var provider = new FakeProvider()
-            .With(D0927, ("510150", 202_317.86))
-            .With(D0930, ("510150", 349_717.86))
+            .With(D0927, ("510150", 2_023_178_600.0))
+            .With(D0930, ("510150", 3_497_178_600.0))
             .With(D1008, ("510150", 397_117.86));
 
         var task = NewTask(provider);
@@ -116,10 +116,10 @@ public class EtfTurnoverRecalcTests : IDisposable
     [Fact]
     public async Task 彻底重查_错值改对_只动换手率()
     {
-        SaveEtfBars(D0930, volume: 16_919_316, dayTurnover: 83.63, rawTurnover: 48.38);
+        SaveEtfBars(D0930, volume: 1_691_931_600, dayTurnover: 83.63, rawTurnover: 48.38);
         var task = NewTask(new FakeProvider()
-            .With(D0927, ("510150", 202_317.86))
-            .With(D0930, ("510150", 349_717.86)));
+            .With(D0927, ("510150", 2_023_178_600.0))
+            .With(D0930, ("510150", 3_497_178_600.0)));
 
         await task.RunAsync(new TaskRunArgs(FetchMode.Thorough), CancellationToken.None);
 
@@ -129,18 +129,18 @@ public class EtfTurnoverRecalcTests : IDisposable
         Assert.Equal(83.63, ReadTurnover("sh510150", Granularity.Day, D0930));
         var (open, volume, amount) = ReadOthers("sh510150", Granularity.DayRaw, D0930);
         Assert.Equal(0.602, open);
-        Assert.Equal(16_919_316, volume);
+        Assert.Equal(1_691_931_600, volume);
         Assert.Equal(956_041_900, amount);
     }
 
     [Fact]
     public async Task 彻底重查_空值补上_没成交的0不动()
     {
-        SaveEtfBars(D0930, volume: 16_919_316, dayTurnover: 0, rawTurnover: 0);
+        SaveEtfBars(D0930, volume: 1_691_931_600, dayTurnover: 0, rawTurnover: 0);
         SaveEtfBars(D1008, volume: 0, dayTurnover: 0, rawTurnover: 0);
         var task = NewTask(new FakeProvider()
-            .With(D0927, ("510150", 202_317.86))
-            .With(D0930, ("510150", 349_717.86)));
+            .With(D0927, ("510150", 2_023_178_600.0))
+            .With(D0930, ("510150", 3_497_178_600.0)));
 
         await task.RunAsync(new TaskRunArgs(FetchMode.Thorough), CancellationToken.None);
 
@@ -154,7 +154,7 @@ public class EtfTurnoverRecalcTests : IDisposable
     public async Task 没有前一交易日份额_判不了_原样不动()
     {
         // 09-27 是日历第一天：它没有前一交易日
-        SaveEtfBars(D0927, volume: 2_166_324, dayTurnover: 11.17, rawTurnover: 0);
+        SaveEtfBars(D0927, volume: 216_632_400, dayTurnover: 11.17, rawTurnover: 0);
         var task = NewTask(new FakeProvider().With(D0927, ("510150", 193_917.86)));
 
         await task.RunAsync(new TaskRunArgs(FetchMode.Thorough), CancellationToken.None);
@@ -167,8 +167,8 @@ public class EtfTurnoverRecalcTests : IDisposable
     [Fact]
     public async Task 已有份额的日子不再请求()
     {
-        _shares.Upsert([new EtfShareRow("sh", "510150", D0927, 202_317.86)]);
-        var provider = new FakeProvider().With(D0930, ("510150", 349_717.86)).With(D1008, ("510150", 1));
+        _shares.Upsert([new EtfShareRow("sh", "510150", D0927, 2_023_178_600.0)]);
+        var provider = new FakeProvider().With(D0930, ("510150", 3_497_178_600.0)).With(D1008, ("510150", 1));
 
         await NewTask(provider).RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
 
@@ -217,7 +217,7 @@ public class EtfTurnoverRecalcTests : IDisposable
         // 货币 ETF 不在上交所「ETF 规模」接口里：不报的话它们的换手率会安安静静停在 0
         ExecSql("INSERT INTO StockMeta (code, name, type) VALUES ('sh510150', '消费ETF招商', 'etf'), "
               + "('sh511620', '货币ETF国泰', 'etf');");
-        var task = NewTask(new FakeProvider().With(D0927, ("510150", 202_317.86)));
+        var task = NewTask(new FakeProvider().With(D0927, ("510150", 2_023_178_600.0)));
 
         await task.RunAsync(new TaskRunArgs(FetchMode.Incremental), CancellationToken.None);
 
@@ -228,10 +228,10 @@ public class EtfTurnoverRecalcTests : IDisposable
     public async Task 深市_按月请求_Bar代码是sz加代码_补上空值()
     {
         // 159915 创业板ETF：2024-09-30 份额 4,256,845.4936 万份（深交所导出 42,568,454,936 份）
-        SaveEtfBars(D1008, volume: 5_000_000, dayTurnover: 0, rawTurnover: 0, code: "sz159915");
+        SaveEtfBars(D1008, volume: 500_000_000, dayTurnover: 0, rawTurnover: 0, code: "sz159915");
         var sz = new FakeProvider("sz", new DateOnly(2016, 9, 26), EtfShareBatch.Month)
-            .With(D0927, ("159915", 4_200_000))
-            .With(D0930, ("159915", 4_256_845.4936));
+            .With(D0927, ("159915", 42_000_000_000))
+            .With(D0930, ("159915", 42_568_454_936));          // 份（2026-10-20 起入库存份）
         var task = NewTask(new FakeProvider(), sz);
 
         await task.RunAsync(new TaskRunArgs(FetchMode.Thorough), CancellationToken.None);
@@ -269,14 +269,14 @@ public class EtfTurnoverRecalcTests : IDisposable
     }
 
     [Fact]
-    public void 解析深交所_真实导出样本_单位份换算成万份()
+    public void 解析深交所_真实导出样本_单位份原样存份()
     {
         var rows = SzseEtfShareProvider.Parse(Convert.FromBase64String(SzseSampleXlsxBase64), D0930, D0930);
         Assert.Equal(3, rows.Count);
         var cyb = rows.Single(r => r.Code == "159915");
         Assert.Equal("sz", cyb.Market);
         Assert.Equal("sz159915", cyb.BarCode);
-        Assert.Equal(4_256_845.4936, cyb.SharesWan, 6);
+        Assert.Equal(42_568_454_936d, cyb.Shares);        // 表头"基金规模(份)"，原样存份（2026-10-20 起）
         Assert.Contains(rows, r => r.Code == "159001");   // 货币 ETF 深交所是列的
     }
 
@@ -303,7 +303,7 @@ public class EtfTurnoverRecalcTests : IDisposable
             """;
         var rows = SseEtfShareProvider.Parse(json, D0930);
         Assert.Equal(2, rows.Count);
-        Assert.Equal(new EtfShareRow("sh", "510150", D0930, 349_717.86), rows[0]);
+        Assert.Equal(new EtfShareRow("sh", "510150", D0930, 3_497_178_600.0), rows[0]);
     }
 
     [Fact]
@@ -358,9 +358,9 @@ public class EtfTurnoverRecalcTests : IDisposable
     [Fact]
     public async Task 只补待办_按本地份额写回_移出名单_不联网()
     {
-        SaveEtfBars(D0930, volume: 16_919_316, dayTurnover: 83.63, rawTurnover: 48.38);
-        _shares.Upsert([new EtfShareRow("sh", "510150", D0927, 202_317.86),
-                        new EtfShareRow("sh", "510150", D0930, 349_717.86)]);
+        SaveEtfBars(D0930, volume: 1_691_931_600, dayTurnover: 83.63, rawTurnover: 48.38);
+        _shares.Upsert([new EtfShareRow("sh", "510150", D0927, 2_023_178_600.0),
+                        new EtfShareRow("sh", "510150", D0930, 3_497_178_600.0)]);
         var store = NewManifest(Todo0930());
         var provider = new FakeProvider();
 
@@ -378,7 +378,7 @@ public class EtfTurnoverRecalcTests : IDisposable
     [Fact]
     public async Task 只补待办_份额没了修不好_留在名单且Tries加一()
     {
-        SaveEtfBars(D0930, volume: 16_919_316, dayTurnover: 83.63, rawTurnover: 48.38);
+        SaveEtfBars(D0930, volume: 1_691_931_600, dayTurnover: 83.63, rawTurnover: 48.38);
         var store = NewManifest(Todo0930());    // 本地一条份额都没有
 
         await NewBacklogTask(store, new FakeProvider())
@@ -471,9 +471,9 @@ public class EtfTurnoverRecalcTests : IDisposable
         public event Action<string>? OnStatus;
 #pragma warning restore CS0067
 
-        public FakeProvider With(DateOnly day, params (string Code, double Wan)[] rows)
+        public FakeProvider With(DateOnly day, params (string Code, double Shares)[] rows)
         {
-            _byDay[day] = rows.Select(r => new EtfShareRow(market, r.Code, day, r.Wan)).ToList();
+            _byDay[day] = rows.Select(r => new EtfShareRow(market, r.Code, day, r.Shares)).ToList();
             return this;
         }
 

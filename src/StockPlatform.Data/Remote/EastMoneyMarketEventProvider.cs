@@ -1,6 +1,7 @@
 ﻿using System.Globalization;
 using System.Text.Json;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Remote;
 
@@ -143,28 +144,7 @@ public class EastMoneyMarketEventProvider : IBlockTradeDayFetcher
             await foreach (var el in _dc.QueryAsync(
                 "RPT_LIFT_STAGE", filter, "FREE_DATE,SECURITY_CODE,FREE_SHARES_TYPE", ct: ct))
             {
-                var code = Str(el, "SECURITY_CODE");
-                var d = Date(el, "FREE_DATE");
-                if (code.Length == 0 || d == null) continue;
-                rows.Add(new ShareLift
-                {
-                    Code = code,
-                    Name = Str(el, "SECURITY_NAME_ABBR"),
-                    FreeDate = d.Value,
-                    ShareType = Str(el, "FREE_SHARES_TYPE"),
-                    LiftShares = Num(el, "CURRENT_FREE_SHARES"),
-                    LiftMarketCap = Num(el, "LIFT_MARKET_CAP"),
-                    FreeRatio = Num(el, "FREE_RATIO"),
-                    TotalRatio = Num(el, "TOTALSHARES_RATIO") ?? Num(el, "TOTAL_RATIO"),
-                    HolderCount = (int?)Num(el, "BATCH_HOLDER_NUM"),
-                    // FREE_SHARES 是解禁**前**的已流通股数（FreeRatio 的分母），别跟
-                    // CURRENT_FREE_SHARES（本次解禁股数，上面的 LiftShares）弄混。
-                    PreFreeShares = Num(el, "FREE_SHARES"),
-                    NonFreeShares = Num(el, "NON_FREE_SHARES"),
-                    Before20Change = Num(el, "B20_ADJCHRATE"),
-                    After20Change = Num(el, "A20_ADJCHRATE"),
-                    FetchedAt = DateTime.Now,
-                });
+                if (ParseShareLift(el) is { } row) rows.Add(row);
             }
             int written = rows.Count > 0 ? onBatch(rows) : 0;
             total += written;
@@ -207,7 +187,8 @@ public class EastMoneyMarketEventProvider : IBlockTradeDayFetcher
             DealPrice = Num(el, "DEAL_PRICE"),
             DealVolume = Num(el, "DEAL_VOLUME"),
             DealAmount = Num(el, "DEAL_AMT"),
-            PremiumRatio = Num(el, "PREMIUM_RATIO"),
+            // 接口给小数（0.075），入库存百分数（2026-10-20，doc/unit-normalization-inventory.md）
+            PremiumRatio = UnitScale.Apply(Num(el, "PREMIUM_RATIO"), UnitScale.Percent),
             ClosePrice = Num(el, "CLOSE_PRICE"),
             ChangeRate = Num(el, "CHANGE_RATE"),
             TurnoverRate = Num(el, "TURNOVER_RATE"),
@@ -227,6 +208,35 @@ public class EastMoneyMarketEventProvider : IBlockTradeDayFetcher
         };
     }
 
+    /// <summary>限售解禁一行 → <see cref="ShareLift"/>（没有代码或解禁日的行返回 null）。</summary>
+    private static ShareLift? ParseShareLift(JsonElement el)
+    {
+        var code = Str(el, "SECURITY_CODE");
+        var d = Date(el, "FREE_DATE");
+        if (code.Length == 0 || d == null) return null;
+        return new ShareLift
+        {
+            Code = code,
+            Name = Str(el, "SECURITY_NAME_ABBR"),
+            FreeDate = d.Value,
+            ShareType = Str(el, "FREE_SHARES_TYPE"),
+            // 入库存基本单位（2026-10-20，doc/unit-normalization-inventory.md）：
+            // 接口给万股/万元/小数，这里换成股/元/百分数。
+            LiftShares = UnitScale.Apply(Num(el, "CURRENT_FREE_SHARES"), UnitScale.Wan),
+            LiftMarketCap = UnitScale.Apply(Num(el, "LIFT_MARKET_CAP"), UnitScale.Wan),
+            FreeRatio = UnitScale.Apply(Num(el, "FREE_RATIO"), UnitScale.Percent),
+            TotalRatio = UnitScale.Apply(Num(el, "TOTALSHARES_RATIO") ?? Num(el, "TOTAL_RATIO"), UnitScale.Percent),
+            HolderCount = (int?)Num(el, "BATCH_HOLDER_NUM"),
+            // FREE_SHARES 是解禁**前**的已流通股数（FreeRatio 的分母），别跟
+            // CURRENT_FREE_SHARES（本次解禁股数，上面的 LiftShares）弄混。
+            PreFreeShares = UnitScale.Apply(Num(el, "FREE_SHARES"), UnitScale.Wan),
+            NonFreeShares = UnitScale.Apply(Num(el, "NON_FREE_SHARES"), UnitScale.Wan),
+            Before20Change = Num(el, "B20_ADJCHRATE"),
+            After20Change = Num(el, "A20_ADJCHRATE"),
+            FetchedAt = DateTime.Now,
+        };
+    }
+
     /// <summary>股东增减持一行的解析。提成命名方法的理由同 <see cref="ParseBlockTrade"/>。</summary>
     private static HolderChange? ParseHolderChange(JsonElement el)
     {
@@ -240,13 +250,14 @@ public class EastMoneyMarketEventProvider : IBlockTradeDayFetcher
             NoticeDate = d.Value,
             HolderName = Str(el, "HOLDER_NAME"),
             Direction = Str(el, "DIRECTION"),
-            ChangeShares = Num(el, "CHANGE_NUM_SYMBOL") ?? Num(el, "CHANGE_NUM"),
+            // 接口给万股，入库存股（2026-10-20，doc/unit-normalization-inventory.md）。
+            ChangeShares = UnitScale.Apply(Num(el, "CHANGE_NUM_SYMBOL") ?? Num(el, "CHANGE_NUM"), UnitScale.Wan),
             // ⚠ 不是 CHANGE_RATE——那是**公告日的股价涨跌幅**，跟增减持方向无关
             // （实测 2026-08-25 起 200 条：34 只"增持"里 15 只为负、166 只"减持"里 97 只为正，
             // 还有增持而值为 0 的）。AFTER_CHANGE_RATE 才是变动占总股本的比例：
             // 002203 增持 1519.76 万股 ÷ 0.663142% = 22.9 亿总股本，与实际吻合。
             ChangeRatio = Num(el, "AFTER_CHANGE_RATE"),
-            AfterShares = Num(el, "AFTER_HOLDER_NUM"),
+            AfterShares = UnitScale.Apply(Num(el, "AFTER_HOLDER_NUM"), UnitScale.Wan),
             AfterRatio = Num(el, "HOLD_RATIO"),
             StartDate = Date(el, "START_DATE"),
             EndDate = Date(el, "END_DATE"),

@@ -112,6 +112,51 @@ public class IpoIssueTests : IDisposable
         Assert.Contains("NEW_COLUMN_X", stats.UnknownColumns);
     }
 
+    /// <summary>
+    /// 入库单位（2026-10-20，doc/unit-normalization-inventory.md）：万股/万元/亿元换成股/元；
+    /// 沪深和北交所单位不同的三列按 IS_BEIJING 分开换。值都是样本里的原始数，精确相等（按 decimal 乘，没有浮点尾巴）。
+    /// </summary>
+    [Fact]
+    public void 万股万元亿元换成股和元_沪深北交所分开换()
+    {
+        var rows = Rows().ToDictionary(r => r.Code);
+        var zg = rows["002051"];                                    // 深市
+        Assert.Equal(60_000_000d, zg["ISSUE_NUM"]);                 // 6000 万股
+        Assert.Equal(60_000_000d, zg["TOTAL_ISSUE_NUM"]);
+        Assert.Equal(444_000_000d, zg["TOTAL_RAISE_FUNDS"]);        // 4.44 亿元
+        Assert.Equal(419_640_000d, zg["PREDICT_RAISE_FUNDS"]);      // 4.1964 亿元
+        Assert.Equal(444_000_000d, zg["DEC_SUMFINA"]);              // 沪深：亿元
+        Assert.Equal(422_704_100d, zg["NETSUMFINA"]);               // 4.227041 亿元
+        Assert.Equal(1_241_900_000d, zg["OFFLINE_VATS"]);           // 124190 万股 ＝ 同一行的 OFFLINE_VATS_NONUNIT
+        Assert.Equal(zg["OFFLINE_VATS_NONUNIT"], zg["OFFLINE_VATS"]);
+        Assert.Equal(zg["ONLINE_VASHARES_NONUNIT"], zg["ONLINE_VA_SHARES"]);   // 沪深：万股
+        Assert.Equal(8.3, rows["600285"].IssuePrice);               // 已经是元的不动
+
+        var hg = rows["001381"];
+        Assert.Equal(56_304_768d, hg["ISSUE_NUM"]);                 // 5630.4768 万股
+        Assert.Equal(168_858_800_000d, hg["TOTAL_APPLY_NUM"]);      // 16885880 万股
+        Assert.Equal(135_000d, hg["TOP_APPLY_MARKETCAP"]);          // 13.5 万元
+
+        var bj = rows["920229"];                                    // 北交所
+        Assert.Equal(11_000_000d, bj["ISSUE_NUM"]);                 // 1100 万股，跟沪深一样换
+        Assert.Equal(7_325_725d, bj["TOP_APPLY_MARKETCAP"]);        // 732.5725 万元
+        Assert.Equal(7_325_725d, bj["APPLY_AMT_UPPER"]);
+        Assert.Equal(172_370_000d, bj["DEC_SUMFINA"]);              // 北交所本来就是元：不动
+        Assert.Equal(148_708_374.56, bj["NETSUMFINA"]);
+        Assert.Equal(57_544_021_500d, bj["ONLINE_VA_SHARES"]);      // 北交所本来就是股：不动
+    }
+
+    [Fact]
+    public void 没给IS_BEIJING按号段判()
+    {
+        var json = """{"SECURITY_CODE":"832317","DEC_SUMFINA":123456789,"ISSUE_NUM":100}""";
+        var row = EastMoneyIpoIssueProvider.Parse(JsonDocument.Parse(json).RootElement)!;
+        Assert.Equal(123456789d, row["DEC_SUMFINA"]);               // 83x 是北交所：元，不动
+        Assert.Equal(1_000_000d, row["ISSUE_NUM"]);
+        var sz = EastMoneyIpoIssueProvider.Parse(JsonDocument.Parse("""{"SECURITY_CODE":"001381","DEC_SUMFINA":9.56055}""").RootElement)!;
+        Assert.Equal(956_055_000d, sz["DEC_SUMFINA"]);
+    }
+
     // ─────────────────── ③ 存取（真 SQLite）───────────────────
 
     /// <summary>151 列逐格写进去、读回来一样——拼出来的 INSERT 漏一列不会报错、只会静默少存。</summary>
@@ -220,9 +265,16 @@ public class IpoIssueTests : IDisposable
 
     /// <summary>
     /// 拿沙箱抓回来的全量响应（{"order":[...],"rows":[...]}）走一遍产品代码：解析 → 写库 → 读回，
-    /// 5,640 行 × 151 列逐格比原始 JSON。零网络。
+    /// 5,640 行 × 151 列逐格比原始 JSON（换单位的列比"原始值×系数"）。零网络。
+    /// 另外用同一行里自带的"不带单位"列做独立互证：换完之后 OFFLINE_VATS＝OFFLINE_VATS_NONUNIT、
+    /// 沪深 ONLINE_VA_SHARES＝ONLINE_VASHARES_NONUNIT、TOTAL_APPLY_NUM 跟 ENQUIRY_SHARE_NUM 同量级——系数写错一格这里就红。
     ///   dotnet test --filter "FullyQualifiedName~IpoIssueTests.全量" -e IPO_FULL_JSON=路径
     /// </summary>
+    private static bool Close(double a, double b) => Math.Abs(a - b) <= 1e-9 * Math.Max(1, Math.Max(Math.Abs(a), Math.Abs(b)));
+
+    private static bool Beijing(JsonElement item) =>
+        item.TryGetProperty("IS_BEIJING", out var v) && v.ValueKind == JsonValueKind.Number && v.GetDouble() == 1;
+
     [Fact]
     public void 全量离线核对_逐格一致()
     {
@@ -246,7 +298,8 @@ public class IpoIssueTests : IDisposable
                 bool ok = p.Value.ValueKind switch
                 {
                     JsonValueKind.Null => have is null,
-                    JsonValueKind.Number => have is not null && Math.Abs(Convert.ToDouble(have) - p.Value.GetDouble()) < 1e-9,
+                    JsonValueKind.Number => have is not null
+                        && Close(Convert.ToDouble(have), p.Value.GetDouble() * (double)IpoIssueColumns.FactorOf(p.Name, Beijing(item))),
                     JsonValueKind.String => p.Value.GetString() is var s
                         && (Equals(have, s) || (s!.EndsWith(" 00:00:00") && Equals(have, s[..10]))),
                     _ => false,
@@ -256,6 +309,28 @@ public class IpoIssueTests : IDisposable
         }
         _out.WriteLine($"{rows.Count} 行、{cells} 格，对不上 {bad} 格；未知列 {stats.UnknownColumns.Count}、类型不符 {stats.TypeMismatches.Count}");
         Assert.Equal(0, bad);
+
+        // 独立互证（不经过系数表）
+        int pairs = 0, cross = 0;
+        void Same(IpoIssueRow r, string a, string b)
+        {
+            if (r[a] is not double x || r[b] is not double y) return;
+            pairs++;
+            if (!Close(x, y) && ++cross <= 10) _out.WriteLine($"{r.Code} {a}={x} {b}={y}");
+        }
+        foreach (var r in rows)
+        {
+            Same(r, "OFFLINE_VATS", "OFFLINE_VATS_NONUNIT");
+            Same(r, "ONLINE_VA_SHARES", "ONLINE_VASHARES_NONUNIT");
+            if (r["TOTAL_APPLY_NUM"] is double ta && r["ENQUIRY_SHARE_NUM"] is double eq && eq > 0)
+            {
+                pairs++;
+                if ((ta / eq is < 0.1 or > 10) && ++cross <= 10) _out.WriteLine($"{r.Code} TOTAL_APPLY_NUM={ta} ENQUIRY_SHARE_NUM={eq}");
+            }
+        }
+        _out.WriteLine($"互证 {pairs} 对，对不上 {cross}");
+        Assert.True(pairs > 10000);
+        Assert.Equal(0, cross);
         Assert.Empty(stats.UnknownColumns);
         Assert.Empty(stats.TypeMismatches);
     }

@@ -16,7 +16,7 @@ namespace StockPlatform.Tests;
 /// 手编样本只会把口径写成自己以为的样子：
 /// <list type="bullet">
 /// <item>同一条大宗交易记录里 PREMIUM_RATIO 是小数、DISCOUNT_RATIO 是百分数，基准还不一样；</item>
-/// <item>ShareLift 的比例是小数，但同一条里的涨跌幅是百分数；</item>
+/// <item>ShareLift 接口给的比例是小数、股数是万股，但同一条里的涨跌幅是百分数（入库已统一成百分数/股，2026-10-20）；</item>
 /// <item>HolderChange 的 CHANGE_RATE 根本不是变动比例而是股价涨跌幅（已修）。</item>
 /// </list>
 /// </summary>
@@ -115,8 +115,9 @@ public class MarketEventExtraFieldsTests : IDisposable
     }
 
     /// <summary>
-    /// 口径钉死：PremiumRatio 是**小数**、基准是当日收盘价；DiscountRatio 是**百分数**、
-    /// 基准是**前收盘价**。两个样本都要成立，谁把单位或基准改错了这条会红。
+    /// 口径钉死：PremiumRatio 基准是当日收盘价，DiscountRatio 基准是**前收盘价**。
+    /// 接口的 PREMIUM_RATIO 给小数，入库 ×100 存百分数（2026-10-20 起），所以两者入库后单位相同、基准不同。
+    /// 两个样本都要成立，谁把单位或基准改错了这条会红。
     /// </summary>
     [Theory]
     [InlineData(true, 15.05, 14.0, 14.2)]
@@ -128,8 +129,8 @@ public class MarketEventExtraFieldsTests : IDisposable
             useOldSample ? BlockTradeOldJson : BlockTradeFreshJson);
         Assert.Equal(dealPrice, x.DealPrice!.Value, 6);
 
-        // PremiumRatio：小数，基准 = 当日收盘价
-        Assert.Equal(dealPrice / close - 1, x.PremiumRatio!.Value, 6);
+        // PremiumRatio：百分数（接口小数 ×100），基准 = 当日收盘价
+        Assert.Equal((dealPrice / close - 1) * 100, x.PremiumRatio!.Value, 4);
         // DiscountRatio：百分数，基准 = 前收盘价
         Assert.Equal((dealPrice / preClose - 1) * 100, x.DiscountRatio!.Value, 4);
     }
@@ -172,57 +173,31 @@ public class MarketEventExtraFieldsTests : IDisposable
     public void ShareLiftParsesAddedFields()
     {
         var x = BuildShareLift();
-        Assert.Equal(106501.8573, x.PreFreeShares!.Value, 6);
-        Assert.Equal(9642.3586, x.NonFreeShares!.Value, 6);
+        Assert.Equal(1065018573d, x.PreFreeShares!.Value);      // 106501.8573 万股
+        Assert.Equal(96423586d, x.NonFreeShares!.Value);         // 9642.3586 万股
         Assert.Equal(-4.81064483, x.Before20Change!.Value, 8);
         Assert.Equal(10, x.After20Change!.Value, 8);
     }
 
     /// <summary>
-    /// 两个口径一起钉死：
+    /// 入库单位（2026-10-20，doc/unit-normalization-inventory.md）：接口给万股/万元/小数，入库存股/元/百分数。
     /// ① LiftShares 取的是 CURRENT_FREE_SHARES（本次解禁），不是 FREE_SHARES（解禁前已流通）；
-    /// ② FreeRatio 是**小数**，而同一条里的 Before20Change 是**百分数**。
+    /// ② FreeRatio 换成百分数后跟同一条里的 Before20Change 一个口径；
+    /// ③ 换算是精确的（按 decimal 乘），不会乘出 830318947.70000005 这种尾巴——用精确相等钉住。
     /// </summary>
     [Fact]
-    public void ShareLiftRatioIsFractionWhileChangeIsPercent()
+    public void ShareLiftStoredInBaseUnits()
     {
         var x = BuildShareLift();
-        Assert.Equal(9005.6285, x.LiftShares!.Value, 6);          // 本次解禁
-        Assert.Equal(106501.8573, x.PreFreeShares!.Value, 6);     // 解禁前已流通（分母）
-        Assert.Equal(x.LiftShares.Value / x.PreFreeShares.Value, x.FreeRatio!.Value, 8);
-        Assert.InRange(x.FreeRatio.Value, 0d, 1d);                // 小数域
-        Assert.Equal(-4.81064483, x.Before20Change!.Value, 8);    // 百分数域，同一条记录
+        Assert.Equal(90056285d, x.LiftShares!.Value);            // 9005.6285 万股
+        Assert.Equal(830318947.7, x.LiftMarketCap!.Value);       // 83031.89477 万元
+        Assert.Equal(8.4558417368, x.FreeRatio!.Value);          // 0.084558417368
+        Assert.Equal(7.7538329655, x.TotalRatio!.Value);         // 0.077538329655
+        Assert.Equal(x.LiftShares.Value / x.PreFreeShares!.Value * 100, x.FreeRatio.Value, 8);
+        Assert.Equal(-4.81064483, x.Before20Change!.Value, 8);   // 百分数域，同一条记录
     }
 
-    /// <summary>
-    /// 限售解禁的解析还留在 provider 的 lambda 里（那个方法不走 RunSlicedAsync），
-    /// 所以这里按同样的字段映射构造对象，覆盖口径断言与仓储往返。
-    /// 映射一旦改动，<see cref="ShareLiftRatioIsFractionWhileChangeIsPercent"/> 会先红。
-    /// </summary>
-    private static ShareLift BuildShareLift()
-    {
-        using var doc = JsonDocument.Parse(ShareLiftJson);
-        var el = doc.RootElement;
-        double? N(string k) => el.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number
-            ? v.GetDouble() : null;
-        return new ShareLift
-        {
-            Code = el.GetProperty("SECURITY_CODE").GetString()!,
-            Name = el.GetProperty("SECURITY_NAME_ABBR").GetString()!,
-            FreeDate = DateTime.Parse(el.GetProperty("FREE_DATE").GetString()!),
-            ShareType = el.GetProperty("FREE_SHARES_TYPE").GetString()!,
-            LiftShares = N("CURRENT_FREE_SHARES"),
-            LiftMarketCap = N("LIFT_MARKET_CAP"),
-            FreeRatio = N("FREE_RATIO"),
-            TotalRatio = N("TOTALSHARES_RATIO"),
-            HolderCount = (int?)N("BATCH_HOLDER_NUM"),
-            PreFreeShares = N("FREE_SHARES"),
-            NonFreeShares = N("NON_FREE_SHARES"),
-            Before20Change = N("B20_ADJCHRATE"),
-            After20Change = N("A20_ADJCHRATE"),
-            FetchedAt = DateTime.Now,
-        };
-    }
+    private static ShareLift BuildShareLift() => Parse<ShareLift>("ParseShareLift", ShareLiftJson);
 
     // ── 股东增减持 ─────────────────────────────────────────────────
 
@@ -234,6 +209,15 @@ public class MarketEventExtraFieldsTests : IDisposable
         Assert.Equal(12.5, x.ClosePrice!.Value, 6);
         Assert.Equal(12.61, x.RealPrice!.Value, 6);
         Assert.Null(x.ChangeRateQuotes);      // 覆盖不全，容忍空
+    }
+
+    /// <summary>入库单位（2026-10-20）：接口的 CHANGE_NUM_SYMBOL / AFTER_HOLDER_NUM 是万股，入库存股。</summary>
+    [Fact]
+    public void HolderChangeSharesStoredInShares()
+    {
+        var x = Parse<HolderChange>("ParseHolderChange", HolderChangeJson);
+        Assert.Equal(15197600d, x.ChangeShares!.Value);   // 1519.76 万股
+        Assert.Equal(420000000d, x.AfterShares!.Value);   // 42000 万股
     }
 
     /// <summary>
@@ -286,7 +270,7 @@ public class MarketEventExtraFieldsTests : IDisposable
         Assert.Equal(5.985915492958, One("SELECT discount_ratio FROM BlockTrade")!.Value, 10);
         Assert.Equal(0.226875297468, One("SELECT total_shares_ratio FROM BlockTrade")!.Value, 10);
 
-        Assert.Equal(106501.8573, One("SELECT pre_free_shares FROM ShareLift")!.Value, 6);
+        Assert.Equal(1065018573d, One("SELECT pre_free_shares FROM ShareLift")!.Value);
         Assert.Equal(-4.81064483, One("SELECT before20_change FROM ShareLift")!.Value, 8);
 
         Assert.Equal(0.68, One("SELECT change_free_ratio FROM HolderChange")!.Value, 6);

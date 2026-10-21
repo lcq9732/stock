@@ -372,7 +372,9 @@ public class FullAuditTaskTests : IDisposable
     {
         var repo = new SqliteEtfShareRepository(_dbPath);
         repo.EnsureSchema();
-        repo.Upsert(shares.Select(s => new EtfShareRow(s.Market, s.Code, DateOnly.FromDateTime(s.Day), s.Wan)).ToList());
+        // 用例里的份额按万份写（好读），库里存份（2026-10-20 起）
+        repo.Upsert(shares.Select(s => new EtfShareRow(s.Market, s.Code, DateOnly.FromDateTime(s.Day),
+            UnitScale.Apply(s.Wan, UnitScale.Wan))).ToList());
         var days = new SqliteTradingDayRepository(_dbPath);
         days.EnsureSchema();
         days.Upsert(Days.Select(d => (DateOnly.FromDateTime(d), "szse")));

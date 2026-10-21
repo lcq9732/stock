@@ -3,6 +3,7 @@ using System.Net;
 using System.Text.Json;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Remote;
 
@@ -12,7 +13,7 @@ namespace StockPlatform.Data.Remote;
 /// 即官网「ETF 规模」那一页背后的接口。
 ///
 /// 一个请求拿当天**全部**沪市 ETF（2024-09-30 是 555 只，2026-09-22 是 912 只），pageSize 给 5000 一页收完。
-/// 返回的 <c>TOT_VOL</c> 单位是**万份**，两位小数。
+/// 返回的 <c>TOT_VOL</c> 单位是**万份**，两位小数；入库 ×1e4 存份（2026-10-20）。
 ///
 /// 覆盖范围（2026-09-23 实测）：**2012-01-04 起**（那天 23 只），更早的日子返回空列表；
 /// 当天的份额收盘后才发布，白天查当天也是空的。
@@ -136,7 +137,7 @@ public class SseEtfShareProvider : IEtfShareProvider
                 if (!double.TryParse(Str(item, "TOT_VOL"), NumberStyles.Float, CultureInfo.InvariantCulture, out var wan)
                     || wan <= 0)
                     continue;
-                rows.Add(new EtfShareRow("sh", code, day, wan));
+                rows.Add(new EtfShareRow("sh", code, day, UnitScale.Apply(wan, UnitScale.Wan)));
             }
             return rows;
         }

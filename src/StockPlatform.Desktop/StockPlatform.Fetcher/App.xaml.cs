@@ -629,8 +629,11 @@ public partial class App : Application
             () => new WatchIndicatorRuleTask(
                 new SqliteWatchIndicatorRepository(paths.CurrentDb),
                 boardMapRepository, indicatorRepository, paths));
-        taskRegistry.Register(FetchActionId.StepFixVolumeUnit,
-            () => new BarVolumeUnitFixTask(new SqliteBarVolumeUnitFixer(paths.CurrentDb)));
+        // 【统一成交量单位】2026-10-20 退役不再注册（volume 改存股后它会把全库除回手）；
+        // 换成一次性的【成交量改存股】，没做完之前用准入闸挡住别的任务。
+        var barVolumeMigration = new SqliteBarVolumeMigration(paths.CurrentDb);
+        taskRegistry.Register(FetchActionId.StepBarVolumeShares, () => new BarVolumeSharesTask(barVolumeMigration));
+        taskRegistry.RunGate = new BarVolumeMigrationGate(barVolumeMigration).Check;
         // 【融券余额补算】2026-09-16。纯本地 UPDATE，要排在【融资余额】和【个股日K】之后
         // ——它拿当天收盘价乘当天融券余量，两样都落库了才算得出来。
         taskRegistry.Register(FetchActionId.StepFillShortBalance,

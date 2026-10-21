@@ -37,15 +37,15 @@ public class SqliteEtfShareRepository : IEtfShareRepository
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO EtfShare (market, code, trade_date, shares_wan, fetched_at)
-            VALUES ($market, $code, $day, $wan, $at)
+            INSERT INTO EtfShare (market, code, trade_date, shares, fetched_at)
+            VALUES ($market, $code, $day, $shares, $at)
             ON CONFLICT(code, trade_date) DO UPDATE SET
-                market = excluded.market, shares_wan = excluded.shares_wan, fetched_at = excluded.fetched_at;
+                market = excluded.market, shares = excluded.shares, fetched_at = excluded.fetched_at;
             """;
         var pMarket = cmd.Parameters.Add("$market", SqliteType.Text);
         var pCode = cmd.Parameters.Add("$code", SqliteType.Text);
         var pDay = cmd.Parameters.Add("$day", SqliteType.Text);
-        var pWan = cmd.Parameters.Add("$wan", SqliteType.Real);
+        var pShares = cmd.Parameters.Add("$shares", SqliteType.Real);
         cmd.Parameters.AddWithValue("$at", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
 
         foreach (var r in rows)
@@ -53,7 +53,7 @@ public class SqliteEtfShareRepository : IEtfShareRepository
             pMarket.Value = r.Market;
             pCode.Value = r.Code;
             pDay.Value = r.TradeDate.ToString(DateFormat, CultureInfo.InvariantCulture);
-            pWan.Value = r.SharesWan;
+            pShares.Value = r.Shares;
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
@@ -89,7 +89,7 @@ public class SqliteEtfShareRepository : IEtfShareRepository
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT trade_date, shares_wan FROM EtfShare WHERE market = $market AND code = $code;";
+        cmd.CommandText = "SELECT trade_date, shares FROM EtfShare WHERE market = $market AND code = $code;";
         cmd.Parameters.AddWithValue("$market", market);
         cmd.Parameters.AddWithValue("$code", code);
         var map = new Dictionary<DateOnly, double>();

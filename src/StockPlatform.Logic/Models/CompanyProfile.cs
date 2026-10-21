@@ -25,12 +25,9 @@ public class CompanyProfile
     public string ListingState { get; set; } = "";
 
     /// <summary>
-    /// 注册资本（<b>万元</b>，东财 REG_CAPITAL）。
-    /// ⚠ 跟 <see cref="RegCapital"/> 差 1 万倍，光看名字看不出来——宁德时代 462677.041 万元。
+    /// 注册资本（<b>元</b>，东财 REG_CAPITALY）。宁德时代 4626770410 元。
+    /// 接口另给的万元版 REG_CAPITAL 是重复，不存（2026-10-20 删了 RegCapitalWan / reg_capital_wan）。
     /// </summary>
-    public double? RegCapitalWan { get; set; }
-
-    /// <summary>注册资本（<b>元</b>，东财 REG_CAPITALY）。宁德时代 4626770410 元。</summary>
     public double? RegCapital { get; set; }
 
     public string Currency { get; set; } = "";

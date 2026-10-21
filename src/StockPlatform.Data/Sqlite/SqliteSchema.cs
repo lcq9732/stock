@@ -239,7 +239,7 @@ public static class SqliteSchema
                 close_price REAL,
                 deviation REAL,             -- 对应值；东财源不给，本地派生（见 deviation_source）
                 volume REAL,                -- 成交量；东财源不给，取本地日K
-                amount REAL,                -- 成交额（万元）
+                amount REAL,                -- 成交额（元；2026-10-20 前存万元，已迁移）
                 reason TEXT NOT NULL,       -- 上榜指标（同股同日可多条）；东财源下是交易所原文
                 fetched_at TEXT,
                 -- ↓ 东财源独有（2026-09-09），新浪历史行为 NULL
@@ -554,7 +554,7 @@ public static class SqliteSchema
                 market     TEXT NOT NULL DEFAULT 'sh',   -- 'sh' / 'sz'
                 code       TEXT NOT NULL,
                 trade_date TEXT NOT NULL,   -- yyyy-MM-dd，上交所的 STAT_DATE
-                shares_wan REAL NOT NULL,   -- 总份额，万份（TOT_VOL 原样）
+                shares     REAL NOT NULL,   -- 总份额（份）。2026-10-20 前列名 shares_wan、存万份，已迁移改名
                 fetched_at TEXT,
                 PRIMARY KEY (code, trade_date)
             );
@@ -691,7 +691,7 @@ public static class SqliteSchema
                 close_price REAL,
                 change_rate REAL,
                 fetched_at TEXT,
-                buy_ratio REAL,                 -- 该席位买入额占当日总成交额比例。⚠小数不是百分数：0.0103=1.03%
+                buy_ratio REAL,                 -- 该席位买入额占当日总成交额比例(%)。2026-10-20 前存小数，已迁移
                 sell_ratio REAL,
                 change_type TEXT,               -- 上榜类型代码，比中文 explanation 稳定，分类统计用它
                 PRIMARY KEY (trade_date, code, is_buy, explanation, seq)
@@ -752,7 +752,7 @@ public static class SqliteSchema
                 daily_rank INTEGER NOT NULL,    -- 当日第几笔，同股同日可多笔
                 name TEXT,
                 deal_price REAL, deal_volume REAL, deal_amount REAL,
-                premium_ratio REAL,             -- 折溢价率(%)，负=折价
+                premium_ratio REAL,             -- 折溢价率(%)，负=折价，基准=当日收盘。2026-10-20 前存的是小数，已迁移
                 close_price REAL, change_rate REAL, turnover_rate REAL,
                 buyer_name TEXT, seller_name TEXT,
                 fetched_at TEXT,
@@ -789,10 +789,10 @@ public static class SqliteSchema
                 free_date TEXT NOT NULL,        -- 解禁日，可能在未来
                 share_type TEXT NOT NULL,       -- 首发原股东限售股份/定向增发机构配售股份…同日可多类
                 name TEXT,
-                lift_shares REAL,               -- 解禁股数(万股)
-                lift_market_cap REAL,           -- 解禁市值(万元)
-                free_ratio REAL,                -- 占流通股比例(%)
-                total_ratio REAL,               -- 占总股本比例(%)
+                lift_shares REAL,               -- 解禁股数(股；2026-10-20 前存万股，已迁移)
+                lift_market_cap REAL,           -- 解禁市值(元；之前万元)
+                free_ratio REAL,                -- 占流通股比例(%；之前存小数)
+                total_ratio REAL,               -- 占总股本比例(%；之前存小数)
                 holder_count INTEGER,
                 fetched_at TEXT,
                 PRIMARY KEY (code, free_date, share_type)
@@ -807,9 +807,9 @@ public static class SqliteSchema
                 end_date TEXT NOT NULL,         -- 变动区间截止日，同一股东可多次公告
                 name TEXT,
                 direction TEXT,                 -- 增持/减持
-                change_shares REAL,             -- 变动股数(万股)，带符号
+                change_shares REAL,             -- 变动股数(股，带符号；2026-10-20 前存万股，已迁移)
                 change_ratio REAL,
-                after_shares REAL, after_ratio REAL,
+                after_shares REAL, after_ratio REAL,   -- 变动后持股数(股；之前万股)、持股比例(%)
                 start_date TEXT,
                 average_price REAL,
                 fetched_at TEXT,
@@ -1116,10 +1116,9 @@ public static class SqliteSchema
                 found_date       TEXT,
                 listing_date     TEXT,
                 listing_state    TEXT,
-                -- ⚠ 这两列差 **1 万倍**，光看名字看不出来：
-                --   reg_capital_wan 是万元（东财 REG_CAPITAL），reg_capital 是元（REG_CAPITALY）。
-                --   宁德时代：462677.041 万元 = 4626770410 元。
-                reg_capital_wan  REAL,
+                -- 注册资本（元，东财 REG_CAPITALY）。宁德时代 4626770410 元。
+                -- 接口另给的 REG_CAPITAL 是同一个数的万元版，不存（2026-10-20 删了 reg_capital_wan 列：
+                -- 6050 行全部等于 reg_capital ÷ 1e4，纯重复）。
                 reg_capital      REAL,
                 currency         TEXT,
                 province         TEXT,
@@ -1173,6 +1172,9 @@ public static class SqliteSchema
 
         // ② 见上面「补列跑两次」：这一次是给刚由 DDL 建出来的新表补那些没写进 CREATE TABLE 的列。
         MigrateColumns(conn);
+
+        // 存量数据的一次性改值（入库单位统一等），有记账、只跑一次。要在表和列都齐了之后。
+        SqliteDataMigrations.Apply(conn);
     }
 
     /// <summary>

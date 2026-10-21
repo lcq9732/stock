@@ -34,9 +34,9 @@ public class BarValueAuditTests : IDisposable
         try { File.Delete(_dbPath); } catch { /* 临时文件 */ }
     }
 
-    /// <summary>一条各方面都正常的行：ratio = 10000/(100×1.0)/… 这里凑成 100（手口径）。</summary>
+    /// <summary>一条各方面都正常的行：volume 存股（2026-10-20 起），amount = volume × close，量额比 ≈1。</summary>
     private void Ok(string code, string gran = Granularity.Day, DateTime? day = null,
-                    double close = 10, double volume = 100, double? amount = null,
+                    double close = 10, double volume = 10000, double? amount = null,
                     DateTime? fetchedAt = null, double turnover = 1.5)
     {
         var d = day ?? Day;
@@ -44,7 +44,7 @@ public class BarValueAuditTests : IDisposable
         {
             Code = code, Granularity = gran, PeriodStart = d,
             Open = close, Close = close, High = close, Low = close,
-            Volume = volume, Amount = amount ?? volume * close * 100, Turnover = turnover,
+            Volume = volume, Amount = amount ?? volume * close, Turnover = turnover,
             FetchedAt = fetchedAt ?? d.AddHours(20),
         }]);
     }
@@ -143,7 +143,7 @@ public class BarValueAuditTests : IDisposable
         {
             Code = "600000", Granularity = Granularity.Day, PeriodStart = Day,
             Open = open, Close = close, High = high, Low = low,
-            Volume = 100, Amount = 100 * close * 100, Turnover = 1.5,
+            Volume = 10000, Amount = 10000 * close, Turnover = 1.5,
             FetchedAt = Day.AddHours(20),
         }]);
         Assert.Equal(shouldReport, Issues(AuditFindingKind.Ohlc).Count == 1);
@@ -152,28 +152,28 @@ public class BarValueAuditTests : IDisposable
     // ─────────────────── V6 量额比率 ───────────────────
 
     /// <summary>
-    /// volume 的单位是**手**，所以 <c>amount / (volume × close)</c> 只有 ≈100 一个正常区间。
+    /// volume 的单位是**股**（2026-10-20 起；之前是手、正常区间 ≈100），所以
+    /// <c>amount / (volume × close)</c> 只有 ≈1 一个正常区间。
     ///
-    /// ⚠ 2026-09-10 收紧：**≈1 不再放过**。原来它是放行的，因为当时科创板 688/689 的 volume
-    /// 确实按股存（腾讯给股、fetcher 原样入库）。那是 bug 不是第二种合法口径——它让含科创板的
-    /// 板块指数成交量常年虚高 100 倍。现在解析层归一化（<c>BarVolumeUnit</c>）、历史由
-    /// 【统一成交量单位】修，这里就该报出来，否则以后再掺进股口径照样没人发现。
+    /// ⚠ 只认一种口径：2026-09-10 以前科创板按股、其余按手并存过，那是 bug 不是第二种合法口径
+    /// （含科创板的板块指数成交量常年虚高 100 倍）。现在 ≈100 的（有写入路径按手存了）要报出来，
+    /// 否则以后再掺进手口径照样没人发现。
     /// </summary>
     [Theory]
-    [InlineData(100.0, true)]     // 手口径：amount = volume × close × 100
-    [InlineData(1.0, false)]      // 按股存的——单位错了，要报
-    [InlineData(33.0, false)]     // 603999 那种：amount 少了约 2/3
-    [InlineData(1000.0, false)]   // 量额差一个数量级
-    [InlineData(5.0, false)]      // 1991-92 老数据那种：成交量少记 5 倍（比值 ≈500 的反面）
-    [InlineData(10.0, false)]     // 差 10 倍
-    // ── 2026-09-12 放宽到 [50,250] 之后，这一档不再报 ──
+    [InlineData(1.0, true)]       // 股口径：amount = volume × close
+    [InlineData(100.0, false)]    // 按手存的——单位错了，要报
+    [InlineData(0.33, false)]     // 603999 那种：amount 少了约 2/3
+    [InlineData(10.0, false)]     // 量额差一个数量级
+    [InlineData(0.05, false)]     // 1991-92 老数据那种：成交量多记 / 额少记
+    [InlineData(0.1, false)]      // 差 10 倍
+    // ── 2026-09-12 放宽之后（按股是 [0.5, 2.5]），这一档不再报 ──
     // 成因是**当日均价偏离收盘**，不是数据错。生产实测 592 行命中里 318 行是这种，
     // 集中在北交所 920xxx 和 1990 年代成交稀疏的老股。见 RatioLow/RatioHigh 的注释。
-    [InlineData(60.0, true)]      // 均价比收盘低 40%
-    [InlineData(200.0, true)]     // 均价比收盘高一倍
-    public void V6_只有手口径算正常(double multiplier, bool isNormal)
+    [InlineData(0.6, true)]       // 均价比收盘低 40%
+    [InlineData(2.0, true)]       // 均价比收盘高一倍
+    public void V6_只有股口径算正常(double multiplier, bool isNormal)
     {
-        double close = 10, volume = 100;
+        double close = 10, volume = 10000;
         Ok("600000", Granularity.DayRaw, close: close, volume: volume, amount: volume * close * multiplier);
         Assert.Equal(!isNormal, Issues(AuditFindingKind.Ratio).Count == 1);
     }
@@ -198,10 +198,10 @@ public class BarValueAuditTests : IDisposable
     [Fact]
     public void V3_不复权的量对不上前复权就报()
     {
-        Ok("600000", Granularity.Day, volume: 20953, amount: 20953 * 10 * 100);
-        Ok("600000", Granularity.DayHfq, volume: 20953, amount: 20953 * 10 * 100);
+        Ok("600000", Granularity.Day, volume: 2_095_300, amount: 2_095_300 * 10);
+        Ok("600000", Granularity.DayHfq, volume: 2_095_300, amount: 2_095_300 * 10);
         // 复现 2026-09-01 那批盘中行：量只有正常值的一小部分
-        Ok("600000", Granularity.DayRaw, volume: 23, amount: 23 * 10 * 100);
+        Ok("600000", Granularity.DayRaw, volume: 2_300, amount: 2_300 * 10);
 
         var hits = _auditor.CrossGranularityMismatch(Cutoff);
         Assert.Single(hits);
@@ -359,8 +359,8 @@ public class BarValueAuditTests : IDisposable
     {
         foreach (var d in new[] { Day, Day.AddDays(1) })
         {
-            Ok("600000", Granularity.Day, d, volume: 20953, amount: 20953 * 10 * 100);
-            Ok("600000", Granularity.DayRaw, d, volume: 23, amount: 23 * 10 * 100);
+            Ok("600000", Granularity.Day, d, volume: 2_095_300, amount: 2_095_300 * 10);
+            Ok("600000", Granularity.DayRaw, d, volume: 2_300, amount: 2_300 * 10);
         }
         var segs = _auditor.CrossGranularitySegments(Cutoff);
         Assert.Single(segs);
@@ -422,7 +422,7 @@ public class BarValueAuditTests : IDisposable
         {
             Code = "000002", Granularity = Granularity.Day, PeriodStart = Day,
             Open = -8.17, Close = -8.17, High = -8.11, Low = -8.24,   // 自洽，只是为负
-            Volume = 100, Amount = 100 * 8.17 * 100, Turnover = 1,
+            Volume = 10000, Amount = 10000 * 8.17, Turnover = 1,
             FetchedAt = Day.AddHours(20),
         }]);
         Assert.Empty(Issues(AuditFindingKind.Ohlc));
@@ -455,7 +455,7 @@ public class BarValueAuditTests : IDisposable
     public void 量额比率只对个股判(string code, bool shouldReport)
     {
         // 口径必须是不复权——复权口径一律不判，见「V6_只对不复权判」
-        Ok(code, Granularity.DayRaw, close: 10, volume: 100, amount: 100 * 10 * 33);
+        Ok(code, Granularity.DayRaw, close: 10, volume: 10000, amount: 10000 * 10 * 0.33);
         Assert.Equal(shouldReport, Issues(AuditFindingKind.Ratio).Count == 1);
     }
 
@@ -507,7 +507,7 @@ public class BarValueAuditTests : IDisposable
     [InlineData(Granularity.DayAdj, false)]
     public void V6_只对不复权判(string gran, bool shouldReport)
     {
-        Ok("600601", gran, close: 10, volume: 100, amount: 100 * 10 * 33);   // ratio≈33
+        Ok("600601", gran, close: 10, volume: 10000, amount: 10000 * 10 * 0.33);   // ratio≈0.33
         Assert.Equal(shouldReport, Issues(AuditFindingKind.Ratio).Count == 1);
     }
 }

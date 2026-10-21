@@ -16,6 +16,6 @@ public interface IEtfShareRepository
     /// <summary>表里出现过的全部 ETF（市场 + 6 位裸码）。</summary>
     List<(string Market, string Code)> GetCodes();
 
-    /// <summary>一只 ETF 的全部份额，按日期索引（万份）。</summary>
+    /// <summary>一只 ETF 的全部份额，按日期索引（份）。</summary>
     Dictionary<DateOnly, double> GetByCode(string market, string code);
 }
