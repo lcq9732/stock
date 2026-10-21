@@ -33,7 +33,7 @@ namespace StockPlatform.Data.Orchestration;
 /// ════ 不设人为的每轮上限 ════
 /// 分次是为限流付的税，不是目标。季度披露期 5513 只同时到期，一轮 11026 个请求、
 /// 3 并发/1 秒 ⇒ 约 60 分钟，一轮跑得完。真撞限流由任务侧的熔断 + 断点续跑自然分次。
-/// 财务那项要 <c>MaxPerRun=300</c> 是因为它配额极严（约 10 请求/分钟），不是同一量级。
+/// （财务报表原来有每轮 300 只的上限，2026-10-21 挪进日更时也取消了。）
 /// </summary>
 public class ShareholderFetchPlanner(FetchPaths paths)
 {

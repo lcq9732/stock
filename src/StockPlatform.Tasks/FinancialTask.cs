@@ -24,15 +24,22 @@ namespace StockPlatform.Tasks;
 /// **谁都写不进库**。实测发出 420 个请求、零条写入、零错误，看着像卡死其实在正常跑。
 /// 骨架的流式枚举天然是顺序的，别改成 Task.WhenAll。
 ///
-/// ════ 每轮上限交给框架 ════
-/// 老实现自己写了 <c>MaxFinancialFetchPerRun</c> + <c>maxCount</c> 参数，迁移时删掉，
-/// 改用 <see cref="TaskRunArgs.MaxItems"/>（一批＝一只票，语义正好对上）和 <c>Deadline</c>。
-/// 调度没给上限时仍按 <see cref="FinancialFetchPlanner.MaxPerRun"/> 兜底——
-/// 不兜的话一轮就是全市场 1.7 万个请求、几小时，把别的任务全挡在门外。
+/// ════ 每轮不设上限（2026-10-21 随挪进日更）════
+/// 原来调度没给 <see cref="TaskRunArgs.MaxItems"/> 时按 300 只兜底。挪进日更后删了：
+/// 日更"跑一轮就算今天做完"，留着上限的话披露高峰（一天 1200 只）要积压好几天；
+/// 而当天没抓完的票本地报告期还是旧的，第二天照样被算进名单，漏不掉。
+/// "一轮会跑很久"改成开工那行报只数和预计耗时（<see cref="FinancialFetchPlan.Describe"/>）。
+/// 调度显式给了 MaxItems / Deadline 时仍照办（骨架负责）。
 ///
-/// ════ 失败不中断整轮 ════
-/// 单只失败记进错误列表继续下一只：本地报告期停在旧值，下轮 <see cref="FinancialFetchPlanner"/>
-/// 自然把它重新算进待抓名单（自愈，不需要失败名单表）。
+/// ════ 报错（2026-10-21 用户定）════
+/// 抓到的立即入库；没抓到的报只数、不挡后面的任务；用户手动点【执行】或等明天日更都会再取。
+///   · 单只失败：错误原文进运行日志和错误列表，继续下一只。本地报告期停在旧值，
+///     下轮 <see cref="FinancialFetchPlanner"/> 自然把它算回名单——**不能记"问过了"**，
+///     否则它会进冷却。
+///   · 连续 <see cref="AbortAfterConsecutiveFailures"/> 只失败：认定数据源当前不通，本轮停下、记失败。
+///     不停的话限速器会在熔断里一等十几分钟到两小时、一轮接一轮地等，没有上限之后能堵住后面所有任务。
+///   · 抓回来了、但还没有已披露的那一期：数据源还没更新，不算错，明天再取；
+///     披露超过 <see cref="FinancialFetchPlanner.SourceLagAlarm"/> 还没有的才报错。
 /// </summary>
 public sealed class FinancialTask(
     FetchPaths paths,
@@ -40,13 +47,20 @@ public sealed class FinancialTask(
 {
     public override FetchActionId Id => FetchActionId.FetchFinancials;
 
+    /// <summary>
+    /// 连续几只失败就认定数据源不通、本轮收工。每只本身已含限速器的快速重试，
+    /// 个别票接口报错不会连着出现 10 次；真不通时最多再浪费 10 只的时间。
+    /// </summary>
+    internal const int AbortAfterConsecutiveFailures = 10;
+
     private readonly SqliteFinancialRepository _repo = new(paths.CurrentDb);
 
     /// <summary>本轮的待抓清单——落库时要回头问它"这只票冲的是哪一期"（<c>TargetOf</c>）。</summary>
     private FinancialFetchPlan? _plan;
 
     /// <summary>本轮统计。</summary>
-    private int _targetCount, _done, _wrote, _empty;
+    private int _targetCount, _done, _wrote, _empty, _consecutiveFailures, _sourceLag, _sourceLagAlarm;
+    private bool _aborted;
     private readonly List<string> _errors = [];
     private readonly Stopwatch _sw = new();
 
@@ -54,16 +68,18 @@ public sealed class FinancialTask(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
         _repo.EnsureSchema();
-        _done = _wrote = _empty = 0;
+        _done = _wrote = _empty = _consecutiveFailures = _sourceLag = _sourceLagAlarm = 0;
+        _aborted = false;
         _errors.Clear();
         _sw.Restart();
 
-        int cap = args.MaxItems is > 0 ? args.MaxItems.Value : FinancialFetchPlanner.MaxPerRun;
-        var plan = new FinancialFetchPlanner(paths).Plan(cap);
+        // 名单要读全市场状态和日线水位（25GB 库上要一阵子），推到线程池——
+        // 首个 await 之前的同步活会跑在调用方（可能是 UI）线程上，见 BankRegulatoryTask 的同款注释。
+        var plan = await Task.Run(() => new FinancialFetchPlanner(paths).Plan(args.MaxItems), ct);
         _plan = plan;
         var targets = plan.ThisRun;
         _targetCount = targets.Count;
-        Report(plan.Describe(cap));
+        Report(plan.Describe());
         if (targets.Count == 0) yield break;
 
         void Forward(string s) => Report(s);
@@ -83,15 +99,21 @@ public sealed class FinancialTask(
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    _errors.Add($"财报 {code}: {ex.Message}");
+                    // ⚠ 不记"问过了"：本地报告期没动，下一轮自然再取（见类注释）
+                    var msg = $"财报 {code}: {ex.Message}";
+                    _errors.Add(msg);
+                    Report($"✘ {msg}（已跳过，继续下一只）");
                 }
 
                 if (rows is { Count: > 0 })
                 {
+                    _consecutiveFailures = 0;
+                    CountSourceLag(code, rows);
                     yield return rows;
                 }
                 else if (rows != null)
                 {
+                    _consecutiveFailures = 0;
                     // 请求成功但一行都没解析出来——多半是该股没有这些报表（新上市/特殊标的），
                     // 单独计数：这个数一大就说明映射出问题了，不能静默混在"成功"里。
                     //
@@ -99,6 +121,13 @@ public sealed class FinancialTask(
                     //   否则这只票每轮都会被重新算进待抓名单（见 MarkAsked 的注释）。
                     _repo.MarkAsked(code, plan.TargetOf(code));
                     _empty++;
+                }
+                else if (++_consecutiveFailures >= AbortAfterConsecutiveFailures)
+                {
+                    _done++;
+                    _aborted = true;
+                    Report($"✘ 财务报表：数据源连续 {_consecutiveFailures} 只取不到，判断它当前不通，本轮停在第 {_done} 只。");
+                    yield break;
                 }
 
                 _done++;
@@ -130,39 +159,70 @@ public sealed class FinancialTask(
         }
     }
 
+    /// <summary>
+    /// 抓回来的最新期还没到已披露的那一期 ⇒ 数据源还没更新（2026-10-21）。
+    /// 照常落库（老的期次可能有修订），只计数：刚披露的明天再取，拖过 <see cref="FinancialFetchPlanner.SourceLagAlarm"/> 的报错。
+    /// </summary>
+    private void CountSourceLag(string code, List<FinancialValue> rows)
+    {
+        if (_plan?.DisclosedOnByCode.TryGetValue(code, out var disclosedOn) != true) return;
+        if (_plan.TargetOf(code) is not { } target) return;
+        if (rows.Max(r => r.ReportDate) >= target) return;
+        if (DateTime.Today - disclosedOn >= FinancialFetchPlanner.SourceLagAlarm) _sourceLagAlarm++;
+        else _sourceLag++;
+    }
+
     /// <summary>一批就是一只票的全部科目，整只替换。</summary>
     protected override Task SaveBatchAsync(IReadOnlyList<FinancialValue> batch, CancellationToken ct)
     {
         var code = batch[0].Code;
         // 带上"这一轮冲的是哪一期"：抓回来的报告期追不上它，就说明数据源那边就是没有，
-        // 下一轮的 FinancialFetchPlanner 靠这一列把它冷却掉，不再每 20 分钟问一遍。
+        // 下一轮的 FinancialFetchPlanner 靠这一列把它冷却掉（刚披露的只冷却到当天）。
         _repo.ReplaceByCode(code, batch, _plan?.TargetOf(code));
         _wrote += batch.Count;
         return Task.CompletedTask;
     }
 
-    protected override Task<TaskRunResult?> OnCompletedAsync(
+    protected override async Task<TaskRunResult?> OnCompletedAsync(
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
         if (_targetCount == 0)
-            return Task.FromResult<TaskRunResult?>(TaskRunResult.Ok(nothingToDo: true));
+            return TaskRunResult.Ok(nothingToDo: true);
 
-        // 本轮跑完还剩多少——必须显式报出来。有每轮上限在，"完成"两个字很容易被读成
-        // "全部补齐了"，实际可能只补了 5%。
+        // 用户 2026-10-21 定：只报只数，不列代码——要补就点【执行】，或者等明天日更。
+        // 单只的错误原文已经逐只打进运行日志了（排查"为什么失败"用）。
+        const string retryHint = "明天日更会自动再取，也可以点【执行】手工补";
+
+        if (_aborted)
+        {
+            int left = _targetCount - _done;
+            var why = $"数据源连续 {AbortAfterConsecutiveFailures} 只取不到，本轮停在第 {_done}/{_targetCount} 只"
+                    + $"（已写入 {_wrote:N0} 条，还剩 {left} 只没取）；{retryHint}";
+            Report($"✘ 财务报表：{why}");
+            return new TaskRunResult(TaskState.Failed, [why]);
+        }
+
+        // 本轮跑完还剩多少——有 MaxItems 时才可能剩（不设上限之后平时恒为 0）。
         int stillPending = 0;
-        try { stillPending = new FinancialFetchPlanner(paths).Plan().AllPending.Count; }
+        try { stillPending = await Task.Run(() => new FinancialFetchPlanner(paths).Plan().AllPending.Count, ct); }
         catch (Exception) { /* 只是提示，查不到就不提 */ }
 
-        Report($"财务报表完成：抓取 {_done} 只、写入 {_wrote:N0} 条、失败 {_errors.Count} 只"
-               + (_empty > 0 ? $"、{_empty} 只无报表数据" : "")
-               + (_errors.Count > 0 ? "（失败的下次运行会自动重试）" : "")
-               + $"，用时 {Fmt(_sw.Elapsed)}。"
-               + (stillPending > 0
-                   ? $"⚠ 还有 {stillPending} 只没补——勾选界面上的【空闲时自动补财务】可以让它在程序空着时"
-                     + "自己一轮一轮补完，或者再点一次。已抓的不会重抓。"
-                   : "全部已补齐（报告期和科目集版本都是最新）。"));
+        int failed = _errors.Count;
+        var summary = $"抓取 {_done} 只、写入 {_wrote:N0} 条"
+                    + (failed > 0 ? $"，{failed} 只没取到（{retryHint}）" : "")
+                    + (_empty > 0 ? $"，{_empty} 只无报表数据" : "")
+                    + (_sourceLag > 0 ? $"，{_sourceLag} 只已披露、数据源还没有这一期（明天再取）" : "")
+                    + (_sourceLagAlarm > 0
+                        ? $"，⚠ {_sourceLagAlarm} 只披露已超过 {FinancialFetchPlanner.SourceLagAlarm.TotalDays:0} 天、数据源仍没有这一期"
+                        : "");
+        Report($"财务报表完成：{summary}，用时 {Fmt(_sw.Elapsed)}。"
+               + (stillPending > 0 ? $"还有 {stillPending} 只没补，下一轮接着来。" : ""));
 
-        return Task.FromResult<TaskRunResult?>(new TaskRunResult(TaskState.Completed, _errors.ToList()));
+        var errors = new List<string>(_errors);
+        if (_sourceLagAlarm > 0)
+            errors.Add($"{_sourceLagAlarm} 只披露已超过 {FinancialFetchPlanner.SourceLagAlarm.TotalDays:0} 天、数据源仍没有这一期");
+        // 汇总放进 Progress：计划状态列优先显示它，"N 只没取到"一眼看得见
+        return new TaskRunResult(TaskState.Completed, errors, Progress: summary);
     }
 
     private static string Fmt(TimeSpan t) =>

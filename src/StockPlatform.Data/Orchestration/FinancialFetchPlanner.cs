@@ -14,11 +14,10 @@ namespace StockPlatform.Data.Orchestration;
 /// </summary>
 public class FinancialFetchPlanner(FetchPaths paths)
 {
-    /// <summary>
-    /// 一轮最多抓多少只。这个接口是所有抓取项里最慢的（每只 3 个请求、限流到约 10 请求/分钟），
-    /// 一次跑完全市场要一两个小时，中间什么都干不了；分轮跑才能跟别的任务共处。
-    /// </summary>
-    public const int MaxPerRun = 300;
+    // 原来这里有个 MaxPerRun = 300（每轮最多抓多少只）。2026-10-21 随【拉取财务报表】挪进日更删掉
+    // （用户定）：当天没抓完的票本地报告期还是旧的，第二天照样会被算进名单——**漏不掉，只会晚一天**；
+    // 而日更是"跑一轮就算今天做完"，留着上限的话披露高峰（一天 1200 只）要积压好几天。
+    // "一轮跑太久"改成开工时报只数和预计耗时（见 FinancialFetchPlan.Describe），由人决定要不要停。
 
     /// <summary>
     /// 多久没有过成交就算"已经不交易了"，财务报表不再反复去问它。
@@ -38,8 +37,20 @@ public class FinancialFetchPlanner(FetchPaths paths)
     /// 只能靠"问过了、没有、隔阵子再问"。
     ///
     /// 取 7 天：公司延期披露后补上一般在一周内，而这批常年只有个位数只票，代价可以忽略。
+    ///
+    /// ⚠ 只管目标期来自**法定截止日/退市日**的票。目标期来自**实际披露日**的不走这个冷却
+    /// （2026-10-21，见 <see cref="Plan"/> 里 ③ 那段）：公司已经发了，数据源只是还没更新，第二天就该再问。
     /// </summary>
     private static readonly TimeSpan RetryAfterMiss = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// 已实际披露、数据源却还没有这一期——过了几天就从"等数据源更新"升级成报错（2026-10-21）。
+    /// 东财 F10 平时当天或次日就有；连着 3 天还没有，多半是这只票在数据源那边出了问题，要让人知道。
+    /// </summary>
+    public static readonly TimeSpan SourceLagAlarm = TimeSpan.FromDays(3);
+
+    /// <summary>估预计耗时时，取不到实测速度就按这个算（东财 F10 09-11 实测 7–12 秒一只）。</summary>
+    internal const double DefaultSecondsPerCode = 10;
 
     /// <summary>
     /// 算出财务数据还有哪些票要抓。
@@ -79,8 +90,9 @@ public class FinancialFetchPlanner(FetchPaths paths)
         // 66% 的公司挤在法定截止日前那五天披露，等截止日过完再认这一期，5478 只会同时
         // 涌进待补队列，按每轮 300 只要补三四天。
         // 查不到记录的（新股/B股/老退市股）不在这个字典里，下面会退回 expected 兜底。
+        // 连实际披露日一起取（2026-10-21）：判"数据源还没更新"已经拖了几天要靠它，见 SourceLagAlarm。
         var disclosed = new SqliteEarningsScheduleRepository(paths.CurrentDb)
-            .GetLatestDisclosedPeriodByCode(DateTime.Today);
+            .GetLatestDisclosureByCode(DateTime.Today);
 
         // 「已经不交易了就别再问」（2026-09-03 用户提）：ST/退市/长期停牌那批，公司本身早就
         // 不出新报告期了，每轮拿去问一遍纯属浪费配额——实测 114 只"报告期落后"里，
@@ -94,14 +106,21 @@ public class FinancialFetchPlanner(FetchPaths paths)
         var marketLatest = lastBarByCode.TryGetValue("sh000001", out var mkt) ? mkt : DateTime.Today;
         var dormantBefore = marketLatest - DormantAfterNoTrading;
 
-        int stale = 0, outdatedPeriod = 0, dormant = 0, unusable = 0, asked = 0;
+        int stale = 0, never = 0, outdatedPeriod = 0, dormant = 0, unusable = 0, asked = 0;
         var pending = new List<string>();
         var targetByCode = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        // 目标期来自实际披露的那些票，以及披露日——任务收工时判"数据源还没更新"要用
+        var disclosedOnByCode = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         foreach (var c in codes)
         {
             // 该抓到哪一期：这只票已经披露的最新一期；没有披露记录的退回法定截止日。
             // ⚠ 兜底方向只能是"多取"——查不到就按老判据来，绝不能因为查不到而漏掉一只。
-            var target = disclosed.TryGetValue(c, out var d) ? d : expected;
+            var target = expected;
+            if (disclosed.TryGetValue(c, out var d))
+            {
+                target = d.Period;
+                disclosedOnByCode[c] = d.ActualDate;
+            }
 
             // ══ 退市日封顶（2026-09-19）══
             // 退市公司不会再披露退市日之后的报告期，所以"应该有哪一期"要按它自己的退市日算，
@@ -111,15 +130,19 @@ public class FinancialFetchPlanner(FetchPaths paths)
             if (delistDateByCode.TryGetValue(c, out var delistDate))
             {
                 var lastPossible = LatestExpectedReportPeriod(delistDate);
-                if (lastPossible < target) target = lastPossible;
+                if (lastPossible < target)
+                {
+                    target = lastPossible;
+                    disclosedOnByCode.Remove(c);   // 目标期已不是那次披露的那一期
+                }
             }
             targetByCode[c] = target;
 
             if (!stateByCode.TryGetValue(c, out var st))
             {
-                // 没有状态记录：要么从没抓过，要么是这张表出现之前抓的（版本按 0 算）
+                // 没有状态记录：要么从没抓过（新股），要么是这张表出现之前抓的（版本按 0 算）
                 pending.Add(c);
-                stale++;
+                never++;
                 continue;
             }
             bool periodOld = st.ReportDate.Date < target;
@@ -146,8 +169,14 @@ public class FinancialFetchPlanner(FetchPaths paths)
 
                 // ③ 上一轮就是冲着同一个目标期问的、数据源当时就是没有 ⇒ 冷却期内不再问。
                 //    名单赶不上现实时的最后一层兜底，见 RetryAfterMiss。
+                //    ⚠ 目标期来自**实际披露**的只冷却到当天（2026-10-21）：公司傍晚刚发公告、
+                //      17:30 那轮去问时东财还没更新，是常事——按 7 天冷却的话这只票要等一周，
+                //      正好抵消挪进日更的意义。今天问过就不再问，明天日更再来。
                 if (st.TargetDate is { } askedFor && askedFor >= target
-                    && st.FetchedAt is { } at && DateTime.Now - at < RetryAfterMiss)
+                    && st.FetchedAt is { } at
+                    && (disclosedOnByCode.ContainsKey(c)
+                        ? at.Date == DateTime.Today
+                        : DateTime.Now - at < RetryAfterMiss))
                 {
                     asked++;
                     continue;
@@ -170,9 +199,37 @@ public class FinancialFetchPlanner(FetchPaths paths)
                 .ThenBy(c => c, StringComparer.Ordinal)
                 .ToList();
 
-        var thisRun = pending.Take(cap is > 0 ? cap.Value : MaxPerRun).ToList();
+        // 不设上限（2026-10-21）：cap 只在调用方显式给了时才截，见类开头的说明。
+        var thisRun = cap is > 0 ? pending.Take(cap.Value).ToList() : pending.ToList();
         return new FinancialFetchPlan(codes.Count, pending, thisRun, outdatedPeriod, stale, watchedCount,
-            expected, dormant, unusable, asked, targetByCode);
+            expected, dormant, unusable, asked, targetByCode)
+        {
+            NeverFetched = never,
+            DisclosedOnByCode = disclosedOnByCode,
+            SecondsPerCode = MeasuredSecondsPerCode(stateByCode.Values),
+        };
+    }
+
+    /// <summary>
+    /// 最近一批连续抓取的实测速度（秒/只），给开工那行估预计耗时（2026-10-21）。
+    ///
+    /// 不另查库：<see cref="FinancialFetchState.FetchedAt"/> 本来就在手里。取最近 60 只的抓取时刻，
+    /// 相邻间隔里**超过 2 分钟的不算**（那是两轮之间的空档，不是抓一只要的时间），剩下的取中位数。
+    /// 样本太少（不到 10 个间隔）就返回 null，调用方按 <see cref="DefaultSecondsPerCode"/> 估。
+    /// </summary>
+    internal static double? MeasuredSecondsPerCode(IEnumerable<FinancialFetchState> states)
+    {
+        var times = states.Select(s => s.FetchedAt).OfType<DateTime>()
+                          .OrderByDescending(t => t).Take(60).ToList();
+        var gaps = new List<double>();
+        for (int i = 1; i < times.Count; i++)
+        {
+            var g = (times[i - 1] - times[i]).TotalSeconds;
+            if (g > 0 && g <= 120) gaps.Add(g);
+        }
+        if (gaps.Count < 10) return null;
+        gaps.Sort();
+        return gaps[gaps.Count / 2];
     }
 
     /// <summary>今天应该已经能拿到的最新报告期——按法定披露截止日：一季报 4-30、半年报 8-31、
@@ -210,34 +267,87 @@ public record FinancialFetchPlan(
     int AskedRecently = 0,
     IReadOnlyDictionary<string, DateTime>? TargetByCode = null)
 {
-    /// <summary>还剩多少只没补（本轮之外的）。</summary>
+    /// <summary>还剩多少只没补（本轮之外的）。不设上限之后只有调用方显式给了 cap 才会大于 0。</summary>
     public int Remaining => AllPending.Count - ThisRun.Count;
+
+    /// <summary>
+    /// 从没抓过（没有状态记录）的只数——多半是新股（2026-10-21 从 <see cref="StaleVersion"/> 里拆出来：
+    /// 开工那行要分原因报只数，"科目版本落后一大片"和"来了几只新股"是两回事）。
+    /// </summary>
+    public int NeverFetched { get; init; }
+
+    /// <summary>
+    /// 目标期来自**实际披露**的票 → 披露日（2026-10-21）。任务收工时拿它分辨
+    /// "数据源还没更新"（刚披露，明天再取）和"拖了好几天还没有"（报错），见 <see cref="FinancialFetchPlanner.SourceLagAlarm"/>。
+    /// </summary>
+    public IReadOnlyDictionary<string, DateTime> DisclosedOnByCode { get; init; }
+        = new Dictionary<string, DateTime>();
+
+    /// <summary>最近一批抓取的实测速度（秒/只）；null＝样本不够，按默认值估。</summary>
+    public double? SecondsPerCode { get; init; }
+
+    /// <summary>
+    /// 预计超过多久就在开工那行挂 ⚠（2026-10-21）。取的是 8 月底高峰日的量级（≈750 只），
+    /// 4 月底那几天会触发，平日不会。
+    /// </summary>
+    public static readonly TimeSpan LongRunWarning = TimeSpan.FromHours(2);
+
+    /// <summary>本轮预计耗时。</summary>
+    public TimeSpan Estimate => TimeSpan.FromSeconds(
+        ThisRun.Count * (SecondsPerCode ?? FinancialFetchPlanner.DefaultSecondsPerCode));
 
     /// <summary>这只票这一轮是**冲着哪个报告期**去抓的——落库时要记进
     /// <c>FinancialFetchState.target_date</c>，下一轮靠它认出"问过了但数据源没有"。</summary>
     public DateTime? TargetOf(string code)
         => TargetByCode != null && TargetByCode.TryGetValue(code, out var d) ? d : null;
 
-    public string Describe(int cap) =>
-        $"财务报表：目标 {TotalCodes} 只，需要抓 {AllPending.Count} 只" +
-        $"——其中 {OutdatedPeriod} 只报告期落后（按各自的**实际披露日**判断；" +
-        $"查不到披露记录的那些按法定截止日算，当前是 {ExpectedPeriod:yyyy-MM-dd}）、" +
-        $"{StaleVersion} 只科目集版本落后（本地数据是旧版代码抓的、科目不全，当前 v{FinancialKeys.Version}）；" +
-        $"{TotalCodes - AllPending.Count - Dormant - Unusable - AskedRecently} 只已是最新、跳过。" +
+    /// <summary>
+    /// 开工那一行（2026-10-21 改写）：要抓多少只、为什么、预计多久。
+    ///
+    /// 不设上限之后，"这一轮会跑很久"只能靠这一行让人知道——所以只数按原因分开报，
+    /// 预计超过 <see cref="LongRunWarning"/> 时挂 ⚠ 并说清停掉的后果。
+    /// </summary>
+    public string Describe()
+    {
+        if (ThisRun.Count == 0)
+            return "财务报表：没有新披露、也没有要补的，全部已是最新，无需抓取。" + SkippedNote();
+
+        var reasons = new List<string>();
+        if (OutdatedPeriod > 0) reasons.Add($"新披露/报告期落后 {OutdatedPeriod}");
+        if (StaleVersion > 0) reasons.Add($"科目集版本落后 {StaleVersion}");
+        if (NeverFetched > 0) reasons.Add($"从没抓过 {NeverFetched}");
+
+        var est = Estimate;
+        bool longRun = est >= LongRunWarning;
+        var speed = SecondsPerCode is { } s ? $"按最近实测约 {s:0} 秒/只" : $"按约 {FinancialFetchPlanner.DefaultSecondsPerCode:0} 秒/只估";
+
+        return (longRun ? "⚠ " : "")
+             + $"财务报表：本轮要抓 {ThisRun.Count} 只（{string.Join("、", reasons)}），{speed}，预计 {Fmt(est)}。"
+             + (longRun
+                 ? "这一轮会跑比较久——可以随时停，停掉不丢已抓的，剩下的明天日更接着补。"
+                   + (StaleVersion > ThisRun.Count / 2
+                       ? $"大头是科目集版本落后（当前 v{FinancialKeys.Version}）：那是代码改了科目集造成的一次性重抓，不是数据源出了问题。"
+                       : "")
+                 : "")
+             + (WatchedCount > 0 ? $"你关注的 {WatchedCount} 只（自选/底仓/主动仓）排在最前。" : "")
+             + (Remaining > 0 ? $"本轮只抓前 {ThisRun.Count} 只，其余 {Remaining} 只下轮接着来。" : "")
+             + SkippedNote();
+    }
+
+    /// <summary>不抓的那几类各几只——平时都是个位数，有才说。</summary>
+    private string SkippedNote() =>
         (Dormant > 0
-            ? $"另有 {Dormant} 只报告期虽然落后，但已经一年多没有过任何成交（退市/长期停牌），" +
-              "公司本身不再披露新报告期，不再反复去问；哪天恢复交易，K线一到它自己会回到名单里。"
+            ? $"另有 {Dormant} 只一年多没成交（退市/长期停牌），不再反复去问。"
             : "") +
         (Unusable > 0
-            ? $"{Unusable} 只已退市且本地一根K线都没有（回测池里用不到），不抓。"
+            ? $"{Unusable} 只已退市且本地一根K线都没有，不抓。"
             : "") +
         (AskedRecently > 0
-            ? $"{AskedRecently} 只上一轮就是冲着同一期问的、数据源当时没有，冷却几天再问" +
-              "（多半是退市名单还没收录、或公司延期披露）。"
-            : "") +
-        (WatchedCount > 0 ? $"你关注的 {WatchedCount} 只（自选/底仓/主动仓）已排到最前。" : "") +
-        (Remaining > 0 ? $"⚠ 本轮上限 {cap} 只，其余 {Remaining} 只下轮自动继续（抓过的不会重抓）。" : "") +
-        (ThisRun.Count > 0
-            ? $"本轮 {ThisRun.Count} 只 × 3 个请求，该接口已降速到约 10 请求/分钟，预计 {ThisRun.Count * 3 / 10} 分钟..."
-            : "全部已是最新，无需抓取。");
+            ? $"{AskedRecently} 只问过了、数据源暂时没有，先不问（刚披露的明天再问，其余隔几天）。"
+            : "");
+
+    private static string Fmt(TimeSpan t) =>
+        t.TotalHours >= 1 ? $"{(int)t.TotalHours} 小时 {t.Minutes} 分"
+        : t.TotalMinutes >= 1 ? $"{(int)t.TotalMinutes} 分钟"
+        : $"{Math.Max(1, (int)t.TotalSeconds)} 秒";
 }

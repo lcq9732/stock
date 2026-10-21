@@ -222,6 +222,49 @@ public class SqliteEarningsScheduleRepository
         return map;
     }
 
+    /// <summary>
+    /// 跟 <see cref="GetLatestDisclosedPeriodByCode"/> 同一个判据，但连**实际披露日**一起给（2026-10-21）。
+    ///
+    /// 【拉取财务报表】挪进日更后要分辨两种"数据源没有这一期"：刚披露（东财还没更新，明天再取）
+    /// 和拖了好几天（报错让人知道）——靠的就是这一天。
+    /// </summary>
+    public Dictionary<string, (DateTime Period, DateTime ActualDate)> GetLatestDisclosureByCode(DateTime asOf)
+        => QueryLatestDisclosure(asOf, halfYearOnly: false);
+
+    /// <summary>
+    /// 每只票**已实际披露的最新一期年报或中报**（只认 06-30 / 12-31），连披露日（2026-10-21）。
+    ///
+    /// 给【金融监管指标】判"有没有新东西要下"：监管指标只在年报/中报的 PDF 里有。
+    /// 拿 <see cref="GetLatestDisclosedPeriodByCode"/> 的话，三季报一出最新一期就成了 09-30——
+    /// 那一期永远不会被解析，于是每一家都被判成"有活"、挨家去查公告列表，查完才发现没东西可下。
+    /// </summary>
+    public Dictionary<string, (DateTime Period, DateTime ActualDate)> GetLatestHalfYearDisclosureByCode(DateTime asOf)
+        => QueryLatestDisclosure(asOf, halfYearOnly: true);
+
+    private Dictionary<string, (DateTime Period, DateTime ActualDate)> QueryLatestDisclosure(DateTime asOf, bool halfYearOnly)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        // 同一只票取 report_period 最大的那一行；SQLite 的 bare column + MAX() 保证 actual_date 来自同一行
+        cmd.CommandText = $"""
+            SELECT code, MAX(report_period), actual_date FROM EarningsSchedule
+            WHERE actual_date IS NOT NULL AND actual_date <> '' AND actual_date <= $asOf
+            {(halfYearOnly ? "AND (substr(report_period, 6, 5) = '06-30' OR substr(report_period, 6, 5) = '12-31')" : "")}
+            GROUP BY code;
+            """;
+        cmd.Parameters.AddWithValue("$asOf", asOf.ToString(DateFormat, CultureInfo.InvariantCulture));
+        var map = new Dictionary<string, (DateTime, DateTime)>(StringComparer.Ordinal);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            if (r.IsDBNull(1) || r.IsDBNull(2)) continue;
+            if (DateTime.TryParse(r.GetString(1), CultureInfo.InvariantCulture, DateTimeStyles.None, out var period)
+                && DateTime.TryParse(r.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.None, out var actual))
+                map[r.GetString(0)] = (period.Date, actual.Date);
+        }
+        return map;
+    }
+
     public int PendingCount()
     {
         using var conn = Open();

@@ -199,6 +199,27 @@ public class SqliteBankRegulatoryRepository
         return list;
     }
 
+    /// <summary>
+    /// 全部期次的解析状态，(代码, 报告期) → (状态, 最后一次尝试时刻)（2026-10-21）。
+    /// 给开工检查判"这一期还要不要再试、隔多久再试"用，见 BankRegulatoryPlanner。
+    /// </summary>
+    public Dictionary<(string Code, DateTime ReportDate), (string Status, DateTime? FetchedAt)> GetAllStates()
+    {
+        using var conn = Open();
+        SqliteSchema.EnsureSchema(conn);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, report_date, IFNULL(status, ''), fetched_at FROM BankReportFetchState;";
+        var map = new Dictionary<(string, DateTime), (string, DateTime?)>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            if (!DateTime.TryParse(r.GetString(1), out var d)) continue;
+            DateTime? at = !r.IsDBNull(3) && DateTime.TryParse(r.GetString(3), out var t) ? t : null;
+            map[(r.GetString(0), d.Date)] = (r.GetString(2), at);
+        }
+        return map;
+    }
+
     public List<BankRegulatoryMetric> GetByCode(string code)
     {
         using var conn = Open();

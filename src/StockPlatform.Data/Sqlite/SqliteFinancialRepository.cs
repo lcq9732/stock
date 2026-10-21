@@ -260,6 +260,41 @@ public class SqliteFinancialRepository : IFinancialRepository
         return result;
     }
 
+    /// <summary>
+    /// 只取**指定几只**票各自最新一期的快照（2026-10-21）。语义同 <see cref="GetLatestSnapshotByCode"/>，
+    /// 但逐只走 (code, report_date) 主键——一百来只是毫秒级，而全市场那个要扫 1400 万行。
+    /// 给【金融监管指标】的开工检查认机构类型用。
+    /// </summary>
+    public Dictionary<string, FinancialSnapshot> GetLatestSnapshotByCodes(IEnumerable<string> codes)
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT report_date, metric_key, value FROM FinancialReport
+            WHERE code = $code
+              AND report_date = (SELECT MAX(report_date) FROM FinancialReport WHERE code = $code);
+            """;
+        var pCode = cmd.CreateParameter(); pCode.ParameterName = "$code"; cmd.Parameters.Add(pCode);
+
+        var result = new Dictionary<string, FinancialSnapshot>(StringComparer.Ordinal);
+        foreach (var code in codes)
+        {
+            pCode.Value = code;
+            using var reader = cmd.ExecuteReader();
+            FinancialSnapshot? snap = null;
+            while (reader.Read())
+            {
+                snap ??= new FinancialSnapshot { ReportDate = DateTime.Parse(reader.GetString(0), CultureInfo.InvariantCulture) };
+                if (!reader.IsDBNull(2)) snap.Values[reader.GetString(1)] = reader.GetDouble(2);
+            }
+            if (snap != null) result[code] = snap;
+        }
+        return result;
+    }
+
     public Dictionary<string, List<(int Year, double NetProfitParent)>> GetRecentAnnualNetProfitByCode(int count)
     {
         using var conn = new SqliteConnection(_connectionString);

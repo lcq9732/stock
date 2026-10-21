@@ -149,13 +149,61 @@ public class PlanTemplateTests
         Assert.Equal(FetchActionId.StepIndexWeight, periodic.Items[^1].Action);
     }
 
+    /// <summary>
+    /// 2026-10-21 起财务报表和监管指标在日更组**最末两项**、财务在前：监管指标靠财务的特征科目认机构；
+    /// 软前置【拉取财报预约日】刷新的实际披露日是两项判"有没有活"的依据，必须排在它们前面。
+    /// 手工数据仍在季度组。
+    /// </summary>
     [Fact]
-    public void Financials_comes_before_bank_regulatory()
+    public void Financials_and_bank_regulatory_are_the_last_two_daily_items()
     {
-        var items = Loaded().GroupOf(PlanGroupKind.Periodic).Items.Select(i => i.Action).ToList();
-        Assert.True(items.IndexOf(FetchActionId.FetchFinancials) < items.IndexOf(FetchActionId.BankRegulatory));
-        // 手工回填的是监管指标没解析出来的格子，所以它在最后
-        Assert.True(items.IndexOf(FetchActionId.BankRegulatory) < items.IndexOf(FetchActionId.ImportManual));
+        var plan = Loaded();
+        var daily = plan.GroupOf(PlanGroupKind.Daily).Items.Select(i => i.Action).ToList();
+        Assert.Equal(FetchActionId.FetchFinancials, daily[^2]);
+        Assert.Equal(FetchActionId.BankRegulatory, daily[^1]);
+        Assert.True(daily.IndexOf(FetchActionId.FetchEarningsSchedule) < daily.IndexOf(FetchActionId.FetchFinancials));
+
+        var periodic = plan.GroupOf(PlanGroupKind.Periodic).Items.Select(i => i.Action).ToList();
+        Assert.DoesNotContain(FetchActionId.FetchFinancials, periodic);
+        Assert.DoesNotContain(FetchActionId.BankRegulatory, periodic);
+        Assert.Contains(FetchActionId.ImportManual, periodic);
+    }
+
+    /// <summary>
+    /// 老计划里两项还在季度组 → 加载后搬到日更组尾、财务在前，启用状态/模式/运行记录照搬；
+    /// 再加载一次不动（2026-10-21，见 FetchPlan.Regrouped）。
+    /// </summary>
+    [Fact]
+    public void Financials_and_bank_regulatory_move_from_periodic_to_daily()
+    {
+        var plan = FetchPlan.CreateDefault();
+        var daily = plan.GroupOf(PlanGroupKind.Daily);
+        var periodic = plan.GroupOf(PlanGroupKind.Periodic);
+        // 造一份"老计划"：把两项搬回季度组
+        var fin = daily.Items.First(i => i.Action == FetchActionId.FetchFinancials);
+        var bank = daily.Items.First(i => i.Action == FetchActionId.BankRegulatory);
+        daily.Items.Remove(fin); daily.Items.Remove(bank);
+        fin.Enabled = false;   // 用户关着的就继续关着
+        fin.LastStart = new DateTime(2026, 10, 1, 5, 53, 0);
+        fin.RecentDurationsSec = [90, 91];
+        periodic.Items.Insert(0, bank);
+        periodic.Items.Insert(0, fin);
+        plan.LinkOwners();
+
+        var notes = plan.MigrateRetired();
+        plan.LinkOwners();
+
+        var actions = daily.Items.Select(i => i.Action).ToList();
+        Assert.Equal(FetchActionId.FetchFinancials, actions[^2]);
+        Assert.Equal(FetchActionId.BankRegulatory, actions[^1]);
+        Assert.DoesNotContain(periodic.Items, i => i.Action is FetchActionId.FetchFinancials or FetchActionId.BankRegulatory);
+        Assert.Same(fin, daily.Items[^2]);                       // 同一个对象：运行记录跟着走
+        Assert.False(fin.Enabled);
+        Assert.Equal([90, 91], fin.RecentDurationsSec);
+        Assert.Contains(notes, n => n.Contains("拉取财务报表"));
+        Assert.Contains(notes, n => n.Contains("金融监管指标"));
+
+        Assert.DoesNotContain(plan.MigrateRetired(), n => n.Contains("拉取财务报表") || n.Contains("金融监管指标"));
     }
 
     [Fact]
@@ -556,14 +604,16 @@ public class EastMoneyTaskGroupingTests
     }
 
     [Fact]
-    public void 龙虎榜席位必须排在日更组最末()
+    public void 龙虎榜席位必须排在当天核心数据之后()
     {
         // 它是日频数据、本该跟 StepLhb 挨着，但**首轮 264 万行要跑几小时**。
         // 日更组是「定时项」：跑多久算多久、后面顺延、不受时间窗约束——排中间的话，
         // 首轮那几小时会把后面的公告/板块/板块指数/覆盖率体检全堵住，当天核心数据就废了。
         // 排最末则最坏也只是它自己跑到半夜，前面该落库的早落完了。
+        // 2026-10-21 起它后面只剩【拉取财务报表】【金融监管指标】两项（理由同一个：披露高峰日要跑几小时，
+        // 见 Financials_and_bank_regulatory_are_the_last_two_daily_items）。
         var items = Fresh().GroupOf(PlanGroupKind.Daily).Items.Select(i => i.Action).ToList();
-        Assert.Equal(FetchActionId.FetchLhbSeat, items[^1]);
+        Assert.Equal(FetchActionId.FetchLhbSeat, items[^3]);
     }
 
     [Fact]

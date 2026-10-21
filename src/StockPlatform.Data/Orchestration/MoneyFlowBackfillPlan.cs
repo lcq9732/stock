@@ -78,8 +78,8 @@ public static class MoneyFlowBackfillPlan
     /// 这期间别的任务全得让路；而这份数据**没有时效压力**（120 天窗口内随时补），
     /// 慢慢补十天半个月完全可以接受。
     ///
-    /// 30 只＝两个主动歇的批次、约 5 分钟，跟【财务报表】每轮 300 只是同一个形状
-    /// （见 FinancialFetchPlanner.MaxPerRun），只是因为这个接口更凶所以数字小一个量级。
+    /// 30 只＝两个主动歇的批次、约 5 分钟。（【财务报表】原来也是这个形状、每轮 300 只，
+    /// 2026-10-21 挪进日更后取消了上限——那份数据有时效、这份没有，两边不再同形。）
     /// 调度给了 <see cref="StockPlatform.Scheduling.Tasks.TaskRunArgs.MaxItems"/> 时以调度的为准。
     /// </summary>
     public const int MaxPerRun = 30;

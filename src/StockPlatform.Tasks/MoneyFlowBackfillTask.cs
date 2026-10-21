@@ -122,7 +122,7 @@ public sealed class MoneyFlowBackfillTask(
 
         var pending = queue.Todo;
         int never = queue.Never;
-        // 每轮上限：调度给了就听调度的，没给就按 MaxPerRun 兜底（跟财务报表同一个形状）。
+        // 每轮上限：调度给了就听调度的，没给就按 MaxPerRun 兜底。
         // 截在**问几只**上、不是"成功几只"：限流限的是请求数，失败的那几只照样花掉了配额，
         // 骨架的 MaxItems 只数成功批次，单靠它会在一轮里把 5000 只全问一遍。
         int cap = args.MaxItems is > 0 ? args.MaxItems.Value

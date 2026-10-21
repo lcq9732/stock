@@ -819,8 +819,8 @@ public sealed class FetchPlan
                 },
 
                 // ── 组 2：按周期更新、晚几天没关系的 ──
-                // 整组「空闲时补」：财务报表接口配额严、每轮只能 300 只，全市场要跨几天才啃得完，
-                // 设成"每月 1 号跑一轮"根本补不完；而这类数据本来也没有时效压力。
+                // 整组「空闲时补」：请求量大、跨几天才补得完的（分档资金流补历史、板块成分、
+                // 客户与供应商），设成"每月 1 号跑一轮"根本补不完；而这类数据本来也没有时效压力。
                 new FetchPlanGroup
                 {
                     Name = "季度定期", Enabled = true, Repeat = RepeatKind.Monthly, DayOfMonth = 1,
@@ -1018,6 +1018,13 @@ public sealed class FetchPlan
         // 它在周期组里勾着就带着勾过去，没勾就还是没勾。
         (FetchActionId.ImportFundExDividend,
          "【重算回测序列】在日更，事件晚到几天 ETF 的 day_adj 就按旧因子错几天", null),
+        // 【拉取财务报表】+【金融监管指标】2026-10-21 从季度组挪进日更（用户要求）。启用状态和模式照搬。
+        // **顺序要紧**：财务在前——TemplateIndexIn 按"组里模板序排在它前面的最后一项"定位，
+        // 监管指标搬过去时财务已经在了，才会插在财务后面。
+        (FetchActionId.FetchFinancials,
+         "财报是陆续披露的，按月到期的话月初之后新披露的要等到下个月才进库", null),
+        (FetchActionId.BankRegulatory,
+         "跟着【拉取财务报表】走，有新披露的年报/中报当天就解析", null),
     ];
 
     public List<string> MigrateRetired()

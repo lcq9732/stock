@@ -368,8 +368,10 @@ public partial class App : Application
         // 切到东财时走的是 FinancialSourceRouter：**保险那 5 家仍留在新浪**，因为东财整组不填
         // 保险的支出科目（赔付支出/退保金/保单红利/分保费用，三处全 null），而赔付率指标要用它。
         // datacenter 比新浪宽松得多（1 秒间隔连拉几百页无事），所以东财这条限流参数放宽。
+        // 离线模拟（2026-10-21）：【拉取财务报表】挪进日更后要能零联网把整条链跑一遍，见 MockFinancialProvider。
         IFinancialProvider financialProvider =
-            FetcherSettings.ReadFinancialSource(paths.SettingsPath) == "eastmoney"
+            offlineMock ? new MockFinancialProvider(paths.CurrentDb)
+            : FetcherSettings.ReadFinancialSource(paths.SettingsPath) == "eastmoney"
                 ? new FinancialSourceRouter(
                     new EastMoneyFinancialProvider(new RateLimiter(
                         maxConcurrency: 1, delayBetweenRequests: TimeSpan.FromSeconds(1))),
@@ -899,7 +901,8 @@ public partial class App : Application
                 new SqliteFinancialRepository(paths.CurrentDb),
                 new SqliteEarningsScheduleRepository(paths.CurrentDb),
                 paths,
-                orchestrator.FetchFinancialsForCodesAsync));
+                orchestrator.FetchFinancialsForCodesAsync,
+                offlineMock));
 
         // 【拉取分红送配】2026-09-18 迁到新任务框架。注册放在 orchestrator 之后只是就近——
         // 它不依赖编排层（依赖是 provider + 仓储 + manifest + 公告索引）。

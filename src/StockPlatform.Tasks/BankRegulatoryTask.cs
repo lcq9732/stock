@@ -54,6 +54,7 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
     private readonly SqliteEarningsScheduleRepository _schedule;
     private readonly string _reportsDir;
     private readonly string _dbPath;
+    private readonly FetchPaths _paths;
 
     /// <summary>
     /// 补抓一小批金融股的财务报表。
@@ -65,10 +66,27 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
     /// </summary>
     private readonly Func<IReadOnlyList<string>, IProgress<string>?, CancellationToken, Task>? _refetchFinancials;
 
+    /// <summary>
+    /// Debug 的离线模拟（2026-10-21）：查公告、下 PDF 那段（③）走的是自己 new 的 <see cref="SinaReportIndex"/>，
+    /// 不经过任何可替换的 provider——不拦的话，开工检查一旦说"有活"，零联网验证就会发出真请求。
+    /// 打开时 ③ 整段跳过，只跑本地的 ⓪①②④。
+    /// </summary>
+    private readonly bool _offlineMock;
+
     /// <summary>本轮识别出的目标，收尾生成手工回填清单要用。</summary>
     private IReadOnlyList<(string Code, FinancialInstitutionKind Kind)> _targets = [];
 
+    /// <summary>
+    /// 连续几家取公告列表失败就认定新浪当前不通、本轮收工（2026-10-21，跟【拉取财务报表】同一个口径）。
+    /// 不停的话限速器会在熔断里一等十几分钟到两小时，日更里能堵住后面的任务。
+    /// </summary>
+    internal const int AbortAfterConsecutiveFailures = 10;
+
+    /// <summary>本轮开工检查的结果（2026-10-21）。为 null＝还没查。</summary>
+    private BankRegulatoryPlan? _plan;
+
     private int _ok, _fail, _skip, _metricTotal;
+    private bool _aborted;
     private readonly List<string> _errors = [];
 
     public BankRegulatoryTask(
@@ -76,13 +94,16 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
         SqliteFinancialRepository finRepo,
         SqliteEarningsScheduleRepository schedule,
         FetchPaths paths,
-        Func<IReadOnlyList<string>, IProgress<string>?, CancellationToken, Task>? refetchFinancials = null)
+        Func<IReadOnlyList<string>, IProgress<string>?, CancellationToken, Task>? refetchFinancials = null,
+        bool offlineMock = false)
     {
+        _offlineMock = offlineMock;
         _repo = repo;
         _finRepo = finRepo;
         _schedule = schedule;
         _reportsDir = paths.ReportsDir;
         _dbPath = paths.CurrentDb;
+        _paths = paths;
         _refetchFinancials = refetchFinancials;
     }
 
@@ -93,6 +114,20 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
     {
         _repo.EnsureSchema();
         bool refetchAll = args.Mode == FetchMode.FirstBackfill;
+        _ok = _fail = _skip = _metricTotal = 0;
+        _aborted = false;
+        _errors.Clear();
+        _targets = [];
+
+        // ── ⓪ 开工检查（2026-10-21 挪进日更时加）：只查本地库，没活就整轮不做 ──
+        // 下面 ①② 是两段一刻钟级的重活，不管有没有新东西都要跑；一年里真有活的只有
+        // 3–4 月和 8 月那二三十个工作日。「整段回补」是人主动要全部重来，不过这道门。
+        _plan = refetchAll ? null : await Task.Run(() => new BankRegulatoryPlanner(_paths).Plan(DateTime.Today), ct);
+        if (_plan != null)
+        {
+            Report(_plan.Describe());
+            if (_plan.NothingToDo) yield break;
+        }
 
         // ⚠ **首个 await 之前的活全部推到线程池**。异步迭代器在第一次 yield 之前是同步跑在
         //   调用方线程上的，而调用方是 UI 线程（FetchTaskRegistry.RunAsync 只是 await，
@@ -146,9 +181,12 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
         // 原来是无条件为每一家发请求查列表，而这一段限流很紧（约 17 请求/分钟），
         // 87 家跑一轮要个把小时。披露季前期绝大多数机构根本还没出报告，那一小时全是空转。
         // ⚠ 查不到披露记录的照常查——兜底方向只能是"多查"，不能因为查不到就漏掉一家。
+        // ⚠ 只认年报/中报（2026-10-21 修）：原来取的是"最新已披露的任意一期"，三季报一出就成了 09-30，
+        //   而三季报从来不解析，于是每一家都跳不过去、挨家查一遍公告列表才发现没东西可下。
         var disclosed = refetchAll
             ? new Dictionary<string, DateTime>(StringComparer.Ordinal)
-            : await Task.Run(() => _schedule.GetLatestDisclosedPeriodByCode(DateTime.Today), ct);
+            : await Task.Run(() => _schedule.GetLatestHalfYearDisclosureByCode(DateTime.Today)
+                .ToDictionary(kv => kv.Key, kv => kv.Value.Period, StringComparer.Ordinal), ct);
 
         // ⚠ **本地文件缺了的票不许跳过**（2026-09-16 补）。
         //
@@ -183,10 +221,26 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
         try
         {
             var batch = new List<FetchedReport>(BatchSize);
+            int consecutiveFailures = 0;
             for (int i = 0; i < _targets.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
                 var (code, kind) = _targets[i];
+
+                // 开工检查给了名单就只处理名单里的（2026-10-21）。①② 仍对全体机构跑（重解析是自愈，
+                // 手工回填清单也要全体），只有发请求的这一段收窄。
+                List<DateTime>? wanted = null;
+                if (_plan is { FullRun: false } && !_plan.Work.TryGetValue(code, out wanted))
+                {
+                    _skip++;
+                    continue;
+                }
+                if (_offlineMock)
+                {
+                    Report($"[离线模拟] {code} 跳过查公告/下 PDF（要处理的期：{string.Join("、", (wanted ?? []).Select(p => p.ToString("yyyy-MM-dd")))}）");
+                    _skip++;
+                    continue;
+                }
                 string kindName = kind switch
                 {
                     FinancialInstitutionKind.Bank => "银行",
@@ -196,7 +250,8 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
 
                 // 已披露的最新一期本地已经拿到了 → 这一轮它没有新东西，一个请求都不用发。
                 // ⚠ 但**本地缺文件的票不能跳**，否则那些期次永远补不回来（见上面 needRefill）。
-                if (disclosed.TryGetValue(code, out var latestDisclosed)
+                if (wanted == null
+                    && disclosed.TryGetValue(code, out var latestDisclosed)
                     && done.Contains((code, latestDisclosed))
                     && !needRefill.Contains(code))
                 {
@@ -210,12 +265,38 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
                 // 每一期拿**全部候选**（标题只做粗筛+排序），下面逐个试到解析出指标为止
                 SortedDictionary<DateTime, List<SinaReportIndex.ReportRef>> byDate;
                 try { byDate = await fetcher.ListCandidatesAsync(code, maxPerKind: 2, ct); }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     _fail++;
                     _errors.Add($"{code} 取公告列表失败：{ex.Message}");
+                    Report($"    ✘ {code} 取公告列表失败：{ex.Message}（已跳过，继续下一家）");
+                    if (++consecutiveFailures >= AbortAfterConsecutiveFailures)
+                    {
+                        _aborted = true;
+                        Report($"✘ 金融监管指标：新浪连续 {consecutiveFailures} 家取不到公告列表，判断它当前不通，本轮停下。");
+                        break;
+                    }
                     continue;
                 }
+                consecutiveFailures = 0;
+
+                // 开工检查要的那几期，公告列表里却没有——记一笔，不然它天天被检查拉出来
+                // （每次都连带一刻钟的重解析）。补丢失文件的老期次记 not_listed、不再自动试；
+                // 最新一期记 no_pdf，按披露后的节奏再试（新浪挂 PDF 可能比披露晚）。
+                if (wanted != null)
+                    foreach (var p in wanted.Where(p => !byDate.ContainsKey(p) && !done.Contains((code, p))))
+                    {
+                        bool refill = _plan!.RefillKeys.Contains((code, p));
+                        batch.Add(new FetchedReport(new BankReportFetchState
+                        {
+                            Code = code, ReportDate = p,
+                            Status = refill ? BankRegulatoryPlanner.NotListed : "no_pdf",
+                            Message = "公告列表里没找到这一期的年报/中报",
+                        }, []));
+                        _fail++;
+                        Report($"    ⚠ {p:yyyy-MM-dd} 公告列表里没找到这一期" + (refill ? "（老期次，不再自动重试）" : "（之后再试）"));
+                    }
 
                 foreach (var (period, candidates) in byDate)
                 {
@@ -263,9 +344,21 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
     protected override async Task<TaskRunResult?> OnCompletedAsync(
         TaskRunStats stats, TaskRunArgs args, CancellationToken ct)
     {
+        // 开工检查说没活：几秒结束、一个请求都没发（2026-10-21）
+        if (_plan is { NothingToDo: true })
+            return TaskRunResult.Ok(nothingToDo: true, progress: "没有新披露的年报/中报要解析");
+
         var summary = $"金融监管指标：成功 {_ok} 份（共 {_metricTotal} 个指标）、"
                     + $"失败 {_fail} 份、跳过已有 {_skip} 份。PDF 缓存在 {_reportsDir}。";
         Report(summary);
+
+        // 新浪不通、提前收工：记失败让人看得见，后面的任务照跑；明天日更的开工检查会把没做完的再拉出来
+        if (_aborted)
+        {
+            var why = $"新浪连续 {AbortAfterConsecutiveFailures} 家取不到公告列表，本轮提前收工"
+                    + $"（已成功 {_ok} 份）；明天日更会自动再试，也可以点【执行】手工补";
+            return new TaskRunResult(TaskState.Failed, [why]);
+        }
 
         // ── ④ 生成「待手工回填清单」 ───────────────────────────────────────
         // PDF 解析做不到 100%（个别年报的字体 PdfPig 和 pdftotext 都读不动），与其让体检表

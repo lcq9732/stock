@@ -201,6 +201,128 @@ public class FinancialFetchPlannerTests : IDisposable
         Assert.Equal(Expected.AddYears(-1), st.ReportDate);
     }
 
+    // ── 2026-10-21 挪进日更：不设上限、刚披露的次日再问、开工那行 ──────────
+
+    /// <summary>预约日表登记一笔"<paramref name="period"/> 已在 <paramref name="actual"/> 实际披露"。</summary>
+    private void Disclosed(string code, DateTime period, DateTime actual)
+    {
+        var repo = new SqliteEarningsScheduleRepository(_paths.CurrentDb);
+        repo.EnsureSchema();
+        repo.Upsert([new EarningsScheduleRow(code, period, actual, null, null, null, actual)]);
+    }
+
+    /// <summary>把这只票的"最后一次问"挪到 <paramref name="at"/>（ReplaceByCode 只会写 Now）。</summary>
+    private void AskedAt(string code, DateTime at)
+    {
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_paths.CurrentDb}");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE FinancialFetchState SET fetched_at = $t WHERE code = $c;";
+        cmd.Parameters.AddWithValue("$t", at.ToString("yyyy-MM-dd HH:mm:ss"));
+        cmd.Parameters.AddWithValue("$c", code);
+        cmd.ExecuteNonQuery();
+    }
+
+    [Fact]
+    public void 不设上限_待抓多少本轮就抓多少()
+    {
+        var codes = Enumerable.Range(1, 400).Select(i => $"{600000 + i:000000}").ToList();
+        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, codes.Select(c => (c, c)), "stock");
+
+        var plan = Plan();
+        Assert.Equal(401, plan.ThisRun.Count);          // 400 只 + 构造函数里那只
+        Assert.Equal(0, plan.Remaining);
+        Assert.Equal(401, plan.NeverFetched);
+        // 调用方显式给了上限时仍照办（测试、以后真要限量）
+        Assert.Equal(50, new FinancialFetchPlanner(_paths).Plan(50).ThisRun.Count);
+    }
+
+    [Fact]
+    public void 已披露_数据源当天还没有_今天不再问_明天再问()
+    {
+        // 宁德时代那种：傍晚刚发三季报，17:30 那轮去取，东财只给到中报
+        var q3 = new DateTime(DateTime.Today.Year, 9, 30);
+        var h1 = new DateTime(DateTime.Today.Year, 6, 30);
+        Bar(Live, DateTime.Today);
+        Disclosed(Live, q3, DateTime.Today);
+        Have(Live, h1, target: q3);
+
+        var today = Plan();
+        Assert.DoesNotContain(Live, today.AllPending);
+        Assert.Equal(1, today.AskedRecently);
+
+        // 原来这里要冷却 7 天；挪进日更后只冷却到当天
+        AskedAt(Live, DateTime.Today.AddDays(-1).AddHours(18));
+        Assert.Contains(Live, Plan().AllPending);
+    }
+
+    [Fact]
+    public void 目标期来自法定截止日的_仍按7天冷却()
+    {
+        LiveStock("002731");
+        Bar("002731", DateTime.Today);
+        Have("002731", Expected.AddYears(-1), target: Expected);
+        AskedAt("002731", DateTime.Today.AddDays(-2));
+
+        Assert.DoesNotContain("002731", Plan().AllPending);
+    }
+
+    [Fact]
+    public void 计划带出披露日_任务靠它分辨数据源还没更新()
+    {
+        var q3 = new DateTime(DateTime.Today.Year, 9, 30);
+        Bar(Live, DateTime.Today);
+        Disclosed(Live, q3, DateTime.Today.AddDays(-1));
+        Have(Live, new DateTime(DateTime.Today.Year, 6, 30));
+
+        var plan = Plan();
+        Assert.Contains(Live, plan.ThisRun);
+        Assert.Equal(q3, plan.TargetOf(Live));
+        Assert.Equal(DateTime.Today.AddDays(-1), plan.DisclosedOnByCode[Live]);
+    }
+
+    [Fact]
+    public void 开工那行_按原因报只数_预计超两小时挂警告()
+    {
+        var codes = Enumerable.Range(1, 1000).Select(i => $"{600000 + i:000000}").ToList();
+        SqliteStockMetaUpsert.Upsert(_paths.CurrentDb, codes.Select(c => (c, c)), "stock");
+
+        var text = Plan().Describe();       // 1001 只 × 默认 10 秒 ≈ 2.8 小时
+        Assert.StartsWith("⚠", text);
+        Assert.Contains("本轮要抓 1001 只", text);
+        Assert.Contains("从没抓过 1001", text);
+        Assert.Contains("可以随时停", text);
+    }
+
+    [Fact]
+    public void 开工那行_平时不挂警告_没活时说清楚()
+    {
+        Bar(Live, DateTime.Today);
+        Have(Live, Expected, target: Expected);
+        Assert.Contains("无需抓取", Plan().Describe());
+
+        LiveStock("000002");
+        Bar("000002", DateTime.Today);
+        Have("000002", Expected.AddYears(-1));
+        var text = Plan().Describe();
+        Assert.DoesNotContain("⚠", text);
+        Assert.Contains("新披露/报告期落后 1", text);
+        Assert.Contains("本轮要抓 1 只", text);
+    }
+
+    [Fact]
+    public void 实测速度_去掉两轮之间的空档取中位数()
+    {
+        var t0 = new DateTime(2026, 10, 21, 18, 0, 0);
+        var states = Enumerable.Range(0, 20)
+            .Select(i => new FinancialFetchState(t0, 5, null, t0.AddSeconds(-8 * i)))
+            .Append(new FinancialFetchState(t0, 5, null, t0.AddDays(-3)));   // 上一轮，隔了三天
+        Assert.Equal(8, FinancialFetchPlanner.MeasuredSecondsPerCode(states));
+
+        // 样本太少就不估（按默认值）
+        Assert.Null(FinancialFetchPlanner.MeasuredSecondsPerCode(states.Take(5)));
+    }
+
     [Fact]
     public void 数据源一行都没给_也要记下问过了()
     {

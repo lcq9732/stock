@@ -1610,21 +1610,24 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.FetchEarningsSchedule, FetchActionId.StepDelistedSupplement]),
 
         new(FetchActionId.FetchFinancials, "拉取财务报表", "东财 F10（保险走新浪）", QuotaGroup.Mixed,
-            TimeSpan.FromMinutes(90), "季度·跨天分轮",
-            "三张表 52 个科目的全部报告期。⚠ 这个接口配额很严，已单独降速到约 10 请求/分钟、"
-            + "每轮上限 300 只（约 90 分钟），全市场要跨几天补完。"
-            + "**建议把重复规则设成「空闲时」**：程序空着就自己补一批，到点前自动收尾给定时任务让路，"
-            + "跨几天慢慢啃完。设成「每月某天」只会跑一轮 300 只，全市场根本补不完。\n"
+            TimeSpan.FromMinutes(5), "每工作日",
+            "三张表 52 个科目的全部报告期。\n"
+            + "**2026-10-21 挪进日更、每轮不设上限**：财报是陆续披露的，原来「每月 1 号到期」的话，"
+            + "月初跑过一轮之后新披露的要等到下个月才进库（宁德时代 10-21 的三季报就是这么卡住的）。"
+            + "现在每个工作日跑一次，没有新披露时只查本地库、几秒结束、不发请求；"
+            + "披露高峰（4 月底一天 1100~1200 只）一轮要两三个小时，开工那行会报只数和预计耗时。\n"
+            + "**没取到的**：已取到的照常入库，没取到的只报只数，不挡后面的任务——明天日更会自动再取，"
+            + "也可以手动点【执行】。连续 10 只取不到（数据源不通）就提前收工、记成失败。\n"
             + "「要不要抓」按每只票的**实际披露日**判断（来自【拉取财报预约日】），不是法定截止日——"
             + "所以那一项要是好几天没跑成，这边会以为没人披露而少取。\n"
             + "**2026-09-10 换成东财 F10**（固定英文列名、按 ORG_TYPE 选 G/B/S 三套表），"
-            + "datacenter 的配额比新浪宽得多，所以上面那句「10 请求/分钟」只在退回新浪时成立。\n"
+            + "datacenter 的配额比新浪宽得多（实测约 7–12 秒一只）；退回新浪的话约 10 请求/分钟，高峰日会跑很久。\n"
             + "⚠ **保险那 5 家仍走新浪**（东财整组不填赔付支出/退保金/保单红利/分保费用），"
             + "所以两个源都占——见 FinancialSourceRouter。要退回新浪：改 fetcher-settings.json 的 FinancialSource，"
             + "但要知道新浪那条路有两个老毛病：幽灵 0（银行的应付账款/存货被写成 0）、营业支出漏掉信用减值。\n"
             + "**状态格怎么看**：还有多少只股票的财务报表没补齐。\n"
-            + "判据有两条，任一落后就要重抓：① 报告期不够新（按法定披露截止日算）② 科目集版本落后（旧版代码抓的、科目不全）。\n"
-            + "这个接口配额很严，每轮上限 300 只，全市场要跨几天补完。",
+            + "判据有两条，任一落后就要重抓：① 报告期不够新（按实际披露日；查不到披露记录的按法定截止日）"
+            + "② 科目集版本落后（旧版代码抓的、科目不全）。",
             SupportsPartialRun: true,
             Sources: [DataSourceId.Sina, DataSourceId.EmDataCenter],
             SoftDependsOn: [FetchActionId.FetchEarningsSchedule]),
@@ -1665,13 +1668,15 @@ public static class FetchTaskCatalog
             Sources: [DataSourceId.EmDataCenter]),
 
         new(FetchActionId.BankRegulatory, "金融监管指标", "新浪(页面 + PDF文件)", QuotaGroup.Sina,
-            TimeSpan.FromHours(1), "半年（年报/中报后）",
+            TimeSpan.FromMinutes(1), "每工作日（有新年报/中报才干活）",
             "下载银行/券商/保险的年报和中报 PDF，解析三张报表里没有的监管指标"
             + "（不良率、拨备覆盖率、资本充足率、风险覆盖率、偿付能力充足率等）。"
-            + "每次都会先用当前规则把本地已有 PDF 重解析一遍（不联网，几分钟）。"
             + "⚠ 前置：财务报表——机构类型是靠特征科目认出来的。\n"
-            + "没披露的机构不会去翻公告列表（按实际披露日判断，来自【拉取财报预约日】）——"
-            + "这一段限流很紧，披露季前期挨家去查全是空转。",
+            + "**2026-10-21 挪进日更**，开工先只查本地库判断有没有活：某家机构**已实际披露**的最新年报/中报"
+            + "还没解析成功、本地 PDF 文件丢了、或者上次是网络报错/新浪还没挂出 PDF（隔天再试）。"
+            + "都没有就几秒结束、一个请求都不发——一年里真正有活的大约只有 3–4 月和 8 月那二三十个工作日。\n"
+            + "有活的那天：先用当前规则把本地已有 PDF 重解析一遍（不联网，十几分钟），再只给有活的那几家查公告、下 PDF。\n"
+            + "PDF 下到了但解析不出指标的（no_match 等）不自动重试——再下一遍结果一样，它们在「待手工回填清单」里。",
             DependsOn: FetchActionId.FetchFinancials,
             SoftDependsOn: [FetchActionId.FetchEarningsSchedule],
             // PDF 有几 MB，单个下载的 HttpClient 超时就设到 3 分钟（BankReportFetcher）；
@@ -1897,15 +1902,19 @@ public static class FetchTaskCatalog
         // 晚一天就失去意义——那正是这一项唯一要等的信号。
         FetchActionId.StepPlanWatch => PlanGroupKind.Daily,
 
+        // 【拉取财务报表】+【金融监管指标】（2026-10-21 从季度组挪过来）：财报是陆续披露的，
+        // 「每月 1 号到期」时月初跑过一轮，之后新披露的要等到下个月——宁德时代 10-21 的三季报就卡在这儿。
+        // 两项都按"本地有没有活"自己判断，没新披露的日子几秒结束、不发请求。
+        FetchActionId.FetchFinancials or FetchActionId.BankRegulatory => PlanGroupKind.Daily,
+
         // ── 按周期更新、晚几天没关系的 ──
         FetchActionId.FetchIndustry
             // 【个股行业与题材】（2026-09-03）跟证监会分类同组同频：行业归属变动很慢，季度一轮够了。
             or FetchActionId.FetchStockBoardMap
             or FetchActionId.StepIndexCons or FetchActionId.StepIndexWeight
             or FetchActionId.StepEtfIndexMap or FetchActionId.FetchShareholder
-            or FetchActionId.FetchDividend or FetchActionId.BankRegulatory
+            or FetchActionId.FetchDividend
             or FetchActionId.StepReparseBankPdf or FetchActionId.ImportManual
-            or FetchActionId.FetchFinancials
             // 【分档资金流·补历史】归定期而不是日更（2026-09-12 订正理由）：日常增量早就不走它了——
             // 那是【分档资金流快照】的事（59 个请求、一两分钟，已归日更）。留在这一组的只有
             // 逐股补历史：一只票一个请求、全市场一轮 5500 个请求十几小时，而且 120 天窗口内
@@ -2154,19 +2163,25 @@ public static class FetchTaskCatalog
         // 落一次库、按本地最新交易日续抓，所以就算今晚没跑完，明晚接着来，几天自然补齐。
         // 首轮过后增量每次只有几十页、几分钟，那时排在哪儿都无所谓了。
         FetchActionId.FetchLhbSeat,
+
+        // 【拉取财务报表】+【金融监管指标】排在龙虎榜席位之后、整组最末（2026-10-21 从季度组挪过来）。
+        // 平时几秒结束；但披露高峰（4 月底一天 1100~1200 只）财务报表一轮要两三个小时，
+        // 排在中间会把后面"当天必须拿到"的项堵住，排最末最坏也只是它自己跑到深夜。
+        // 软前置【拉取财报预约日】在前面——它刷新的实际披露日正是这两项判"有没有活"的依据。
+        // ⚠ 两项**必须挨着且财务在前**：监管指标靠财务的特征科目认机构，新上市的银行也是先被财务抓到。
+        FetchActionId.FetchFinancials,
+        FetchActionId.BankRegulatory,
     ];
 
     /// <summary>
     /// 「季度定期」组的默认排法（2026-09-02）。整组「每月 1 号到期 + 空闲时补」。
     ///
-    /// ⚠ 顺序上有三条依赖，别按"快的排前面"随手挪：
-    ///   · 【金融监管指标】要在【财务报表】之后——机构类型（银行/券商/保险）是靠财务特征科目
-    ///     认出来的，没有财务数据它一家都识别不出；
-    ///   · 【导入手工数据】要在【金融监管指标】之后——它填的正是监管指标里没解析出来的那些格子；
+    /// ⚠ 顺序上的依赖，别按"快的排前面"随手挪：
     ///   · 【补全退市名单】要在【拉取股东数据】和【拉取分红送配】之前（2026-09-18）——
     ///     那两项的名单都含退市股，而退市名单是它写进 StockMeta 的。
-    /// 财务报表最慢（每轮 300 只、跨几天），但它有冷却：补完一轮歇 20 分钟，
-    /// 那段空档后面的小任务照样能跑，不会被饿死。
+    /// （【拉取财务报表】【金融监管指标】2026-10-21 挪进了日更，理由见 DefaultGroupOf。
+    ///  【导入手工数据】仍在这里、硬依赖监管指标：跨组照样生效，而监管指标写库不会覆盖人工值，
+    ///  见 SqliteBankRegulatoryRepository.Upsert。）
     /// </summary>
     public static readonly IReadOnlyList<FetchActionId> PeriodicOrder =
     [
@@ -2182,17 +2197,15 @@ public static class FetchTaskCatalog
         // 一轮；现在每个工作日都刷新一遍，这两项无论什么时候跑，用的名单至多隔一天。
         FetchActionId.FetchShareholder,
         FetchActionId.FetchDividend,
-        // （【基金除权除息】原来紧跟在这里，2026-09-23 挪进了日更，理由见 DefaultGroupOf。）
-        FetchActionId.FetchFinancials,        // 监管指标要靠它认机构类型，所以排在前面
-        // 【公司档案】+【客户与供应商】紧跟财务报表（2026-09-07/09-08）：
-        // 它们是同一份年报里的东西，一起更新才不会出现"财务是新的、客户集中度还是去年的"错配。
+        // （【基金除权除息】原来紧跟在这里，2026-09-23 挪进了日更，理由见 DefaultGroupOf。
+        //  【拉取财务报表】也在这里，2026-10-21 挪进了日更。）
+        // 【公司档案】+【客户与供应商】：
         // ⚠ 这三项**必须挨着且按这个顺序**：客户与供应商跑对手方还原时，要用前两项的产出——
         //   档案给全称（前两档），子公司名单给归并关系（第三档）。任何一项排在后面，
         //   同一轮里还原用的就永远是上一轮的旧数据。
         FetchActionId.StepCompanyProfile,
         FetchActionId.StepSubsidiaryExtract,
         FetchActionId.StepCustomerSupplier,
-        FetchActionId.BankRegulatory,
         FetchActionId.StepReparseBankPdf,
         FetchActionId.ImportManual,           // 填的是监管指标没解析出来的格子
         // 【分档资金流】（2026-09-03）：接口是 120 天滚动窗口、没有增量入口，每轮都要把 5500 只

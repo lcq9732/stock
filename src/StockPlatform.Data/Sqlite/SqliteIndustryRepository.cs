@@ -135,4 +135,22 @@ public class SqliteIndustryRepository
         }
         return result;
     }
+
+    /// <summary>
+    /// code → 证监会门类代码（A~S，可能为空串）。2026-10-21 给【金融监管指标】的开工检查用：
+    /// 金融业是 J，先按门类圈出一百来只候选，再拿财务特征科目认机构类型——不必扫全市场财务快照。
+    /// </summary>
+    public Dictionary<string, string> GetClassCodeByCode()
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, IFNULL(class_code, '') FROM StockIndustry;";
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) result[reader.GetString(0)] = reader.GetString(1);
+        return result;
+    }
 }
