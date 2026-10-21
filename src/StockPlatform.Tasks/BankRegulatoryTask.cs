@@ -365,7 +365,11 @@ public sealed class BankRegulatoryTask : FetchTaskBase<FetchedReport>
         // 一直显示"待接入"、让人对着三个字发呆，不如直接给一份能照着干活的表：
         // 哪家、哪一期、缺哪几个数、翻年报的哪一章能找到。填完用【导入手工数据】写回来，
         // 之后重解析也不会覆盖（来源标 manual）。
-        if (_targets.Count > 0)
+        // 人改过、还没导入的清单不重新生成（2026-10-21）——Generate 自己会说一声，这里别再接一句"已生成"
+        if (_targets.Count > 0 && ManualFillWorklist.KeepsUserEdits(_reportsDir))
+            Report("待手工回填清单你改过、还没导入，这次先不重新生成（免得覆盖你填的值），"
+                 + "紧接着的【导入手工数据】会把它导进去。");
+        else if (_targets.Count > 0)
         {
             try
             {

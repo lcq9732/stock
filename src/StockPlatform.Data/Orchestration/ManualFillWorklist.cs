@@ -3,6 +3,7 @@ using System.Text;
 using StockPlatform.Data.Remote;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 
 namespace StockPlatform.Data.Orchestration;
 
@@ -19,7 +20,9 @@ namespace StockPlatform.Data.Orchestration;
 /// ════ 闭环怎么走 ════
 ///   ① 抓取跑完自动生成 CSV（本类的 <see cref="Generate"/>）
 ///   ② 用 Excel 打开，只填「填这里」一列
-///   ③ Fetcher 点【导入手工数据】（<see cref="Import"/>），写回库、来源标 'manual'
+///   ③ Fetcher 点【导入手工数据】（<see cref="Import"/>），写回库、来源标 'manual'。
+///      2026-10-21 起它在日更里自动跑，但**只导人改过的那一版**（见 ManualFillImportRule）——
+///      生成时刻记在旁边的 待手工回填清单.state.json
 ///   ④ 之后再怎么重解析都不会覆盖它——见 SqliteBankRegulatoryRepository.Upsert 的 ON CONFLICT
 ///
 /// CSV 带 UTF-8 BOM，Excel 双击打开不乱码。
@@ -45,13 +48,35 @@ public static class ManualFillWorklist
     private const int ColFillLegacy = 8;
 
     /// <summary>
+    /// 现有清单是不是人改过、还没导入（2026-10-21）——是的话 <see cref="Generate"/> 不覆盖它。
+    /// 调用方据此决定收尾那句话怎么说（"已生成"还是"先保留你改的那份"）。
+    /// </summary>
+    public static bool KeepsUserEdits(string outputDir)
+    {
+        var path = Path.Combine(outputDir, FileName);
+        return ManualFillImportRule.HasUnimportedEdits(
+            File.Exists(path), ManualFillStateStore.FileTimeUtc(path), ManualFillStateStore.Load(outputDir));
+    }
+
+    /// <summary>
     /// 扫一遍所有该有监管指标的机构，把缺的列成清单。返回写出的文件路径；无缺失则返回 null。
+    /// 现有清单人改过、还没导入时不重新生成，原样返回它的路径（见 <see cref="KeepsUserEdits"/>）。
     /// </summary>
     /// <param name="targets">机构代码 → 类型（银行/券商/保险）。</param>
     public static string? Generate(string dbPath, string reportsDir, string outputDir,
         IReadOnlyList<(string Code, FinancialInstitutionKind Kind)> targets,
         Action<string>? progress = null)
     {
+        // ⚠ 人改过、还没导入的清单不能覆盖（2026-10-21）：日更里【金融监管指标】排在【导入手工数据】前面，
+        //   覆盖了就是把人填的数静默扔掉。先保留，同一轮紧接着的自动导入会把它导进去，下次有新内容再重新生成。
+        var existing = Path.Combine(outputDir, FileName);
+        if (KeepsUserEdits(outputDir))
+        {
+            progress?.Invoke($"清单你改过、还没导入，这次先不重新生成（免得覆盖你填的值）：{existing}。"
+                           + "导入之后下次再更新。");
+            return existing;
+        }
+
         var repo = new SqliteBankRegulatoryRepository(dbPath);
         var rows = new List<string[]>();
         int scanned = 0;
@@ -167,6 +192,8 @@ public static class ManualFillWorklist
         foreach (var r in rows) sb.AppendLine(string.Join(",", r.Select(Escape)));
         // UTF-8 **带 BOM**：Excel 靠它认出编码，否则中文全是乱码
         File.WriteAllText(path, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        // 记下这一版的生成时刻（取文件自己的修改时间，比"当前时间"准）。自动导入只认比它新的——人改过才导。
+        ManualFillStateStore.Save(outputDir, new ManualFillState(File.GetLastWriteTimeUtc(path), null));
         return path;
     }
 

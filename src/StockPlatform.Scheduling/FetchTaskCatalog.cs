@@ -1224,13 +1224,13 @@ public static class FetchTaskCatalog
             SupportedModes: FetchMode.Incremental | FetchMode.Thorough),
 
         new(FetchActionId.StepReparseBankPdf, "重解析已有PDF", "本地计算·不联网", QuotaGroup.Local,
-            TimeSpan.FromMinutes(5), "解析规则改了之后",
+            TimeSpan.FromMinutes(15), "按需（改了解析规则后）",
             "用**当前**规则把本地已下载的银行/券商/保险年报中报重跑一遍，一个网络请求都不发。\n"
             + "为什么单独成项：解析规则一直在改（版式差异不断暴露新坑——注释角标没清干净让拨备覆盖率"
             + "变成 3.0、目录页页码被当成资本充足率），改完想全库重跑时，原来只能连带把联网下载那一大段"
             + "也跑一遍。\n"
-            + "⚠ 【金融监管指标】开头本来就会先重解析一遍，所以两项都排的话这一步会做两次（幂等，"
-            + "只是多花几分钟）。"),
+            + "**2026-10-21 起归按需启动**：【金融监管指标】在有新年报/中报的那天本来就先重解析一遍，"
+            + "每月再排一次是白跑一刻钟。改了解析规则、想让全库马上用上新规则时，点这一行的【执行】。"),
 
         new(FetchActionId.FetchAll, "拉取全部", "腾讯K线 + 新浪 + 交易所 + 巨潮", QuotaGroup.Mixed,
             TimeSpan.FromHours(2), "每工作日",
@@ -1587,7 +1587,7 @@ public static class FetchTaskCatalog
             Sources: [DataSourceId.Sina, DataSourceId.CsIndex]),
 
         new(FetchActionId.FetchShareholder, "拉取股东数据", "新浪", QuotaGroup.Sina,
-            TimeSpan.FromHours(1.5), "季度",
+            TimeSpan.FromMinutes(5), "每工作日",
             "逐只抓股东户数 + 十大股东 + 十大流通股东的全部历史（一只票 2 个请求）。"
             + "十大流通股东里的「香港中央结算」就是北向资金的名义持有人。\n"
             + "**2026-09-18 迁到新任务框架**（ShareholderTask）：一批 30 只、抓一批存一批，"
@@ -1595,6 +1595,8 @@ public static class FetchTaskCatalog
             + "「要不要抓」按**报告期**判，不按「多久没抓」：库里这只票股东户数的最新报告期"
             + "落后于它**已披露**的最新一期才抓（披露日来自【拉取财报预约日】，查不到的退回"
             + "法定截止日）。所以半年报抓齐之后、三季报披露之前，这一项一个请求都不发。\n"
+            + "**2026-10-21 挪进日更**（排在日更组最末）：按月跑的话月中披露的股东户数要等一个月；"
+            + "没有新披露的日子只剩 100 天兜底那几十只，约两分钟。\n"
             + "另有两条：100 天没抓过的整只重刷一遍（兜那 4% 不定期的股东名单变动公告）；"
             + "一年多没成交的跳过（恢复交易会自动回到名单）。\n"
             + "⚠ 不设人为的每轮上限——季度高峰约 60 分钟一轮跑得完；真撞限流会在连续 3 批"
@@ -1633,13 +1635,16 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.FetchEarningsSchedule]),
 
         new(FetchActionId.FetchDividend, "拉取分红送配", "新浪", QuotaGroup.Sina,
-            TimeSpan.FromHours(2), "年度",
+            TimeSpan.FromMinutes(15), "每工作日",
             "逐只抓历年全部分红方案，**同一次请求顺带抓配股**（源页面上分红和配股是两张表，不额外花请求）。\n"
             + "做股息率因子、核对除权除息日都靠分红这张表。\n"
             + "配股是A股第四类除权事件（前三类是现金分红/送股/转增），2026-09-01 起才抓——漏掉它，"
             + "回测序列 day_adj 会在配股除权日凭空多一根阴线：实测招商证券 2020 年那次 10配3@7.46 "
             + "让十年累计收益少算了 25 个百分点，中信证券少 12 个。配股集中在**银行和券商**，正是底仓的重点。\n"
-            + "⚠ 抓完要再跑一次【重算回测序列】，配股才会体现到 day_adj 上。\n"
+            + "**2026-10-21 挪进日更**（排在财务报表之后）：分红是复权因子的输入，按月更新时除权日之后 day_adj "
+            + "会静默错到下个月。实施公告一般比除权日早好几个交易日，今天抓到、**次日**日更的【重算回测序列】"
+            + "就会自动算进去，不用再手动跑。平日估计十几分钟；12 月上中旬有两批 90 天兜底集中到期，"
+            + "那两周每天会顶着 400 只的上限跑约一小时。\n"
             + "**2026-09-18 迁到新任务框架**（DividendTask）：一批 30 只、抓一批存一批，"
             + "每只的抓取时刻记在 DividendFetchState 表里。于是——\n"
             + "· 【增量】只抓 25 天以内没抓过的（含从没抓过的），**中途停止再点执行会接着抓、不从头来**；\n"
@@ -1687,8 +1692,9 @@ public static class FetchTaskCatalog
             MaxQuiet: TimeSpan.FromMinutes(30)),
 
         new(FetchActionId.ImportManual, "导入手工数据", "本地文件", QuotaGroup.Local,
-            TimeSpan.FromSeconds(5), "人填完 CSV 后",
+            TimeSpan.FromSeconds(5), "每工作日",
             "把填好的「待手工回填清单.csv」写回库。文件没填就是空跑，无副作用。\n"
+            + "2026-10-21 挪进日更、紧跟【金融监管指标】：填完清单第二天自动写回，不用再手动点。\n"
             + "**状态格怎么看**：PDF 解析不出来的监管指标会列成「待手工回填清单.csv」(在 data\\reports 下),要人对着年报把数填上。\n"
             + "这里显示还剩几项没填——不显示的话根本不知道有活等着自己干。\n"
             + "流程:①【金融监管指标】跑完自动生成清单 ②用 Excel 打开只填「填这里」一列 ③点这一行的「执行」写回库 ④以后重新解析不会覆盖你填的值。",
@@ -1907,14 +1913,22 @@ public static class FetchTaskCatalog
         // 两项都按"本地有没有活"自己判断，没新披露的日子几秒结束、不发请求。
         FetchActionId.FetchFinancials or FetchActionId.BankRegulatory => PlanGroupKind.Daily,
 
+        // 【导入手工数据】【拉取分红送配】【拉取股东数据】（2026-10-21 从季度组挪过来，用户要求）：
+        //   · 导入手工数据硬依赖监管指标，后者已在日更；填完回填清单第二天自动写回，1 秒、纯本地；
+        //   · 分红是复权因子的输入，按月更新时除权日之后 day_adj 会静默错到下个月——跟【基金除权除息】
+        //     09-23 挪进日更同一个理由。公告索引只抓有新公告的，平日十几分钟；每轮仍限 400 只（新浪整域限流）；
+        //   · 股东数据已按实际披露日判"要不要抓"，按月跑的话月中披露的股东户数要等一个月。
+        FetchActionId.ImportManual or FetchActionId.FetchDividend
+            or FetchActionId.FetchShareholder => PlanGroupKind.Daily,
+
         // ── 按周期更新、晚几天没关系的 ──
         FetchActionId.FetchIndustry
             // 【个股行业与题材】（2026-09-03）跟证监会分类同组同频：行业归属变动很慢，季度一轮够了。
             or FetchActionId.FetchStockBoardMap
             or FetchActionId.StepIndexCons or FetchActionId.StepIndexWeight
-            or FetchActionId.StepEtfIndexMap or FetchActionId.FetchShareholder
-            or FetchActionId.FetchDividend
-            or FetchActionId.StepReparseBankPdf or FetchActionId.ImportManual
+            or FetchActionId.StepEtfIndexMap
+            // （【重解析已有PDF】2026-10-21 起归按需启动：只有改了解析规则才需要，
+            //  监管指标有活的那天本来就先重解析一遍——落到下面的默认分支。）
             // 【分档资金流·补历史】归定期而不是日更（2026-09-12 订正理由）：日常增量早就不走它了——
             // 那是【分档资金流快照】的事（59 个请求、一两分钟，已归日更）。留在这一组的只有
             // 逐股补历史：一只票一个请求、全市场一轮 5500 个请求十几小时，而且 120 天窗口内
@@ -2171,17 +2185,26 @@ public static class FetchTaskCatalog
         // ⚠ 两项**必须挨着且财务在前**：监管指标靠财务的特征科目认机构，新上市的银行也是先被财务抓到。
         FetchActionId.FetchFinancials,
         FetchActionId.BankRegulatory,
+
+        // 【导入手工数据】【拉取分红送配】【拉取股东数据】（2026-10-21 从季度组挪过来）。
+        //   · 导入手工数据紧跟监管指标：硬前置，它填的是监管指标没解析出来的格子。
+        //   · 分红**不排在【重算回测序列】前面**：实施公告一般比除权日早好几个交易日，今天抓到、
+        //     次日日更的重算就会算进去（SqliteAdjSeriesAuditor.CodesWithStaleEvents 按 fetched_at 认），
+        //     仍在除权日之前；排到中段则平日十几分钟会把板块、板块指数合成往后推。
+        //   · 股东数据三项里最不急，排最末；季报高峰约一小时。
+        //   · 三项都在财务报表之后：披露高峰日财务最重要，不该等它们。
+        FetchActionId.ImportManual,
+        FetchActionId.FetchDividend,
+        FetchActionId.FetchShareholder,
     ];
 
     /// <summary>
     /// 「季度定期」组的默认排法（2026-09-02）。整组「每月 1 号到期 + 空闲时补」。
     ///
     /// ⚠ 顺序上的依赖，别按"快的排前面"随手挪：
-    ///   · 【补全退市名单】要在【拉取股东数据】和【拉取分红送配】之前（2026-09-18）——
-    ///     那两项的名单都含退市股，而退市名单是它写进 StockMeta 的。
-    /// （【拉取财务报表】【金融监管指标】2026-10-21 挪进了日更，理由见 DefaultGroupOf。
-    ///  【导入手工数据】仍在这里、硬依赖监管指标：跨组照样生效，而监管指标写库不会覆盖人工值，
-    ///  见 SqliteBankRegulatoryRepository.Upsert。）
+    ///   · 【公司档案】→【年报子公司名单】→【客户与供应商】必须挨着且按这个顺序（见下面）。
+    /// （财务报表、金融监管指标、导入手工数据、分红送配、股东数据 2026-10-21 都挪进了日更，
+    ///  重解析已有PDF 改归按需启动，理由见 DefaultGroupOf。）
     /// </summary>
     public static readonly IReadOnlyList<FetchActionId> PeriodicOrder =
     [
@@ -2191,14 +2214,8 @@ public static class FetchTaskCatalog
         // 指数那两项是拆开的：成分名单（新浪）/ ETF映射（本地）；权重排到最后，理由见末尾
         FetchActionId.StepIndexCons,
         FetchActionId.StepEtfIndexMap,
-        // 【股东数据】【分红送配】的名单都含退市股（分红 09-06 纳入、股东 09-18 纳入），
-        // 而退市名单是【补全退市名单】往 StockMeta 写的。那一项 2026-09-19 从这一组挪进了日更——
-        // **这个依赖因此变强而不是变弱**：原来同组顺序只保证"这一轮里它先跑"，而这一组几天才转
-        // 一轮；现在每个工作日都刷新一遍，这两项无论什么时候跑，用的名单至多隔一天。
-        FetchActionId.FetchShareholder,
-        FetchActionId.FetchDividend,
-        // （【基金除权除息】原来紧跟在这里，2026-09-23 挪进了日更，理由见 DefaultGroupOf。
-        //  【拉取财务报表】也在这里，2026-10-21 挪进了日更。）
+        // （【拉取股东数据】【拉取分红送配】【基金除权除息】【拉取财务报表】原来都在这一段，
+        //  先后挪进了日更，理由见 DefaultGroupOf。）
         // 【公司档案】+【客户与供应商】：
         // ⚠ 这三项**必须挨着且按这个顺序**：客户与供应商跑对手方还原时，要用前两项的产出——
         //   档案给全称（前两档），子公司名单给归并关系（第三档）。任何一项排在后面，
@@ -2206,8 +2223,7 @@ public static class FetchTaskCatalog
         FetchActionId.StepCompanyProfile,
         FetchActionId.StepSubsidiaryExtract,
         FetchActionId.StepCustomerSupplier,
-        FetchActionId.StepReparseBankPdf,
-        FetchActionId.ImportManual,           // 填的是监管指标没解析出来的格子
+        // （【重解析已有PDF】2026-10-21 改归按需启动，【导入手工数据】挪进了日更。）
         // 【分档资金流】（2026-09-03）：接口是 120 天滚动窗口、没有增量入口，每轮都要把 5500 只
         // 重抓一遍（约 3 小时），所以归"空闲时补"这一组而不是日更。放在权重前面——它虽然慢，
         // 但走的是 push2his，跟中证 OSS 不是一家，不会互相牵连。
@@ -2229,6 +2245,8 @@ public static class FetchTaskCatalog
         FetchActionId.StepFullAudit,
         FetchActionId.FetchYear,
         FetchActionId.OptimizeDatabase,
+        // 【重解析已有PDF】（2026-10-21 从季度组改归按需）：改了监管指标的解析规则后手动点一次
+        FetchActionId.StepReparseBankPdf,
     ];
 
     /// <summary>

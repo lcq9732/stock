@@ -181,6 +181,8 @@ public sealed class BankPdfReparseTask(FetchPaths paths) : FetchTaskBase<int>
 
 /// <summary>
 /// 【导入手工数据】——把填好的「待手工回填清单.csv」写回库。文件没填就是空跑、无副作用。
+/// 2026-10-21 起在日更里自动跑：自动跑只导人改过、还没导过的那一版；手动点【执行】清单在就导。
+/// 判据见 <see cref="ManualFillImportRule"/>。
 /// </summary>
 public sealed class ManualImportTask(FetchPaths paths) : FetchTaskBase<int>
 {
@@ -196,14 +198,31 @@ public sealed class ManualImportTask(FetchPaths paths) : FetchTaskBase<int>
         _summary = null;
 
         var csv = Path.Combine(paths.ReportsDir, ManualFillWorklist.FileName);
-        if (!File.Exists(csv))
+        var fileTime = ManualFillStateStore.FileTimeUtc(csv);
+        var state = ManualFillStateStore.Load(paths.ReportsDir);
+
+        // 2026-10-21 挪进日更后的判据（见 ManualFillImportRule）：自动跑只导"人改过、还没导过"的那一版，
+        // 否则监管指标刚生成清单、紧接着的自动导入就会把所有 OCR 值标成"已核对"。手动点就是要导。
+        // ⚠ 清单不存在原来算**错误**（人点了就是想导入）；挪进日更后它是"所有指标都齐了"的正常状态，
+        //   天天报红 ✘ 会把真正的错误淹掉，所以改成"没活"并把原因说清楚。
+        switch (ManualFillImportRule.Decide(File.Exists(csv), fileTime, state, args.Manual))
         {
-            // ⚠ 这是**错误**不是「没事可做」：人点了这一项就是想导入，文件不在说明前置没跑，
-            //   记成完成会让人以为导进去了。
-            var msg = $"找不到清单文件：{csv}。请先跑一次【金融监管指标】生成它。";
-            _errors.Add(msg);
-            Report("⚠ " + msg);
-            yield break;
+            case ManualImportDecision.NoFile:
+                _summary = "没有待回填清单（监管指标都齐了，或者【金融监管指标】还没生成过）";
+                Report(_summary + "。");
+                yield break;
+            case ManualImportDecision.NoRecord:
+                _summary = "清单没有生成记录（是这个功能上线前生成的），自动跑不导入";
+                Report(_summary + $"——改过的话点这一行的【执行】导入：{csv}");
+                yield break;
+            case ManualImportDecision.NotEdited:
+                _summary = "清单生成后还没改过，不导入（免得替你把 OCR 值标成已核对）";
+                Report(_summary + $"。填好保存后，下一轮日更会自动导入：{csv}");
+                yield break;
+            case ManualImportDecision.AlreadyImported:
+                _summary = "清单这一版已经导入过";
+                Report(_summary + "。");
+                yield break;
         }
 
         Report($"读取 {csv} ...");
@@ -214,6 +233,10 @@ public sealed class ManualImportTask(FetchPaths paths) : FetchTaskBase<int>
             _summary = $"导入完成：写入 {imported} 条人工填的值，确认 {confirmed} 条 OCR 值正确（留空的那些），"
                      + $"跳过 {skipped} 条（既没 OCR 值也没填）。这两类以后都不会被自动解析覆盖。";
             Report(_summary);
+            // 记下导的是哪一版：下一轮看到同一版就不再导（导入幂等，但没必要天天重写人工值）。
+            // 没有生成记录的旧清单（只可能是手动导入）也补一条，以后自动跑就能按规则判断了。
+            ManualFillStateStore.Save(paths.ReportsDir,
+                (state ?? new ManualFillState(fileTime, null)) with { ImportedFileTimeUtc = fileTime });
             return imported;
         }, ct);
         if (imported > 0) yield return [imported];

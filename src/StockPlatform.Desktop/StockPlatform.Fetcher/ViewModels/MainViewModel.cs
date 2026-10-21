@@ -2104,7 +2104,10 @@ public class MainViewModel : INotifyPropertyChanged
             //    "队列里还没轮到的项要不要继续"，不是"正在抓的这一项要不要停"。
             //    任务自己的取消源在 ExecutePlanItemAsync 里建（itemCts，登记进占用表），
             //    也就是右上角「正在执行」里那一行的【停止】——单项停止只有那一个入口。
-            var result = await ExecutePlanItemAsync(vm.Model, null, new Progress<string>(Log), CancellationToken.None);
+            // 人点的【执行】要告诉任务（2026-10-21）：【导入手工数据】自动跑只导"人改过的那一版"，
+            // 人点了就是要导。自动重试、启动时自动开跑都不算人点。
+            var result = await ExecutePlanItemAsync(vm.Model, null, new Progress<string>(Log), CancellationToken.None,
+                                                    manual: how == "手动执行");
 
             // 失败原因必须落到日志里（2026-09-12 补）。以前只有**计划自动跑**的那条路打这些
             // （PlanRunner.FinishRunAsync），手动点【执行】压根不看 result.Errors——于是界面上
@@ -2266,7 +2269,7 @@ public class MainViewModel : INotifyPropertyChanged
 
     private async Task<FetchResult> ExecutePlanItemAsync(
         FetchPlanItem item, DateTime? deadline, IProgress<string> progress, CancellationToken ct,
-        bool fromPlan = false)
+        bool fromPlan = false, bool manual = false)
     {
         // PlanRunner 是**挑中**这一项就回调报告"当前项 = 它"的，而下面这个等待循环可能让它在这儿
         // 排上十几分钟。不区分的话状态列会写着「▶ 执行中…」，其实一个请求都还没发
@@ -2308,7 +2311,7 @@ public class MainViewModel : INotifyPropertyChanged
 
             try
             {
-                return await DispatchPlanActionAsync(item, deadline, progress, itemCts.Token);
+                return await DispatchPlanActionAsync(item, deadline, progress, itemCts.Token, manual);
             }
             // 这一项被人单独停掉（右上角那一行的【停止】＝取消 itemCts）。翻译成一个**明确的**
             // 异常再往上抛：上面那层光看 OperationCanceledException 分不出是人停的还是
@@ -2346,7 +2349,8 @@ public class MainViewModel : INotifyPropertyChanged
 
     /// <summary>把计划项翻译成具体的编排层调用。参数不合法就抛异常——引擎会把这一项记成失败、继续后面的。</summary>
     private Task<FetchResult> DispatchPlanActionAsync(
-        FetchPlanItem item, DateTime? deadline, IProgress<string> progress, CancellationToken ct)
+        FetchPlanItem item, DateTime? deadline, IProgress<string> progress, CancellationToken ct,
+        bool manual = false)
     {
         // ── 【只补待办】走这一条总分支（2026-09-13）──
         // 【只补待办】现在**全部由任务自己认领**（2026-09-22）：声明了 HandlesBacklog 的任务
@@ -2377,6 +2381,7 @@ public class MainViewModel : INotifyPropertyChanged
                 Mode: item.EffectiveMode,
                 Day: ParseOptionalDate(item.DateText) is { } d ? DateOnly.FromDateTime(d) : null,
                 Deadline: deadline,
+                Manual: manual,
                 // 「新标的补 N 年」（2026-09-21 随K线任务迁移加）。不吃这个参数的任务忽略它即可。
                 LookbackYears: ParseLookbackYears(item.LookbackYearsText),
                 // 只有【中标/订单公告】和【拉取区间数据】声明了这个参数（后者会把它转交给前者）。

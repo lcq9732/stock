@@ -52,11 +52,11 @@ public static class FetchPlanTemplates
     /// <summary>
     /// 按周期更新、晚几天没关系的那一组。整组「空闲时补」：分档资金流补历史、板块成分这类
     /// 请求量大、要跨几天才啃得完的，设成"每月 1 号跑一轮"根本补不完。
-    /// （财务报表和金融监管指标 2026-10-21 挪进了日更。）
+    /// （财务报表、金融监管指标、导入手工数据、分红、股东 2026-10-21 挪进了日更，重解析已有PDF 改归按需。）
     /// </summary>
     public static readonly PlanTemplate Periodic = new(
         "季度定期",
-        "行业分类 → 指数成分/权重/映射 → 股东 → 分红 → 公司档案/客户供应商 → PDF重解析 → 手工数据。每月 1 号到期，空闲时慢慢补。",
+        "行业分类 → 指数成分/映射 → 公司档案/子公司/客户供应商 → 板块成分 → 分档资金流补历史 → 指数权重。每月 1 号到期，空闲时慢慢补。",
         RepeatKind.Monthly, null,
         // 顺序集中在 FetchTaskCatalog.PeriodicOrder，跟默认计划共用同一份
         FetchTaskCatalog.PeriodicOrder.Select(a => new PlanTemplateItem(a)).ToList(),

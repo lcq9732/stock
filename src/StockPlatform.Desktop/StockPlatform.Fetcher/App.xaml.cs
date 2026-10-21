@@ -387,9 +387,12 @@ public partial class App : Application
         // 参数可配（fetcher-settings.json 的 DividendBatchSize / DividendRestMinutes），
         // 因为那个配额会随时段浮动，得跑两天再定。
         var dividendPace = FetcherSettings.ReadDividendPace(paths.SettingsPath);
-        var dividendProvider = new SinaDividendProvider(new RateLimiter(
-            maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1),
-            batchSize: dividendPace.BatchSize, restDuration: dividendPace.RestDuration));
+        // 离线模拟（2026-10-21）：分红挪进日更后要能零联网验证，见 MockDividendProvider。
+        IDividendProvider dividendProvider = offlineMock
+            ? new MockDividendProvider()
+            : new SinaDividendProvider(new RateLimiter(
+                maxConcurrency: 3, delayBetweenRequests: TimeSpan.FromSeconds(1),
+                batchSize: dividendPace.BatchSize, restDuration: dividendPace.RestDuration));
         var dividendRepository = new SqliteDividendRepository(paths.CurrentDb);
         dividendRepository.EnsureSchema();
 
@@ -915,6 +918,7 @@ public partial class App : Application
         var dividendIndexMode = FetcherSettings.ReadDividendNoticeIndex(paths.SettingsPath);
         IDividendNoticeIndex? dividendNoticeIndex = dividendIndexMode == "none"
             ? null
+            : offlineMock ? new MockDividendNoticeIndex()
             : new EastMoneyDividendNoticeIndex(new EastMoneyDataCenterClient(
                 new RateLimiter(maxConcurrency: 2, delayBetweenRequests: TimeSpan.FromSeconds(1))));
         // 【拉取股东数据】2026-09-18 迁到新任务框架。判据在 ShareholderFetchPlanner

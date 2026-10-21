@@ -150,60 +150,73 @@ public class PlanTemplateTests
     }
 
     /// <summary>
-    /// 2026-10-21 起财务报表和监管指标在日更组**最末两项**、财务在前：监管指标靠财务的特征科目认机构；
-    /// 软前置【拉取财报预约日】刷新的实际披露日是两项判"有没有活"的依据，必须排在它们前面。
-    /// 手工数据仍在季度组。
+    /// 2026-10-21 起日更组尾部依次是 财务 → 监管指标 → 导入手工数据 → 分红 → 股东（两批挪组）：
+    ///   · 监管指标靠财务的特征科目认机构，导入手工数据硬依赖监管指标——这条链必须按序；
+    ///   · 软前置【拉取财报预约日】刷新的实际披露日是财务、股东判"有没有活"的依据，必须排在前面；
+    ///   · 分红不排在【重算回测序列】前面（次日重算即可，见 DailyOrder 的注释）。
+    /// 季度组里不再有这五项；【重解析已有PDF】在按需组、不启用。
     /// </summary>
     [Fact]
-    public void Financials_and_bank_regulatory_are_the_last_two_daily_items()
+    public void Disclosure_driven_items_are_at_the_tail_of_daily()
     {
         var plan = Loaded();
         var daily = plan.GroupOf(PlanGroupKind.Daily).Items.Select(i => i.Action).ToList();
-        Assert.Equal(FetchActionId.FetchFinancials, daily[^2]);
-        Assert.Equal(FetchActionId.BankRegulatory, daily[^1]);
+        Assert.Equal(
+            [FetchActionId.FetchFinancials, FetchActionId.BankRegulatory, FetchActionId.ImportManual,
+             FetchActionId.FetchDividend, FetchActionId.FetchShareholder],
+            daily[^5..]);
         Assert.True(daily.IndexOf(FetchActionId.FetchEarningsSchedule) < daily.IndexOf(FetchActionId.FetchFinancials));
 
         var periodic = plan.GroupOf(PlanGroupKind.Periodic).Items.Select(i => i.Action).ToList();
-        Assert.DoesNotContain(FetchActionId.FetchFinancials, periodic);
-        Assert.DoesNotContain(FetchActionId.BankRegulatory, periodic);
-        Assert.Contains(FetchActionId.ImportManual, periodic);
+        foreach (var a in new[] { FetchActionId.FetchFinancials, FetchActionId.BankRegulatory, FetchActionId.ImportManual,
+                                  FetchActionId.FetchDividend, FetchActionId.FetchShareholder, FetchActionId.StepReparseBankPdf })
+            Assert.DoesNotContain(a, periodic);
+
+        var reparse = plan.GroupOf(PlanGroupKind.OnDemand).Items.Single(i => i.Action == FetchActionId.StepReparseBankPdf);
+        Assert.False(reparse.Enabled);
     }
 
     /// <summary>
-    /// 老计划里两项还在季度组 → 加载后搬到日更组尾、财务在前，启用状态/模式/运行记录照搬；
-    /// 再加载一次不动（2026-10-21，见 FetchPlan.Regrouped）。
+    /// 老计划里这几项还在季度组 → 加载后搬到位：日更组尾按序、重解析去按需组；
+    /// 启用状态/模式/运行记录照搬；再加载一次不动（2026-10-21，见 FetchPlan.Regrouped）。
     /// </summary>
     [Fact]
-    public void Financials_and_bank_regulatory_move_from_periodic_to_daily()
+    public void Periodic_items_move_to_daily_and_on_demand()
     {
         var plan = FetchPlan.CreateDefault();
         var daily = plan.GroupOf(PlanGroupKind.Daily);
         var periodic = plan.GroupOf(PlanGroupKind.Periodic);
-        // 造一份"老计划"：把两项搬回季度组
-        var fin = daily.Items.First(i => i.Action == FetchActionId.FetchFinancials);
-        var bank = daily.Items.First(i => i.Action == FetchActionId.BankRegulatory);
-        daily.Items.Remove(fin); daily.Items.Remove(bank);
+        var onDemand = plan.GroupOf(PlanGroupKind.OnDemand);
+        // 造一份"老计划"：五项 + 重解析都搬回季度组，顺序照老模板
+        var moved = new[] { FetchActionId.FetchShareholder, FetchActionId.FetchDividend, FetchActionId.FetchFinancials,
+                            FetchActionId.BankRegulatory, FetchActionId.StepReparseBankPdf, FetchActionId.ImportManual }
+            .Select(a => plan.AllItems.First(i => i.Action == a)).ToList();
+        foreach (var it in moved) it.Owner!.Items.Remove(it);
+        periodic.Items.InsertRange(0, moved);
+        var fin = moved[2];
         fin.Enabled = false;   // 用户关着的就继续关着
         fin.LastStart = new DateTime(2026, 10, 1, 5, 53, 0);
         fin.RecentDurationsSec = [90, 91];
-        periodic.Items.Insert(0, bank);
-        periodic.Items.Insert(0, fin);
+        moved[4].Enabled = true;
         plan.LinkOwners();
 
         var notes = plan.MigrateRetired();
-        plan.LinkOwners();
+        plan.Normalize();
 
-        var actions = daily.Items.Select(i => i.Action).ToList();
-        Assert.Equal(FetchActionId.FetchFinancials, actions[^2]);
-        Assert.Equal(FetchActionId.BankRegulatory, actions[^1]);
-        Assert.DoesNotContain(periodic.Items, i => i.Action is FetchActionId.FetchFinancials or FetchActionId.BankRegulatory);
-        Assert.Same(fin, daily.Items[^2]);                       // 同一个对象：运行记录跟着走
+        Assert.Equal(
+            [FetchActionId.FetchFinancials, FetchActionId.BankRegulatory, FetchActionId.ImportManual,
+             FetchActionId.FetchDividend, FetchActionId.FetchShareholder],
+            daily.Items.Select(i => i.Action).ToList()[^5..]);
+        Assert.DoesNotContain(periodic.Items, i => moved.Contains(i));
+        Assert.Same(fin, daily.Items[^5]);                       // 同一个对象：运行记录跟着走
         Assert.False(fin.Enabled);
         Assert.Equal([90, 91], fin.RecentDurationsSec);
-        Assert.Contains(notes, n => n.Contains("拉取财务报表"));
-        Assert.Contains(notes, n => n.Contains("金融监管指标"));
+        var reparse = onDemand.Items.Single(i => i.Action == FetchActionId.StepReparseBankPdf);
+        Assert.False(reparse.Enabled);                           // 按需组是「手动」，不留勾选
+        foreach (var name in new[] { "拉取财务报表", "金融监管指标", "导入手工数据", "拉取分红送配", "拉取股东数据", "重解析已有PDF" })
+            Assert.Contains(notes, n => n.Contains(name));
 
-        Assert.DoesNotContain(plan.MigrateRetired(), n => n.Contains("拉取财务报表") || n.Contains("金融监管指标"));
+        Assert.Empty(plan.MigrateRetired().Where(n => n.Contains("挪到")));
     }
 
     [Fact]
@@ -610,10 +623,10 @@ public class EastMoneyTaskGroupingTests
         // 日更组是「定时项」：跑多久算多久、后面顺延、不受时间窗约束——排中间的话，
         // 首轮那几小时会把后面的公告/板块/板块指数/覆盖率体检全堵住，当天核心数据就废了。
         // 排最末则最坏也只是它自己跑到半夜，前面该落库的早落完了。
-        // 2026-10-21 起它后面只剩【拉取财务报表】【金融监管指标】两项（理由同一个：披露高峰日要跑几小时，
-        // 见 Financials_and_bank_regulatory_are_the_last_two_daily_items）。
+        // 2026-10-21 起它后面只剩按披露驱动的五项（财务/监管指标/手工数据/分红/股东，理由同一个：
+        // 披露高峰日要跑几小时，见 Disclosure_driven_items_are_at_the_tail_of_daily）。
         var items = Fresh().GroupOf(PlanGroupKind.Daily).Items.Select(i => i.Action).ToList();
-        Assert.Equal(FetchActionId.FetchLhbSeat, items[^3]);
+        Assert.Equal(FetchActionId.FetchLhbSeat, items[^6]);
     }
 
     [Fact]

@@ -1025,6 +1025,17 @@ public sealed class FetchPlan
          "财报是陆续披露的，按月到期的话月初之后新披露的要等到下个月才进库", null),
         (FetchActionId.BankRegulatory,
          "跟着【拉取财务报表】走，有新披露的年报/中报当天就解析", null),
+        // 2026-10-21 第二批（用户要求）。ImportManual 必须排在 BankRegulatory **之后**——
+        // 插入位置按组里已有项定位，它的硬前置得先到位。启用状态和模式照搬。
+        (FetchActionId.ImportManual,
+         "紧跟【金融监管指标】，填完回填清单第二天自动写回", null),
+        (FetchActionId.FetchDividend,
+         "分红是复权因子的输入，按月更新时除权日之后回测序列会静默错到下个月", null),
+        (FetchActionId.FetchShareholder,
+         "已按实际披露日判断，按月跑的话月中披露的股东户数要等一个月", null),
+        // 按需组是「手动」，Normalize 会把它取消勾选——这正是"按需"的意思
+        (FetchActionId.StepReparseBankPdf,
+         "只有改了解析规则才需要，监管指标有活的那天本来就先重解析一遍", null),
     ];
 
     public List<string> MigrateRetired()
