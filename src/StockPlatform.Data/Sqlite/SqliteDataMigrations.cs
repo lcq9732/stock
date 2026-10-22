@@ -40,6 +40,14 @@ public static class SqliteDataMigrations
     /// <summary>第二批：删 CompanyProfile.reg_capital_wan（＝reg_capital÷1e4，6050 行全部吻合，纯重复）。</summary>
     public const string UnitBatch2Profile = "unit_batch2_profile";
 
+    /// <summary>
+    /// 清掉**配错了正文**的公告行（2026-10-22）：东财正文原来按"±3 天、取窗口里最新那篇"匹配，
+    /// 连发几天同名公告的票全配到了同一篇（回购 19 行、中标订单 4 行），判据见 <see cref="AnnouncementMatchRule.FindMismatched"/>。
+    /// 正文编号和抽出的数值清空、标题留着，变回空壳：回购那边每轮的回补段会按新规则重取；
+    /// 超出东财"最近 100 条"的取不回来，就一直空着——空着比错着好。
+    /// </summary>
+    public const string AnnouncementMismatchCleanup = "announcement_mismatch_cleanup";
+
     public static void Apply(SqliteConnection conn)
     {
         using (var cmd = conn.CreateCommand())
@@ -95,6 +103,49 @@ public static class SqliteDataMigrations
             Exec(conn, tx, "ALTER TABLE CompanyProfile DROP COLUMN reg_capital_wan;");
             return 1;
         });
+        Run(conn, AnnouncementMismatchCleanup, tx =>
+            ClearMismatched(conn, tx, "PlanAnnouncement", "announce_date",
+                "art_code = '', as_of_date = NULL, cum_shares = NULL, cum_amount = NULL, price_low = NULL, "
+                + "price_high = NULL, pct_of_capital = NULL, plan_cap_price = NULL, plan_amount_low = NULL, plan_amount_high = NULL")
+            + ClearMismatched(conn, tx, "OrderWinAnnouncement", "publish_date",
+                "art_code = '', content = NULL, total_amount_yuan = NULL"));
+    }
+
+    /// <summary>
+    /// 按 <see cref="AnnouncementMatchRule.FindMismatched"/> 找出配错正文的行，执行 <paramref name="clearSet"/> 清空。
+    /// 表还没建（新库）就是 0 行。
+    /// </summary>
+    private static int ClearMismatched(SqliteConnection conn, SqliteTransaction tx, string table, string dateColumn, string clearSet)
+    {
+        if (!TableExists(conn, tx, table)) return 0;
+
+        var rowIds = new List<long>();
+        var rows = new List<(string Code, DateOnly AnnounceDate, string ArtCode)>();
+        using (var read = conn.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = $"SELECT rowid, code, {dateColumn}, art_code FROM {table} WHERE art_code IS NOT NULL AND art_code <> '';";
+            using var r = read.ExecuteReader();
+            while (r.Read())
+            {
+                if (!DateTime.TryParse(r.GetString(2), System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None, out var d)) continue;
+                rowIds.Add(r.GetInt64(0));
+                rows.Add((r.GetString(1), DateOnly.FromDateTime(d), r.GetString(3)));
+            }
+        }
+
+        var wrong = AnnouncementMatchRule.FindMismatched(rows);
+        using var write = conn.CreateCommand();
+        write.Transaction = tx;
+        write.CommandText = $"UPDATE {table} SET {clearSet} WHERE rowid = $id;";
+        var pid = write.Parameters.Add("$id", SqliteType.Integer);
+        foreach (var i in wrong)
+        {
+            pid.Value = rowIds[i];
+            write.ExecuteNonQuery();
+        }
+        return wrong.Count;
     }
 
     /// <summary>这条迁移跑过没有（测试和日志用）。</summary>

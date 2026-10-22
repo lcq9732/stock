@@ -62,7 +62,10 @@ public class EastMoneyAnnouncementDetailFetcher : IAnnouncementDetailFetcher
         if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object) return null;
         if (!data.TryGetProperty("list", out var list) || list.ValueKind != JsonValueKind.Array) return null;
 
+        // 日期只认"东财早一天或同一天"，两种都有时优先早一天（2026-10-22，见 AnnouncementMatchRule）。
+        // 原来是 ±3 天、取第一条——列表新的在前，于是连发几天同名公告的票全配到了最新那篇。
         string? matchedArtCode = null;
+        int bestPref = int.MaxValue;
         foreach (var item in list.EnumerateArray())
         {
             var itemTitle = item.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
@@ -73,13 +76,11 @@ public class EastMoneyAnnouncementDetailFetcher : IAnnouncementDetailFetcher
             if (!DateTime.TryParse(dateEl.GetString(), out var itemDateTime)) continue;
             var itemDate = DateOnly.FromDateTime(itemDateTime);
 
-            // ±3 days: cninfo's announcementTime and EastMoney's notice_date occasionally disagree
-            // by a day or two for the same article (timezone/publish-vs-effective-date quirks).
-            if (Math.Abs(itemDate.DayNumber - approxDate.DayNumber) > 3) continue;
+            if (AnnouncementMatchRule.DatePreference(itemDate, approxDate) is not { } pref || pref >= bestPref) continue;
             if (!TitlesLooselyMatch(title, itemTitle)) continue;
 
             matchedArtCode = item.GetProperty("art_code").GetString();
-            break;
+            bestPref = pref;
         }
         if (matchedArtCode == null) return null;
 
