@@ -105,9 +105,9 @@ public static class PlanAnnouncementExtractor
     private static readonly Regex NotYetStarted = new(
         @"(?:尚未|暂未|暂无|未曾)[^。；;]{0,20}?回购(?:公司)?(?:[A-Za-z]\s*股)?股?份?", RegexOptions.Compiled);
 
-    /// <summary>骨架＝「回购 … 股份 … 数字 股」，中间的"公司/A股/数量/为"全可选，单位可带万/亿。</summary>
+    /// <summary>骨架＝「回购 … 股份/股票 … 数字 股」，中间的"公司/A股/数量/为"全可选，单位可带万/亿。</summary>
     private static readonly Regex CumShares = new(
-        @"回购(?:公司)?(?:[A-Za-z]\s*股)?股份(?:的)?(?:数量)?(?:为|共计|合计)?\s*" + NU + @"\s*股",
+        @"回购(?:公司)?(?:[A-Za-z]\s*股)?股[份票](?:的)?(?:数量)?(?:为|共计|合计)?\s*" + NU + @"\s*股",
         RegexOptions.Compiled);
     /// <summary>「占公司目前总股本的1.31%」「累计占公司总股本的比例为 0.14%」都要能匹配。</summary>
     private static readonly Regex PctOfCapital = new(
@@ -126,7 +126,21 @@ public static class PlanAnnouncementExtractor
     /// 而这些公告股数、占比、成交价都抽到了，唯独金额空着，在界面上看起来像"没买"。
     /// </summary>
     private static readonly Regex CumAmount = new(
-        @"(?:已)?(?:支付的?|成交的?|回购|使用资金)?\s*总金额(?:为)?\s*(?:人民币)?\s*" + NU + @"\s*元",
+        @"(?:(?:已)?(?:累计)?(?:支付|成交|使用)的?\s*(?:资金)?\s*总?\s*金?额|总金额)(?:为)?\s*(?:人民币)?\s*" + NU + @"\s*元",
+        RegexOptions.Compiled);
+    // ↑ 2026-10-22 放宽：「支付的资金总额为」「回购使用的资金总额为」「已支付的金额为」也是累计金额，
+    //   原来只认带"总金额"的写法，这几种只能退到汇总表那个四舍五入到万元的数。
+    //   **不收「港币」**——那是 B 股的港币金额，进人民币这一列会把单位弄错；
+    //   方案里的「回购资金总额不低于…」后面跟的不是数字，匹配不上，不会串。
+
+    /// <summary>
+    /// 「累计回购金额 3,288.79 万元」「累计已回购金额 …」（2026-10-22 补）：上交所新版公告开头的汇总表、
+    /// 两轮回购的永和股份都这么写，没有"总金额"三个字，原来一律抽不到。不收「预计回购金额」——那是方案区间。
+    /// ⚠ 它**排在 <see cref="CumAmount"/> 后面**用：汇总表里是四舍五入到万元的（369.77 万），
+    ///   正文"总金额 3,697,673 元"更精确，两者都有时要后者。
+    /// </summary>
+    private static readonly Regex CumAmountTable = new(
+        @"累计(?:已)?回购(?:的)?金额(?:为|达)?\s*(?:人民币)?\s*" + NU + @"\s*元",
         RegexOptions.Compiled);
 
     /// <summary>
@@ -219,13 +233,22 @@ public static class PlanAnnouncementExtractor
         // 硬抽的后果是拿一个不相干的日期当"值所属日期"：实测宁德 07-25 那份方案被抽成 06-30、
         // 山东高速 08-26 那份被抽成 03-31，观察项的触发记录就按这个错日期归档了。
         // 抽不到就让它是 null，下游自己退回用公告日（见 SqliteStockEventSource.Buyback）。
+        // 「截至X日」那一句是**本期进度**所在的句子（2026-10-22）。公告里常还有别的累计数：
+        // 永和股份做两轮回购，先写「前次方案…累计回购 186.40 万股」，后面才是「截至 8 月 5 日…累计回购 100.00 万股」；
+        // 广汇物流先写「截至 4 月 30 日…17,386,400 股」（已注销那批），后面才是「截至 6 月 30 日…26,791,000 股」。
+        // 原来全文取第一个匹配，于是每期都抽成了前一轮/更早的数。现在取**日期最晚**的那个「截至」，
+        // 数值先在它所在的那句话里找，找不到再退回全文（单个「截至」的公告行为不变）。
+        var anchor = rec.Stage != PlanStage.Proposal ? LatestAsOf(content) : null;
         if (rec.Stage != PlanStage.Proposal)
         {
             // 三种写法按优先级试：「截至X日」最准 → 区间取末尾 → 单日的「X日，公司…」
-            rec.AsOfDate = MatchDate(AsOfCn, content)
+            rec.AsOfDate = anchor?.Date
                            ?? MatchDate(DateRangeEnd, content)
                            ?? MatchDate(DateThenCompany, content);
         }
+        var focus = anchor is { } a ? SentenceFrom(content, a.Index) : null;
+        // 那句话说的是**出售**已回购的股份（「出售回购股份数量为0股」），不是本期买了多少，不能当本期句
+        if (focus != null && focus.Contains("出售", StringComparison.Ordinal)) focus = null;
 
         if (NotYetStarted.IsMatch(content))
         {
@@ -238,11 +261,12 @@ public static class PlanAnnouncementExtractor
         {
             // ⚠ 这两条必须走 ScaledNum（带万/亿换算），不能用 Num——见 NU 的注释：
             // 漏掉「万」会抽出一个小 10000 倍、但看起来完全正常的数。
-            rec.CumShares = ScaledNum(CumShares, content);
-            rec.CumAmount = ScaledNum(CumAmount, content);
-            rec.PctOfCapital = Num(PctOfCapital, content);
-            rec.PriceHigh = Num(PriceHigh, content);
-            rec.PriceLow = Num(PriceLow, content);
+            rec.CumShares = Prefer(focus, content, t => ScaledNum(CumShares, t));
+            rec.CumAmount = Prefer(focus, content, t => ScaledNum(CumAmount, t))
+                            ?? Prefer(focus, content, t => ScaledNum(CumAmountTable, t));
+            rec.PctOfCapital = Prefer(focus, content, t => Num(PctOfCapital, t));
+            rec.PriceHigh = Prefer(focus, content, t => Num(PriceHigh, t));
+            rec.PriceLow = Prefer(focus, content, t => Num(PriceLow, t));
         }
 
         if (rec.Stage == PlanStage.Proposal)
@@ -271,7 +295,43 @@ public static class PlanAnnouncementExtractor
         if (!m.Success) return null;
         var raw = Regex.Replace(m.Groups[1].Value.Replace(",", "").Replace("，", ""), @"\s+", "");
         if (!double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var v)) return null;
-        return m.Groups[2].Value switch { "亿" => v * 1e8, "万" => v * 1e4, _ => v };
+        // 乘完取整到 6 位小数：1,605.11 万 × 1e4 浮点会变成 16051099.999999998
+        return Math.Round(m.Groups[2].Value switch { "亿" => v * 1e8, "万" => v * 1e4, _ => v }, 6);
+    }
+
+    /// <summary>全文里**日期最晚**的那个「截至X日」，连它在正文里的位置。没有就 null。</summary>
+    private static (DateTime Date, int Index)? LatestAsOf(string text)
+    {
+        (DateTime Date, int Index)? best = null;
+        foreach (Match m in AsOfCn.Matches(text))
+        {
+            if (DateOf(m) is not { } d) continue;
+            if (best == null || d >= best.Value.Date) best = (d, m.Index);   // 同一天取后出现的那句
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// 从 <paramref name="start"/> 到这句话结束（句号/分号）。PDF 转文本的换行不算句子结束，
+    /// 而且句内的换行要去掉——排版折行会把「回购使用」和「的资金总额」拆到两行，关键词就对不上了；
+    /// 一句话之内去换行是安全的（不会把两句话的数粘在一起）。
+    /// </summary>
+    private static string SentenceFrom(string text, int start)
+    {
+        int end = text.IndexOfAny(['。', '；', ';'], start);
+        var s = end < 0 ? text[start..] : text[start..(end + 1)];
+        return s.Replace("\r", "").Replace("\n", "");
+    }
+
+    /// <summary>先在本期那句话里找，找不到再退回全文。</summary>
+    private static double? Prefer(string? focus, string content, Func<string, double?> pick)
+        => (focus != null ? pick(focus) : null) ?? pick(content);
+
+    private static DateTime? DateOf(Match m)
+    {
+        static int I(Group g) => int.Parse(Regex.Replace(g.Value, @"\s+", ""), CultureInfo.InvariantCulture);
+        try { return new DateTime(I(m.Groups[1]), I(m.Groups[2]), I(m.Groups[3])); }
+        catch { return null; }
     }
 
     private static DateTime? MatchDate(Regex re, string text)

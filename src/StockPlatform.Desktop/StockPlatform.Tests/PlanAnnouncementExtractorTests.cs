@@ -405,4 +405,125 @@ public class PlanAnnouncementExtractorTests
         Assert.Equal(0, notStarted.CumAmount);
         Assert.Null(noContent.CumAmount);
     }
+
+    // ── 2026-10-22：以最新那个「截至X日」所在的句子为准 ──
+    // 以下样本是巨潮 PDF 经 pdftotext 转出的原文节选，换行原样保留（折行正是出错的原因之一）。
+
+    /// <summary>
+    /// 永和股份 605020，2026-08-06《…回购进展公告》。正文先讲上一轮（186.40 万股，已完成），
+    /// 再讲本轮截至 8 月 5 日的数。原来取全文第一个匹配，每期都记成上一轮的 186.4 万股、金额空着。
+    /// </summary>
+    private const string YongheTwoRounds = """
+        2026 年 7 月 20 日至 2026 年 7 月 31 日期间，公司已累计回购公司股份 186.40 万
+        股，累计回购金额 5,999.12 万元（不含印花税、交易佣金等交易费用），前述回购
+        方案已实施完成。
+        （二）本次回购方案实施进展情况
+        截至 2026 年 8 月 5 日，公司通过上海证券交易所交易系统以集中竞价交易方
+        式累计回购公司股份 100.00 万股，占公司当前总股本的比例为 0.20%，回购成交
+        的最高价为 34.76 元/股，最低价为 31.29 元/股，累计回购金额为 3,288.79 万元（不
+        含印花税、交易佣金等交易费用）。
+        综上所述，截至本公告披露日，公司通过上述两轮回购股份方案已累计回购公
+        司股份合计 286.40 万股，累计回购金额达 9,288.01 万元。
+        """;
+
+    [Fact]
+    public void 两轮回购_取截至句里的本轮累计_不取上一轮()
+    {
+        var r = PlanAnnouncementExtractor.Extract("605020", "永和股份",
+            "关于以集中竞价交易方式回购股份的进展公告", new DateTime(2026, 8, 6), YongheTwoRounds);
+
+        Assert.Equal(new DateTime(2026, 8, 5), r.AsOfDate);
+        Assert.Equal(1_000_000, r.CumShares);       // 原来 1,864,000（上一轮）
+        Assert.Equal(32_887_900, r.CumAmount);      // 原来空
+        Assert.Equal(34.76, r.PriceHigh);
+        Assert.Equal(31.29, r.PriceLow);
+        Assert.Equal(0.20, r.PctOfCapital);
+    }
+
+    /// <summary>
+    /// 阿特斯 688472，2026-10-09。开头汇总表（金额四舍五入到万元）+ 当月一段 + 截至月末一段；
+    /// 截至那段的「回购使用」和「的资金总额」被折行拆开。原来取到当月那段的 80,218,967.06。
+    /// </summary>
+    private const string CanadianSolar = """
+        累计已回购股数          3,779.11万股
+        累计已回购股数占总股本比例    1.04%
+        累计已回购金额          36,529.18万元
+        实际回购价格区间         8.16元/股~11.35元/股
+        2026 年 9 月，公司通过上海证券交易所交易系统以集中竞价交易方式累计回
+        购股份 9,259,676 股，占公司总股本的比例为 0.25%，回购成交的最高价为 9.03 元
+        /股、最低价为 8.16 元/股，支付的资金总额为 80,218,967.06 元（不含印花税、交
+        易佣金等交易费用）
+        截至 2026 年 9 月 30 日，公司通过上海证券交易所交易系统以集中竞价交易
+        方式累计回购股份 37,791,085 股，占公司总股本的比例为 1.04%，与上次披露数相
+        比增加 0.25%，回购成交的最高价为 11.35 元/股、最低价为 8.16 元/股，回购使用
+        的资金总额为人民币 365,291,813.71 元（不含印花税、交易佣金等交易费用）。
+        """;
+
+    [Fact]
+    public void 截至句被折行拆开_也取它_且精确金额优先于汇总表()
+    {
+        var r = PlanAnnouncementExtractor.Extract("688472", "阿特斯",
+            "关于2026年度以集中竞价交易方式回购股份比例达到总股本1%暨回购进展公告", new DateTime(2026, 10, 9), CanadianSolar);
+
+        Assert.Equal(new DateTime(2026, 9, 30), r.AsOfDate);
+        Assert.Equal(37_791_085, r.CumShares);
+        Assert.Equal(365_291_813.71, r.CumAmount);  // 不是当月的 80,218,967.06，也不是表里的 36,529.18 万
+        Assert.Equal(11.35, r.PriceHigh);
+        Assert.Equal(1.04, r.PctOfCapital);
+    }
+
+    /// <summary>春秋航空 600909，2026-08-05。「回购公司股\n票」——写的是"股票"不是"股份"，还被折行拆开。</summary>
+    private const string SpringAirlines = """
+        2026 年 7 月 28 日，公司通过集中竞价交易方式首次回购股份 650 万股。
+        截至 2026 年 7 月 31 日，本次回购计划已累计通过集中竞价方式回购公司股
+        票 11,238,400 股，购买的最低价格为 7.37 元/股，最高价格为 7.76 元/股，累计成
+        交金额 84,167,906.00 元（不含交易费用）。
+        """;
+
+    [Fact]
+    public void 回购公司股票_折行也认()
+    {
+        var r = PlanAnnouncementExtractor.Extract("600909", "春秋航空",
+            "关于以集中竞价交易方式回购股份的进展公告", new DateTime(2026, 8, 5), SpringAirlines);
+
+        Assert.Equal(11_238_400, r.CumShares);      // 原来 6,500,000（首次回购那句）
+        Assert.Equal(84_167_906, r.CumAmount);
+    }
+
+    /// <summary>只有汇总表、正文没写累计金额时，退到表里的万元数；万元换算不带浮点尾数。</summary>
+    [Fact]
+    public void 正文没有累计金额_退到汇总表()
+    {
+        const string body = """
+            累计已回购金额          25,629.24万元
+            截至 2026 年 7 月底，公司已累计回购公司股份 1,605.11 万股。
+            """;
+        var r = PlanAnnouncementExtractor.Extract("603568", "伟明环保",
+            "关于以集中竞价交易方式回购公司股份的进展公告", new DateTime(2026, 8, 4), body);
+
+        Assert.Equal(256_292_400, r.CumAmount);     // 不是 256292400.00000003
+        Assert.Equal(16_051_100, r.CumShares);
+    }
+
+    /// <summary>
+    /// 晨光电缆 920639，2026-10-09《关于出售已回购股份的进展公告》。截至句讲的是**出售**了 0 股，
+    /// 不能当成"累计回购 0 股"（那会显示成公司没买）。
+    /// </summary>
+    private const string ChenguangSale = """
+        审议通过《关于出售2023年已回购股份的议案》，同意公
+        司以集中竞价方式出售2023年已回购股份1,896,532股（占公司总股本的比例为
+        0.94%），出售期间为本出售计划公告之日起15个交易日之后至2026年11月20日
+        截至2026年9月30日，公司通过集中竞价交易方式出售回购股份数量为0股
+        ，占公司总股本的比例为0%。
+        """;
+
+    [Fact]
+    public void 截至句讲的是出售_不当成本期累计()
+    {
+        var r = PlanAnnouncementExtractor.Extract("920639", "晨光电缆",
+            "关于出售已回购股份的进展公告", new DateTime(2026, 10, 9), ChenguangSale);
+
+        Assert.NotEqual(0, r.CumShares);
+        Assert.NotEqual(0, r.PctOfCapital);
+    }
 }
