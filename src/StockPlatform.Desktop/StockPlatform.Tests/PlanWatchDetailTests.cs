@@ -181,6 +181,7 @@ public class PlanWatchDetailTests
             => Missing.Where(m => m.AnnounceDate >= since).Take(limit).ToList();
         public Dictionary<string, PlanAnnouncement> GetOpenPlans(string kind) => [];
         public DateTime? GetLatestAnnounceDate(string kind) => Watermark;
+        public HashSet<(string Code, DateTime AnnounceDate, string Title)> GetFetchedKeys(string kind, DateTime since) => [];
         public (int Rows, int Stocks, int OpenPlans) GetCounts(string kind) => (Saved.Count, 1, 0);
     }
 

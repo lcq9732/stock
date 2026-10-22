@@ -67,11 +67,11 @@ public class PlanWatchHeartbeatTests
         var (task, _, _) = Build(3);
 
         var texts = new List<string>();
-        task.OnProgress += p => texts.Add(p.Text);
+        task.OnProgress += p => { if (!p.Quiet) texts.Add(p.Text); };   // 只看进日志的；每条那种只喂看门狗
 
         await task.RunAsync(new TaskRunArgs(), CancellationToken.None);
 
-        // 「开始取正文…」那句照报，中间那种「取正文 20/241…」一条都不该有。
+        // 「开始取正文…」那句照报，中间那种「取正文 20/241…」一条都不该进日志。
         Assert.DoesNotContain(texts, t => t.Contains("取正文 "));
     }
 
@@ -147,6 +147,10 @@ public class PlanWatchHeartbeatTests
         public List<PlanAnnouncement> GetByCode(string code, string kind) => [];
         public List<PlanAnnouncement> GetMissingDetail(string kind, DateTime since, int limit)
             => Missing.Take(limit).ToList();
+        /// <summary>已取到正文的 (代码, 日期, 标题)；默认空＝全部重新取。</summary>
+        public HashSet<(string Code, DateTime AnnounceDate, string Title)> Fetched = [];
+        public HashSet<(string Code, DateTime AnnounceDate, string Title)> GetFetchedKeys(string kind, DateTime since)
+            => Fetched;
         public Dictionary<string, PlanAnnouncement> GetOpenPlans(string kind) => [];
         public DateTime? GetLatestAnnounceDate(string kind) => Watermark;
         public (int Rows, int Stocks, int OpenPlans) GetCounts(string kind) => (BatchSizes.Sum(), 1, 0);

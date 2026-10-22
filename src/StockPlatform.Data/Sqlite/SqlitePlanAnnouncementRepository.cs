@@ -241,6 +241,25 @@ public class SqlitePlanAnnouncementRepository : IPlanAnnouncementRepository
         return list;
     }
 
+    public HashSet<(string Code, DateTime AnnounceDate, string Title)> GetFetchedKeys(string kind, DateTime since)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT code, announce_date, IFNULL(title, '') FROM PlanAnnouncement
+             WHERE kind = $k AND art_code IS NOT NULL AND art_code <> '' AND announce_date >= $since;
+            """;
+        cmd.Parameters.AddWithValue("$k", kind);
+        cmd.Parameters.AddWithValue("$since", since.ToString(DateFormat, CultureInfo.InvariantCulture));
+
+        var set = new HashSet<(string, DateTime, string)>();
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            if (DateTime.TryParse(r.GetString(1), CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
+                set.Add((r.GetString(0), d.Date, r.GetString(2)));
+        return set;
+    }
+
     public (int Rows, int Stocks, int OpenPlans) GetCounts(string kind)
     {
         using var conn = Open();

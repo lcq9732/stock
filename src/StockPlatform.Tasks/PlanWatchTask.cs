@@ -122,6 +122,16 @@ public sealed class PlanWatchTask(
     private const int YieldChunk = 60;
 
     /// <summary>
+    /// 连续这么多条取正文**抛异常**（网络/限流，不是"没匹配上"）就认定东财当前不通，本轮收工（2026-10-22）。
+    ///
+    /// 不收工的话：每条要等 12 秒超时、再重试两次，限速器连续失败还会暂停 15 分钟——一路"静默变慢"，
+    /// 10 分钟后被看门狗判卡死掐断（10-21 17:24、10-22 02:26 两次都是这样，停在不同的条数上），
+    /// 掐断走失败分支，而且这一项占着全部联网源，期间【分档资金流快照】这类要用东财的都开不了工。
+    /// 收工记成「跳过」：已取到的照常落库，计划先跑别的、隔一阵再回头试；没取到的下一轮再取。
+    /// </summary>
+    internal const int AbortAfterConsecutiveFailures = 10;
+
+    /// <summary>
     /// 定本轮要搜的起点。**纯函数，所以能单独测**（见 PlanWatchResumeTests）。
     ///
     /// ════ 这里修过一个会静默丢数据的 bug（2026-09-11）════
@@ -154,14 +164,16 @@ public sealed class PlanWatchTask(
         return (start, false);
     }
 
-    private int _hits, _parsed, _noDetail, _refillTried, _refillOk;
+    private int _hits, _parsed, _noDetail, _refillTried, _refillOk, _skipped;
+    private bool _aborted;
     private readonly List<string> _warnings = [];
 
     protected override async IAsyncEnumerable<IReadOnlyList<PlanAnnouncement>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
         repository.EnsureSchema();
-        _hits = _parsed = _noDetail = _refillTried = _refillOk = 0;
+        _hits = _parsed = _noDetail = _refillTried = _refillOk = _skipped = 0;
+        _aborted = false;
         _warnings.Clear();
 
         var watermark = repository.GetLatestAnnounceDate(PlanKind.Buyback);
@@ -171,6 +183,12 @@ public sealed class PlanWatchTask(
                + (isFirstRun
                    ? $"（首轮，回看 {FirstRunLookbackDays} 天——再往前正文取不到，见类注释）"
                    : $"（增量，库里最新到 {watermark:yyyy-MM-dd}）"));
+
+        // 窗口里**已经取到正文**的公告不再重取（2026-10-22）：回看 14 天每轮都会重新搜到它们，
+        // 原来照样每条重取——一天约 550 条、1100 个东财请求，跑到三百来条就被限流拖慢、被看门狗掐断。
+        // 没取到正文的空壳不在这个集合里，照常重试。
+        var fetched = repository.GetFetchedKeys(PlanKind.Buyback, start.ToDateTime(TimeOnly.MinValue));
+        int consecutiveFailures = 0;
 
         // ⚠ **必须按天切片搜索，不能一次搜整个区间**（2026-09-11 实测发现）：
         // CninfoAnnouncementSearchProvider 有 MaxPages=30 的硬上限，而「回购」是高频关键词——
@@ -204,11 +222,15 @@ public sealed class PlanWatchTask(
             // ⚠ 标题筛选：《关于回购股份事项前十名股东和前十名无限售条件股东持股情况的公告》
             // 标题含"回购"但内容是股东名册。不排除会解析出一条各字段全空的"进展"，
             // **看起来像回购停滞** —— 本项唯一会产生错误结论（而非漏数据）的坑。
-            var group = dayHits.Where(h => PlanAnnouncementExtractor.IsBuybackAnnouncement(h.Title)).ToList();
-            _hits += group.Count;
+            var buyback = dayHits.Where(h => PlanAnnouncementExtractor.IsBuybackAnnouncement(h.Title)).ToList();
+            _hits += buyback.Count;
+            var group = buyback.Where(h => !fetched.Contains((h.Code, h.PublishDate.Date, h.Title))).ToList();
+            _skipped += buyback.Count - group.Count;
             if (group.Count == 0) continue;
 
-            Report($"{day:yyyy-MM-dd} 命中 {dayHits.Count} 条，真回购公告 {group.Count} 条，开始取正文…");
+            Report($"{day:yyyy-MM-dd} 命中 {dayHits.Count} 条，真回购公告 {buyback.Count} 条"
+                   + (buyback.Count > group.Count ? $"（{buyback.Count - group.Count} 条已有正文，跳过）" : "")
+                   + $"，开始取 {group.Count} 条正文…");
 
             var batch = new List<PlanAnnouncement>();
             var doneToday = 0;
@@ -221,6 +243,7 @@ public sealed class PlanWatchTask(
                 {
                     var detail = await detailFetcher.FetchDetailAsync(
                         hit.Code, hit.Title, DateOnly.FromDateTime(hit.PublishDate), ct);
+                    consecutiveFailures = 0;   // 请求本身成功了（配没配上是另一回事）
                     if (detail is { } d) { artCode = d.ArtCode; content = d.Content; }
                     else
                     {
@@ -238,6 +261,7 @@ public sealed class PlanWatchTask(
                     // 软失败：取不到正文照样把标题那部分留下来
                     _noDetail++;
                     _warnings.Add($"{hit.Code} {hit.Title}：正文取不到（{ex.Message}）");
+                    consecutiveFailures++;
                 }
 
                 batch.Add(PlanAnnouncementExtractor.Extract(
@@ -246,9 +270,18 @@ public sealed class PlanWatchTask(
                 doneToday++;
 
                 // 心跳。这一段是全任务最慢的地方（1.3 秒/条），不出声就会被看门狗当成卡死，
-                // 见 ProgressEvery 的注释。
+                // 见 ProgressEvery 的注释。日志每 20 条一行；**每条**都喂看门狗（2026-10-22）——
+                // 东财变慢时一条要几十秒，20 条一报会越过 10 分钟线，正在前进的任务被判成卡死。
                 if (doneToday % ProgressEvery == 0 && doneToday < group.Count)
                     Report($"{day:yyyy-MM-dd} 取正文 {doneToday}/{group.Count}…", _parsed, _hits);
+                else
+                    ReportQuiet($"{day:yyyy-MM-dd} 取正文 {doneToday}/{group.Count}…", _parsed, _hits);
+
+                if (consecutiveFailures >= AbortAfterConsecutiveFailures)
+                {
+                    _aborted = true;
+                    break;
+                }
 
                 // 攒够一段就先落库，别把一天的成果全押在"能跑到最后"上，见 YieldChunk 的注释。
                 if (batch.Count >= YieldChunk)
@@ -256,6 +289,15 @@ public sealed class PlanWatchTask(
                     yield return batch;
                     batch = [];
                 }
+            }
+
+            if (_aborted)
+            {
+                // 已取到的照常落库，没取到的（标题留档成空壳）下一轮再取
+                if (batch.Count > 0) yield return batch;
+                Report($"⚠ 东财公告正文连续 {AbortAfterConsecutiveFailures} 条取不到，判断它当前不通（多半是限流），"
+                       + $"本轮停在 {day:yyyy-MM-dd} 第 {doneToday}/{group.Count} 条；已取到的已入库，剩下的隔一阵再试。");
+                yield break;
             }
 
             Report($"{day:yyyy-MM-dd} 解析 {doneToday} 条", _parsed, _hits);
@@ -323,12 +365,18 @@ public sealed class PlanWatchTask(
         foreach (var w in _warnings.Take(20)) Report("⚠ " + w);
         if (_warnings.Count > 20) Report($"⚠ 另有 {_warnings.Count - 20} 条告警未列出。");
 
+        // 东财不通、提前收工：记「跳过」而不是失败——条件会变（限流会过去），计划先跑别的、隔一阵回头再试
+        if (_aborted)
+            return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(
+                $"东财公告正文连续 {AbortAfterConsecutiveFailures} 条取不到（多半是限流），已取到的 {_parsed - _noDetail} 条已入库"));
+
         if (stats.Items == 0)
             return Task.FromResult<TaskRunResult?>(TaskRunResult.Ok(
                 nothingToDo: true, progress: "本轮没有新的回购公告"));
 
         var (rows, stocks, open) = repository.GetCounts(PlanKind.Buyback);
-        var msg = $"本轮解析 {_parsed} 条（{_noDetail} 条没取到正文，已按标题留档）；"
+        var msg = $"本轮解析 {_parsed} 条（{_noDetail} 条没取到正文，已按标题留档"
+                  + (_skipped > 0 ? $"；{_skipped} 条已有正文、跳过" : "") + "）；"
                   + (_refillTried > 0 ? $"回补旧空壳 {_refillOk}/{_refillTried} 条；" : "")
                   + $"库里现有 {rows} 条 / {stocks} 只票，**{open} 个方案还在进行中**。";
         return Task.FromResult<TaskRunResult?>(TaskRunResult.Ok(progress: msg));

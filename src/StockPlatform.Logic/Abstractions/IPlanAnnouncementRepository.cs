@@ -44,6 +44,15 @@ public interface IPlanAnnouncementRepository
     /// </summary>
     List<PlanAnnouncement> GetMissingDetail(string kind, DateTime since, int limit);
 
+    /// <summary>
+    /// <paramref name="since"/> 之后**已经取到正文**（<c>art_code</c> 非空）的公告，(代码, 公告日, 标题)（2026-10-22）。
+    ///
+    /// 给增量那段跳过用：回看 14 天每轮都会重新搜到这些公告，原来照样每条重取正文——
+    /// 一天约 550 条、1100 个东财请求，跑到三百来条就被限流拖慢、被看门狗判卡死掐断。
+    /// 已有正文的不必再取；没取到的（空壳）不在这里，照常重试。
+    /// </summary>
+    HashSet<(string Code, DateTime AnnounceDate, string Title)> GetFetchedKeys(string kind, DateTime since);
+
     /// <summary>(记录数, 覆盖股票数, 未结束方案数)，给日志和体检看。</summary>
     (int Rows, int Stocks, int OpenPlans) GetCounts(string kind);
 }
