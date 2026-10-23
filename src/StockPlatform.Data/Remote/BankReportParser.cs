@@ -482,13 +482,13 @@ public sealed class BankReportParser
         //   杭州银行：表格格子里写的是文字"不良贷款率 与上年末持平"，压根没有数字
         //   兰州银行：标签独占一行"不良贷款率（%）"，数值被排版换到了别处
         // 靠 seen 去重 + 第一遍优先，正文里的值只在表格确实没有时才会被采用。
-        ScanLines(6);
+        ScanLines(MaxLabelIndexInTable);
         ScanLines(int.MaxValue);
         ScanWrappedLabels();
         ScanColumnPairs();
 
         if (kind == FinancialInstitutionKind.Bank) DropInconsistentCapital(result);
-        if (kind == FinancialInstitutionKind.Insurer) DropCrossPageSolvency(result);
+        if (kind == FinancialInstitutionKind.Insurer) ResolveSolvency(result, lines, code, reportDate, source);
 
         return result;
 
@@ -727,8 +727,103 @@ public sealed class BankReportParser
         }
     }
 
+    /// <summary>标签在行首多少字以内才算"表格行"。ScanLines 的第一遍和成对取都用这个尺度。</summary>
+    private const int MaxLabelIndexInTable = 6;
+
+    /// <summary>锚值与候选表的综合偿付能力允许的最大差，见 <see cref="ResolveSolvency"/> 的容差说明。</summary>
+    private const double SolvencyAnchorTolerance = 0.01;
+
+    /// <summary>
+    /// 核心偿付能力充足率**整表成对取**（2026-10-23 新增）。
+    ///
+    /// ════ 要解决的问题 ════
+    /// 集团型保险公司把「集团综合偿付能力充足率」提前印在财务摘要页，而那一页**没有核心**那一行。
+    /// 于是综合锁死在摘要页，核心按"第一次命中"一路往后找，先撞上子公司横排表——中国平安
+    /// 2026 中报取到的是平安寿险的 133.8，集团数 165.6 在 p85 的「集团偿付能力」表里。
+    /// <see cref="DropCrossPageSolvency"/> 能看出这俩不是一张表里的，但它只会把核心丢掉，
+    /// **不会回头去找那张两行俱全的表**——601318 四期报告的核心偿付能力因此全是空的。
+    ///
+    /// ════ 判据：拿综合当锚，去找同一张表 ════
+    /// 摘要页的综合偿付能力是主体/集团口径（公司最想摆在前面的就是这个数），实测 5 家 15 份全取对。
+    /// 以它为锚扫全文，找"同一页里综合等于锚值、核心也在"的那张表。同表相邻两行，口径一致是
+    /// 结构保证的，不像页距那样依赖排版巧合。
+    ///
+    /// 三道过滤都是实测逼出来的：
+    ///   · 容差 0.01——中国人寿的附注里有个整数精度版（核心 140 / 综合 191），跟锚 190.94 差 0.06，
+    ///     正好被排除，保住 p20 那张 139.54 / 190.94 的高精度表；
+    ///   · 核心 ≤ 综合——核心资本必然 ≤ 实际资本，定义决定的，拿来挡脏页；
+    ///   · 核心落在 <see cref="Ranges"/> 的合理区间，跟 AddIfNew 同一个尺度。
+    ///
+    /// 配不上就原样退回 <see cref="DropCrossPageSolvency"/>，今天能用的场景一个都不会变差。
+    /// </summary>
+    private static void ResolveSolvency(List<BankRegulatoryMetric> rows, List<PdfLine> lines,
+                                        string code, DateTime reportDate, string source)
+    {
+        var anchor = rows.FirstOrDefault(r => r.MetricKey == InsurerRegulatoryKeys.ComprehensiveSolvency);
+        if (anchor == null) { DropCrossPageSolvency(rows); return; }   // 没有锚就没得配
+
+        var range = Ranges[InsurerRegulatoryKeys.CoreSolvency];
+        foreach (var page in lines.GroupBy(l => l.Page).OrderBy(g => g.Key))
+        {
+            if (!TryReadSolvencyPair(page, out var core, out var comp)) continue;
+            if (Math.Abs(comp - anchor.Value) > SolvencyAnchorTolerance) continue;
+            if (core > comp) continue;
+            if (core < range.Min || core > range.Max) continue;
+
+            // 页码升序，第一张配上的就是要的——附注里的重复表排在后面，精度往往还更粗。
+            rows.RemoveAll(r => r.MetricKey == InsurerRegulatoryKeys.CoreSolvency);
+            rows.Add(new BankRegulatoryMetric
+            {
+                Code = code, ReportDate = reportDate,
+                MetricKey = InsurerRegulatoryKeys.CoreSolvency,
+                Basis = "", Value = core, SourcePage = page.Key, Source = source,
+            });
+            return;
+        }
+
+        DropCrossPageSolvency(rows);
+    }
+
+    /// <summary>
+    /// 从**一页**里读出成对的核心/综合偿付能力充足率，两个都拿到才返回 true。
+    ///
+    /// 取值口径跟 ScanLines 的第一遍一致：标签必须在行首 <see cref="MaxLabelIndexInTable"/> 字以内
+    /// （表格行都是"标签 值 值"，出现在句子中间的是叙述文字），各取第一次命中。
+    /// 靠这条约束，同一页上的注释行（"注：(1) 核心偿付能力充足率=核心资本╱最低资本"）和敏感性
+    /// 测试表的表头（"核心偿付能力充足率 综合偿付能力充足率"，后面跟的是"下降1.5个百分点"）都进不来。
+    /// </summary>
+    private static bool TryReadSolvencyPair(IEnumerable<PdfLine> pageLines, out double core, out double comp)
+    {
+        double? c = null, p = null;
+        foreach (var line in pageLines)
+        {
+            var text = Normalize(line.Text);
+            foreach (var (label, key) in InsurerLabels)
+            {
+                if (key is not (InsurerRegulatoryKeys.CoreSolvency or InsurerRegulatoryKeys.ComprehensiveSolvency))
+                    continue;
+                if (key == InsurerRegulatoryKeys.CoreSolvency ? c != null : p != null) continue;
+
+                var m = RegexFor(label).Match(text);
+                if (!m.Success || m.Index > MaxLabelIndexInTable) continue;
+                if (IsQualifiedByPrefix(text, m.Index)) continue;
+
+                var (value, _) = FirstNumberAfterStandard(text[(m.Index + m.Length)..]);
+                if (value == null || !double.TryParse(value, NumberStyles.Float,
+                                                      CultureInfo.InvariantCulture, out var v)) continue;
+
+                if (key == InsurerRegulatoryKeys.CoreSolvency) c = v; else p = v;
+            }
+        }
+
+        core = c ?? double.NaN;
+        comp = p ?? double.NaN;
+        return c != null && p != null;
+    }
+
     /// <summary>
     /// 核心与综合偿付能力充足率必须来自**同一张表**，否则口径对不上。
+    /// **这是兜底**——<see cref="ResolveSolvency"/> 没配上成对表时才轮到它。
     ///
     /// 真实踩到的例子：中国平安年报里，集团口径的综合偿付能力充足率在 p15（193.3%），而 p15 没有
     /// 集团核心偿付能力那一行，于是核心偿付能力一路取到 p51 的子公司表，拿到的是**平安寿险**的

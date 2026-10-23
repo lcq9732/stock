@@ -169,7 +169,8 @@ public static class RegulatoryMetricCatalog
 
         // ── 保险：偿付能力在年报的偿付能力章节，也可查季度偿付能力报告 ──
         [InsurerRegulatoryKeys.CoreSolvency] = ("核心偿付能力充足率",
-            "年报「偿付能力」章节，或公司官网的季度偿付能力报告摘要（监管 ≥50%）。⚠ 集团型公司要取**集团口径**，别取子公司的"),
+            "年报「偿付能力」章节，或公司官网的季度偿付能力报告摘要（监管 ≥50%）。⚠ 集团型公司要取**集团口径**，别取子公司的"
+            + "——那张表在「流动性及资本资源 → 集团偿付能力」，财务摘要页只印综合、没有核心"),
         [InsurerRegulatoryKeys.ComprehensiveSolvency] = ("综合偿付能力充足率",
             "同上（监管 ≥100%）。⚠ 同样注意集团 vs 子公司口径"),
         [InsurerRegulatoryKeys.CombinedRatio] = ("综合成本率", "年报「财产保险业务」章节（低于 100% 才是承保盈利）"),
