@@ -59,6 +59,35 @@ public sealed class PdfLineExtractor
         return [];
     }
 
+    /// <summary>
+    /// 把**每条**可用 source 的结果都交出来（按尝试顺序），自己不做取舍。
+    ///
+    /// <see cref="Extract(string, PdfExtractOptions, CancellationToken)"/> 的判据是"行数 &gt; 0 就算成了"，
+    /// 对"读残了但非空"无能为力：PdfPigLineSource 是逐页兜异常的，一份 291 页的报告只读出
+    /// 4 页也是非空，于是后面的路子永远轮不到（实测 9 份报告、29 个指标因此拿不到，
+    /// 见 doc/pdf-source-fallback-design.md）。
+    ///
+    /// 够不够用得看**解析出多少指标**，而那是业务知识，组合器不懂也不该懂——所以这里只把
+    /// 候选一条条交出来，谁更好由调用方评。惰性返回，调用方提前收手就能省下后面几条的提取开销。
+    /// </summary>
+    public IEnumerable<(string Source, IReadOnlyList<PdfLine> Lines)> ExtractAll(
+        string pdfPath, PdfExtractOptions options, CancellationToken ct = default)
+    {
+        foreach (var s in _sources)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!s.IsAvailable) continue;
+
+            // 跟 Extract 一样：某条路自己出错不该让整条链报废
+            IReadOnlyList<PdfLine>? lines;
+            try { lines = s.TryExtract(pdfPath, options, ct); }
+            catch (OperationCanceledException) { throw; }
+            catch { continue; }
+
+            if (lines is { Count: > 0 }) yield return (s.Name, lines);
+        }
+    }
+
     /// <summary>不关心用了哪条路时的简写。</summary>
     public IReadOnlyList<PdfLine> Extract(string pdfPath, PdfExtractOptions options,
                                           CancellationToken ct = default)

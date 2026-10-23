@@ -308,36 +308,50 @@ public sealed class BankReportParser
     public HashSet<string>? DisclosedKeys(string pdfPath)
     {
         var all = BankLabels.Concat(BrokerLabels).Concat(InsurerLabels).ToArray();
-        List<PdfLine> lines;
-        try { lines = ExtractLines(pdfPath, all); }
-        catch { return null; }
-        if (lines.Count == 0) return null;
-        // 数字被转曲的 PDF 文本层里根本没有数，这个判据对它没有意义——返回 null 让调用方
-        // 保守处理（宁可多列一项让人核，也别把该补的数悄悄漏掉）。
-        if (LooksLikeDigitsStripped(lines)) return null;
-
         var found = new HashSet<string>();
-        for (int i = 0; i < lines.Count; i++)
+        bool usable = false;
+        try
         {
-            var text = Normalize(lines[i].Text);
-            // 下一行只在同一页才算——跨页拼接没有意义
-            var next = i + 1 < lines.Count && lines[i + 1].Page == lines[i].Page
-                ? lines[i + 1].Text : "";
-            foreach (var (label, key) in all)
+            // 跟 Parse 一样走每一条提取路子。读残的那条会把披露了的指标漏判成"没披露"，
+            // 而「待手工回填清单」正是照着这个结果过滤的——漏判等于**既没解析出来、
+            // 也不让人去补**，那才是最坏的情形。取并集：任何一条路看到"标签后面有数"就算披露。
+            foreach (var (_, srcLines) in ExtractAllLines(pdfPath, all))
             {
-                if (found.Contains(key)) continue;
-                foreach (Match m in RegexFor(label).Matches(text))
+                var lines = srcLines.ToList();
+                // 数字被转曲的 PDF 文本层里根本没有数，这个判据对它没有意义——跳过这一条。
+                // 一条能用的都没有时返回 null，让调用方保守处理（宁可多列一项让人核，
+                // 也别把该补的数悄悄漏掉）。
+                if (LooksLikeDigitsStripped(lines)) continue;
+                usable = true;
+                Collect(lines);
+            }
+        }
+        catch { return null; }
+        return usable ? found : null;
+
+        void Collect(List<PdfLine> lines)
+        {
+            for (int i = 0; i < lines.Count; i++)
+            {
+                var text = Normalize(lines[i].Text);
+                // 下一行只在同一页才算——跨页拼接没有意义
+                var next = i + 1 < lines.Count && lines[i + 1].Page == lines[i].Page
+                    ? lines[i + 1].Text : "";
+                foreach (var (label, key) in all)
                 {
-                    var rest = text[(m.Index + m.Length)..];
-                    if (rest.Any(char.IsAsciiDigit) || next.Any(char.IsAsciiDigit))
+                    if (found.Contains(key)) continue;
+                    foreach (Match m in RegexFor(label).Matches(text))
                     {
-                        found.Add(key);
-                        break;
+                        var rest = text[(m.Index + m.Length)..];
+                        if (rest.Any(char.IsAsciiDigit) || next.Any(char.IsAsciiDigit))
+                        {
+                            found.Add(key);
+                            break;
+                        }
                     }
                 }
             }
         }
-        return found;
     }
 
     /// <summary>
@@ -356,11 +370,31 @@ public sealed class BankReportParser
         var labels = LabelsFor(kind);
         if (labels.Length == 0) return [];      // 非金融/未细分：没有统一披露的监管指标可解析
 
-        var lines = ExtractLines(pdfPath, labels);
-        if (lines.Count == 0)
+        // ── 每条提取路子各解析一遍，取解出指标最多的那条 ────────────────────────────
+        // 为什么不能"第一条非空就用"：PdfPigLineSource 逐页兜异常，读残了也是非空（新华
+        // 2024 年报 291 页只读出 4 页），后面的路子永远轮不到。而"读到百分之几的页"跟
+        // "有没有读到指标表"不相关——实测张家港行、南京银行的页覆盖率都 ≥0.9，仍各缺 3 项；
+        // 按指标数设阈值短路同样挡不住（那两家已经解出 10 项、12 项）。全跑一遍再挑最省心。
+        // 反过来 PdfPig 在不少版式上比 pdftotext 强（青岛银行 15 对 12），所以也不能简单
+        // 换成 poppler 优先。详见 doc/pdf-source-fallback-design.md。
+        List<PdfLine>? lines = null;
+        List<BankRegulatoryMetric>? result = null;
+        var tried = new List<(string Source, int Count)>();
+        foreach (var (srcName, srcLines) in ExtractAllLines(pdfPath, labels, ct))
+        {
+            var candidate = srcLines.ToList();
+            var metrics = ScanAll(candidate, labels, code, reportDate, kind, MetricSources.Pdf);
+            tried.Add((srcName, metrics.Count));
+            // **严格大于**才换：平手时保持 source 顺序，跟改之前的行为一致
+            if (result == null || metrics.Count > result.Count) (lines, result) = (candidate, metrics);
+        }
+        if (lines == null || result == null)
             throw new InvalidOperationException("PDF 没有可提取的文本层（可能是扫描件，需要 OCR）");
-
-        var result = ScanAll(lines, labels, code, reportDate, kind, MetricSources.Pdf);
+        // 几条路解出的数量不一样才值得说一句——一样的时候每份都刷一行太吵
+        if (tried.Select(x => x.Count).Distinct().Count() > 1)
+            progress?.Invoke($"    {Path.GetFileName(pdfPath)}："
+                + string.Join("、", tried.Select(x => $"{x.Source} {x.Count} 项"))
+                + $"，取解出最多的那条");
 
         // ── 数字被转曲的 PDF：走 OCR 兜底 ──────────────────────────────────────
         // 中文文本层是好的、数字全没了（见 LooksLikeDigitsStripped 的说明）。这时中文正好
@@ -973,7 +1007,8 @@ public sealed class BankReportParser
     /// ⚠ 这个判据以前是**传给工具层的 labels 数组**，工具层拿着银行的标签表自己判断——
     ///   业务知识漏进了通用工具。改成回调之后判断权回到这里，工具层只管照做。
     /// </summary>
-    private List<PdfLine> ExtractLines(string pdfPath, (string Label, string Key)[] labels)
+    private IEnumerable<(string Source, IReadOnlyList<PdfLine> Lines)> ExtractAllLines(
+        string pdfPath, (string Label, string Key)[] labels, CancellationToken ct = default)
     {
         bool KeepPage(string pageText)
         {
@@ -983,6 +1018,6 @@ public sealed class BankReportParser
                    || SectionHints.Any(h => t.Contains(h, StringComparison.Ordinal));
         }
 
-        return _lines.Extract(pdfPath, new PdfExtractOptions { PageFilter = KeepPage }).ToList();
+        return _lines.ExtractAll(pdfPath, new PdfExtractOptions { PageFilter = KeepPage }, ct);
     }
 }

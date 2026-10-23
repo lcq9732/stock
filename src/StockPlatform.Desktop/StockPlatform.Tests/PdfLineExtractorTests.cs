@@ -149,6 +149,62 @@ public class PdfLineExtractorTests
         Assert.Equal(7.5, seen.LineTolerance);
     }
 
+    // ── ExtractAll：把每条的结果都交出来，取舍留给业务侧（2026-10-23）──────────────
+    // 加这个入口是因为"第一个非空的赢"治不了"读残但非空"，而"够不够用"要看解出多少指标，
+    // 组合器不懂指标。见 doc/pdf-source-fallback-design.md。
+
+    [Fact]
+    public void ExtractAll_按顺序把每条都交出来()
+    {
+        var first = new FakeSource("a", Some("来自 a"));
+        var second = new FakeSource("b", Some("来自 b"));
+
+        var all = new PdfLineExtractor(first, second).ExtractAll("x.pdf", PdfExtractOptions.Default).ToList();
+
+        Assert.Equal(["a", "b"], all.Select(x => x.Source));
+        Assert.Equal("来自 a", all[0].Lines[0].Text);
+        Assert.Equal("来自 b", all[1].Lines[0].Text);
+    }
+
+    [Fact]
+    public void ExtractAll_跳过不可用的和没结果的()
+    {
+        var down = new FakeSource("down", Some("不该出现"), available: false);
+        var empty = new FakeSource("empty", []);
+        var nil = new FakeSource("nil", null);
+        var ok = new FakeSource("ok", Some("有货"));
+
+        var all = new PdfLineExtractor(down, empty, nil, ok).ExtractAll("x.pdf", PdfExtractOptions.Default).ToList();
+
+        Assert.Equal(["ok"], all.Select(x => x.Source));
+        Assert.Equal(0, down.Calls);
+    }
+
+    [Fact]
+    public void ExtractAll_某条抛了不影响后面那条()
+    {
+        var boom = new FakeSource("boom", null, throws: new InvalidOperationException("字体表坏了"));
+        var ok = new FakeSource("ok", Some("有货"));
+
+        var all = new PdfLineExtractor(boom, ok).ExtractAll("x.pdf", PdfExtractOptions.Default).ToList();
+
+        Assert.Equal(["ok"], all.Select(x => x.Source));
+    }
+
+    /// <summary>惰性：调用方只要第一条时，后面的 source 不该被白白跑一遍（一份 PDF 好几秒）。</summary>
+    [Fact]
+    public void ExtractAll_是惰性的()
+    {
+        var first = new FakeSource("a", Some("来自 a"));
+        var second = new FakeSource("b", Some("来自 b"));
+
+        var taken = new PdfLineExtractor(first, second).ExtractAll("x.pdf", PdfExtractOptions.Default).First();
+
+        Assert.Equal("a", taken.Source);
+        Assert.Equal(1, first.Calls);
+        Assert.Equal(0, second.Calls);
+    }
+
     private sealed class ProbeSource(Action<PdfExtractOptions> spy) : IPdfLineSource
     {
         public string Name => "probe";
