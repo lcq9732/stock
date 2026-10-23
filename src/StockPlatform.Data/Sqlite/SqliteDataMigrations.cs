@@ -48,6 +48,15 @@ public static class SqliteDataMigrations
     /// </summary>
     public const string AnnouncementMismatchCleanup = "announcement_mismatch_cleanup";
 
+    /// <summary>
+    /// 回购公告抽取规则升到第 2 版（2026-10-23，见 <c>PlanAnnouncementExtractor.Version</c>）时，
+    /// 把**不用重抽**的老行先记成第 2 版，只留真要重抽的进队列：
+    /// · 「方案」行——第 2 版只改了进展类（截至句、累计数），离线比对 60 份方案公告一条都没变；
+    /// · 空壳行（没取到过正文）——没东西可重抽，归回补段管，补上时自然按新版抽。
+    /// 剩下的约 2069 行由【回购公告进展】每轮尾巴上按 art_code 重取正文重抽。
+    /// </summary>
+    public const string PlanExtractV2Baseline = "plan_extract_v2_baseline";
+
     public static void Apply(SqliteConnection conn)
     {
         using (var cmd = conn.CreateCommand())
@@ -109,6 +118,20 @@ public static class SqliteDataMigrations
                 + "price_high = NULL, pct_of_capital = NULL, plan_cap_price = NULL, plan_amount_low = NULL, plan_amount_high = NULL")
             + ClearMismatched(conn, tx, "OrderWinAnnouncement", "publish_date",
                 "art_code = '', content = NULL, total_amount_yuan = NULL"));
+        Run(conn, PlanExtractV2Baseline, tx =>
+        {
+            if (!TableExists(conn, tx, "PlanAnnouncement")) return 0;
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            // 写死 2，不引用 PlanAnnouncementExtractor.Version：这是"第 2 版时核对过不用重抽"这件事本身，
+            // 以后版本再升，这些行照样该进重抽队列。
+            cmd.CommandText = """
+                UPDATE PlanAnnouncement SET extract_ver = 2
+                 WHERE IFNULL(extract_ver, 1) < 2
+                   AND (stage = '方案' OR art_code IS NULL OR art_code = '');
+                """;
+            return cmd.ExecuteNonQuery();
+        });
     }
 
     /// <summary>

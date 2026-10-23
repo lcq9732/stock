@@ -53,6 +53,17 @@ public interface IPlanAnnouncementRepository
     /// </summary>
     HashSet<(string Code, DateTime AnnounceDate, string Title)> GetFetchedKeys(string kind, DateTime since);
 
+    /// <summary>
+    /// 抽取版本低于 <paramref name="version"/>、要重抽的行（2026-10-23）。只看取到过正文的（<c>art_code</c> 非空）——
+    /// 空壳归 <see cref="GetMissingDetail"/> 管。
+    /// 库里**存了正文的全部返回**（本地重抽，不花请求）；没存正文的按公告日从新到旧最多 <paramref name="fetchLimit"/> 条
+    /// （要按 art_code 重取正文，一条一个请求）。
+    /// </summary>
+    List<PlanAnnouncement> GetStaleExtraction(string kind, int version, int fetchLimit);
+
+    /// <summary>还有多少行抽取版本低于 <paramref name="version"/>（只算取到过正文的），给日志报"还剩几条"。</summary>
+    int CountStaleExtraction(string kind, int version);
+
     /// <summary>(记录数, 覆盖股票数, 未结束方案数)，给日志和体检看。</summary>
     (int Rows, int Stocks, int OpenPlans) GetCounts(string kind);
 }

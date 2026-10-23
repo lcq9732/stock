@@ -129,6 +129,8 @@ public class PlanWatchHeartbeatTests
 
     private sealed class FakeRepo : IPlanAnnouncementRepository
     {
+        public List<PlanAnnouncement> GetStaleExtraction(string kind, int version, int fetchLimit) => [];
+        public int CountStaleExtraction(string kind, int version) => 0;
         public DateTime? Watermark;
 
         /// <summary>每次 Upsert 的条数——批的形状就看它。</summary>
@@ -175,6 +177,7 @@ public class PlanWatchHeartbeatTests
 
     private sealed class FakeDetail : IAnnouncementDetailFetcher
     {
+        public Task<string?> FetchContentAsync(string artCode, CancellationToken ct = default) => Task.FromResult<string?>(null);
         /// <summary>取了多少条正文——测试拿它当"慢时钟"，一条≈1.3 秒。</summary>
         public int Calls;
 

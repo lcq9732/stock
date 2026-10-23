@@ -165,6 +165,8 @@ public class PlanWatchDetailTests
 
     private sealed class FakeRepo : IPlanAnnouncementRepository
     {
+        public List<PlanAnnouncement> GetStaleExtraction(string kind, int version, int fetchLimit) => [];
+        public int CountStaleExtraction(string kind, int version) => 0;
         public DateTime? Watermark;
         public List<PlanAnnouncement> Missing = [];
         public readonly List<PlanAnnouncement> Saved = [];
@@ -196,6 +198,7 @@ public class PlanWatchDetailTests
 
     private sealed class FakeDetail : IAnnouncementDetailFetcher
     {
+        public Task<string?> FetchContentAsync(string artCode, CancellationToken ct = default) => Task.FromResult<string?>(null);
         public int Calls;
         public bool ReturnNull;
 

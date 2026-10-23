@@ -45,11 +45,11 @@ public class SqlitePlanAnnouncementRepository : IPlanAnnouncementRepository
                 (code, kind, announce_date, stage, name, as_of_date,
                  cum_shares, cum_amount, price_low, price_high, pct_of_capital,
                  plan_cap_price, plan_amount_low, plan_amount_high,
-                 title, art_code, source_url, fetched_at)
+                 title, art_code, source_url, fetched_at, content, extract_ver)
             VALUES ($c, $k, $d, $s, $n, $ao,
                     $cs, $ca, $pl, $ph, $pct,
                     $cap, $al, $ah,
-                    $t, $art, $url, $at)
+                    $t, $art, $url, $at, $body, $ver)
             ON CONFLICT(code, kind, announce_date, stage) DO UPDATE SET
                 name = excluded.name, as_of_date = excluded.as_of_date,
                 cum_shares = excluded.cum_shares, cum_amount = excluded.cum_amount,
@@ -59,10 +59,13 @@ public class SqlitePlanAnnouncementRepository : IPlanAnnouncementRepository
                 plan_amount_low = excluded.plan_amount_low,
                 plan_amount_high = excluded.plan_amount_high,
                 title = excluded.title, art_code = excluded.art_code,
-                source_url = excluded.source_url, fetched_at = excluded.fetched_at;
+                source_url = excluded.source_url, fetched_at = excluded.fetched_at,
+                -- 没带正文的写入（取正文失败留的空壳）不冲掉已存的正文
+                content = COALESCE(excluded.content, PlanAnnouncement.content),
+                extract_ver = excluded.extract_ver;
             """;
 
-        var names = new[] { "$c","$k","$d","$s","$n","$ao","$cs","$ca","$pl","$ph","$pct","$cap","$al","$ah","$t","$art","$url","$at" };
+        var names = new[] { "$c","$k","$d","$s","$n","$ao","$cs","$ca","$pl","$ph","$pct","$cap","$al","$ah","$t","$art","$url","$at","$body","$ver" };
         var p = new Dictionary<string, SqliteParameter>();
         foreach (var n in names)
         { var q = cmd.CreateParameter(); q.ParameterName = n; cmd.Parameters.Add(q); p[n] = q; }
@@ -90,6 +93,8 @@ public class SqlitePlanAnnouncementRepository : IPlanAnnouncementRepository
             p["$art"].Value = x.ArtCode ?? "";
             p["$url"].Value = x.SourceUrl ?? "";
             p["$at"].Value = x.FetchedAt.ToString(TimeFormat, CultureInfo.InvariantCulture);
+            p["$body"].Value = string.IsNullOrEmpty(x.Content) ? DBNull.Value : x.Content;
+            p["$ver"].Value = x.ExtractVersion;
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
@@ -100,7 +105,7 @@ public class SqlitePlanAnnouncementRepository : IPlanAnnouncementRepository
         SELECT code, kind, announce_date, stage, name, as_of_date,
                cum_shares, cum_amount, price_low, price_high, pct_of_capital,
                plan_cap_price, plan_amount_low, plan_amount_high,
-               title, art_code, source_url, fetched_at
+               title, art_code, source_url, fetched_at, content, IFNULL(extract_ver, 1)
         FROM PlanAnnouncement
         """;
 
@@ -131,6 +136,8 @@ public class SqlitePlanAnnouncementRepository : IPlanAnnouncementRepository
             ArtCode = r.IsDBNull(15) ? "" : r.GetString(15),
             SourceUrl = r.IsDBNull(16) ? "" : r.GetString(16),
             FetchedAt = Dt(r, 17) ?? default,
+            Content = r.IsDBNull(18) ? null : r.GetString(18),
+            ExtractVersion = r.GetInt32(19),
         };
     }
 
@@ -239,6 +246,42 @@ public class SqlitePlanAnnouncementRepository : IPlanAnnouncementRepository
         using var r = cmd.ExecuteReader();
         while (r.Read()) list.Add(Read(r));
         return list;
+    }
+
+    public List<PlanAnnouncement> GetStaleExtraction(string kind, int version, int fetchLimit)
+    {
+        // 两段：库里有正文的全拿（本地重抽，不花请求）；没正文的按公告日从新到旧拿 fetchLimit 条
+        const string Stale = " WHERE kind = $k AND art_code IS NOT NULL AND art_code <> '' AND IFNULL(extract_ver, 1) < $v";
+        using var conn = Open();
+        var list = new List<PlanAnnouncement>();
+        foreach (var sql in new[]
+                 {
+                     SelectCols + Stale + " AND content IS NOT NULL ORDER BY announce_date DESC;",
+                     SelectCols + Stale + " AND content IS NULL ORDER BY announce_date DESC LIMIT $n;",
+                 })
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("$k", kind);
+            cmd.Parameters.AddWithValue("$v", version);
+            cmd.Parameters.AddWithValue("$n", fetchLimit);
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) list.Add(Read(r));
+        }
+        return list;
+    }
+
+    public int CountStaleExtraction(string kind, int version)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT COUNT(*) FROM PlanAnnouncement
+             WHERE kind = $k AND art_code IS NOT NULL AND art_code <> '' AND IFNULL(extract_ver, 1) < $v;
+            """;
+        cmd.Parameters.AddWithValue("$k", kind);
+        cmd.Parameters.AddWithValue("$v", version);
+        return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
     public HashSet<(string Code, DateTime AnnounceDate, string Title)> GetFetchedKeys(string kind, DateTime since)

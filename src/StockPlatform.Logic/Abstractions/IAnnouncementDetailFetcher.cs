@@ -9,4 +9,11 @@ namespace StockPlatform.Logic.Abstractions;
 public interface IAnnouncementDetailFetcher
 {
     Task<(string ArtCode, string Content)?> FetchDetailAsync(string code, string title, DateOnly approxDate, CancellationToken ct = default);
+
+    /// <summary>
+    /// 已知文章编号（之前 <see cref="FetchDetailAsync"/> 配上的 art_code），直接取正文——一个请求，
+    /// 不用再在该股最近 100 条公告里按标题匹配，所以也不受"最近 100 条"的限制（2026-10-23，给重抽用）。
+    /// 源头说这篇没有正文返回 null；网络/限流照常抛异常。
+    /// </summary>
+    Task<string?> FetchContentAsync(string artCode, CancellationToken ct = default);
 }

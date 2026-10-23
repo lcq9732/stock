@@ -24,6 +24,16 @@ namespace StockPlatform.Logic.Services;
 /// </summary>
 public static class PlanAnnouncementExtractor
 {
+    /// <summary>
+    /// 抽取规则的版本号，每行记着自己是用哪一版抽的（<c>PlanAnnouncement.extract_ver</c>）。
+    /// **改了抽取结果就要 +1**：低于它的行由【回购公告进展】每轮尾巴上重抽——库里存了正文的本地重抽，
+    /// 没存的按 art_code 重取正文（见 <c>PlanWatchTask.ReextractMax</c>）。
+    ///
+    /// 1：2026-10-22 之前（取全文第一个匹配）。
+    /// 2：2026-10-22 以最新「截至X日」那句为准、句内去折行、精确金额优先于汇总表、认「回购公司股票」。
+    /// </summary>
+    public const int Version = 2;
+
     // ── 标题判据 ──
     // ⚠ 必须先排除这一类：《关于回购股份事项前十名股东和前十名无限售条件股东持股情况的公告》。
     // 它标题含"回购"，但内容是股东名册，跟回购进度毫无关系。不排除的话会解析出一条各字段全空的
@@ -209,6 +219,29 @@ public static class PlanAnnouncementExtractor
         return null;
     }
 
+    /// <summary>
+    /// 两次抽取结果里**数值不一样**的字段：(字段名, 旧值, 新值)，空值写成空串。重抽时用来记变化清单。
+    /// 比的是抽出来的那些数和截至日；标题、编号、正文这些输入不比。
+    /// </summary>
+    public static List<(string Field, string Old, string New)> ChangedValues(PlanAnnouncement before, PlanAnnouncement after)
+    {
+        static string D(double? v) => v?.ToString("0.######", CultureInfo.InvariantCulture) ?? "";
+        static string T(DateTime? v) => v?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "";
+
+        var list = new List<(string, string, string)>();
+        void Add(string field, string o, string n) { if (o != n) list.Add((field, o, n)); }
+        Add("as_of_date", T(before.AsOfDate), T(after.AsOfDate));
+        Add("cum_shares", D(before.CumShares), D(after.CumShares));
+        Add("cum_amount", D(before.CumAmount), D(after.CumAmount));
+        Add("price_low", D(before.PriceLow), D(after.PriceLow));
+        Add("price_high", D(before.PriceHigh), D(after.PriceHigh));
+        Add("pct_of_capital", D(before.PctOfCapital), D(after.PctOfCapital));
+        Add("plan_cap_price", D(before.PlanCapPrice), D(after.PlanCapPrice));
+        Add("plan_amount_low", D(before.PlanAmountLow), D(after.PlanAmountLow));
+        Add("plan_amount_high", D(before.PlanAmountHigh), D(after.PlanAmountHigh));
+        return list;
+    }
+
     /// <summary>把标题和正文抽成一条记录。<paramref name="content"/> 为空时只按标题定 stage。</summary>
     public static PlanAnnouncement Extract(
         string code, string name, string title, DateTime announceDate,
@@ -224,8 +257,10 @@ public static class PlanAnnouncementExtractor
             Title = title,
             ArtCode = artCode,
             SourceUrl = sourceUrl,
+            ExtractVersion = Version,
         };
         if (string.IsNullOrWhiteSpace(content)) return rec;
+        rec.Content = content;
 
         // ⚠ **方案公告不抽 as_of_date**（2026-09-11 修）。
         // 「数据截止日」这个概念只对进展类有意义（截至上月末累计回购了多少）；方案公告里出现的

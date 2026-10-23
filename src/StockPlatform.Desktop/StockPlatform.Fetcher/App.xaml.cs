@@ -629,7 +629,8 @@ public partial class App : Application
         taskRegistry.Register(FetchActionId.StepPlanWatch,
             () => new PlanWatchTask(
                 new SqlitePlanAnnouncementRepository(paths.CurrentDb),
-                announcementSearchProvider, announcementDetailFetcher));
+                announcementSearchProvider, announcementDetailFetcher,
+                changes => PlanReextractChangeLog.Append(paths.PlanReextractChangesPath, changes)));
         taskRegistry.Register(FetchActionId.StepWatchIndicator,
             () => new WatchIndicatorRuleTask(
                 new SqliteWatchIndicatorRepository(paths.CurrentDb),

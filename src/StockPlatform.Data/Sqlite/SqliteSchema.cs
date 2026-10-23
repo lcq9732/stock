@@ -978,6 +978,12 @@ public static class SqliteSchema
                 art_code       TEXT,
                 source_url     TEXT,
                 fetched_at     TEXT,
+                -- 东财正文原文（2026-10-23 起存）。有了它抽取规则再改就能本地重抽，不用再发请求；
+                -- 之前没存，规则改一次就得按 art_code 把两千多篇重取一遍。约 2KB/篇。
+                content        TEXT,
+                -- 这一行是用第几版抽取规则抽的，见 PlanAnnouncementExtractor.Version。NULL＝老行，按 1。
+                -- 低于当前版本的行由【回购公告进展】每轮尾巴上重抽。
+                extract_ver    INTEGER,
                 PRIMARY KEY (code, kind, announce_date, stage)
             );
             CREATE INDEX IF NOT EXISTS ix_planann_code ON PlanAnnouncement(code, kind);
@@ -1225,6 +1231,9 @@ public static class SqliteSchema
         // （见 SqliteBankRegulatoryRepository.Upsert 的 ON CONFLICT … WHERE），
         // 也才能把"这个数是 OCR 认的、还没核对"如实告诉看的人。老行为 NULL，按 'pdf' 处理。
         AddColumnIfMissing(conn, "BankRegulatoryMetric", "source", "TEXT");
+        // 2026-10-23：回购公告存正文 + 抽取版本号，见 PlanAnnouncement 建表处的注释。
+        AddColumnIfMissing(conn, "PlanAnnouncement", "content", "TEXT");
+        AddColumnIfMissing(conn, "PlanAnnouncement", "extract_ver", "INTEGER");
         // 2026-09-16：两融明细补三列。这三个字段**数据源一直都在返回**，只是解析时没取
         //（跟东财 columns=ALL 那次一个毛病，见 project_em_columns_all_dropped）：
         //   · margin_repay       沪市 rzche —— 有了它才能按官方口径算「融资净买入 = 买入 − 偿还」

@@ -134,6 +134,8 @@ public class PlanWatchSkipAndAbortTests : IDisposable
 
     private sealed class FakeRepo : IPlanAnnouncementRepository
     {
+        public List<PlanAnnouncement> GetStaleExtraction(string kind, int version, int fetchLimit) => [];
+        public int CountStaleExtraction(string kind, int version) => 0;
         public DateTime? Watermark;
         public readonly List<PlanAnnouncement> Saved = [];
         public HashSet<(string Code, DateTime AnnounceDate, string Title)> Fetched = [];
@@ -160,6 +162,7 @@ public class PlanWatchSkipAndAbortTests : IDisposable
 
     private sealed class FakeDetail : IAnnouncementDetailFetcher
     {
+        public Task<string?> FetchContentAsync(string artCode, CancellationToken ct = default) => Task.FromResult<string?>(null);
         public int Calls;
         /// <summary>从第几次调用起一律抛异常（模拟东财限流不通）。</summary>
         public int? FailFrom;

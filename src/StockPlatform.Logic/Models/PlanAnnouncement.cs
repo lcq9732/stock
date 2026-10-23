@@ -54,7 +54,27 @@ public sealed class PlanAnnouncement
     public string ArtCode { get; set; } = "";
     public string SourceUrl { get; set; } = "";
     public DateTime FetchedAt { get; set; } = DateTime.Now;
+
+    /// <summary>
+    /// 东财正文原文（2026-10-23 起存）。没取到正文、或是这之前入库的老行，就是 null。
+    /// 存它是为了抽取规则改了能本地重抽，不必再按 art_code 重取一遍。
+    /// </summary>
+    public string? Content { get; set; }
+
+    /// <summary>
+    /// 用第几版抽取规则抽的，见 <c>PlanAnnouncementExtractor.Version</c>。库里 NULL 的老行读出来是 1。
+    /// 低于当前版本的行会被【回购公告进展】重抽。
+    /// </summary>
+    public int ExtractVersion { get; set; } = 1;
 }
+
+/// <summary>
+/// 重抽时一个字段的变化（2026-10-23），写进变化清单给人核对。
+/// <paramref name="Source"/>：「本地」＝库里存的正文重抽，「重取」＝按 art_code 重新取的正文。
+/// </summary>
+public sealed record PlanReextractChange(
+    string Code, string Name, DateTime AnnounceDate, string Stage,
+    string Field, string Old, string New, string Source);
 
 /// <summary>方案类型。目前只做回购，定增/重组留位——它们的进展披露节奏完全不同，不能共用一套抽取规则。</summary>
 public static class PlanKind

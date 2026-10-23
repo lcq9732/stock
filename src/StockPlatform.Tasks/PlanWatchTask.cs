@@ -41,11 +41,18 @@ namespace StockPlatform.Tasks;
 /// 软失败留下的空壳行**增量窗口再也不会路过**——水位线早越过那天了。所以每轮跑完新公告之后
 /// 再挑一批 <c>art_code</c> 为空的旧行，按 code+标题直接取一次正文（不用重新检索）补上数值，
 /// 见 <see cref="BackfillMax"/>。当天新抓那段配不上的，第二天这一段会自动再试一次。
+///
+/// ════ 再往后：抽取规则升级后重抽旧行（2026-10-23）════
+/// 每行记着自己是第几版规则抽的（<see cref="PlanAnnouncementExtractor.Version"/>）。版本低的：
+/// 库里存了正文就本地重抽（不花请求）；没存的（10-23 之前入库的老行）按 art_code 直接重取正文，
+/// 每轮最多 <see cref="ReextractMax"/> 条。**取到新正文才覆盖**，取不到旧值原样留着。
+/// 数值变了的字段交给 <c>onReextractChanges</c> 记进变化清单，给人事后核对。
 /// </summary>
 public sealed class PlanWatchTask(
     IPlanAnnouncementRepository repository,
     IAnnouncementSearchProvider searchProvider,
-    IAnnouncementDetailFetcher detailFetcher) : FetchTaskBase<PlanAnnouncement>
+    IAnnouncementDetailFetcher detailFetcher,
+    Action<IReadOnlyList<PlanReextractChange>>? onReextractChanges = null) : FetchTaskBase<PlanAnnouncement>
 {
     public override FetchActionId Id => FetchActionId.StepPlanWatch;
 
@@ -132,6 +139,15 @@ public sealed class PlanWatchTask(
     internal const int AbortAfterConsecutiveFailures = 10;
 
     /// <summary>
+    /// 每轮最多按 art_code 重取多少条正文来重抽（2026-10-23）。库里存了正文的本地重抽不占这个数。
+    ///
+    /// 一条一个请求、约 1 秒，300 条≈5 分钟挂在尾巴上。不一口气做完 2069 条（约 35 分钟），
+    /// 是因为这一项跑着的时候占着东财，【分档资金流快照】这些都得等它；七八轮做完，按公告日从新到旧，
+    /// 最近的进展先修好。
+    /// </summary>
+    internal const int ReextractMax = 300;
+
+    /// <summary>
     /// 定本轮要搜的起点。**纯函数，所以能单独测**（见 PlanWatchResumeTests）。
     ///
     /// ════ 这里修过一个会静默丢数据的 bug（2026-09-11）════
@@ -165,16 +181,21 @@ public sealed class PlanWatchTask(
     }
 
     private int _hits, _parsed, _noDetail, _refillTried, _refillOk, _skipped;
+    private int _redoDone, _redoChanged, _redoFailed, _redoLeft;
     private bool _aborted;
     private readonly List<string> _warnings = [];
+    /// <summary>已交出去、还没落库的那批重抽行的变化；落库成功后才写清单，见 <see cref="SaveBatchAsync"/>。</summary>
+    private readonly List<PlanReextractChange> _pendingChanges = [];
 
     protected override async IAsyncEnumerable<IReadOnlyList<PlanAnnouncement>> FetchAsync(
         TaskRunArgs args, [EnumeratorCancellation] CancellationToken ct)
     {
         repository.EnsureSchema();
         _hits = _parsed = _noDetail = _refillTried = _refillOk = _skipped = 0;
+        _redoDone = _redoChanged = _redoFailed = _redoLeft = 0;
         _aborted = false;
         _warnings.Clear();
+        _pendingChanges.Clear();
 
         var watermark = repository.GetLatestAnnounceDate(PlanKind.Buyback);
         var today = DateOnly.FromDateTime(DateTime.Today);
@@ -311,7 +332,11 @@ public sealed class PlanWatchTask(
         // MaxItems/Deadline 掐掉也无所谓——幂等，下一轮接着补。
         var since = today.AddDays(-FirstRunLookbackDays).ToDateTime(TimeOnly.MinValue);
         var stale = repository.GetMissingDetail(PlanKind.Buyback, since, BackfillMax);
-        if (stale.Count == 0) yield break;
+        if (stale.Count == 0)
+        {
+            await foreach (var b in ReextractAsync(ct)) yield return b;
+            yield break;
+        }
 
         Report($"回补 {stale.Count} 条只有标题、没取到正文的旧记录…");
         var refill = new List<PlanAnnouncement>();
@@ -351,11 +376,127 @@ public sealed class PlanWatchTask(
 
         Report($"回补完成：{_refillOk}/{_refillTried} 条补上了正文");
         if (refill.Count > 0) yield return refill;
+
+        await foreach (var b in ReextractAsync(ct)) yield return b;
+    }
+
+    /// <summary>
+    /// 抽取版本低于当前的旧行按新规则重抽（2026-10-23），见类注释最后一节和 <see cref="ReextractMax"/>。
+    ///
+    /// 三种结局：
+    /// · 有正文（库里的或新取的）→ 按新规则抽，整行覆盖，版本号升上去；
+    /// · 东财说这篇没有正文（返回 null）→ 旧值原样留着，版本号也升上去——再试也一样，别每轮白花一个请求；
+    /// · 取正文抛异常（网络/限流）→ 什么都不写，版本号不动，下一轮再试。
+    /// </summary>
+    private async IAsyncEnumerable<IReadOnlyList<PlanAnnouncement>> ReextractAsync(
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        var redo = repository.GetStaleExtraction(PlanKind.Buyback, PlanAnnouncementExtractor.Version, ReextractMax);
+        if (redo.Count == 0) yield break;
+
+        var local = redo.Count(r => !string.IsNullOrWhiteSpace(r.Content));
+        Report($"按第 {PlanAnnouncementExtractor.Version} 版抽取规则重抽 {redo.Count} 条旧记录"
+               + $"（{local} 条库里有正文、本地重抽；{redo.Count - local} 条按编号重取正文）…");
+
+        var batch = new List<PlanAnnouncement>();
+        var changes = new List<PlanReextractChange>();
+        int consecutiveFailures = 0, done = 0;
+        foreach (var old in redo)
+        {
+            ct.ThrowIfCancellationRequested();
+            var content = old.Content;
+            var source = "本地";
+            var failed = false;
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                source = "重取";
+                try
+                {
+                    content = await detailFetcher.FetchContentAsync(old.ArtCode, ct);
+                    consecutiveFailures = 0;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    failed = true;
+                    _redoFailed++;
+                    consecutiveFailures++;
+                    _warnings.Add($"重抽 {old.Code} {old.AnnounceDate:yyyy-MM-dd} 取正文失败：{ex.Message}");
+                }
+            }
+
+            if (!failed)
+            {
+                PlanAnnouncement fresh;
+                if (string.IsNullOrWhiteSpace(content))
+                {
+                    fresh = old;                                   // 东财没有正文：旧值不动，只记已处理
+                    fresh.ExtractVersion = PlanAnnouncementExtractor.Version;
+                }
+                else
+                {
+                    // 同一个标题，stage 一定跟原行相同，upsert 落在原行上
+                    fresh = PlanAnnouncementExtractor.Extract(
+                        old.Code, old.Name, old.Title, old.AnnounceDate, content, old.ArtCode, old.SourceUrl);
+                    if (source == "本地") fresh.FetchedAt = old.FetchedAt;
+                    var diff = PlanAnnouncementExtractor.ChangedValues(old, fresh);
+                    if (diff.Count > 0)
+                    {
+                        _redoChanged++;
+                        changes.AddRange(diff.Select(d => new PlanReextractChange(
+                            old.Code, old.Name, old.AnnounceDate, old.Stage, d.Field, d.Old, d.New, source)));
+                    }
+                }
+                batch.Add(fresh);
+                _redoDone++;
+            }
+
+            done++;
+            // 每条喂看门狗，日志 20 条一行（同取正文那段，见 ProgressEvery）
+            if (done % ProgressEvery == 0 && done < redo.Count)
+                Report($"重抽 {done}/{redo.Count}…");
+            else
+                ReportQuiet($"重抽 {done}/{redo.Count}…");
+
+            if (consecutiveFailures >= AbortAfterConsecutiveFailures)
+            {
+                _aborted = true;
+                break;
+            }
+
+            if (batch.Count >= YieldChunk)
+            {
+                _pendingChanges.AddRange(changes);
+                changes = [];
+                yield return batch;
+                batch = [];
+            }
+        }
+
+        if (batch.Count > 0)
+        {
+            _pendingChanges.AddRange(changes);
+            yield return batch;
+        }
+        if (_aborted)
+            Report($"⚠ 东财公告正文连续 {AbortAfterConsecutiveFailures} 条取不到，判断它当前不通（多半是限流），"
+                   + $"重抽停在第 {done}/{redo.Count} 条；已重抽的已入库，剩下的隔一阵再试。");
+
+        _redoLeft = repository.CountStaleExtraction(PlanKind.Buyback, PlanAnnouncementExtractor.Version);
+        Report($"重抽完成：{_redoDone} 条，其中 {_redoChanged} 条数值有变化"
+               + (_redoLeft > 0 ? $"；还剩 {_redoLeft} 条待重抽，下一轮接着做" : ""));
     }
 
     protected override Task SaveBatchAsync(IReadOnlyList<PlanAnnouncement> batch, CancellationToken ct)
     {
         repository.Upsert(batch);
+        // 重抽的变化清单在落库之后才写：落库失败的话清单里不该有这几行
+        if (_pendingChanges.Count > 0)
+        {
+            try { onReextractChanges?.Invoke(_pendingChanges.ToList()); }
+            catch (Exception ex) { _warnings.Add($"变化清单写不进去：{ex.Message}"); }   // 清单是留档，写不进不拖累入库
+            _pendingChanges.Clear();
+        }
         return Task.CompletedTask;
     }
 
@@ -370,7 +511,7 @@ public sealed class PlanWatchTask(
             return Task.FromResult<TaskRunResult?>(TaskRunResult.Skipped(
                 $"东财公告正文连续 {AbortAfterConsecutiveFailures} 条取不到（多半是限流），已取到的 {_parsed - _noDetail} 条已入库"));
 
-        if (stats.Items == 0)
+        if (stats.Items == 0 && _redoFailed == 0)
             return Task.FromResult<TaskRunResult?>(TaskRunResult.Ok(
                 nothingToDo: true, progress: "本轮没有新的回购公告"));
 
@@ -378,6 +519,11 @@ public sealed class PlanWatchTask(
         var msg = $"本轮解析 {_parsed} 条（{_noDetail} 条没取到正文，已按标题留档"
                   + (_skipped > 0 ? $"；{_skipped} 条已有正文、跳过" : "") + "）；"
                   + (_refillTried > 0 ? $"回补旧空壳 {_refillOk}/{_refillTried} 条；" : "")
+                  + (_redoDone + _redoFailed > 0
+                      ? $"按新规则重抽 {_redoDone} 条（{_redoChanged} 条数值有变化"
+                        + (_redoFailed > 0 ? $"，{_redoFailed} 条取不到正文" : "")
+                        + (_redoLeft > 0 ? $"，还剩 {_redoLeft} 条" : "") + "）；"
+                      : "")
                   + $"库里现有 {rows} 条 / {stocks} 只票，**{open} 个方案还在进行中**。";
         return Task.FromResult<TaskRunResult?>(TaskRunResult.Ok(progress: msg));
     }

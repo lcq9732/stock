@@ -23,6 +23,13 @@ public class FetchPaths
     public string ReportsDir => Path.Combine(BaseDir, "reports");
 
     /// <summary>
+    /// 回购公告重抽的变化清单（2026-10-23）——抽取规则升级后旧行重抽，凡数值变了的
+    /// 「代码、公告日、字段、旧值、新值」逐行追加在这里，事后核对新规则改得对不对。
+    /// 只追加不清空；核对完删掉即可，下次重抽会重新建。
+    /// </summary>
+    public string PlanReextractChangesPath => Path.Combine(BaseDir, "local", "回购公告重抽变化.csv");
+
+    /// <summary>
     /// 全市场年报 PDF（2026-09-11 新增）——给「年报子公司名单」解析用，见 SubsidiaryParser。
     ///
     /// ⚠ **故意跟 <see cref="ReportsDir"/> 分开**，这是踩过的坑：把非金融年报放进那个目录后，

@@ -84,14 +84,25 @@ public class EastMoneyAnnouncementDetailFetcher : IAnnouncementDetailFetcher
         }
         if (matchedArtCode == null) return null;
 
-        var contentUrl = $"https://np-cnotice-stock.eastmoney.com/api/content/ann?art_code={matchedArtCode}&client_source=web&page_index=1";
+        var noticeContent = await FetchContentInternalAsync(matchedArtCode, ct);
+        return noticeContent == null ? null : (matchedArtCode, noticeContent);
+    }
+
+    public async Task<string?> FetchContentAsync(string artCode, CancellationToken ct = default)
+    {
+        return await _rateLimiter.RunAsync(() => FetchContentInternalAsync(artCode, ct), ct);
+    }
+
+    private async Task<string?> FetchContentInternalAsync(string artCode, CancellationToken ct)
+    {
+        var contentUrl = $"https://np-cnotice-stock.eastmoney.com/api/content/ann?art_code={Uri.EscapeDataString(artCode)}&client_source=web&page_index=1";
         var contentBody = await GetStringAsync(contentUrl, ct);
         if (string.IsNullOrWhiteSpace(contentBody)) return null;
 
         using var contentDoc = JsonDocument.Parse(contentBody);
-        if (!contentDoc.RootElement.TryGetProperty("data", out var contentData)) return null;
+        if (!contentDoc.RootElement.TryGetProperty("data", out var contentData) || contentData.ValueKind != JsonValueKind.Object) return null;
         var noticeContent = contentData.TryGetProperty("notice_content", out var c) ? c.GetString() : null;
-        return string.IsNullOrWhiteSpace(noticeContent) ? null : (matchedArtCode, noticeContent);
+        return string.IsNullOrWhiteSpace(noticeContent) ? null : noticeContent;
     }
 
     /// <summary>

@@ -54,4 +54,10 @@ public sealed class MockAnnouncementProvider(Func<IReadOnlyList<StockListEntry>>
             ($"mock-{code}-{approxDate:yyyyMMdd}",
              $"[模拟源] {title}。本公告为离线模拟生成，未发任何请求。"));
     }
+
+    public Task<string?> FetchContentAsync(string artCode, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult<string?>($"[模拟源] {artCode}。本公告为离线模拟生成，未发任何请求。");
+    }
 }
