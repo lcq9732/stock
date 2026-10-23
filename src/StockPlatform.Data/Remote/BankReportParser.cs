@@ -201,6 +201,14 @@ public sealed class BankReportParser
     /// 每个指标的合理区间（%）。取值宽松——目的是挡掉页码、年份、金额这类明显不是指标的数，
     /// 不是替代人工判断。边界参照 42 家上市银行的实际分布再往外放一档。
     /// 迁徙率可以超过 100%（次级类转下迁的比例常年 100%+），单独给大区间。
+    ///
+    /// ⚠ **放宽上限要先拿全库验一遍**。2026-10-23 把所有上限临时抬高 1000 倍重解析全库，
+    /// 23 处值变了，其中只有 9 处是被误拦的真值（券商那两项，已放宽），另外 **14 处是
+    /// 上限正拦着的错值**——放宽就等于把它们放进来：
+    ///     农业银行 npl_ratio   1.13 → 292.55     （上限 6 拦住的）
+    ///     民生银行 total_car  13.25 → 44         （上限 35）
+    ///     渝农商行 lcr            — → 2026       （上限 2000；2026 是**年份**）
+    /// 所以这些上限不是保守，是在干活。调任何一项之前，先跑一遍这个对比。
     /// </summary>
     private static readonly Dictionary<string, (double Min, double Max)> Ranges = new()
     {
@@ -226,12 +234,18 @@ public sealed class BankReportParser
         // 券商：前六项是"越高越安全"的下限型指标，后两项是自营规模上限（监管 ≤100% / ≤500%）。
         [BrokerRegulatoryKeys.RiskCoverage] = (50, 3000),
         [BrokerRegulatoryKeys.CapitalLeverage] = (4, 80),
-        [BrokerRegulatoryKeys.LiquidityCoverage] = (50, 2000),
+        // 上限 2000 太低：太平洋证券 2025 中报的流动性覆盖率是 2030.55，刚好越线被拒，
+        // 而**被拒的值不占位**，于是同页风险覆盖率的 526.29 被填了进来——拦掉一个真值的
+        // 代价不是"空着"，是"存了邻居的数"。见 doc/metric-value-audit-findings.md。
+        [BrokerRegulatoryKeys.LiquidityCoverage] = (50, 5000),
         [BrokerRegulatoryKeys.NetStableFunding] = (50, 1000),
         // 上限不能卡在 100：**净资本可以超过净资产**——附属净资本（次级债）会把它推上去。
         // 实测财达证券 101.11%，被原来的 (10,100) 直接拒掉了。
         [BrokerRegulatoryKeys.NetCapitalToNetAssets] = (10, 200),
-        [BrokerRegulatoryKeys.NetCapitalToLiabilities] = (4, 200),
+        // 同样的坑，而且更离谱：监管只要求 ≥8%，可**负债少的公司这个比值天然就高**——
+        // 实测弘业期货 291~374%、太平洋证券 480~918%，全被 200 的上限拒在门外，
+        // 库里存的是同页"净资本/净资产"的数（48.28 / 78.21 那些）。
+        [BrokerRegulatoryKeys.NetCapitalToLiabilities] = (4, 2000),
         [BrokerRegulatoryKeys.EquityPropToNetCapital] = (0, 200),
         [BrokerRegulatoryKeys.NonEquityPropToNetCapital] = (0, 800),
 
