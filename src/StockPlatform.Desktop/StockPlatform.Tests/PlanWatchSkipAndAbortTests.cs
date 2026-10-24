@@ -62,23 +62,91 @@ public class PlanWatchSkipAndAbortTests : IDisposable
         Assert.True(r.NothingToDo);
     }
 
-    // ── ② 每条都喂看门狗，日志仍 20 条一行 ─────────────────────────
+    // ── ② 喂狗按每条，日志按时间 ───────────────────────────────────
 
+    /// <summary>
+    /// 喂狗按每条、日志按时间——这两件事分开（2026-10-24）。
+    /// 跑得快的时候：45 条每条都喂狗，但 30 秒的日志间隔一次都到不了点，所以不刷屏。
+    /// </summary>
     [Fact]
-    public async Task 每条都喂看门狗_日志仍然二十条一行()
+    public async Task 跑得快时_每条都喂狗_日志不刷屏()
     {
         var repo = new FakeRepo { Watermark = DateTime.Today };
         var detail = new FakeDetail();
         var task = new PlanWatchTask(repo, new FakeSearch(45), detail);
-        var quiet = 0;
-        var logged = new List<string>();
-        task.OnProgress += p => { if (p.Quiet) quiet++; else logged.Add(p.Text); };
+        var fed = new List<string>();          // 所有 OnProgress＝都算心跳，不分 Quiet
+        var logged = new List<string>();       // 只有非 Quiet 的才进日志
+        task.OnProgress += p => { fed.Add(p.Text); if (!p.Quiet) logged.Add(p.Text); };
 
         await task.RunAsync(new TaskRunArgs(), CancellationToken.None);
 
-        Assert.Equal(45 - 2, quiet);                               // 第 20、40 条进日志，其余每条只喂狗
-        Assert.Equal(2, logged.Count(t => t.Contains("取正文 ")));
+        Assert.Equal(45, fed.Count(t => t.Contains("取正文 ")));
+        Assert.DoesNotContain(logged, t => t.Contains("取正文 "));
     }
+
+    /// <summary>
+    /// 反过来，跑得慢的时候日志照样出来。间隔设 0 ＝ 每条都到点，模拟"一条几十秒"。
+    /// 旧写法是"每 20 条一行"：批量只有几条时一次都不打，于是整段静默、被看门狗掐断。
+    /// </summary>
+    [Fact]
+    public async Task 跑得慢时_日志照样出来()
+    {
+        var repo = new FakeRepo { Watermark = DateTime.Today };
+        var task = new PlanWatchTask(repo, new FakeSearch(45), new FakeDetail())
+        {
+            LogInterval = TimeSpan.Zero,
+        };
+        var logged = new List<string>();
+        task.OnProgress += p => { if (!p.Quiet) logged.Add(p.Text); };
+
+        await task.RunAsync(new TaskRunArgs(), CancellationToken.None);
+
+        // 最后一条走的是 else 分支（doneToday < group.Count 为假），所以是 44 不是 45
+        Assert.Equal(44, logged.Count(t => t.Contains("取正文 ")));
+    }
+
+    /// <summary>
+    /// **回补那一段也要每条喂狗**——这是 2026-10-24 真正修的那个 bug：
+    /// 那段原来只有 Report、没有 ReportQuiet，日志稀疏＝喂狗也稀疏；
+    /// 而一轮只回补 6 条（比当时 20 条的日志门限还少），整段一次都没出声，
+    /// 东财掐连接时一条要走满两个请求的超时+重试，10 分钟后就被看门狗掐断了。
+    /// </summary>
+    [Fact]
+    public async Task 回补段也是每条喂狗()
+    {
+        var repo = new FakeRepo { Watermark = DateTime.Today, Missing = Stale(6) };
+        var task = new PlanWatchTask(repo, new FakeSearch(0), new FakeDetail());
+        var fed = new List<string>();
+        task.OnProgress += p => fed.Add(p.Text);
+
+        await task.RunAsync(new TaskRunArgs(), CancellationToken.None);
+
+        Assert.Equal(6, fed.Count(t => t.StartsWith("回补 ") && t.Contains("/6…")));
+    }
+
+    /// <summary>回补段也要能提前收工——原来它只往 _warnings 里塞，一路耗到被掐断。</summary>
+    [Fact]
+    public async Task 回补连续十条取不到_也提前收工()
+    {
+        var repo = new FakeRepo { Watermark = DateTime.Today, Missing = Stale(60) };
+        var detail = new FakeDetail { FailFrom = 1 };               // 一上来就全失败
+        var task = new PlanWatchTask(repo, new FakeSearch(0), detail);
+
+        var r = await task.RunAsync(new TaskRunArgs(), CancellationToken.None);
+
+        Assert.Equal(PlanWatchTask.AbortAfterConsecutiveFailures, detail.Calls);   // 没一路撞到 60 条
+        Assert.NotNull(r.SkippedReason);
+        Assert.NotEqual(TaskState.Failed, r.State);
+    }
+
+    private static List<PlanAnnouncement> Stale(int n) => Enumerable.Range(0, n)
+        .Select(i => new PlanAnnouncement
+        {
+            Code = $"{600100 + i}",
+            AnnounceDate = DateTime.Today.AddDays(-3),
+            Stage = PlanStage.Progress,
+            Title = Title,
+        }).ToList();
 
     // ── ③ 连续失败就收工 ──────────────────────────────────────────
 
@@ -143,7 +211,10 @@ public class PlanWatchSkipAndAbortTests : IDisposable
         public void EnsureSchema() { }
         public int Upsert(IEnumerable<PlanAnnouncement> items) { var l = items.ToList(); Saved.AddRange(l); return l.Count; }
         public List<PlanAnnouncement> GetByCode(string code, string kind) => [];
-        public List<PlanAnnouncement> GetMissingDetail(string kind, DateTime since, int limit) => [];
+        /// <summary>要回补的空壳；默认没有，测回补那几条用例自己塞。</summary>
+        public List<PlanAnnouncement> Missing = [];
+        public List<PlanAnnouncement> GetMissingDetail(string kind, DateTime since, int limit)
+            => Missing.Take(limit).ToList();
         public Dictionary<string, PlanAnnouncement> GetOpenPlans(string kind) => [];
         public DateTime? GetLatestAnnounceDate(string kind) => Watermark;
         public HashSet<(string Code, DateTime AnnounceDate, string Title)> GetFetchedKeys(string kind, DateTime since) => Fetched;
@@ -162,6 +233,7 @@ public class PlanWatchSkipAndAbortTests : IDisposable
 
     private sealed class FakeDetail : IAnnouncementDetailFetcher
     {
+        public event Action<string>? OnStatus { add { } remove { } }
         public Task<string?> FetchContentAsync(string artCode, CancellationToken ct = default) => Task.FromResult<string?>(null);
         public int Calls;
         /// <summary>从第几次调用起一律抛异常（模拟东财限流不通）。</summary>

@@ -177,6 +177,7 @@ public class PlanWatchHeartbeatTests
 
     private sealed class FakeDetail : IAnnouncementDetailFetcher
     {
+        public event Action<string>? OnStatus { add { } remove { } }
         public Task<string?> FetchContentAsync(string artCode, CancellationToken ct = default) => Task.FromResult<string?>(null);
         /// <summary>取了多少条正文——测试拿它当"慢时钟"，一条≈1.3 秒。</summary>
         public int Calls;

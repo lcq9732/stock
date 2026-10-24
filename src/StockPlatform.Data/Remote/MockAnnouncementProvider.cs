@@ -23,6 +23,9 @@ public sealed class MockAnnouncementProvider(Func<IReadOnlyList<StockListEntry>>
     /// <summary>每个关键词造几条命中。</summary>
     public const int HitsPerKeyword = 20;
 
+    /// <summary>离线源不限流，也就没有退避/暂停要播报。</summary>
+    public event Action<string>? OnStatus { add { } remove { } }
+
     public Task<List<AnnouncementSearchHit>> SearchAsync(
         string keyword, DateOnly start, DateOnly end,
         IProgress<string>? progress = null, CancellationToken ct = default)

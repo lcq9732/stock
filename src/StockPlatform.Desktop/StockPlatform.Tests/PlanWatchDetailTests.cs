@@ -198,6 +198,7 @@ public class PlanWatchDetailTests
 
     private sealed class FakeDetail : IAnnouncementDetailFetcher
     {
+        public event Action<string>? OnStatus { add { } remove { } }
         public Task<string?> FetchContentAsync(string artCode, CancellationToken ct = default) => Task.FromResult<string?>(null);
         public int Calls;
         public bool ReturnNull;

@@ -28,6 +28,16 @@ public class EastMoneyAnnouncementDetailFetcher : IAnnouncementDetailFetcher
     private readonly HttpClient _http;
     private readonly RateLimiter _rateLimiter;
 
+    /// <inheritdoc/>
+    /// <remarks>直接把订阅挂到限速器上（事件访问器转发），退订也直接退——中间不留自己的
+    /// 委托字段，省掉一处漏退订的机会。限速器是按配额组共享的，所以订阅方收到的是整个东财
+    /// 通道的退避/暂停消息，那正是要的。</remarks>
+    public event Action<string>? OnStatus
+    {
+        add => _rateLimiter.OnStatus += value;
+        remove => _rateLimiter.OnStatus -= value;
+    }
+
     public EastMoneyAnnouncementDetailFetcher(RateLimiter rateLimiter, HttpClient? httpClient = null)
     {
         _rateLimiter = rateLimiter;

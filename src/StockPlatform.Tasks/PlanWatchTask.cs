@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using StockPlatform.Data.Orchestration;
 using StockPlatform.Logic.Abstractions;
 using StockPlatform.Logic.Models;
 using StockPlatform.Logic.Services;
@@ -94,20 +95,28 @@ public sealed class PlanWatchTask(
     private const int BackfillMax = 60;
 
     /// <summary>
-    /// 取正文取到第几条报一次进度（2026-09-14 补，这是被误杀出来的）。
+    /// 三段长循环（取正文／回补／重抽）共用的**日志节奏**（2026-10-24）。
     ///
-    /// 原来内层这个 foreach 整段一句话不说：先报「命中 N 条，开始取正文…」，等全天取完才报
-    /// 「解析 N 条」。单条正文要两个请求（先在该股最近 100 条公告里匹配 art_code、再取正文），
-    /// 限流 1 秒一个，实测 1.3 秒/条——**241 条就是 5 分 13 秒的静默**，刚好越过
-    /// <see cref="QuietWatchdog"/> 的 5 分钟线，于是一个正在正常前进的任务被判成卡死掐断
-    /// （2026-09-14 08:25，停在 09-02）。
+    /// ════ 日志按时间，喂狗按每条 ════
+    /// 这两件事必须分开，混在一起就是这段历史反复踩的坑：
+    ///   · 喂看门狗走 <c>ReportQuiet</c>，**每条都喂**——它的前提是"真的做完了一条"，
+    ///     所以循环在转就有心跳，真卡在某一条里就到不了这行，该掐还是掐。
+    ///   · 日志走 <c>Report</c>，到点才打——否则几百条刷屏。
     ///
-    /// ⚠ 而且这不是偶发：法定节奏是「回购期间**每月前三个交易日**披露上月进展」，月初那几天
-    ///   的量是平日十几倍（09-02 有 241 条，09-04 只有 2 条）——**每个月初都会撞一次**。
+    /// ════ 为什么日志的节奏不能按条数 ════
+    /// 原来是"每 20 条一行"。按条数的静默时长＝间隔条数 × 单位耗时，而单位耗时根本不稳：
+    /// 正常 1.3 秒/条，东财掐连接时一条要走满两个请求的超时+重试（约 96 秒），差 70 倍。
+    /// 更要命的是**批量小于门限时一次都不打**——回补只有 6 条（&lt; 20）就是整段静默。
+    /// 按时间报则把静默上限钉死＝间隔，跟单位耗时无关（见 <see cref="ProgressThrottle"/>）。
     ///
-    /// 20 条≈26 秒，比 5 分钟阈值密一个数量级，够。
+    /// 历史：2026-09-14 08:25 因为"整段取完才报一句"被误杀过一次——241 条连哑 5 分 13 秒，
+    /// 越过当时 5 分钟的线。法定节奏是「回购期间每月前三个交易日披露上月进展」，月初那几天
+    /// 的量是平日十几倍（09-02 有 241 条，09-04 只有 2 条），所以这不是偶发，每月都会撞。
     /// </summary>
-    private const int ProgressEvery = 20;
+    private ProgressThrottle _tick = null!;   // 每轮在 FetchAsync 开头重建
+
+    /// <summary>日志间隔。**只为测试可注入**——真跑一律用默认的 30 秒。</summary>
+    internal TimeSpan LogInterval { get; init; } = ProgressThrottle.DefaultInterval;
 
     /// <summary>
     /// 一天的命中攒到这么多条就先交出去落库（2026-09-14）。
@@ -196,6 +205,10 @@ public sealed class PlanWatchTask(
         _aborted = false;
         _warnings.Clear();
         _pendingChanges.Clear();
+        _tick = new ProgressThrottle(ProgressSink, LogInterval);
+        // 限速器的退避/暂停播报——不订阅的话，一次 15 分钟的主动休息在日志里一个字都没有，
+        // 跟卡死长得一样（见 IAnnouncementDetailFetcher.OnStatus）。
+        using var status = ForwardStatus(h => detailFetcher.OnStatus += h, h => detailFetcher.OnStatus -= h);
 
         var watermark = repository.GetLatestAnnounceDate(PlanKind.Buyback);
         var today = DateOnly.FromDateTime(DateTime.Today);
@@ -290,13 +303,11 @@ public sealed class PlanWatchTask(
                 _parsed++;
                 doneToday++;
 
-                // 心跳。这一段是全任务最慢的地方（1.3 秒/条），不出声就会被看门狗当成卡死，
-                // 见 ProgressEvery 的注释。日志每 20 条一行；**每条**都喂看门狗（2026-10-22）——
-                // 东财变慢时一条要几十秒，20 条一报会越过 10 分钟线，正在前进的任务被判成卡死。
-                if (doneToday % ProgressEvery == 0 && doneToday < group.Count)
-                    Report($"{day:yyyy-MM-dd} 取正文 {doneToday}/{group.Count}…", _parsed, _hits);
-                else
-                    ReportQuiet($"{day:yyyy-MM-dd} 取正文 {doneToday}/{group.Count}…", _parsed, _hits);
+                // 心跳。这一段是全任务最慢的地方，不出声就会被看门狗当成卡死。
+                // **每条**都喂看门狗（2026-10-22），日志按时间稀疏打（2026-10-24，见 _tick）。
+                var msg = $"{day:yyyy-MM-dd} 取正文 {doneToday}/{group.Count}…";
+                if (_tick.TryTick() && doneToday < group.Count) Report(msg, _parsed, _hits);
+                else ReportQuiet(msg, _parsed, _hits);
 
                 if (consecutiveFailures >= AbortAfterConsecutiveFailures)
                 {
@@ -340,6 +351,10 @@ public sealed class PlanWatchTask(
 
         Report($"回补 {stale.Count} 条只有标题、没取到正文的旧记录…");
         var refill = new List<PlanAnnouncement>();
+        // 东财不通时提前收工（2026-10-24）——主循环和重抽早就有这个，唯独这一段没有：
+        // 失败只往 _warnings 里塞，于是一路耗到被看门狗掐断。本轮做的事一样没保住，
+        // 还白占了十分钟联网源。
+        consecutiveFailures = 0;   // 跟主循环共用一个计数器，这里重新起算
         foreach (var old in stale)
         {
             ct.ThrowIfCancellationRequested();
@@ -348,6 +363,7 @@ public sealed class PlanWatchTask(
             {
                 detail = await detailFetcher.FetchDetailAsync(
                     old.Code, old.Title, DateOnly.FromDateTime(old.AnnounceDate), ct);
+                consecutiveFailures = 0;   // 请求本身成功了（配没配上是另一回事）
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
@@ -356,13 +372,28 @@ public sealed class PlanWatchTask(
                 // 而"配上了但还是没匹配到"（返回 null）那条路**不告警**：积压有多少条就会刷多少行，
                 // 把当轮真正的新问题淹了——那种只汇总成末尾一行「回补 N/M」。
                 _warnings.Add($"回补 {old.Code} 失败：{ex.Message}");
+                consecutiveFailures++;
             }
 
             _refillTried++;
-            // ⚠ 心跳要在**成功与否之前**打（这一段最慢 1.3 秒/条，跟主循环同一个看门狗）：
+            // ⚠ 心跳要在**成功与否之前**打（跟主循环同一个看门狗）：
             // 放在 continue 后面的话，一整批都配不上时就是整段静默。
-            if (_refillTried % ProgressEvery == 0 && _refillTried < stale.Count)
-                Report($"回补 {_refillTried}/{stale.Count}…");
+            //
+            // 2026-10-24：这里原来只有 Report、**没有 ReportQuiet**，于是日志稀疏＝喂狗也稀疏。
+            // 正常 1.3 秒/条时没事；东财掐连接时一条要走满两个请求的超时+重试（约 96 秒），
+            // 而那轮只回补 6 条（< 当时的 20 条门限）——整段一次都没出声，10 分钟后被看门狗掐断。
+            // 这就是主循环和重抽早就修过、唯独漏掉这一段的那个坑。
+            var msg = $"回补 {_refillTried}/{stale.Count}…";
+            if (_tick.TryTick() && _refillTried < stale.Count) Report(msg);
+            else ReportQuiet(msg);
+
+            if (consecutiveFailures >= AbortAfterConsecutiveFailures)
+            {
+                _aborted = true;
+                Report($"⚠ 东财公告正文连续 {AbortAfterConsecutiveFailures} 条取不到，判断它当前不通"
+                       + $"（多半是限流），回补停在第 {_refillTried}/{stale.Count} 条；剩下的隔一阵再试。");
+                break;
+            }
 
             if (detail is not { } dd) continue;   // 还是配不上：不写，下一轮再试
 
@@ -376,6 +407,7 @@ public sealed class PlanWatchTask(
 
         Report($"回补完成：{_refillOk}/{_refillTried} 条补上了正文");
         if (refill.Count > 0) yield return refill;
+        if (_aborted) yield break;   // 东财不通，后面的重抽就别再去撞了
 
         await foreach (var b in ReextractAsync(ct)) yield return b;
     }
@@ -452,11 +484,10 @@ public sealed class PlanWatchTask(
             }
 
             done++;
-            // 每条喂看门狗，日志 20 条一行（同取正文那段，见 ProgressEvery）
-            if (done % ProgressEvery == 0 && done < redo.Count)
-                Report($"重抽 {done}/{redo.Count}…");
-            else
-                ReportQuiet($"重抽 {done}/{redo.Count}…");
+            // 每条喂看门狗，日志按时间稀疏打（同取正文那段，见 _tick）
+            var msg = $"重抽 {done}/{redo.Count}…";
+            if (_tick.TryTick() && done < redo.Count) Report(msg);
+            else ReportQuiet(msg);
 
             if (consecutiveFailures >= AbortAfterConsecutiveFailures)
             {

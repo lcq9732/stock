@@ -31,6 +31,25 @@ public sealed class ProgressThrottle(IProgress<string>? inner, TimeSpan interval
         inner.Report(message());
     }
 
+    /// <summary>
+    /// 到点了吗——到了就**消费掉**这一次（重置计时）并返回 true。
+    ///
+    /// 给那些"日志得带 Done/Total 进度计数"的调用方用：<see cref="Report"/> 走的是
+    /// <c>IProgress&lt;string&gt;</c>，只有一个字符串，进度计数在那一层会丢。它们自己调骨架上
+    /// 带参数的 Report／ReportQuiet，只问这里要节奏：
+    /// <code>
+    /// if (tick.TryTick()) Report(msg, done, total);   // 日志：按时间稀疏
+    /// else                ReportQuiet(msg, done, total); // 看门狗：每条都喂
+    /// </code>
+    /// </summary>
+    public bool TryTick()
+    {
+        var now = DateTime.Now;
+        if (now - _last < interval) return false;
+        _last = now;
+        return true;
+    }
+
     /// <summary>无视节流立刻报（阶段收尾的汇总用），并重置计时。</summary>
     public void ReportNow(string message)
     {

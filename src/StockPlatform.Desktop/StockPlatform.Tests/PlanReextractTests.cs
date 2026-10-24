@@ -295,6 +295,7 @@ public class PlanReextractTests : IDisposable
 
     private sealed class FakeDetail : IAnnouncementDetailFetcher
     {
+        public event Action<string>? OnStatus { add { } remove { } }
         public string? Content = Yonghe;
         public bool Throw;
         public int MatchCalls;
