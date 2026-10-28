@@ -1,6 +1,7 @@
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 using Xunit;
 
 namespace StockPlatform.Tests;
@@ -208,7 +209,10 @@ public class FinancialFetchPlannerTests : IDisposable
     {
         var repo = new SqliteEarningsScheduleRepository(_paths.CurrentDb);
         repo.EnsureSchema();
-        repo.Upsert([new EarningsScheduleRow(code, period, actual, null, null, null, actual)]);
+        var row = new EarningsScheduleRow(code, period, actual, null, null, null, actual);
+        repo.Upsert([row]);
+        // 消费端读的是合并表；产品流程里【拉取财报预约日】抓完两家就合并落库，测试走同一条路。
+        repo.UpsertMerged(EarningsScheduleMerge.Merge([row], []));
     }
 
     /// <summary>把这只票的"最后一次问"挪到 <paramref name="at"/>（ReplaceByCode 只会写 Now）。</summary>

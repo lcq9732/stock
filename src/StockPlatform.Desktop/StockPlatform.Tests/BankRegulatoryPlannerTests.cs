@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using StockPlatform.Data.Orchestration;
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 using Xunit;
 
 namespace StockPlatform.Tests;
@@ -58,7 +59,10 @@ public class BankRegulatoryPlannerTests : IDisposable
     {
         var repo = new SqliteEarningsScheduleRepository(_paths.CurrentDb);
         repo.EnsureSchema();
-        repo.Upsert([new EarningsScheduleRow(code, period, actual, null, null, null, actual)]);
+        var row = new EarningsScheduleRow(code, period, actual, null, null, null, actual);
+        repo.Upsert([row]);
+        // 消费端读的是合并表；产品流程里【拉取财报预约日】抓完两家就合并落库，测试走同一条路。
+        repo.UpsertMerged(EarningsScheduleMerge.Merge([row], []));
     }
 
     /// <summary>记一笔解析状态，最后一次尝试在 <paramref name="daysAgo"/> 天前。</summary>

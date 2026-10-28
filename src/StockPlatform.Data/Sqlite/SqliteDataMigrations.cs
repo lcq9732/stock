@@ -57,6 +57,16 @@ public static class SqliteDataMigrations
     /// </summary>
     public const string PlanExtractV2Baseline = "plan_extract_v2_baseline";
 
+    /// <summary>
+    /// 预约披露日合并表的起点（2026-10-27，见 doc/financial-fetch-disclosure-race-design.md）：
+    /// 把巨潮现有的行原样复制进 EarningsScheduleMerged。
+    ///
+    /// 消费端改成只读合并表之后，这一步是**上线当天不塌**的保证——否则在下一次
+    /// 【拉取财报预约日】跑完之前合并表是空的，财务/股东/金融监管三处闸门会一起退回
+    /// 兜底判据，界面的财报日列全空。
+    /// </summary>
+    public const string EarningsScheduleMergedBaseline = "earnings_schedule_merged_baseline";
+
     public static void Apply(SqliteConnection conn)
     {
         using (var cmd = conn.CreateCommand())
@@ -129,6 +139,27 @@ public static class SqliteDataMigrations
                 UPDATE PlanAnnouncement SET extract_ver = 2
                  WHERE IFNULL(extract_ver, 1) < 2
                    AND (stage = '方案' OR art_code IS NULL OR art_code = '');
+                """;
+            return cmd.ExecuteNonQuery();
+        });
+        Run(conn, EarningsScheduleMergedBaseline, tx =>
+        {
+            if (!TableExists(conn, tx, "EarningsSchedule")) return 0;
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            // 把巨潮现有的行原样灌进合并表当起点。**不做这一步的话**，上线后到下一次
+            // 【拉取财报预约日】跑完之前，合并表是空的，而消费端已经改成只读它——
+            // 财务抓取、股东抓取、金融监管指标会一起退回"谁都没披露"的兜底判据，
+            // 界面的财报日列全空。那就不是"下限等于现状"，是直接砸出一个坑。
+            cmd.CommandText = """
+                INSERT INTO EarningsScheduleMerged
+                    (code, report_period, appoint_date, change1, change2, change3, actual_date, fetched_at)
+                SELECT code, report_period, appoint_date, change1, change2, change3, actual_date, fetched_at
+                  FROM EarningsSchedule
+                 WHERE true          -- ⚠ 不能删：INSERT…SELECT 后面直接跟 ON CONFLICT，SQLite 会把
+                                     --   ON 当成 JOIN 的 ON 子句，报 near "DO": syntax error。
+                                     --   官方给的消歧办法就是补一个 WHERE。
+                ON CONFLICT(code, report_period) DO NOTHING;
                 """;
             return cmd.ExecuteNonQuery();
         });

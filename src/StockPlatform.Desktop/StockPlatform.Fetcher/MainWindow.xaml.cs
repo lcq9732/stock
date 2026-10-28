@@ -169,6 +169,16 @@ public partial class MainWindow : Window
         _dragItem = RowItemAt(e.OriginalSource as DependencyObject);
     }
 
+    /// <summary>
+    /// 右键先把那一行选中（2026-10-27）——WPF 的 DataGrid **右键不会改变 SelectedItem**，
+    /// 而「复制到其他组」取的就是选中行。不选中的话，人在 A 行上右键、复制走的却是上次点过的 B 行。
+    /// </summary>
+    private void PlanGrid_PreviewMouseRightButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (RowItemAt(e.OriginalSource as DependencyObject) is not { } item) return;
+        if (sender is System.Windows.Controls.DataGrid grid) grid.SelectedItem = item;
+    }
+
     private void PlanGrid_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
     {
         if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed || _dragItem == null) return;

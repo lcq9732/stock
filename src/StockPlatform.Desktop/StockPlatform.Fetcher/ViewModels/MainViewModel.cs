@@ -367,6 +367,7 @@ public class MainViewModel : INotifyPropertyChanged
     public RelayCommand ReloadConfigCommand { get; }
     public RelayCommand RunPlanItemNowCommand { get; }
     public RelayCommand AddPlanTemplateCommand { get; }
+    public RelayCommand CopyPlanItemToGroupCommand { get; }
     public RelayCommand RunPlanGroupNowCommand { get; }
 
     /// <param name="browserChannel">
@@ -446,6 +447,11 @@ public class MainViewModel : INotifyPropertyChanged
             // 那儿会往日志写清楚"没执行，因为计划正在运行中"。宁可点了被拒绝，也别静默。
             p => p is PlanItemViewModel);
         AddPlanTemplateCommand = new RelayCommand(_ => AddPlanTemplate(), _ => !IsPlanRunning);
+        // 把选中那一行**再排一份**到别的组（2026-10-27，见 doc/plan-cross-group-duplicate-design.md）。
+        // 同一个任务可以在多个组里按各自的时间跑——这是"要跑两轮就摆两份"的入口。
+        CopyPlanItemToGroupCommand = new RelayCommand(
+            p => CopyPlanItemToGroup(p as PlanGroupViewModel),
+            p => CanCopyPlanItemTo(p as PlanGroupViewModel));
         RunPlanGroupNowCommand = new RelayCommand(
             async p => await RunPlanGroupNowAsync(p as PlanGroupViewModel),
             p => p is PlanGroupViewModel);      // 同上：拦截和说明都在 RunPlanGroupNowAsync 里
@@ -1314,6 +1320,60 @@ public class MainViewModel : INotifyPropertyChanged
           + "。组头改时间和重复规则，组里改顺序和参数。");
     }
 
+    /// <summary>
+    /// 右键菜单「复制到其他组」的那一串目标（2026-10-27）。
+    ///
+    /// 为什么要这么一个小 VM 而不是直接把 <see cref="PlanGroups"/> 绑上去：
+    /// **ContextMenu 不在视觉树里**，它的子项绑不到 <c>RelativeSource AncestorType=Window</c>，
+    /// 拿不到 MainViewModel 上的命令。把命令和参数打包进元素自身，XAML 里就只剩
+    /// Header/Command/CommandParameter 三个普通绑定，没有任何 RelativeSource 把戏。
+    /// </summary>
+    public sealed record CopyTargetViewModel(string Name, RelayCommand Command, object Parameter);
+
+    /// <summary>右键菜单用的目标组列表，跟着 <see cref="PlanGroups"/> 一起重建。</summary>
+    public ObservableCollection<CopyTargetViewModel> CopyTargets { get; } = [];
+
+    /// <summary>
+    /// 选中那一行能不能再排一份到 <paramref name="g"/>（2026-10-27）。
+    ///
+    /// 拦两种情况：**同一个组里已经有了**（同一时间跑两遍没有意义），以及计划正在跑
+    /// （改结构会让正在评估的队列对不上）。其余一律放行——一个任务排在几个组、各自什么时候跑，
+    /// 那是人的安排，不是程序该替他决定的事。
+    /// </summary>
+    private bool CanCopyPlanItemTo(PlanGroupViewModel? g)
+        => g != null && SelectedPlanItem != null && !IsPlanRunning
+           && !g.Model.Items.Any(i => i.Action == SelectedPlanItem.Model.Action);
+
+    /// <summary>
+    /// 把选中那一行复制一份到别的组。
+    ///
+    /// 复制出来的是**全新的一项**：不带上一份的运行记录（那是那一份自己的历史），
+    /// 并且**默认不启用**——没经过确认的项不该自己跑起来，跟 <see cref="FetchPlan.Normalize"/>
+    /// 补新动作的做法一致。模式沿用原来那份，省得人再配一遍。
+    /// </summary>
+    private void CopyPlanItemToGroup(PlanGroupViewModel? g)
+    {
+        if (_plan == null || g == null || SelectedPlanItem is not { } src) return;
+        if (!CanCopyPlanItemTo(g)) return;
+
+        g.Model.Items.Add(new FetchPlanItem
+        {
+            Action = src.Model.Action,
+            Enabled = false,
+            Mode = src.Model.Mode,
+            Owner = g.Model,
+        });
+        _plan.LinkOwners();
+
+        RebuildPlanItems();
+        SavePlan();
+        RecalcTimeline();
+        Log($"【{src.Name}】已在「{g.Name}」组里再排一份（{g.Model.RepeatText}"
+          + (g.Model.NotBefore.HasValue ? $"，{g.Model.TriggerText}" : "") + "）。"
+          + "两份各按自己所在组的时间跑、各记各的结果。"
+          + "**新加的这份默认没勾启用**，确认位置和参数之后再勾上。");
+    }
+
     private PlanItemViewModel? _selectedPlanItem;
     public PlanItemViewModel? SelectedPlanItem
     {
@@ -1488,6 +1548,13 @@ public class MainViewModel : INotifyPropertyChanged
             }
             PlanGroups.Add(gvm);
         }
+
+        // 右键「复制到其他组」的目标列表跟着重建（2026-10-27）。
+        // 能不能复制到某个组由命令的 CanExecute 判（同组已有的会自动灰掉），这里列全部组。
+        CopyTargets.Clear();
+        foreach (var g in PlanGroups)
+            CopyTargets.Add(new CopyTargetViewModel(g.Name, CopyPlanItemToGroupCommand, g));
+
         RenumberPlanItems();
         RefreshPlanWarning();
         // 重建之后那几行是新对象，待办文字得重新推一遍——不然切换计划模板后体检那行是空的
@@ -1502,7 +1569,14 @@ public class MainViewModel : INotifyPropertyChanged
     private void RenumberPlanItems()
     {
         // ① 编号：组号.序号（日更 1.x、季度 2.x、按需 3.x）
-        var numberOf = new Dictionary<FetchActionId, string>();
+        //
+        // ⚠ 同一个动作可以排在多个组里（2026-10-27 跨组重复），所以这里要记**两张**表：
+        //   · inGroup：(第几组, 动作) → 编号，依赖列优先查它
+        //   · anyGroup：动作 → 编号最靠前的那一份，同组没有时的兜底
+        // 原来只有一张按动作作键的表，后写的覆盖先写的——于是日更组里的【拉取财务报表】
+        // 显示成依赖「4.01」（早间组那份），而它真正等的是同组前面的 1.33。
+        var inGroup = new Dictionary<(int Group, FetchActionId Action), string>();
+        var anyGroup = new Dictionary<FetchActionId, string>();
         for (int gi = 0; gi < PlanGroups.Count; gi++)
         {
             var g = PlanGroups[gi];
@@ -1510,7 +1584,9 @@ public class MainViewModel : INotifyPropertyChanged
             {
                 g.Items[i].GroupIndex = gi + 1;
                 g.Items[i].Order = i + 1;
-                numberOf[g.Items[i].Model.Action] = g.Items[i].Number;
+                var act = g.Items[i].Model.Action;
+                inGroup[(gi + 1, act)] = g.Items[i].Number;
+                anyGroup.TryAdd(act, g.Items[i].Number);   // 第一个出现的＝编号最小的那一份
             }
             g.RefreshHeader();
         }
@@ -1521,10 +1597,18 @@ public class MainViewModel : INotifyPropertyChanged
         {
             var info = vm.Info;
             var parts = new List<string>();
+
+            // **优先指同组那一份**：串行执行时，同组前面那份才是这一项真正等的；
+            // 指到别的组去会让人以为要等另一个时间段。同组确实没有才退回编号最小的那份。
+            string Num(FetchActionId a, string fallbackName)
+                => inGroup.TryGetValue((vm.GroupIndex, a), out var mine) ? mine
+                 : anyGroup.TryGetValue(a, out var any) ? any
+                 : fallbackName;
+
             if (info.DependsOn is { } hard)
-                parts.Add((numberOf.TryGetValue(hard, out var hn) ? hn : FetchTaskCatalog.Info(hard).Name) + "*");
+                parts.Add(Num(hard, FetchTaskCatalog.Info(hard).Name) + "*");
             foreach (var soft in info.SoftDependsOn ?? [])
-                parts.Add(numberOf.TryGetValue(soft, out var sn) ? sn : FetchTaskCatalog.Info(soft).Name);
+                parts.Add(Num(soft, FetchTaskCatalog.Info(soft).Name));
             // 按编号从小到大排：目录里的声明顺序是按"哪条依赖更重要"写的，摆到界面上就成了
             // "1.12 1.02"这种乱序，读的人得自己在脑子里排一遍。
             // 序号补足两位之后，字符串序就是数值序，直接排即可（带 * 的硬前置也落在正确位置）。
@@ -2062,8 +2146,9 @@ public class MainViewModel : INotifyPropertyChanged
         //    "今天有没有跑成功"用的是 AlreadyRanOn，跟"今天还要不要再跑"同一个判据。
         if (vm.Model.Info.DependsOn is { } dep)
         {
-            var depItem = _plan?.AllItems.FirstOrDefault(x => x.Action == dep);
-            if (depItem != null && !depItem.AlreadyRanOn(DateTime.Now))
+            // 同一动作可能排在多个组里（跨组重复）：**任一份**这一轮跑过就不用问
+            var deps = _plan?.AllItems.Where(x => x.Action == dep).ToList() ?? [];
+            if (deps.Count > 0 && !deps.Any(d => d.AlreadyRanOn(DateTime.Now)))
             {
                 var depName = FetchTaskCatalog.Info(dep).Name;
                 if (!Confirm($"【{vm.Name}】的前置没完成",

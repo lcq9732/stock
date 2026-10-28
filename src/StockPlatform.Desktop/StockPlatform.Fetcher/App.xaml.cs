@@ -826,9 +826,13 @@ public partial class App : Application
 
         // 【拉取财报预约日】2026-09-21（第⑦步）。一批＝一个报告期；
         //   "改期对账"（抓前记旧日期、抓后比对报出来）是这一项最该报的事。
+        // 2026-10-27 起同一项里再抓一份东财（EarningsScheduleEm 表），消费端取并集——
+        // 巨潮的"已披露"标记滞后半天以上，当晚披露的票会整批晚一轮拿到财报。
+        // 见 doc/financial-fetch-disclosure-race-design.md。东财这条腿断了只记一句，不影响巨潮那份。
         if (prebookProvider != null)
             taskRegistry.Register(FetchActionId.FetchEarningsSchedule,
-                () => new EarningsScheduleTask(paths, prebookProvider));
+                () => new EarningsScheduleTask(paths, prebookProvider,
+                                               new EastMoneyPrebookProvider(emDataCenter)));
 
         // 【板块指数合成】2026-09-21（⑧-1，见 doc/board-index-synth-design.md）。不联网，
         //   一批＝一个板块；末尾主动回收 WAL（这条路是全库写得最重的一条）。

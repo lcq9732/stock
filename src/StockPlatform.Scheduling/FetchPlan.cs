@@ -547,17 +547,17 @@ public sealed class FetchPlanGroup
         _ => false,
     };
 
-    /// <summary>
-    /// A股收盘时刻（2026-09-04 新增）——「每工作日」的任务在这之后必须再跑一轮，
-    /// 因为收盘前跑到的当日数据是不完整的（K线未定盘、龙虎榜/资金流盘后才发布）。
-    /// 见 <see cref="DueAnchorAt"/> 里 EveryWorkday 那一段。
-    ///
-    /// 15:00 是真实收盘，这里用 17:00：盘后数据（龙虎榜、融资余额、资金流）要到傍晚才齐，
-    /// 15:05 就跑等于白跑一趟。
-    /// </summary>
-    public static readonly TimeOnly MarketClose = new(17, 0);
-
-    private static TimeSpan MarketCloseOffset => MarketClose.ToTimeSpan();
+    // 2026-10-27：**收盘到点（17:00）退役**，见 doc/plan-cross-group-duplicate-design.md。
+    //
+    // 它是 2026-09-04 加的：「每工作日」的组除了自己设定的时刻，还会被自动补一个 17:00，
+    // 因为收盘前跑到的当日数据不完整（K线未定盘、龙虎榜/资金流盘后才发布）。问题解决了，
+    // 代价是**组的时间不再等于执行时间**——「早间（开盘前）」组设的 08:15，实际每天跑
+    // 08:15 和 17:00 两轮，而计划界面上一点看不出来（2026-10-26 的日志里那句
+    // 「17:01:33 ▶ 开始【回购公告进展】」就是它）。
+    //
+    // 现在换成**显式**的表达：一个任务放在哪个组，就按那个组的时间跑；要跑两轮，
+    // 就在两个组里各放一份（跨组重复，见 FetchPlanItem 的注释）。
+    // 老计划靠 MigrateCrossGroup 一次性补齐，行为不变。
 
     /// <summary>
     /// 「当期锚点」：**最近一个已经过去的到点时刻**，也就是"当前这一轮是什么时候开工的"。
@@ -587,37 +587,22 @@ public sealed class FetchPlanGroup
 
             case RepeatKind.EveryWorkday:
             {
-                // 每个工作日有**两个**到点（2026-09-04 按用户要求）：设定的时刻，加上收盘。
+                // 每个工作日**一个**到点：组设定的那个时刻，没有别的（2026-10-27）。
                 //
-                // 为什么必须补收盘这一个：收盘前跑到的当日数据是不完整的（当天K线还没定盘、
-                // 龙虎榜和资金流盘后才出），可原来只要跑过一轮就算"今天做完了"——早上开机
-                // 自动跑一遍，收盘后就再也不跑了，当天数据永远停在盘中那个残缺状态。
-                // 用户 17:04 看到的「共 32 项、已完成 30 项」就是这么来的：那 30 项绝大多数
-                // 是早上跑的，按收盘口径它们今天都还得再跑一遍。
-                //
-                // 补成"两个到点"而不是"把设定时刻推到 17:00"，是因为白天那一轮照样有用
-                // （盘中要看行情、要补历史），要的只是**收盘后再来一遍**。
-                // 两个到点也天然不会来回重跑：白天跑完，锚点还是早上那个，AlreadyRanOn 为真；
-                // 过了 17:00 锚点前移到收盘，上一轮的开始时间落在它之前，于是自然进入新一轮。
-                //
-                // 设定时刻本来就在收盘后（比如「不早于 18:00」）时不补——那一轮已经满足要求了，
-                // 再插一个 17:00 只会让它每天多跑一趟。
-                var offsets = new List<TimeSpan> { offset };
-                if (offset < MarketCloseOffset) offsets.Add(MarketCloseOffset);
-
+                // 这里原来还会自动补一个 17:00（收盘），理由是"收盘前跑到的当日数据不完整"。
+                // 那条规则已经退役——它让组的时间不等于执行时间，而要跑两轮的正确表达是
+                // **在两个组里各放一份**，看得见、也不用猜。详见上面那段注释和
+                // doc/plan-cross-group-duplicate-design.md。
                 for (int back = 0; back <= 7; back++)
                 {
                     var d = now.Date.AddDays(-back);
                     if (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
 
-                    // 同一天里取**最靠后的那个已过去的到点**：17:05 时该对齐到收盘那一轮，
-                    // 而不是早上那一轮，否则收盘后这次重跑判不出来。
-                    var passed = offsets.Select(o => d + o).Where(t => t <= now)
-                                        .OrderByDescending(t => t).ToList();
-                    if (passed.Count == 0) continue;
+                    var t = d + offset;
+                    if (t > now) continue;      // 这一天的到点还没到，往前找上一个工作日
 
                     // 今天已经到过点 = 当前就在这一轮里；更早的日子只有"上一轮还没跑完"才算数
-                    return back == 0 ? passed[0] : (StartedSince(passed[0]) ? passed[0] : null);
+                    return back == 0 ? t : (StartedSince(t) ? t : null);
                 }
                 return null;
             }
@@ -1047,8 +1032,12 @@ public sealed class FetchPlan
         {
             var want = FetchTaskCatalog.DefaultGroupOf(action);
             var target = GroupOf(want);
-            var from = Groups.FirstOrDefault(g => g.Items.Any(i => i.Action == action));
-            if (from == null || ReferenceEquals(from, target)) continue;
+            // 目标组里已经有一份就什么都不用做（2026-10-27 跨组重复之后）：这条迁移是
+            // "把它挪到该去的组"，人要是另外在别的组也排了一份，那是他的安排，不能顺手搬走。
+            if (target.Items.Any(i => i.Action == action)) continue;
+            var from = Groups.FirstOrDefault(g => !ReferenceEquals(g, target)
+                                                  && g.Items.Any(i => i.Action == action));
+            if (from == null) continue;
 
             var item = from.Items.First(i => i.Action == action);
             from.Items.Remove(item);
@@ -1102,14 +1091,16 @@ public sealed class FetchPlan
                 var skipped = new List<string>();
                 foreach (var e in expansions)
                 {
-                    // 等价项可能已经在**别的组**里了（用户自己排过），那就不动它
-                    var existing = AllItems.FirstOrDefault(i => i.Action == e.Into);
-                    if (existing != null && existing.Enabled)
+                    // 等价项可能已经在别处排过了（用户自己摆的），那就不动它。
+                    // 2026-10-27 跨组重复之后，**别的组里那份一律不碰**——它在那儿按那个组的
+                    // 时间跑是合法安排。只有本组里那份没启用的残留才清掉，免得同一个组里出现两份。
+                    if (AllItems.Any(i => i.Action == e.Into && i.Enabled))
                     {
                         skipped.Add(FetchTaskCatalog.Info(e.Into).Name);
                         continue;
                     }
-                    if (existing != null) existing.Owner?.Items.Remove(existing);
+                    foreach (var dup in group.Items.Where(i => i.Action == e.Into).ToList())
+                        group.Items.Remove(dup);
 
                     inserted.Add(new FetchPlanItem
                     {
@@ -1132,7 +1123,52 @@ public sealed class FetchPlan
             }
         }
 
+        notes.AddRange(MigrateCrossGroup());
+
         LinkOwners();
+        return notes;
+    }
+
+    /// <summary>
+    /// 收盘到点退役的一次性补偿（2026-10-27，见 doc/plan-cross-group-duplicate-design.md）。
+    ///
+    /// 退役前，「每工作日」且设定时刻早于 17:00 的组会被**隐式**补一个收盘到点，组里的项
+    /// 因此每天跑两轮（早间组 08:15 的那一份，实测也在 17:01 跑过）。现在组的时间就是唯一的
+    /// 执行时间，这些项会少掉收盘后那一轮——所以在日更组里给它们各补一份，**行为一字不变**，
+    /// 只是从藏在代码里变成摆在计划上。
+    ///
+    /// 只补**启用着的**项：没启用的本来就没在跑，补了反而凭空多出一行。
+    /// 日更组里已经有同一个动作的也不补（那份本来就在收盘后跑）。
+    /// </summary>
+    private List<string> MigrateCrossGroup()
+    {
+        var notes = new List<string>();
+        var daily = GroupOf(PlanGroupKind.Daily);
+        // 日更组自己就是补偿的落点，它要是也早于 17:00，那是另一回事（用户自己调的），不参与
+        var sources = Groups
+            .Where(g => !ReferenceEquals(g, daily) && g.Enabled
+                        && g.Repeat == RepeatKind.EveryWorkday
+                        && g.NotBefore is { } nb && nb < new TimeOnly(17, 0))
+            .ToList();
+
+        foreach (var g in sources)
+        {
+            foreach (var item in g.Items.Where(i => i.Enabled).ToList())
+            {
+                if (daily.Items.Any(i => i.Action == item.Action)) continue;
+
+                daily.Items.Add(new FetchPlanItem
+                {
+                    Action = item.Action,
+                    Enabled = true,
+                    Mode = item.Mode,
+                    Owner = daily,
+                });
+                notes.Add($"【{FetchTaskCatalog.Info(item.Action).Name}】在「{daily.Name}」补了一份"
+                        + $"——它原先靠「收盘后再跑一轮」的隐式规则每天跑两次，"
+                        + $"现在改成在两个组里各排一份（「{g.Name}」那份照旧）");
+            }
+        }
         return notes;
     }
 

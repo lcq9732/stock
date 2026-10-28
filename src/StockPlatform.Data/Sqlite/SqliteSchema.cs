@@ -415,6 +415,78 @@ public static class SqliteSchema
                 PRIMARY KEY (code, report_period)
             );
 
+            -- 预约披露日·东财版（2026-10-27，见 doc/financial-fetch-disclosure-race-design.md）。
+            --
+            -- ══ 为什么两张表而不是一张表加 source 列 ══
+            -- 照 StockIndustry / StockIndustryEm 的先例：两家给的**字段集不一样**，东财这张
+            -- 多出 is_publish、trade_market、board_name、quarter 等十来列，塞进上面那张会让
+            -- 巨潮的行有一半是 NULL；而且上面那张的主键是 (code, report_period)，要并进来就得
+            -- 改主键重建表——16639 行的无谓风险。分开存，合并只发生在**消费端**。
+            --
+            -- ══ 为什么要它 ══
+            -- 巨潮是交易所指定披露网站，"已披露"标记要走正式入库流程，实测**滞后半天以上**：
+            -- 2026-10-27 00:39 抓时本期标了 1325 只，14:12 再抓变成 1690 只，当晚披露的
+            -- 410 只里有 365 只是白天才补上的。格力(000651)就卡在这里——10-26 晚间已发三季报，
+            -- 凌晨那轮还是"未披露"，于是【拉取财务报表】整整晚了一轮。
+            --
+            -- 判据改成「**任一家标了已披露就算已披露**」，下限就是现状：东财快就赚一天，
+            -- 东财慢也不会比只用巨潮更差。
+            --
+            -- is_publish 是东财独有的直接标记（1=已披露），比"看 actual_date 空不空"更干脆；
+            -- 两者都存，消费端以 actual_date 为准、is_publish 作交叉校验。
+            CREATE TABLE IF NOT EXISTS EarningsScheduleEm (
+                code TEXT NOT NULL,             -- SECURITY_CODE，6位
+                report_period TEXT NOT NULL,    -- REPORT_DATE，报告期
+                appoint_date TEXT,              -- APPOINT_PUBLISH_DATE，当前有效预约日
+                first_appoint_date TEXT,        -- FIRST_APPOINT_DATE，首次预约日
+                change1 TEXT,                   -- FIRST_CHANGE_DATE
+                change2 TEXT,                   -- SECOND_CHANGE_DATE
+                change3 TEXT,                   -- THIRD_CHANGE_DATE
+                actual_date TEXT,               -- ACTUAL_PUBLISH_DATE，实际披露日（空=还没披露）
+                is_publish INTEGER,             -- IS_PUBLISH，1=已披露（东财独有）
+                report_type_name TEXT,          -- "2026年 三季报"
+                quarter TEXT,                   -- "2026q3"
+                trade_market TEXT,              -- 深交所主板 / 北京证券交易所 …
+                security_type TEXT,             -- A股
+                board_name TEXT,                -- 所属行业板块名
+                new_board_code TEXT,            -- BKxxxx
+                residual_days INTEGER,          -- 距预约日还剩几天（东财算好的）
+                appoint_change TEXT,            -- 改期说明
+                appoint_change_days INTEGER,    -- 改了几天
+                info_code TEXT,                 -- 东财公告编号
+                eitime TEXT,                    -- 东财建档时间。⚠ 不是回填时间，别拿它判"什么时候标的"
+                fetched_at TEXT,
+                PRIMARY KEY (code, report_period)
+            );
+
+            -- 预约披露日·**两家合并后的那一份**（2026-10-27）。
+            --
+            -- 上面两张是各家的原始落库（巨潮一张、东财一张，取到的全存）；这一张是它们合出来的
+            -- 结论，**消费端只读这一张**——财务抓取、股东抓取、金融监管指标、界面的财报日列，
+            -- 谁都不需要知道底下有两个数据源。
+            --
+            -- 为什么不让每个查询自己 UNION：那样同一套规则要抄好几遍，而且再加一个查询方法
+            -- 就会漏掉合并。合并是判据，判据归 Logic（EarningsScheduleMerge），这里只存结果。
+            --
+            -- 合并规则见 EarningsScheduleMerge 的类注释，三条的方向各不相同：
+            --   披露了没有＝并集（闸门要早）、实际披露日＝取较晚（告警起算点要晚）、
+            --   预约日＝以巨潮为准（给人看的，要稳）。
+            --
+            -- 字段跟 EarningsSchedule 完全一致，就是为了让消费端的读取代码一行都不用改。
+            -- 每轮【拉取财报预约日】抓完两家后整期重算覆盖；东财那边没有数据时，
+            -- 这张表的内容跟巨潮原样一致（＝现状），这是方案"下限不变差"的落点。
+            CREATE TABLE IF NOT EXISTS EarningsScheduleMerged (
+                code TEXT NOT NULL,
+                report_period TEXT NOT NULL,
+                appoint_date TEXT,
+                change1 TEXT,
+                change2 TEXT,
+                change3 TEXT,
+                actual_date TEXT,
+                fetched_at TEXT,
+                PRIMARY KEY (code, report_period)
+            );
+
             -- 银行监管指标（2026-08-29）——不良率/拨备覆盖率/核心一级资本充足率/客户集中度等。
             -- 这些**不在三张报表里**，只在财报正文"会计数据和财务指标摘要"那两三页，所以单独
             -- 一张表、单独的抓取路径（下载 PDF + 解析），见 BankRegulatoryFetcher。

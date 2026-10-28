@@ -1,5 +1,6 @@
 using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Models;
+using StockPlatform.Logic.Services;
 using Xunit;
 
 namespace StockPlatform.Tests;
@@ -26,7 +27,12 @@ public class EarningsDisclosureTests
         Directory.CreateDirectory(dir);
         var repo = new SqliteEarningsScheduleRepository(Path.Combine(dir, "test.sqlite"));
         repo.EnsureSchema();
-        if (rows.Length > 0) repo.Upsert(rows);
+        if (rows.Length > 0)
+        {
+            repo.Upsert(rows);
+            // 消费端读的是合并表；产品流程里抓完两家就合并落库，测试走同一条路。
+            repo.UpsertMerged(EarningsScheduleMerge.Merge(rows, []));
+        }
         return (repo, dir);
     }
 

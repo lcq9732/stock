@@ -112,15 +112,23 @@ public sealed class PlanRunner(
     /// <summary>
     /// 这一轮里记过「本轮没开工」的项 → 记下的时刻。只活在内存里：重启程序就当没发生过，
     /// 第一次照常按顺序跑（那时候多半问题已经排除了）。跑成功/失败之后就移出。
+    ///
+    /// ⚠ 键是**那一份计划项**，不是动作（2026-10-27）。同一个动作可以排在多个组里
+    /// （跨组重复，见 doc/plan-cross-group-duplicate-design.md），按动作记的话两份会互相串：
+    /// 早间组那份因为限流记了「没开工」，日更组那份会被一起判成要等冷却；反过来任一份跑成功
+    /// 又会把另一份的记录抹掉、让它不等冷却就重试。两份各按各的组跑，这里也得各记各的。
     /// </summary>
-    private readonly Dictionary<FetchActionId, DateTime> _deferred = [];
+    private readonly Dictionary<FetchPlanItem, DateTime> _deferred = [];
 
     /// <summary>这一项这一轮记过「本轮没开工」，要让到最后再试。跨轮次的旧记录不算。</summary>
     private bool IsDeferred(FetchPlanItem item, DateTime now)
-        => _deferred.TryGetValue(item.Action, out var at) && at >= item.RoundAnchor(now);
+        => _deferred.TryGetValue(item, out var at) && at >= item.RoundAnchor(now);
 
-    /// <summary>空闲项各自的下一次可跑时刻（跑完 + 冷却）。只活在内存里，重启后重新开始。</summary>
-    private readonly Dictionary<FetchActionId, DateTime> _idleNextAllowed = [];
+    /// <summary>
+    /// 空闲项各自的下一次可跑时刻（跑完 + 冷却）。只活在内存里，重启后重新开始。
+    /// 键同样是**那一份**，理由见 <see cref="_deferred"/>。
+    /// </summary>
+    private readonly Dictionary<FetchPlanItem, DateTime> _idleNextAllowed = [];
 
     /// <summary>上一次评估时有没有可跑的项——用来判断"一轮刚跑完"，只在那一刻打一次汇总。</summary>
     private bool _hadWork;
@@ -296,7 +304,7 @@ public sealed class PlanRunner(
             int p = TypePriority(item.Repeat);
             if (IsDeferred(item, now))
             {
-                if (now - _deferred[item.Action] < RetryCooldown) continue;
+                if (now - _deferred[item] < RetryCooldown) continue;
                 if (p < bestRetryPriority) { bestRetry = item; bestRetryPriority = p; }
             }
             else if (p < bestPriority) { best = item; bestPriority = p; }
@@ -313,7 +321,7 @@ public sealed class PlanRunner(
     {
         var waiting = plan.AllItems
             .Where(i => IsDueNow(i, now) && IsDeferred(i, now))
-            .Select(i => (Item: i, At: _deferred[i.Action] + RetryCooldown))
+            .Select(i => (Item: i, At: _deferred[i] + RetryCooldown))
             .OrderBy(x => x.At)
             .ToList();
         if (waiting.Count == 0) return null;
@@ -421,7 +429,7 @@ public sealed class PlanRunner(
             if (item.Pacing == RunPacing.Immediate && item.DueAnchorAt(now) is null) continue;
             // 空闲项还在冷却里也不算
             if (item.Pacing == RunPacing.WhenIdle
-                && _idleNextAllowed.TryGetValue(item.Action, out var next) && now < next) continue;
+                && _idleNextAllowed.TryGetValue(item, out var next) && now < next) continue;
 
             var need = item.Info.EffectiveSources;
             if (need.Count == 0) continue;
@@ -508,7 +516,7 @@ public sealed class PlanRunner(
             // （2026-09-02 起用 IsPending 判断；原来的「空闲时」是无脑每天反复跑）。
             if (item.Pacing != RunPacing.WhenIdle) continue;
             if (!IsPending(item, now)) continue;
-            if (_idleNextAllowed.TryGetValue(item.Action, out var next) && now < next) continue;
+            if (_idleNextAllowed.TryGetValue(item, out var next) && now < next) continue;
             if (DependencyFailedThisRound(item, now)) continue;
             // 装不装得下按**实测**耗时判（EffectiveEstimate：跑过就用自己最近几轮的中位数，
             // 没跑过才用目录里手填的那个值）——拆细之后手填值只是个数量级。
@@ -529,12 +537,20 @@ public sealed class PlanRunner(
     /// 于是判成"前置今天没失败过"照跑不误——而它要的数据明明没抓到。
     /// 这跟 <see cref="FetchPlanItem.AlreadyRanOn"/> 当初从"落在哪一天"改成锚点是同一个坑。
     /// </summary>
+    /// <remarks>
+    /// ⚠ 同一个动作**可以排在多个组里**（2026-10-27，见 FetchPlan 的"跨组重复"注释），
+    /// 所以这里不能只看第一份。判据是「**每一份都失败了**才算前置挂了」——
+    /// 任何一份在这一轮跑成功过，数据就已经在库里，没理由拦着后面的项。
+    /// 取第一份的写法在"早间组跑成功、日更组那份失败"时会把好好的一项拦下来。
+    /// </remarks>
     private bool DependencyFailedThisRound(FetchPlanItem item, DateTime now)
     {
         if (item.Info.DependsOn is not { } dep) return false;
-        var depItem = plan.AllItems.FirstOrDefault(i => i.Action == dep);
+        var anchor = item.RoundAnchor(now);
+        var deps = plan.AllItems.Where(i => i.Action == dep).ToList();
+        if (deps.Count == 0) return false;
         // 判据本体在 FetchPlanItem（跟 AlreadyRanOn 并排，那样能直接测跨夜场景）
-        return depItem?.FailedSince(item.RoundAnchor(now)) == true;
+        return deps.All(d => d.FailedSince(anchor));
     }
 
     /// <summary>
@@ -560,8 +576,9 @@ public sealed class PlanRunner(
         var stale = new List<string>();
         foreach (var soft in softs)
         {
-            var softItem = plan.AllItems.FirstOrDefault(i => i.Action == soft);
-            if (softItem?.RanOkSince(anchor) != true) stale.Add(FetchTaskCatalog.Info(soft).Name);
+            // 同一动作可能排在多个组里：**任一份**这一轮跑成功过就不算旧（见 DependencyFailedThisRound）
+            if (!plan.AllItems.Any(i => i.Action == soft && i.RanOkSince(anchor)))
+                stale.Add(FetchTaskCatalog.Info(soft).Name);
         }
         if (stale.Count == 0) return;
 
@@ -708,16 +725,16 @@ public sealed class PlanRunner(
             if (outcome == RunOutcome.Skipped && result.SkippedReason is { } why)
             {
                 Finish(item, RunOutcome.Skipped, result.Errors.Count, why, result.Errors);
-                _deferred[item.Action] = item.LastEnd!.Value;
+                _deferred[item] = item.LastEnd!.Value;
                 log($"⏸ 计划：【{info.Name}】本轮没开工——{why}。先接着跑后面的项，"
                   + $"都跑完了再回头试它（每次至少隔 {Describe(RetryCooldown)}）。{tail}");
                 return;
             }
-            _deferred.Remove(item.Action);
+            _deferred.Remove(item);
 
             // 空闲项跑完排下一次：什么都没得做就歇久一点，别每 20 分钟去翻一遍库
             if (item.Pacing == RunPacing.WhenIdle)
-                _idleNextAllowed[item.Action] =
+                _idleNextAllowed[item] =
                     DateTime.Now + (result.NothingToDo ? IdleNothingToDoCooldown : IdleCooldown);
 
             // 实测耗时喂给"耗时自学"（2026-09-02）：只记真干了活的轮次，
@@ -740,7 +757,7 @@ public sealed class PlanRunner(
                 var failWhy = RunOutcomeRules.FailureReason(result);
                 Finish(item, RunOutcome.Failed, RunOutcomeRules.FailureErrorCount(result), failWhy, result.Errors);
                 if (item.Pacing == RunPacing.WhenIdle)
-                    _idleNextAllowed[item.Action] = DateTime.Now + IdleCooldown;
+                    _idleNextAllowed[item] = DateTime.Now + IdleCooldown;
                 log($"✘ 计划：【{info.Name}】失败：{failWhy}（不影响后面的项，继续）{tail}");
                 return;
             }
@@ -790,7 +807,7 @@ public sealed class PlanRunner(
             Finish(item, RunOutcome.Failed, 1, msg);
             // 同下面的普通失败：空闲项要进冷却，否则每分钟回来撞同一个坑
             if (item.Pacing == RunPacing.WhenIdle)
-                _idleNextAllowed[item.Action] = DateTime.Now + IdleCooldown;
+                _idleNextAllowed[item] = DateTime.Now + IdleCooldown;
             log($"⏱ 计划：【{info.Name}】{msg}。后面的项继续跑。"
               + "（不是因为跑得久被掐的——它是真的哑了这么久）" + tail);
         }
@@ -801,7 +818,7 @@ public sealed class PlanRunner(
             // ⚠ 空闲项失败**也要进冷却**：它不像定时项那样"今天失败就不再来"，
             //    不挡一下就会每分钟重试一次，一直撞同一个错。
             if (item.Pacing == RunPacing.WhenIdle)
-                _idleNextAllowed[item.Action] = DateTime.Now + IdleCooldown;
+                _idleNextAllowed[item] = DateTime.Now + IdleCooldown;
             log($"✘ 计划：【{info.Name}】失败：{ex.Message}（不影响后面的项，继续）{tail}");
         }
     }

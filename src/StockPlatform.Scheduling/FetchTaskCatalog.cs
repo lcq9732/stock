@@ -1306,7 +1306,7 @@ public static class FetchTaskCatalog
             SoftDependsOn: [FetchActionId.StepStockDayBars], SupportsPartialRun: true,
             Sources: [DataSourceId.Tencent, DataSourceId.Sina]),
 
-        new(FetchActionId.FetchEarningsSchedule, "拉取财报预约日", "巨潮", QuotaGroup.Mixed,
+        new(FetchActionId.FetchEarningsSchedule, "拉取财报预约日", "巨潮 + 东财", QuotaGroup.Mixed,
             TimeSpan.FromSeconds(20), "每工作日",
             "抓定期报告的**预约披露日**——交易所要求上市公司预约本期定期报告什么时候披露。\n"
             + "用途：主动仓的「财报日」列自动填上，不用再手工录；选股时也能避开「马上要出财报」的票"
@@ -1318,9 +1318,15 @@ public static class FetchTaskCatalog
             + "⚠ 数据源只给最近两期，所以有空窗：上一期都披露完、下一期预约表还没发布时，这一列会是空的。\n"
             + "**状态格怎么看**：本期还有多少只股票没披露财报——就是每天要复查披露日的那批。\n"
             + "预约日会改（实测 12% 改过，提前的比延后的还多），所以没披露的必须天天看一眼。\n"
-            + "已经披露完的不再重抓。",
+            + "已经披露完的不再重抓。\n"
+            + "**两家都抓（2026-10-27）**：巨潮是交易所指定披露网站，「已披露」标记要走正式入库流程，"
+            + "实测滞后半天以上——当天 00:39 标了 1325 只、14:12 变 1690 只。而【拉取财务报表】拿它当闸门，"
+            + "于是前一晚披露的票整批晚一轮才抓到财报（格力 10-26 晚发三季报，凌晨那轮仍算「未披露」）。"
+            + "东财那份进另一张表，判据改成「**任一家标了已披露就算已披露**」，"
+            + "**下限就是现状**：东财快就早一轮，东财慢也不会更差。"
+            + "每轮收工报「只有东财标了几只」——长期为 0 就说明两家同步、这条腿可以撤。",
             SupportsPartialRun: false,
-            Sources: [DataSourceId.Cninfo]),
+            Sources: [DataSourceId.Cninfo, DataSourceId.EmDataCenter]),
 
         new(FetchActionId.FetchEarningsForecast, "拉取业绩预告/快报", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(3), "每工作日（披露密集期尤其要跑）",

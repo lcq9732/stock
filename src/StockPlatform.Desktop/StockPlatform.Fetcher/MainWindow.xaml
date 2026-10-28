@@ -333,14 +333,38 @@
                           AllowDrop="True"
                           PreviewMouseWheel="PlanGrid_PreviewMouseWheel"
                           PreviewMouseLeftButtonDown="PlanGrid_PreviewMouseLeftButtonDown"
+                          PreviewMouseRightButtonDown="PlanGrid_PreviewMouseRightButtonDown"
                           MouseMove="PlanGrid_MouseMove"
-                          Drop="PlanGrid_Drop">
+                          Drop="PlanGrid_Drop"
+                          Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}">
+                    <!-- 右键「复制到其他组」（2026-10-27，见 doc/plan-cross-group-duplicate-design.md）：
+                         同一个任务可以在多个组里按各自的时间跑，这是摆第二份的入口。
+                         ⚠ ContextMenu **不在视觉树里**，子项绑不到 AncestorType=Window，所以
+                         目标列表用的是自带命令和参数的 CopyTargets（见 MainViewModel），
+                         靠 DataGrid 的 Tag 把 MainViewModel 递进来。 -->
+                    <DataGrid.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="复制到其他组"
+                                      ItemsSource="{Binding PlacementTarget.Tag.CopyTargets,
+                                                    RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                      ToolTip="把这一行再排一份到别的组——两份各按自己所在组的时间跑、各记各的结果。&#10;想让一个任务早晚各跑一轮，就在两个组里各放一份。&#10;&#10;新加的那份默认不勾启用；同一个组里已经有了的会灰掉（同一时间跑两遍没有意义）。">
+                                <MenuItem.ItemContainerStyle>
+                                    <Style TargetType="MenuItem">
+                                        <Setter Property="Header" Value="{Binding Name}" />
+                                        <Setter Property="Command" Value="{Binding Command}" />
+                                        <Setter Property="CommandParameter" Value="{Binding Parameter}" />
+                                    </Style>
+                                </MenuItem.ItemContainerStyle>
+                            </MenuItem>
+                        </ContextMenu>
+                    </DataGrid.ContextMenu>
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource Theme.DataGridRow}" />
                     </DataGrid.RowStyle>
                     <DataGrid.Columns>
                         <!-- 编号 组号.序号（2026-09-02）：日更 1.x、季度 2.x、按需 3.x。
-                             跨组唯一，右边"依赖"列才指得清是谁。拖动排序后自动重排。 -->
+                             同一个动作可以排在多个组里（2026-10-27），各自有各自的编号，
+                             右边"依赖"列照样指得清是谁。拖动排序后自动重排。 -->
                         <DataGridTextColumn Header="#" Binding="{Binding Number}" Width="38"
                                             ElementStyle="{StaticResource PlanSubtleCell}" />
 

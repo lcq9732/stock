@@ -80,10 +80,12 @@ public static class FetchPlanTemplates
     /// 规则：
     ///   · **同名组已经在计划里** → 用它（重复规则和时刻保持原样，那是用户调过的）；
     ///     没有就新建一个，按模板的规则和时刻，插在计划末尾。
-    ///   · 模板里的任务按模板顺序放进这个组。**一个动作只能待在一个组**，
-    ///     所以在别处的会被搬过来——这是"我要这一套"的明确意思；搬了哪些会报告出来，
-    ///     不闷声干。
-    ///   · 已经在这个组里的就地更新模式，不重复添加。
+    ///   · 模板里的任务按模板顺序放进这个组。**只认这个组里有没有**——已经在的就地更新模式，
+    ///     没有的新建一份。**别的组里那份不动**（2026-10-27，跨组重复，见
+    ///     doc/plan-cross-group-duplicate-design.md）：同一个任务本来就可以在两个组里
+    ///     按各自的时间跑，铺模板没理由把人在别处摆好的那份偷走。
+    ///   · 返回值里的 MovedIn 仍然报"别的组也有同一个任务"，只是语义从"搬过来了"变成
+    ///     "那边还留着一份"——让人知道它会跑两轮，而不是以为模板动了它。
     /// 反复点是安全的：第二次点，组里还是这一串、顺序也一样。
     /// </summary>
     public static (FetchPlanGroup Group, List<FetchPlanItem> Items, List<string> MovedIn) Apply(
@@ -108,17 +110,20 @@ public static class FetchPlanTemplates
 
         foreach (var t in template.Items)
         {
-            var existing = plan.AllItems.FirstOrDefault(i => i.Action == t.Action);
-            if (existing != null && existing.Owner != null && existing.Owner != group)
+            // 只在**这个组**里找。别的组有同名的是合法的（跨组重复），不碰它，只提一句。
+            var mine = group.Items.FirstOrDefault(i => i.Action == t.Action);
+            if (mine == null && plan.AllItems.Any(i => i.Action == t.Action))
                 movedIn.Add(FetchTaskCatalog.Info(t.Action).Name);
 
-            var item = existing ?? new FetchPlanItem { Action = t.Action };
-            existing?.Owner?.Items.Remove(existing);
+            var item = mine ?? new FetchPlanItem { Action = t.Action };
             item.Enabled = true;
             item.Mode = t.Mode;
             item.Owner = group;
             items.Add(item);
         }
+
+        // 本组里重排：上面收集的那串要按模板顺序落位，不能留着旧位置的副本
+        foreach (var it in items) group.Items.Remove(it);
 
         // 模板没提到、但本来就在这个组里的项留在后面（用户自己加的，不该被模板挤掉）
         var rest = group.Items.Where(i => !items.Contains(i)).ToList();

@@ -80,6 +80,145 @@ public class SqliteEarningsScheduleRepository
         return n;
     }
 
+    /// <summary>
+    /// 东财版预约日入库（2026-10-27，见 doc/financial-fetch-disclosure-race-design.md）。
+    /// 跟巨潮那张一样按 (code, report_period) 整条覆盖——每次抓到的都是最新状态。
+    /// 两家各存各的表，**合并只发生在读取端**（见下面几个查询）。
+    /// </summary>
+    public int UpsertEm(IReadOnlyList<EarningsScheduleEmRow> rows)
+    {
+        if (rows.Count == 0) return 0;
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            INSERT INTO EarningsScheduleEm
+                (code, report_period, appoint_date, first_appoint_date, change1, change2, change3,
+                 actual_date, is_publish, report_type_name, quarter, trade_market, security_type,
+                 board_name, new_board_code, residual_days, appoint_change, appoint_change_days,
+                 info_code, eitime, fetched_at)
+            VALUES ($c, $p, $a, $fa, $c1, $c2, $c3, $ac, $ip, $rt, $q, $tm, $st,
+                    $bn, $bc, $rd, $apc, $apd, $ic, $ei, $f)
+            ON CONFLICT(code, report_period) DO UPDATE SET
+                appoint_date        = excluded.appoint_date,
+                first_appoint_date  = excluded.first_appoint_date,
+                change1             = excluded.change1,
+                change2             = excluded.change2,
+                change3             = excluded.change3,
+                actual_date         = excluded.actual_date,
+                is_publish          = excluded.is_publish,
+                report_type_name    = excluded.report_type_name,
+                quarter             = excluded.quarter,
+                trade_market        = excluded.trade_market,
+                security_type       = excluded.security_type,
+                board_name          = excluded.board_name,
+                new_board_code      = excluded.new_board_code,
+                residual_days       = excluded.residual_days,
+                appoint_change      = excluded.appoint_change,
+                appoint_change_days = excluded.appoint_change_days,
+                info_code           = excluded.info_code,
+                eitime              = excluded.eitime,
+                fetched_at          = excluded.fetched_at;
+            """;
+        var pc = cmd.Parameters.Add("$c", SqliteType.Text);
+        var pp = cmd.Parameters.Add("$p", SqliteType.Text);
+        var pa = cmd.Parameters.Add("$a", SqliteType.Text);
+        var pfa = cmd.Parameters.Add("$fa", SqliteType.Text);
+        var p1 = cmd.Parameters.Add("$c1", SqliteType.Text);
+        var p2 = cmd.Parameters.Add("$c2", SqliteType.Text);
+        var p3 = cmd.Parameters.Add("$c3", SqliteType.Text);
+        var pac = cmd.Parameters.Add("$ac", SqliteType.Text);
+        var pip = cmd.Parameters.Add("$ip", SqliteType.Integer);
+        var prt = cmd.Parameters.Add("$rt", SqliteType.Text);
+        var pq = cmd.Parameters.Add("$q", SqliteType.Text);
+        var ptm = cmd.Parameters.Add("$tm", SqliteType.Text);
+        var pst = cmd.Parameters.Add("$st", SqliteType.Text);
+        var pbn = cmd.Parameters.Add("$bn", SqliteType.Text);
+        var pbc = cmd.Parameters.Add("$bc", SqliteType.Text);
+        var prd = cmd.Parameters.Add("$rd", SqliteType.Integer);
+        var papc = cmd.Parameters.Add("$apc", SqliteType.Text);
+        var papd = cmd.Parameters.Add("$apd", SqliteType.Integer);
+        var pic = cmd.Parameters.Add("$ic", SqliteType.Text);
+        var pei = cmd.Parameters.Add("$ei", SqliteType.Text);
+        var pf = cmd.Parameters.Add("$f", SqliteType.Text);
+        string now = DateTime.Now.ToString(TimeFormat);
+
+        static object Val(string? s) => (object?)s ?? DBNull.Value;
+        static object ValN(int? i) => (object?)i ?? DBNull.Value;
+
+        int n = 0;
+        foreach (var r in rows)
+        {
+            pc.Value = r.Code;
+            pp.Value = r.ReportPeriod.ToString(DateFormat);
+            pa.Value = Val(Fmt(r.AppointDate));
+            pfa.Value = Val(Fmt(r.FirstAppointDate));
+            p1.Value = Val(Fmt(r.Change1));
+            p2.Value = Val(Fmt(r.Change2));
+            p3.Value = Val(Fmt(r.Change3));
+            pac.Value = Val(Fmt(r.ActualDate));
+            pip.Value = ValN(r.IsPublish);
+            prt.Value = Val(r.ReportTypeName);
+            pq.Value = Val(r.Quarter);
+            ptm.Value = Val(r.TradeMarket);
+            pst.Value = Val(r.SecurityType);
+            pbn.Value = Val(r.BoardName);
+            pbc.Value = Val(r.NewBoardCode);
+            prd.Value = ValN(r.ResidualDays);
+            papc.Value = Val(r.AppointChange);
+            papd.Value = ValN(r.AppointChangeDays);
+            pic.Value = Val(r.InfoCode);
+            pei.Value = Val(r.Eitime);
+            pf.Value = now;
+            n += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return n;
+    }
+
+    /// <summary>东财版某一期存了多少条（任务判断"这一期抓过没有"用）。</summary>
+    public Dictionary<string, int> CountByPeriodEm()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT report_period, COUNT(*) FROM EarningsScheduleEm GROUP BY report_period;";
+        using var r = cmd.ExecuteReader();
+        var map = new Dictionary<string, int>(StringComparer.Ordinal);
+        while (r.Read()) map[r.GetString(0)] = r.GetInt32(1);
+        return map;
+    }
+
+    /// <summary>
+    /// 两家在某一期上的对账（2026-10-27）——这一项挪成双源后，每轮收工报一句，
+    /// 用来回答方案里悬着的那个问题：**东财的"已披露"标记到底比巨潮快多少**。
+    ///
+    /// 返回：各自的总条数、各自已标已披露的条数、以及**只有一家标了**的条数。
+    /// 最后那个数就是双源的净收益——它要是长期为 0，说明两家同步，这一路可以撤掉。
+    /// </summary>
+    public (int CninfoTotal, int EmTotal, int CninfoDisclosed, int EmDisclosed,
+            int OnlyCninfo, int OnlyEm) CompareSources(DateTime period)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.Parameters.AddWithValue("$p", period.ToString(DateFormat));
+        cmd.CommandText = """
+            WITH c AS (SELECT code, actual_date FROM EarningsSchedule     WHERE report_period = $p),
+                 e AS (SELECT code, actual_date FROM EarningsScheduleEm   WHERE report_period = $p),
+                 cd AS (SELECT code FROM c WHERE actual_date IS NOT NULL AND actual_date <> ''),
+                 ed AS (SELECT code FROM e WHERE actual_date IS NOT NULL AND actual_date <> '')
+            SELECT (SELECT COUNT(*) FROM c),
+                   (SELECT COUNT(*) FROM e),
+                   (SELECT COUNT(*) FROM cd),
+                   (SELECT COUNT(*) FROM ed),
+                   (SELECT COUNT(*) FROM cd WHERE code NOT IN (SELECT code FROM ed)),
+                   (SELECT COUNT(*) FROM ed WHERE code NOT IN (SELECT code FROM cd));
+            """;
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return (0, 0, 0, 0, 0, 0);
+        return (r.GetInt32(0), r.GetInt32(1), r.GetInt32(2), r.GetInt32(3), r.GetInt32(4), r.GetInt32(5));
+    }
+
     private static EarningsScheduleRow Read(SqliteDataReader r) => new(
         r.GetString(0),
         DateTime.TryParse(r.GetString(1), out var p) ? p : default,
@@ -92,12 +231,71 @@ public class SqliteEarningsScheduleRepository
     private const string Cols =
         "code, report_period, appoint_date, change1, change2, change3, actual_date";
 
+    /// <summary>
+    /// 消费端读的那张表（2026-10-27）：巨潮和东财**合并之后**的结果，字段跟 EarningsSchedule 一模一样。
+    ///
+    /// 合并在抓取时做完（<c>EarningsScheduleMerge</c>），这里只读——所以下面的查询都是最简单的单表 SQL，
+    /// 谁都不需要知道底下有两个数据源，将来再加第三家也不用改这些查询。
+    /// 上面那两张（EarningsSchedule / EarningsScheduleEm）是各家的原始落库，只给对账和重算用。
+    /// </summary>
+    private const string MergedTable = "EarningsScheduleMerged";
+
+    /// <summary>
+    /// 把合并结果整条覆盖进合并表。调用方是【拉取财报预约日】——它抓完两家后算一次，
+    /// 见 <c>EarningsScheduleMerge.Merge</c>。
+    /// </summary>
+    public int UpsertMerged(IReadOnlyList<EarningsScheduleRow> rows)
+    {
+        if (rows.Count == 0) return 0;
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"""
+            INSERT INTO {MergedTable}
+                (code, report_period, appoint_date, change1, change2, change3, actual_date, fetched_at)
+            VALUES ($c, $p, $a, $c1, $c2, $c3, $ac, $f)
+            ON CONFLICT(code, report_period) DO UPDATE SET
+                appoint_date = excluded.appoint_date,
+                change1      = excluded.change1,
+                change2      = excluded.change2,
+                change3      = excluded.change3,
+                actual_date  = excluded.actual_date,
+                fetched_at   = excluded.fetched_at;
+            """;
+        var pc = cmd.Parameters.Add("$c", SqliteType.Text);
+        var pp = cmd.Parameters.Add("$p", SqliteType.Text);
+        var pa = cmd.Parameters.Add("$a", SqliteType.Text);
+        var p1 = cmd.Parameters.Add("$c1", SqliteType.Text);
+        var p2 = cmd.Parameters.Add("$c2", SqliteType.Text);
+        var p3 = cmd.Parameters.Add("$c3", SqliteType.Text);
+        var pac = cmd.Parameters.Add("$ac", SqliteType.Text);
+        var pf = cmd.Parameters.Add("$f", SqliteType.Text);
+        string now = DateTime.Now.ToString(TimeFormat);
+
+        int n = 0;
+        foreach (var r in rows)
+        {
+            pc.Value = r.Code;
+            pp.Value = r.ReportPeriod.ToString(DateFormat);
+            pa.Value = (object?)Fmt(r.AppointDate) ?? DBNull.Value;
+            p1.Value = (object?)Fmt(r.Change1) ?? DBNull.Value;
+            p2.Value = (object?)Fmt(r.Change2) ?? DBNull.Value;
+            p3.Value = (object?)Fmt(r.Change3) ?? DBNull.Value;
+            pac.Value = (object?)Fmt(r.ActualDate) ?? DBNull.Value;
+            pf.Value = now;
+            n += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return n;
+    }
+
     /// <summary>某只股票的全部报告期记录，按报告期倒序。</summary>
     public List<EarningsScheduleRow> GetByCode(string code)
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT {Cols} FROM EarningsSchedule WHERE code=$c ORDER BY report_period DESC;";
+        cmd.CommandText = $"SELECT {Cols} FROM {MergedTable} WHERE code=$c ORDER BY report_period DESC;";
         cmd.Parameters.AddWithValue("$c", code);
         using var r = cmd.ExecuteReader();
         var list = new List<EarningsScheduleRow>();
@@ -113,7 +311,7 @@ public class SqliteEarningsScheduleRepository
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT {Cols} FROM EarningsSchedule WHERE actual_date IS NULL ORDER BY report_period;";
+        cmd.CommandText = $"SELECT {Cols} FROM {MergedTable} WHERE actual_date IS NULL ORDER BY report_period;";
         using var r = cmd.ExecuteReader();
         var map = new Dictionary<string, EarningsScheduleRow>(StringComparer.Ordinal);
         while (r.Read())
@@ -142,7 +340,7 @@ public class SqliteEarningsScheduleRepository
         using var cmd = conn.CreateCommand();
         // 排序即优先级：未披露的排前面（取最早那期），已披露的排后面（取最晚那期）
         cmd.CommandText = $"""
-            SELECT {Cols} FROM EarningsSchedule
+            SELECT {Cols} FROM {MergedTable}
             ORDER BY code,
                      CASE WHEN actual_date IS NULL THEN 0 ELSE 1 END,
                      CASE WHEN actual_date IS NULL THEN report_period END ASC,
@@ -164,7 +362,7 @@ public class SqliteEarningsScheduleRepository
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT {Cols} FROM EarningsSchedule WHERE report_period=$p ORDER BY code;";
+        cmd.CommandText = $"SELECT {Cols} FROM {MergedTable} WHERE report_period=$p ORDER BY code;";
         cmd.Parameters.AddWithValue("$p", period.ToString(DateFormat));
         using var rd = cmd.ExecuteReader();
         var list = new List<EarningsScheduleRow>();
@@ -204,8 +402,10 @@ public class SqliteEarningsScheduleRepository
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT code, MAX(report_period) FROM EarningsSchedule
+        // 读的是**合并表**（2026-10-27）：两家的并集在抓取时就算好了，见 EarningsScheduleMerge。
+        // 这里不做任何合并——判据归 Logic，仓储只读写。
+        cmd.CommandText = $"""
+            SELECT code, MAX(report_period) FROM {MergedTable}
             WHERE actual_date IS NOT NULL AND actual_date <> '' AND actual_date <= $asOf
             GROUP BY code;
             """;
@@ -245,9 +445,11 @@ public class SqliteEarningsScheduleRepository
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        // 同一只票取 report_period 最大的那一行；SQLite 的 bare column + MAX() 保证 actual_date 来自同一行
+        // 同一只票取 report_period 最大的那一行；SQLite 的 bare column + MAX() 保证 actual_date 来自同一行。
+        // 读的是合并表（2026-10-27）——"两家都标了取较晚的日期"那条规则在抓取时就算完了，
+        // 见 EarningsScheduleMerge，这里不重复。
         cmd.CommandText = $"""
-            SELECT code, MAX(report_period), actual_date FROM EarningsSchedule
+            SELECT code, MAX(report_period), actual_date FROM {MergedTable}
             WHERE actual_date IS NOT NULL AND actual_date <> '' AND actual_date <= $asOf
             {(halfYearOnly ? "AND (substr(report_period, 6, 5) = '06-30' OR substr(report_period, 6, 5) = '12-31')" : "")}
             GROUP BY code;
@@ -269,7 +471,7 @@ public class SqliteEarningsScheduleRepository
     {
         using var conn = Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM EarningsSchedule WHERE actual_date IS NULL;";
+        cmd.CommandText = $"SELECT COUNT(*) FROM {MergedTable} WHERE actual_date IS NULL;";
         return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
     }
 }

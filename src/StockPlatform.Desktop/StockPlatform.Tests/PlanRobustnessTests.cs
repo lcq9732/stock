@@ -405,11 +405,11 @@ public class PlanRobustnessTests
     /// <summary>
     /// 把 harness 的组从「每工作日」换成「每周·今天」——**只给那两个"今日清单"测试用**。
     ///
-    /// 为什么要换：每工作日的项从 2026-09-04 起多了一个**收盘到点**（收盘后要再跑一轮，
-    /// 见 FetchPlanGroup.MarketClose），于是"早上跑过算不算今天完成"在 17:00 前后答案不同，
-    /// 拿它做清单测试就成了看运行时刻的脆弱测试（实测 17:00 一过就红）。
-    /// 清单要验的是"已完成和还要跑分开算"，跟收盘规则无关，换个不带收盘到点的周期最干净。
-    /// 收盘规则本身由下面那几个传固定 now 的测试覆盖。
+    /// 为什么要换：每工作日的项 2026-09-04 ~ 2026-10-27 之间多了一个**收盘到点**，
+    /// 于是"早上跑过算不算今天完成"在 17:00 前后答案不同，拿它做清单测试就成了看运行时刻的
+    /// 脆弱测试（实测 17:00 一过就红）。那条规则现在已经退役（见下面那组测试），
+    /// 但这里仍然换成每周——清单要验的是"已完成和还要跑分开算"，跟周期规则无关，
+    /// 换个不受"今天几点跑的"影响的周期最干净。
     /// </summary>
     private static void 换成每周今天(Harness h)
     {
@@ -679,12 +679,15 @@ public class PlanRobustnessTests
         finally { 放行.TrySetResult(); try { Directory.Delete(h.Dir, true); } catch { } }
     }
 
-    // ── 「每工作日」的收盘到点（2026-09-04）────────────────────────────────────────
-    // 收盘前跑到的当日数据是不完整的（K线未定盘、龙虎榜/资金流盘后才发布），所以每工作日的项
-    // 在收盘后必须再跑一轮。原来只要跑过一轮就算"今天做完了"——早上开机自动跑一遍，收盘后
-    // 就再也不跑了，当天数据永远停在盘中那个残缺状态（用户 17:04 看到"共32项已完成30项"，
-    // 那30项绝大多数是早上跑的）。
+    // ── 「每工作日」只有组设定的那**一个**到点（2026-10-27）────────────────────────
+    // 这里原先验的是"收盘到点"：每工作日的组除了设定时刻，还被自动补一个 17:00
+    // （2026-09-04 加的，理由是收盘前跑到的当日数据不完整）。
     //
+    // 那条规则已经退役，见 doc/plan-cross-group-duplicate-design.md：它让**组的时间不等于
+    // 执行时间**——「早间（开盘前）」组设的 08:15，实际每天跑 08:15 和 17:00 两轮，
+    // 而计划界面上一点看不出来。现在换成显式表达：要跑两轮就在两个组里各放一份。
+    //
+    // 所以下面验的是反过来的事：**设定时刻之外不再凭空多出到点**。
     // 这几个测试全部传**固定的 now**，不看真实时钟。
 
     /// <summary>周五 2026-09-04。下面几个测试共用。</summary>
@@ -707,39 +710,49 @@ public class PlanRobustnessTests
         return it;
     }
 
+    /// <summary>
+    /// **退役那条规则的反面**：早上 08:15 的组，早上跑过之后，一整天都算跑过了——
+    /// 17:00 不再凭空长出第二个到点。
+    ///
+    /// 这正是「早间（开盘前）」组原先的隐藏行为（实测它在 17:01 又跑了一轮）。
+    /// 想让它收盘后再跑一遍，现在要在日更组里另排一份，而不是指望这里偷偷多一档。
+    /// </summary>
     [Fact]
-    public void 收盘前跑过的_收盘后还算没跑()
+    public void 设定时刻之外_不再多出收盘那一档()
     {
-        var it = 每工作日项(周五.AddHours(9));                        // 早上 9 点跑完
-        Assert.True(it.AlreadyRanOn(周五.AddHours(10)));              // 上午问：这一轮确实跑过了
-        Assert.False(it.AlreadyRanOn(周五.AddHours(17).AddMinutes(5)));// 收盘后问：还得再跑一轮
+        var it = 每工作日项(周五.AddHours(8).AddMinutes(20), new TimeOnly(8, 15));  // 08:20 跑完
+        Assert.True(it.AlreadyRanOn(周五.AddHours(10)));               // 上午：跑过了
+        Assert.True(it.AlreadyRanOn(周五.AddHours(17).AddMinutes(5))); // 收盘后：还是跑过了，不再多一轮
+        Assert.True(it.AlreadyRanOn(周五.AddHours(23)));               // 到夜里都算今天做完
     }
 
+    /// <summary>设定时刻在收盘后的，行为跟以前一样——那条规则本来就不给它补档。</summary>
     [Fact]
-    public void 收盘后跑过的_才算今天做完()
-    {
-        var it = 每工作日项(周五.AddHours(17).AddMinutes(10));         // 17:10 跑的
-        Assert.True(it.AlreadyRanOn(周五.AddHours(18)));
-        Assert.True(it.AlreadyRanOn(周五.AddHours(23)));
-    }
-
-    /// <summary>设定时刻本来就在收盘后的，不该多插一个收盘到点——否则它每天要多跑一趟。</summary>
-    [Fact]
-    public void 设定时刻已在收盘后_不额外多跑一轮()
+    public void 设定时刻在收盘后_照旧只跑一轮()
     {
         var it = 每工作日项(周五.AddHours(18).AddMinutes(5), new TimeOnly(18, 0));
         Assert.True(it.AlreadyRanOn(周五.AddHours(19)));
         Assert.True(it.AlreadyRanOn(周五.AddHours(23)));
     }
 
+    /// <summary>设定时刻还没到的时候，当前这一轮是**上一个工作日**那一轮，不能判成"今天没跑"。</summary>
+    [Fact]
+    public void 当天到点之前_仍算在上一轮里()
+    {
+        // 周四 18:05 跑过；周五 08:00 问（当天 18:00 的点还没到）
+        var 周四 = 周五.AddDays(-1);
+        var it = 每工作日项(周四.AddHours(18).AddMinutes(5), new TimeOnly(18, 0));
+        Assert.True(it.AlreadyRanOn(周五.AddHours(8)));
+    }
+
     /// <summary>
-    /// 收盘那一轮跨了午夜也不能重复跑：周五 17:30 开工、周六凌晨 2 点还在跑完的状态，
+    /// 一轮跨了午夜也不能重复跑：周五 17:30 开工、周六凌晨 2 点还在跑完的状态，
     /// 周六问"跑过了吗"必须是"跑过了"（周末不开新一轮）。
     /// </summary>
     [Fact]
-    public void 收盘那轮跨到周末_不会重复跑()
+    public void 跨到周末的那轮_不会重复跑()
     {
-        var it = 每工作日项(周五.AddHours(17).AddMinutes(30));
+        var it = 每工作日项(周五.AddHours(17).AddMinutes(30), new TimeOnly(17, 0));
         Assert.True(it.AlreadyRanOn(周五.AddDays(1).AddHours(2)));    // 周六凌晨
     }
 
