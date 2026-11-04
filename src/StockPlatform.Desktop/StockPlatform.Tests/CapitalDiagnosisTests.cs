@@ -21,7 +21,7 @@ public class CapitalDiagnosisTests
     private readonly ITestOutputHelper _out;
     public CapitalDiagnosisTests(ITestOutputHelper output) => _out = output;
 
-    private const string RealDb = @"C:\Chingli\Git\stock\publish\data\local\current.sqlite";
+    private const string RealDb = @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock\data\local\current.sqlite";
 
     // ═══════════════════ 纯算法 ═══════════════════
 

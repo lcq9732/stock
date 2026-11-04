@@ -1,6 +1,7 @@
 ﻿<#
 .SYNOPSIS
-    Publishes StockPlatform.Fetcher and StockPlatform.Analyzer into publish/.
+    Publishes StockPlatform.Fetcher and StockPlatform.Analyzer into the publish folder
+    (default: the OneDrive stock folder, see -PublishDir; was <repo>/publish/ before 2026-11-04).
 .DESCRIPTION
     Publishes both projects to an isolated temp folder first, then copies only the resulting
     .exe into publish/ — never runs `dotnet publish -o` directly into publish/, because that
@@ -27,7 +28,9 @@ param(
     # 不带参数=两个都发；-a 只发分析程序(Analyzer)；-f 只发抓取程序(Fetcher)。用于其中一个正在
     # 运行（exe 被占用）、只想发另一个的场景。同时给 -a -f 等于都发。
     [Alias("a")][switch]$Analyzer,
-    [Alias("f")][switch]$Fetcher
+    [Alias("f")][switch]$Fetcher,
+    # 发布目录（exe 和 data\ 所在处）。2026-11-04 起从仓库的 publish\ 搬到 OneDrive 下。
+    [string]$PublishDir = "C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock"
 )
 
 # 一个都没指定 → 默认两个都发
@@ -36,7 +39,7 @@ if (-not $Analyzer -and -not $Fetcher) { $Analyzer = $true; $Fetcher = $true }
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$publishDir = Join-Path $repoRoot "publish"
+$publishDir = $PublishDir
 $scratchRoot = Join-Path $env:TEMP ("stockpublish_" + [Guid]::NewGuid().ToString("N"))
 
 $projects = @(

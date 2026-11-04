@@ -55,7 +55,7 @@ public class PdfParserBaselineTests
         }
 
         var root = Environment.GetEnvironmentVariable("PDF_BASELINE_REPORTS")
-                   ?? @"C:\Chingli\Git\stock\publish\data\reports";
+                   ?? @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock\data\reports";
         if (!Directory.Exists(root))
         {
             _out.WriteLine($"报告目录不存在：{root}，跳过。");

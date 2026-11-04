@@ -13,7 +13,7 @@ namespace StockPlatform.Tests;
 ///   dotnet test --filter "FullyQualifiedName~FinancialParityTests" -e FIN_PARITY=1 \
 ///     --logger "console;verbosity=detailed"
 /// </code>
-/// 库路径默认取 <c>publish/data/local/current.sqlite</c>，可用 <c>FIN_PARITY_DB</c> 覆盖；
+/// 库路径默认取 OneDrive 发布目录下的 <c>data/local/current.sqlite</c>，可用 <c>FIN_PARITY_DB</c> 覆盖；
 /// 样本量默认 200，可用 <c>FIN_PARITY_N</c> 覆盖。
 ///
 /// ════ 为什么要走产品代码而不是另写个脚本 ════
@@ -35,8 +35,7 @@ public class FinancialParityTests(ITestOutputHelper output)
 
     private static string DbPath =>
         Environment.GetEnvironmentVariable("FIN_PARITY_DB")
-        ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
-             "..", "..", "..", "..", "..", "..", "publish", "data", "local", "current.sqlite"));
+        ?? @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock\data\local\current.sqlite";
 
     private static int SampleSize =>
         int.TryParse(Environment.GetEnvironmentVariable("FIN_PARITY_N"), out var n) && n > 0 ? n : 200;

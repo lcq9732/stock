@@ -20,7 +20,7 @@ public class DossierCustomerSupplierProbe
     private readonly ITestOutputHelper _out;
     public DossierCustomerSupplierProbe(ITestOutputHelper output) => _out = output;
 
-    private const string Db = @"C:\Chingli\Git\stock\publish\data\local\current.sqlite";
+    private const string Db = @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock\data\local\current.sqlite";
     private const string Inbound = "被谁列为客户/供应商";
     private const string Outbound = "前五大客户与供应商";
 

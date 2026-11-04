@@ -20,7 +20,7 @@ public class MatcherRealDataProbe
     private readonly ITestOutputHelper _out;
     public MatcherRealDataProbe(ITestOutputHelper output) => _out = output;
 
-    private const string Db = @"C:\Chingli\Git\stock\publish\data\local\current.sqlite";
+    private const string Db = @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock\data\local\current.sqlite";
 
     [Fact]
     public void 真库上各档的数量()

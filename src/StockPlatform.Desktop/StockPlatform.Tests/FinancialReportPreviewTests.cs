@@ -17,7 +17,7 @@ namespace StockPlatform.Tests;
 /// </summary>
 public class FinancialReportPreviewTests
 {
-    private const string Db = @"C:\Chingli\Git\stock\publish\data\local\current.sqlite";
+    private const string Db = @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock\data\local\current.sqlite";
 
     private readonly ITestOutputHelper _out;
     public FinancialReportPreviewTests(ITestOutputHelper output) => _out = output;

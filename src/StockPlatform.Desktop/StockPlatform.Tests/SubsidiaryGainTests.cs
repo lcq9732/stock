@@ -19,8 +19,8 @@ namespace StockPlatform.Tests;
 /// </summary>
 public class SubsidiaryGainTests
 {
-    private const string Reports = @"C:\Chingli\Git\stock\publish\data\annual-reports";
-    private const string Db = @"C:\Chingli\Git\stock\publish\data\local\current.sqlite";
+    private const string Reports = @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock\data\annual-reports";
+    private const string Db = @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock\data\local\current.sqlite";
 
     private readonly ITestOutputHelper _out;
     public SubsidiaryGainTests(ITestOutputHelper output) => _out = output;

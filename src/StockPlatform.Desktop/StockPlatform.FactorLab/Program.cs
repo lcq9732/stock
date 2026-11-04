@@ -5,7 +5,7 @@ using StockPlatform.FactorLab.Factors;
 
 namespace StockPlatform.FactorLab;
 
-/// <summary>用法：FactorLab [数据库路径] [输出目录]。缺省时向上查找 publish/data/local/current.sqlite。</summary>
+/// <summary>用法：FactorLab [数据库路径] [输出目录]。缺省时先找 OneDrive 发布目录，再向上查找 publish/data/local/current.sqlite。</summary>
 public static class Program
 {
     /// <summary>因子清单在 <see cref="FactorRegistry"/> 登记（与 Analyzer 因子Tab共用）。</summary>
@@ -84,10 +84,16 @@ public static class Program
         return 0;
     }
 
-    /// <summary>从当前目录和程序目录逐级向上找 publish/data/local/current.sqlite（Fetcher 写的那个库，
-    /// 2026-08-21 起分析侧不再有 total.sqlite 副本，见 AnalyzerPaths）。</summary>
+    /// <summary>发布目录（2026-11-04 起从仓库的 publish/ 搬到 OneDrive 下，exe 和 data/ 都在这）。
+    /// 存在就优先用它；不存在才退回下面的逐级向上找 publish/。</summary>
+    const string PublishDir = @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock";
+
+    /// <summary>先看 <see cref="PublishDir"/>，再从当前目录和程序目录逐级向上找 publish/data/local/current.sqlite
+    /// （Fetcher 写的那个库，2026-08-21 起分析侧不再有 total.sqlite 副本，见 AnalyzerPaths）。</summary>
     static string? ProbeDb()
     {
+        var fixedDb = Path.Combine(PublishDir, "data", "local", "current.sqlite");
+        if (File.Exists(fixedDb)) return fixedDb;
         foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
         {
             var dir = new DirectoryInfo(start);
@@ -101,9 +107,11 @@ public static class Program
     }
 
     /// <summary>从当前目录和程序目录逐级向上找 publish 目录——运行时结果数据（数据库、因子实验输出等）
-    /// 都放这里，跟 ProbeDb 找 current.sqlite 同一套向上查找。找不到返回 null（退回当前目录）。</summary>
+    /// 都放这里，跟 ProbeDb 找 current.sqlite 同一套查找（先 <see cref="PublishDir"/> 再向上找）。
+    /// 找不到返回 null（退回当前目录）。</summary>
     static string? ProbePublishDir()
     {
+        if (Directory.Exists(PublishDir)) return PublishDir;
         foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
         {
             var dir = new DirectoryInfo(start);

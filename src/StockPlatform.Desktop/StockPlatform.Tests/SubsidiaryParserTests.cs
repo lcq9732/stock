@@ -15,7 +15,7 @@ namespace StockPlatform.Tests;
 /// </summary>
 public class SubsidiaryParserTests
 {
-    private const string Reports = @"C:\Chingli\Git\stock\publish\data\annual-reports";
+    private const string Reports = @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock\data\annual-reports";
     private static readonly DateTime Period = new(2025, 12, 31);
 
     private readonly ITestOutputHelper _out;

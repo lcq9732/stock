@@ -40,11 +40,16 @@ public class DataService
     /// <summary>读库用的路径：优先桌面上那份共享库，其次 App 私有目录（见类注释）。</summary>
     public string DbPath => ProbeSharedDb() ?? LocalDbPath;
 
-    /// <summary>从当前目录和程序目录逐级向上找 publish/data/local/current.sqlite——跟
-    /// FactorLab.ProbeDb 同一套查找。真机上必然找不到（没有这个目录），返回 null 交给
-    /// <see cref="LocalDbPath"/>。</summary>
+    /// <summary>桌面发布目录（2026-11-04 起从仓库的 publish/ 搬到 OneDrive 下）。</summary>
+    private const string PublishDir = @"C:\Chingli\My Works\OneDrive - CIPPlanner Corporation\stock";
+
+    /// <summary>先看 <see cref="PublishDir"/>，再从当前目录和程序目录逐级向上找
+    /// publish/data/local/current.sqlite——跟 FactorLab.ProbeDb 同一套查找。真机上必然找不到
+    /// （没有这些目录），返回 null 交给 <see cref="LocalDbPath"/>。</summary>
     private static string? ProbeSharedDb()
     {
+        var fixedDb = Path.Combine(PublishDir, "data", "local", "current.sqlite");
+        if (File.Exists(fixedDb)) return fixedDb;
         foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
         {
             var dir = new DirectoryInfo(start);
