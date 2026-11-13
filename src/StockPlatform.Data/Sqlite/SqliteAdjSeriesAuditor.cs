@@ -51,18 +51,33 @@ public sealed class SqliteAdjSeriesAuditor
     /// （全表 JOIN，生产库约 30 秒）。只有【重算回测序列】本身传 true——界面计数每项任务跑完都刷新一次，
     /// 扛不起这 30 秒；而它查出的票绝大多数本来就被上面第五条认出来了，界面漏报的只是存量里
     /// 时间戳已被增量盖新的那些（2026-09-29 那批 324 只），计数少报一轮不伤数据。
+    ///
+    /// <paramref name="onStep"/>：每查完一条回调一次（第几条、共几条、查的是什么、这一条用时）。
+    /// 2026-11-13 加：这六七条全库查询在 26GB 库上合计已经 5～6.5 分钟，中间一句话都不说，
+    /// 【重算回测序列】连续几天被看门狗（默认静默 5 分钟）判成卡死掐断（11-03、11-12、11-13）。
+    /// 每条一报既喂了狗、也让日志能看出到底是哪一条变慢。
     /// </summary>
-    public Plan BuildPlan(bool checkRewrittenRows = false)
+    public Plan BuildPlan(bool checkRewrittenRows = false,
+                          Action<int, int, string, TimeSpan>? onStep = null)
     {
+        int total = checkRewrittenRows ? 7 : 6, at = 0;
+        T Step<T>(string what, Func<T> query)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var result = query();
+            onStep?.Invoke(++at, total, what, sw.Elapsed);
+            return result;
+        }
+
         var repo = new SqliteBarRepository(_dbPath);
-        var rawLatest = repo.GetLatestPeriodStartByCode(Granularity.DayRaw);
-        var adjLatest = repo.GetLatestPeriodStartByCode(Granularity.DayAdj);
-        var rawEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayRaw);
-        var adjEarliest = repo.GetEarliestPeriodStartByCode(Granularity.DayAdj);
-        var staleEvents = CodesWithStaleEvents();
-        var fresherRaw = CodesWithFresherRawBars();
+        var rawLatest = Step("不复权最新日期", () => repo.GetLatestPeriodStartByCode(Granularity.DayRaw));
+        var adjLatest = Step("回测序列最新日期", () => repo.GetLatestPeriodStartByCode(Granularity.DayAdj));
+        var rawEarliest = Step("不复权最早日期", () => repo.GetEarliestPeriodStartByCode(Granularity.DayRaw));
+        var adjEarliest = Step("回测序列最早日期", () => repo.GetEarliestPeriodStartByCode(Granularity.DayAdj));
+        var staleEvents = Step("分红/配股记录有更新的", CodesWithStaleEvents);
+        var fresherRaw = Step("不复权抓取时刻更新的", CodesWithFresherRawBars);
         var rewritten = checkRewrittenRows
-            ? CodesWithRewrittenRows()
+            ? Step("已算过的日子被改写的（逐行比对）", CodesWithRewrittenRows)
             : new HashSet<string>(StringComparer.Ordinal);
 
         var codes = rawLatest

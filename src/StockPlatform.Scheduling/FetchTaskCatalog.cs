@@ -1550,7 +1550,11 @@ public static class FetchTaskCatalog
             // 「首次整段回补」在这一项里的意思是**全量重算**：忽略五条判据，有不复权日线的票
             // 全部整段重来（2026-09-10 加）。改过复权算法之后需要它——原来只能靠手工删掉
             // day_adj 逼判据重新认出来，而那一步没有任何地方记着该怎么做。
-            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill),
+            SupportedModes: FetchMode.Incremental | FetchMode.FirstBackfill,
+            // 开头统计待算名单是六七条全库查询（2026-11-13 实测合计 5～6.5 分钟），已经改成每条
+            // 查完报一句；但最慢的那条（已算日子逐行比对，全表 JOIN）是**单条 SQL**、中间喂不了狗，
+            // 库再长下去单条就可能自己超 5 分钟。默认阈值连续三轮误杀过（11-03、11-12、11-13）。
+            MaxQuiet: TimeSpan.FromMinutes(15)),
 
         new(FetchActionId.FetchBoards, "拉取板块", "东财", QuotaGroup.Mixed,
             TimeSpan.FromMinutes(5), "每工作日～每周",

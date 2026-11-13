@@ -347,6 +347,8 @@ public class FetchTaskCatalogTests
         {
             [FetchActionId.BankRegulatory] = TimeSpan.FromMinutes(25),
             [FetchActionId.StepFillShortBalance] = TimeSpan.FromMinutes(10),
+            // 统计待算名单那条全表 JOIN（2026-11-13：整段统计 5～6.5 分钟，连续三轮被默认阈值误杀）
+            [FetchActionId.RebuildAdjSeries] = TimeSpan.FromMinutes(15),
         };
 
         foreach (var (id, floor) in floors)

@@ -103,7 +103,14 @@ public sealed class AdjSeriesRebuildTask(
             Report("正在统计哪些股票的回测序列要重算（要扫一遍全库的日线，通常一分钟上下，请稍等）…");
             // 任务这边要多查一遍"已算过的日子被改写过"（CodesWithRewrittenRows，约 30 秒）——
             // 那些票只能整段重算，走增量会把改过的旧行永远留在 day_adj 里（2026-09-29 查实）。
-            plan = await Task.Run(() => auditor.BuildPlan(checkRewrittenRows: true), ct);
+            // 每查完一条报一句（2026-11-13）：这一段在 26GB 库上要 5～6.5 分钟，一声不吭就会被
+            // 看门狗（默认静默 5 分钟）当成卡死掐掉——11-03、11-12、11-13 三轮都是这么失败的。
+            // 报的是真进展（一条查询真查完了），日志里也能直接看出哪一条在变慢。
+            var planSw = System.Diagnostics.Stopwatch.StartNew();
+            plan = await Task.Run(() => auditor.BuildPlan(checkRewrittenRows: true,
+                onStep: (i, n, what, took) => Report(
+                    $"  统计中 {i}/{n}：{what}，这一条 {ElapsedText.Format(took)}、"
+                  + $"累计 {ElapsedText.Format(planSw.Elapsed)}")), ct);
             if (plan.StaleEventCount > 0)
                 Report($"其中 {plan.StaleEventCount} 只是因为分红/配股记录有更新——"
                      + "复权因子是拿这些事件算的，事件一变整条序列都得重算。");
