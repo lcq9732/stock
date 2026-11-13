@@ -66,6 +66,9 @@ public class QueryTabViewModel : INotifyPropertyChanged
 
     public RelayCommand SearchCommand { get; }
 
+    /// <summary>手动清空查询结果——结果是叠加的，不会自己清（2026-11-13）。</summary>
+    public RelayCommand ClearResultsCommand { get; }
+
     // ── 勾中的票加到哪一层（2026-09-01 起给三个去处，之前只能进主动仓）──
     // 三层不是同一份数据加个标记，语义也不一样，所以给三个命令而不是一个带参数的：
     //   主动仓 = WatchlistEntry + InTradePool，每天进晨检、吃止损止盈纪律；
@@ -90,6 +93,7 @@ public class QueryTabViewModel : INotifyPropertyChanged
         _watchlistStore = watchlistStore;
         _corePositionStore = corePositionStore;
         SearchCommand = new RelayCommand(_ => Search());
+        ClearResultsCommand = new RelayCommand(_ => ClearResults());
         AddToTradePoolCommand = new RelayCommand(_ => AddSelectedToWatchlist(intoTradePool: true));
         AddToWatchlistOnlyCommand = new RelayCommand(_ => AddSelectedToWatchlist(intoTradePool: false));
         AddToCorePositionCommand = new RelayCommand(_ => AddSelectedToCorePosition());
@@ -220,9 +224,20 @@ public class QueryTabViewModel : INotifyPropertyChanged
         StatusText = string.Join("；", parts);
     }
 
-    private void Search()
+    /// <summary>【清除结果】——结果是叠加的（见 <see cref="Search"/>），只有这里会清空列表。</summary>
+    private void ClearResults()
     {
         Results.Clear();
+        StatusText = "已清除查询结果";
+    }
+
+    /// <summary>
+    /// 查一次，把命中的**追加**到列表里（2026-11-13 改成叠加）：用户要一次看好几只票，
+    /// 原来每查一次就清空上一次的结果，只能一只一只看。现在第二次查询时第一次的结果还在，
+    /// 已在列表里的票（按代码）不重复加、勾选状态也不动；要清空点【清除结果】。
+    /// </summary>
+    private void Search()
+    {
         var q = (QueryText ?? "").Trim();
         if (q.Length == 0)
         {
@@ -255,7 +270,12 @@ public class QueryTabViewModel : INotifyPropertyChanged
             .ThenBy(s => s.Code)
             .ToList();
 
+        var existing = new HashSet<string>(Results.Select(r => r.Code), StringComparer.OrdinalIgnoreCase);
+        int added = 0, already = 0;
         foreach (var s in matches.Take(MaxResults))
+        {
+            if (!existing.Add(s.Code)) { already++; continue; }
+            added++;
             Results.Add(new QueryRowViewModel
             {
                 Code = s.Code,
@@ -265,12 +285,16 @@ public class QueryTabViewModel : INotifyPropertyChanged
                 Type = TypeDisplay(s.Type),
                 TypeRaw = s.Type,
             });
+        }
 
-        StatusText = matches.Count == 0
+        string thisRound = matches.Count == 0
             ? $"没有找到匹配\"{q}\"的标的"
             : matches.Count > MaxResults
-                ? $"匹配到 {matches.Count} 个，只显示前 {MaxResults} 个，请输入更精确的代码或名称"
-                : $"匹配到 {matches.Count} 个";
+                ? $"\"{q}\" 匹配到 {matches.Count} 个，只取前 {MaxResults} 个（请输入更精确的代码或名称）"
+                : $"\"{q}\" 匹配到 {matches.Count} 个";
+        if (matches.Count > 0)
+            thisRound += already > 0 ? $"，新增 {added} 个（{already} 个已在列表里）" : $"，新增 {added} 个";
+        StatusText = $"{thisRound}；列表共 {Results.Count} 个";
     }
 
     private static string TypeDisplay(string type) => type switch

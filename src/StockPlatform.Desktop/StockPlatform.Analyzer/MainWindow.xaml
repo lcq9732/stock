@@ -954,12 +954,15 @@
                         <TextBlock Text="股票代码或名称：" VerticalAlignment="Center" />
                         <TextBox Width="200" Margin="4,0" VerticalContentAlignment="Center"
                                  Text="{Binding QueryText, UpdateSourceTrigger=PropertyChanged}"
-                                 ToolTip="支持部分匹配，如输入 000066 或 长城，回车或点查询">
+                                 ToolTip="支持部分匹配，如输入 000066 或 长城，回车或点查询。&#10;结果是叠加的：再查一只，前面查到的还留在列表里（同一只不会重复出现）；要清空点【清除结果】。">
                             <TextBox.InputBindings>
                                 <KeyBinding Key="Return" Command="{Binding SearchCommand}" />
                             </TextBox.InputBindings>
                         </TextBox>
                         <Button Content="查询" Command="{Binding SearchCommand}" Width="90" Margin="8,0,0,0" />
+                        <!-- 2026-11-13：查询结果改成叠加（一次看好几只票），只有这个按钮会清空列表 -->
+                        <Button Content="清除结果" Command="{Binding ClearResultsCommand}" Margin="8,0,0,0" Padding="10,3"
+                                ToolTip="清空下面的查询结果列表。&#10;查询结果是叠加的，再查别的票不会自动清掉前面的。" />
                         <!-- 分裂按钮【加入主动仓 ▾】（2026-09-01）——原来只能加进主动仓，但同一只票
                              该进哪一层是用户当场的判断：想买卖的进主动仓、长期吃分红的进底仓、只是先
                              挂着看的进自选股。三层的存储和纪律都不同（底仓另一份 json、不设价格止损），
