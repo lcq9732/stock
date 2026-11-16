@@ -1,11 +1,16 @@
-﻿using System.Windows;
+﻿using System.ComponentModel;
+using System.Globalization;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
+using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using OxyPlot;
+using StockPlatform.Data.Sqlite;
 using StockPlatform.Logic.Models;
 using StockPlatform.Desktop.Shared.Theme;
 
@@ -31,9 +36,18 @@ public partial class StockDossierWindow : Window
     private const double ChartHeightStar = 1.0;
     private const double TableHeightStar = 1.4;
 
-    public StockDossierWindow(StockDossier dossier)
+    /// <summary>本地库路径——点股东名称时反查他的其他持仓要用（<see cref="SqliteHolderPortfolioReader"/>）。
+    /// 为 null 时股东名称照样显示成链接，点了提示不可用。</summary>
+    private readonly string? _dbPath;
+
+    /// <summary>在股东持仓窗口里双击某只票时打开它的行情详情（参数：owner 窗口、代码、名称）。</summary>
+    private readonly Action<Window, string, string>? _openQuote;
+
+    public StockDossierWindow(StockDossier dossier, string? dbPath = null, Action<Window, string, string>? openQuote = null)
     {
         InitializeComponent();
+        _dbPath = dbPath;
+        _openQuote = openQuote;
 
         Title = $"其他数据 — {dossier.Code} {dossier.Name}".TrimEnd();
         TitleText.Text = $"{dossier.Code} {dossier.Name}".TrimEnd();
@@ -58,12 +72,12 @@ public partial class StockDossierWindow : Window
             });
         }
 
-        // 默认停在第一个有数据的页签上——第一节"基本信息"永远有数据，所以实际就是它，
-        // 但万一将来第一节也可能为空，这样不会开在一个空表上。
+        // 默认停在第一个有数据的页签上——第一节是十大流通股东（2026-11-16 起），ETF 这类没有
+        // 流通股东数据的就顺延到下一个有数据的节，不开在一个空表上。
         SectionTabs.SelectedIndex = Math.Max(0, dossier.Sections.FindIndex(s => s.Rows.Count > 0));
     }
 
-    private static FrameworkElement BuildSectionContent(DossierSection section)
+    private FrameworkElement BuildSectionContent(DossierSection section)
     {
         var grid = new Grid { Margin = new Thickness(6) };
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 节说明
@@ -216,7 +230,7 @@ public partial class StockDossierWindow : Window
         VerticalAlignment = System.Windows.VerticalAlignment.Top,
     };
 
-    private static DataGrid BuildDataGrid(DossierSection section)
+    private DataGrid BuildDataGrid(DossierSection section)
     {
         var dataGrid = new DataGrid
         {
@@ -235,12 +249,25 @@ public partial class StockDossierWindow : Window
         for (int i = 0; i < section.Columns.Count; i++)
         {
             var col = section.Columns[i];
+            var width = col.Width > 0 ? new DataGridLength(col.Width) : new DataGridLength(1, DataGridLengthUnitType.Star);
+            if (section.LinkColumn == i)
+            {
+                dataGrid.Columns.Add(new DataGridTemplateColumn
+                {
+                    Header = col.Header,
+                    Width = width,
+                    CellTemplate = LinkCellTemplate(i),
+                    ClipboardContentBinding = new Binding($"[{i}]"),   // Ctrl+C 照样复制出名称
+                });
+                continue;
+            }
+
             var column = new DataGridTextColumn
             {
                 Header = col.Header,
                 // 行是 string[]，用索引器绑定取第 i 个单元格。
                 Binding = new Binding($"[{i}]"),
-                Width = col.Width > 0 ? new DataGridLength(col.Width) : new DataGridLength(1, DataGridLengthUnitType.Star),
+                Width = width,
             };
             if (col.RightAlign)
             {
@@ -250,6 +277,80 @@ public partial class StockDossierWindow : Window
             }
             dataGrid.Columns.Add(column);
         }
+
+        if (section.GroupColumn is int groupColumn && section.Rows.Count > 0)
+        {
+            // 按某列分组：行已按"最新在前"排好，组的顺序就是行首次出现的顺序，所以第一组=最新一期，
+            // 只把它默认展开（其余折叠，一眼看到最新名单，旧的要看再点开）。
+            var view = new ListCollectionView(section.Rows);
+            view.GroupDescriptions.Add(new ColumnGroupDescription(groupColumn, section.GroupHeaders, section.Rows[0][groupColumn]));
+            dataGrid.ItemsSource = view;
+            dataGrid.GroupStyle.Add(new GroupStyle { ContainerStyle = (Style)FindResource("DossierGroupContainer") });
+            VirtualizingPanel.SetIsVirtualizingWhenGrouping(dataGrid, true);
+        }
+
+        if (section.LinkColumn != null)
+        {
+            var tag = section.LinkTag ?? TopShareholderRow.KindFloat;
+            dataGrid.AddHandler(Hyperlink.ClickEvent, new RoutedEventHandler(async (_, e) =>
+            {
+                if (e.OriginalSource is Hyperlink { DataContext: string[] row } && section.LinkColumn is int c)
+                    await OpenHolderAsync(row[c], tag);
+            }));
+        }
         return dataGrid;
+    }
+
+    /// <summary>可点击单元格的模板。列下标要写进绑定路径，所以用 XAML 字符串现拼。</summary>
+    private static DataTemplate LinkCellTemplate(int column) => (DataTemplate)XamlReader.Parse($$"""
+        <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+            <TextBlock TextTrimming="CharacterEllipsis">
+                <Hyperlink ToolTip="查看这个股东还持有哪些股票" Foreground="{DynamicResource Theme.Accent.Link}">
+                    <Run Text="{Binding [{{column}}], Mode=OneWay}" />
+                </Hyperlink>
+            </TextBlock>
+        </DataTemplate>
+        """);
+
+    /// <summary>反查这个股东的其他持仓并打开窗口。读库放后台线程（附 25GB 库，没索引的老库要扫一秒多）。</summary>
+    private async Task OpenHolderAsync(string holderName, string kind)
+    {
+        if (string.IsNullOrWhiteSpace(holderName) || holderName == "—") return;
+        if (_dbPath == null)
+        {
+            MessageBox.Show(this, "这里没有拿到本地库路径，无法反查股东持仓。", "股东持仓", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var previousCursor = Cursor;
+        Cursor = Cursors.Wait;
+        try
+        {
+            var dbPath = _dbPath;
+            var portfolio = await Task.Run(() => new SqliteHolderPortfolioReader(dbPath).Read(holderName, kind));
+            Cursor = previousCursor;
+            new HolderPortfolioWindow(portfolio, _openQuote) { Owner = this }.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"读取股东持仓失败：{ex.Message}", "股东持仓", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            Cursor = previousCursor;
+        }
+    }
+
+    /// <summary>组键：标题文字 + 是否默认展开。record 的值相等保证同一期的行落进同一组。</summary>
+    private sealed record GroupKey(string Header, bool Expanded);
+
+    /// <summary>按 string[] 行的第 N 列分组（PropertyGroupDescription 认不了数组下标）。</summary>
+    private sealed class ColumnGroupDescription(int column, Dictionary<string, string> headers, string expandedKey) : GroupDescription
+    {
+        public override object GroupNameFromItem(object item, int level, CultureInfo culture)
+        {
+            var key = ((string[])item)[column];
+            return new GroupKey(headers.GetValueOrDefault(key) ?? key, key == expandedKey);
+        }
     }
 }

@@ -47,11 +47,12 @@ public class SqliteStockDossierReader
         var dossier = new StockDossier { Code = code, Name = name };
         using var conn = Open();
 
+        // 十大流通股东排第一、窗口默认打开它（2026-11-16 用户要求）——这是最常看的一节。
+        Add(dossier, "十大流通股东", "TopShareholder(kind=float)。按报告期分组，组标题带前十合计和新进/退出；点股东名称看他还持有哪些股票。", () => ReadTopShareholder(conn, code, "float"));
         Add(dossier, "基本信息 / 数据覆盖", "StockMeta + DelistedStock + EtfIndexMap，以及本地各粒度K线的起止（K线本身在图上，这里只报覆盖范围）。", () => ReadBasics(conn, code));
         Add(dossier, "融资融券", "MarginDetail：交易所官方（上交所+深交所）。**只覆盖两融标的**，非标的天生没有数据（空表≠余额为0）；北交所两个源都不提供。环比=与上一交易日比。", () => ReadMargin(conn, code));
         Add(dossier, "股东户数", "ShareholderCount。环比=与表里上一行比；每日晨检那列用的是\"两期间隔<55天算同一期的补充披露\"口径，会与这里不同。", () => ReadShareholderCount(conn, code));
-        Add(dossier, "十大股东", "TopShareholder(kind=total)。每次抓取整体覆盖该股全部历史。", () => ReadTopShareholder(conn, code, "total"));
-        Add(dossier, "十大流通股东", "TopShareholder(kind=float)。", () => ReadTopShareholder(conn, code, "float"));
+        Add(dossier, "十大股东", "TopShareholder(kind=total)。每次抓取整体覆盖该股全部历史。按报告期分组；点股东名称看他还持有哪些股票。", () => ReadTopShareholder(conn, code, "total"));
         Add(dossier, "分红送配", "Dividend：新浪分红派息页。表里金额是**每10股**口径，\"每股股息\"列已除10。进度为\"预案/董事会通过\"的方案可能变更。", () => ReadDividend(conn, code));
         Add(dossier, "财务报表", "FinancialReport：单位亿元，**年内累计**口径（不是单季）。报告期是季度末，不是公告日。比率列为本表现算。", () => ReadFinancial(conn, code));
         Add(dossier, "被谁列为客户/供应商", "StockCustomerSupplier 的**反向查询**：别家年报里把这只票列进前五大的记录。\n对龙头股这一节往往比下面那节有用得多——大公司自己披露时基本匿名（「第一名」「客户1」），\n而点它名的中小票通常写实名，所以只有站在这一边才看得到这条边。「占对方」是这笔生意占**对方**\n该类合计的比例，不是占这只票的。", () => ReadInboundPartners(conn, code));
@@ -333,32 +334,82 @@ public class SqliteStockDossierReader
 
     /// <summary>十大（流通）股东。图画的是**每期前十合计占比**——单个股东逐期连线在股东名次进出
     /// 变化时会连出假趋势，合计占比才是"筹码集中度"这个真正想看的东西。</summary>
+    /// <remarks>
+    /// 表格按报告期分组（<see cref="DossierSection.GroupColumn"/>），组标题带前十合计和新进/退出人数；
+    /// 每行多一列"较上期"——跟本票上一期名单比：新进 / 增减多少股 / 不变。退出的人这一期没有行，
+    /// 名字写在组标题里。股东名称列可点（<see cref="DossierSection.LinkColumn"/>），反查他还持有哪些票。
+    /// </remarks>
     private static DossierSection ReadTopShareholder(SqliteConnection conn, string code, string kind)
     {
+        const int nameColumn = 2;
         var columns = new List<DossierColumn>
         {
-            new("报告期", 100), new("名次", 55, true), new("股东名称", 0), new("持股数量", 130, true), new("占比", 80, true), new("股本性质", 120),
+            new("报告期", 100), new("名次", 55, true), new("股东名称", 0), new("持股数量", 130, true), new("占比", 80, true),
+            new("较上期", 130, true), new("股本性质", 120),
         };
-        var rows = new List<string[]>();
-        var sumByPeriod = new Dictionary<string, double>();
 
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT report_date, rank, holder_name, shares, ratio, share_type
-            FROM TopShareholder WHERE code = $c AND kind = $k ORDER BY report_date DESC, rank;
-            """;
-        cmd.Parameters.AddWithValue("$c", code);
-        cmd.Parameters.AddWithValue("$k", kind);
-        using (var r = cmd.ExecuteReader())
+        // 升序读：period → [(rank, name, shares, ratio, type)]
+        var byPeriod = new SortedDictionary<string, List<(double Rank, string Name, double Shares, double Ratio, string Type)>>(StringComparer.Ordinal);
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT report_date, rank, holder_name, shares, ratio, share_type
+                FROM TopShareholder WHERE code = $c AND kind = $k ORDER BY report_date, rank;
+                """;
+            cmd.Parameters.AddWithValue("$c", code);
+            cmd.Parameters.AddWithValue("$k", kind);
+            using var r = cmd.ExecuteReader();
             while (r.Read())
             {
                 var period = r.GetString(0);
-                var ratio = Dbl(r, 4);
-                sumByPeriod[period] = sumByPeriod.GetValueOrDefault(period) + ratio;
-                rows.Add(new[] { period, Num(Dbl(r, 1), 0), Str(r, 2), Num(Dbl(r, 3), 0), Pct(ratio), Str(r, 5) });
+                if (!byPeriod.TryGetValue(period, out var list)) byPeriod[period] = list = new();
+                list.Add((Dbl(r, 1), Str(r, 2), Dbl(r, 3), Dbl(r, 4), Str(r, 5)));
             }
+        }
 
-        var periods = sumByPeriod.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList();
+        var periods = byPeriod.Keys.ToList();
+        var sumByPeriod = periods.ToDictionary(p => p, p => byPeriod[p].Sum(x => x.Ratio));
+        var headers = new Dictionary<string, string>();
+        var rowsByPeriod = new Dictionary<string, List<string[]>>();
+
+        for (int i = 0; i < periods.Count; i++)
+        {
+            var period = periods[i];
+            // 上一期的股数按名字汇总（同名两行的极少数情况也能对上）
+            Dictionary<string, double>? prevShares = i == 0 ? null
+                : byPeriod[periods[i - 1]].GroupBy(x => x.Name).ToDictionary(g => g.Key, g => g.Sum(x => x.Shares));
+            var curNames = byPeriod[period].Select(x => x.Name).ToHashSet();
+
+            var rows = new List<string[]>();
+            int entered = 0;
+            foreach (var x in byPeriod[period])
+            {
+                string change;
+                if (prevShares == null) change = "";
+                else if (!prevShares.TryGetValue(x.Name, out var before)) { change = "新进"; entered++; }
+                else
+                {
+                    var diff = x.Shares - before;
+                    change = diff == 0 ? "不变" : $"{(diff > 0 ? "增" : "减")} {Num(Math.Abs(diff), 0)}";
+                }
+                rows.Add(new[] { period, Num(x.Rank, 0), x.Name, Num(x.Shares, 0), Pct(x.Ratio), change, x.Type });
+            }
+            rowsByPeriod[period] = rows;
+
+            var header = $"{period}　·　前十合计 {Pct(sumByPeriod[period])}";
+            if (prevShares != null)
+            {
+                header += $"（较上期 {Signed(sumByPeriod[period] - sumByPeriod[periods[i - 1]]).TrimEnd('%')} 个百分点）";
+                var exited = prevShares.Keys.Where(n => !curNames.Contains(n)).ToList();
+                header += $"　·　新进 {entered} / 退出 {exited.Count}";
+                // 名字最多列 3 个——换届/改名那期能退出五六个，全列出来组标题撑出横向滚动条
+                if (exited.Count > 0)
+                    header += $"（退出：{string.Join("、", exited.Take(3))}{(exited.Count > 3 ? $" 等 {exited.Count} 个" : "")}）";
+            }
+            headers[period] = header;
+        }
+
+        var allRows = Enumerable.Reverse(periods).SelectMany(p => rowsByPeriod[p]).ToList();
         var chart = periods.Count < 2 ? null : new DossierChart
         {
             XLabels = periods,
@@ -367,7 +418,11 @@ public class SqliteStockDossierReader
             Note = "画合计而不是逐个股东连线——名次进出会让单个股东连出假趋势。合计上升=筹码向大股东集中。",
         };
 
-        return new DossierSection { Columns = columns, Rows = rows, Chart = chart };
+        return new DossierSection
+        {
+            Columns = columns, Rows = allRows, Chart = chart,
+            GroupColumn = 0, GroupHeaders = headers, LinkColumn = nameColumn, LinkTag = kind,
+        };
     }
 
     private static DossierSection ReadDividend(SqliteConnection conn, string code)

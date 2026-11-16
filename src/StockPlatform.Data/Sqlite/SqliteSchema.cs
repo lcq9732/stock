@@ -940,6 +940,9 @@ public static class SqliteSchema
             CREATE INDEX IF NOT EXISTS ix_lhbseat_code ON LhbSeat(code, trade_date);
             -- 按日横切（"这一天全市场谁被超大单买了"）不是主键最左前缀。
             CREATE INDEX IF NOT EXISTS ix_flowdetail_date ON NetInflowDetail(trade_date);
+            -- 按股东名称反查"他还持有哪些票"（其他数据窗口点股东名，2026-11-16）。不是主键最左前缀，
+            -- 没索引要扫 545 万行（热缓存约 1 秒，冷启动更慢）。首次建约几秒。
+            CREATE INDEX IF NOT EXISTS ix_topshareholder_holder ON TopShareholder(holder_name, kind);
             -- 市场事件四表：按股票反查是主要用法，但除 ShareLift/HolderChange 外 code 都不是主键最左前缀。
             CREATE INDEX IF NOT EXISTS ix_blocktrade_code ON BlockTrade(code, trade_date);
             CREATE INDEX IF NOT EXISTS ix_orgsurvey_notice ON OrgSurvey(notice_date);

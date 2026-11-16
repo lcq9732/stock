@@ -45,6 +45,21 @@ public class DossierSection
     /// <summary>该节的趋势图数据（只有时间序列的节有，快照/名单类为 null）。**时间正序**，跟
     /// <see cref="Rows"/> 的倒序相反——图从左到右读是时间往后走。</summary>
     public DossierChart? Chart { get; init; }
+
+    /// <summary>按哪一列分组显示（列下标）；null = 不分组。十大（流通）股东按报告期分组——一期十行
+    /// 摊平成一长串时，看不出哪几行是同一期、两期之间谁进谁出。</summary>
+    public int? GroupColumn { get; init; }
+
+    /// <summary>分组标题：分组列的值 → 标题文字（如"2026-09-30 · 前十合计 32.93% · 新进 1 / 退出 1"）。
+    /// 没有对应项的组直接用分组列的值当标题。</summary>
+    public Dictionary<string, string> GroupHeaders { get; init; } = new();
+
+    /// <summary>可点击的列（列下标）；null = 没有。目前只有股东名称列：点了打开"该股东持有的其他股票"。</summary>
+    public int? LinkColumn { get; init; }
+
+    /// <summary>点击 <see cref="LinkColumn"/> 时带上的附加参数——股东名称列放 TopShareholder 的
+    /// kind（total/float），决定反查哪一种名单。</summary>
+    public string? LinkTag { get; init; }
 }
 
 /// <param name="Header">列标题。</param>

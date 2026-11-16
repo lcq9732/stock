@@ -8,6 +8,24 @@
     <!-- 故意用浅色（跟主窗口各 DataGrid 一致），不跟着"行情详情"用深色——那个窗口深色是为了仿券商
          K线软件，这里是纯数据表格，跟主窗口保持一套观感更省事也更好读。页签在代码里按节动态生成
          （见 StockDossierWindow.xaml.cs BuildTabs），XAML 这里只放骨架。 -->
+    <Window.Resources>
+        <!-- 分组表格（十大/十大流通股东按报告期分组）的组容器：可折叠，标题来自 GroupKey.Header，
+             只有最新一期默认展开（GroupKey.Expanded，见 StockDossierWindow.ColumnGroupDescription）。 -->
+        <Style x:Key="DossierGroupContainer" TargetType="GroupItem">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="GroupItem">
+                        <Expander IsExpanded="{Binding Name.Expanded, Mode=OneTime}" Margin="0,2,0,0">
+                            <Expander.Header>
+                                <TextBlock Text="{Binding Name.Header}" FontWeight="Bold" Foreground="{DynamicResource Theme.Foreground}" />
+                            </Expander.Header>
+                            <ItemsPresenter />
+                        </Expander>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />

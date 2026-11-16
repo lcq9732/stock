@@ -192,7 +192,10 @@ public partial class QuoteDetailWindow : Window
         try
         {
             var dossier = await Task.Run(() => new SqliteStockDossierReader(_dbPath).Read(_code, _name));
-            new StockDossierWindow(dossier) { Owner = this }.ShowDialog();
+            // 股东持仓窗口里双击某只票 → 再开一个它自己的行情详情（模态，关掉回到持仓列表）。
+            new StockDossierWindow(dossier, _dbPath, (owner, code, name) =>
+                new QuoteDetailWindow(code, name, _barRepository, _dbPath, _noteStore) { Owner = owner }.ShowDialog())
+            { Owner = this }.ShowDialog();
         }
         catch (Exception ex)
         {
