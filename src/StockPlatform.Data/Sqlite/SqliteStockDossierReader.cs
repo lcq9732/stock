@@ -332,8 +332,9 @@ public class SqliteStockDossierReader
         return new DossierSection { Columns = columns, Rows = rows, Chart = chart };
     }
 
-    /// <summary>十大（流通）股东。图画的是**每期前十合计占比**——单个股东逐期连线在股东名次进出
-    /// 变化时会连出假趋势，合计占比才是"筹码集中度"这个真正想看的东西。</summary>
+    /// <summary>十大（流通）股东。**不画趋势图**（2026-11-16 用户去掉）：原来画的是每期前十合计占比，
+    /// 但流通股本随解禁跳变，合计占比跟着断崖式跳，看着像筹码剧变、其实是分母变了，没什么用。
+    /// 每期合计和较上期变化仍写在分组标题里。</summary>
     /// <remarks>
     /// 表格按报告期分组（<see cref="DossierSection.GroupColumn"/>），组标题带前十合计和新进/退出人数；
     /// 每行多一列"较上期"——跟本票上一期名单比：新进 / 增减多少股 / 不变。退出的人这一期没有行，
@@ -410,17 +411,9 @@ public class SqliteStockDossierReader
         }
 
         var allRows = Enumerable.Reverse(periods).SelectMany(p => rowsByPeriod[p]).ToList();
-        var chart = periods.Count < 2 ? null : new DossierChart
-        {
-            XLabels = periods,
-            LeftAxisTitle = "%",
-            Series = new List<DossierSeries> { new("前十合计占比（%）", periods.Select(p => sumByPeriod[p]).ToArray()) },
-            Note = "画合计而不是逐个股东连线——名次进出会让单个股东连出假趋势。合计上升=筹码向大股东集中。",
-        };
-
         return new DossierSection
         {
-            Columns = columns, Rows = allRows, Chart = chart,
+            Columns = columns, Rows = allRows,
             GroupColumn = 0, GroupHeaders = headers, LinkColumn = nameColumn, LinkTag = kind,
         };
     }

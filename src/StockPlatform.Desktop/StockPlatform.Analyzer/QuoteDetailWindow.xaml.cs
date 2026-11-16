@@ -187,23 +187,14 @@ public partial class QuoteDetailWindow : Window
     private async void OtherDataButton_Click(object sender, RoutedEventArgs e)
     {
         OtherDataButton.IsEnabled = false;
-        var previousCursor = Cursor;
-        Cursor = Cursors.Wait;
         try
         {
-            var dossier = await Task.Run(() => new SqliteStockDossierReader(_dbPath).Read(_code, _name));
             // 股东持仓窗口里双击某只票 → 再开一个它自己的行情详情（模态，关掉回到持仓列表）。
-            new StockDossierWindow(dossier, _dbPath, (owner, code, name) =>
-                new QuoteDetailWindow(code, name, _barRepository, _dbPath, _noteStore) { Owner = owner }.ShowDialog())
-            { Owner = this }.ShowDialog();
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"读取其他数据失败：{ex.Message}", "其他数据", MessageBoxButton.OK, MessageBoxImage.Warning);
+            await StockDossierWindow.OpenAsync(this, _dbPath, _code, _name, (owner, code, name) =>
+                new QuoteDetailWindow(code, name, _barRepository, _dbPath, _noteStore) { Owner = owner }.ShowDialog());
         }
         finally
         {
-            Cursor = previousCursor;
             OtherDataButton.IsEnabled = true;
         }
     }

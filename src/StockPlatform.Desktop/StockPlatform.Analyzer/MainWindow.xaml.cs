@@ -223,6 +223,7 @@ public partial class MainWindow : Window
                     case "MidCapPullbackGrid": OpenMidCapPullbackCriteria(vm, result); break;
                     case "GoldenCrossGrid": OpenGoldenCrossCriteria(vm, result); break;
                     case "RisingLowsGrid": OpenRisingLowsCriteria(vm, result); break;
+                    case "ProfitableSmallCapGrid": OpenProfitableSmallCapCriteria(result); break;
                     // 新加了筛选页却忘了在这里接一行的话会走到这——说出来，别让它静静地点不动。
                     default:
                         MessageBox.Show(this, $"这一页（{gridName}）还没有接条件详情。", "无法显示详情",
@@ -385,6 +386,23 @@ public partial class MainWindow : Window
         var text = string.Join("\n\n", r.Criteria.Select(c =>
             $"{(c.DataMissing ? "⚠" : c.Satisfied ? "✓" : "✗")} {c.Name}\n    {c.Basis}"));
         TextDetailWindow.Show("短线法 — 条件详情", header, text, this);
+    }
+
+    // 陈峰法的条件详情——判据是市值/财报/位置/成交额，没有一张现成的图画得全，用纯文字（同短线法）。
+    private void OpenProfitableSmallCapCriteria(ResultRowViewModel row)
+    {
+        if (row.Error != null)
+        {
+            MessageBox.Show(this, row.Error, "无法显示详情", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var r = row.Result;
+        var header = $"{r.Code} {r.Name}　　数据日期 {r.DataDate:yyyy-MM-dd}　收盘 {r.LastClose:F2}\n" +
+                     $"250日位置 {r.SortScore:F0}%（列表按这个升序排）{(r.Category == "建仓名单" ? "　★建仓名单" : "")}";
+        var text = string.Join("\n\n", r.Criteria.Select(c =>
+            $"{(c.DataMissing ? "⚠" : c.Satisfied ? "✓" : "✗")} {c.Name}\n    {c.Basis}"));
+        TextDetailWindow.Show("陈峰法 — 条件详情", header, text, this);
     }
 
     private void OpenWatchlistCriteria(MainViewModel vm, WatchlistRowViewModel row)

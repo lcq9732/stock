@@ -44,10 +44,15 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" x:Name="HeaderText" FontSize="17" TextWrapping="Wrap"
                        VerticalAlignment="Center" Margin="0,0,12,0" />
-            <Button Grid.Column="1" Content="复制全文" Width="90" Click="CopyAll_Click"
+            <!-- 「其他数据」（2026-11-16 用户要求）：跟【行情详情】里那个按钮打开的是同一个窗口 -->
+            <Button Grid.Column="1" x:Name="OtherDataButton" Content="其他数据" Width="90" Click="OtherDataButton_Click"
+                    VerticalAlignment="Center" Margin="0,0,8,0"
+                    ToolTip="本地库里这只票除K线之外的全部数据：十大流通股东、两融、股东户数、分红、财报、资金流、龙虎榜……" />
+            <Button Grid.Column="2" Content="复制全文" Width="90" Click="CopyAll_Click"
                     VerticalAlignment="Center"
                     ToolTip="把整份分析复制成纯文本（含六个维度的结论），可以贴到分析笔记里" />
         </Grid>

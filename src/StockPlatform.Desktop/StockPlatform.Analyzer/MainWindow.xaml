@@ -597,7 +597,7 @@
                     </GroupBox>
 
                     <!-- 自选股体检：问题最严重的排最前 -->
-                    <GroupBox Grid.Row="2" Header="自选股体检（短线R1：浮盈+跌破MA5就卖 / 时间止损20天(高波15天) / 15%回撤止损 / +50%止盈减仓 / 户数暴增警示 / 60日线下不加仓）">
+                    <GroupBox Grid.Row="2" Header="自选股体检（短线R1：浮盈+跌破MA5就卖 / 时间止损20天(高波15天) / 15%回撤止损 / +50%止盈减仓 / 户数暴增警示 / 60日线下不加仓｜陈峰法持仓改用：放量收涨减半→再放量清仓 / +25%减半 / +50%或高位清仓 / 跌15%加仓）">
                         <DataGrid ItemsSource="{Binding StockRows}" AutoGenerateColumns="False" IsReadOnly="True"
                                   CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
                                   AlternatingRowBackground="{DynamicResource Theme.Grid.Row.Alternate}"
@@ -1339,6 +1339,56 @@
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" local:CellAction.Kind="Quote" />
                             <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
                             <DataGridTextColumn Header="满足数" Binding="{Binding SatisfiedCount}" Width="70" IsReadOnly="True" local:CellAction.Kind="Criteria" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <GroupBox Grid.Row="2" Header="运行日志" Margin="0,10,0,0">
+                        <TextBox local:LogText.Lines="{Binding LogLines}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
+                                 IsInactiveSelectionHighlightEnabled="True" />
+                    </GroupBox>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="陈峰法">
+                <Grid DataContext="{Binding ProfitableSmallCapTab}" Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="130" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                        <TextBlock Text="固定使用日线；卖出纪律在【每日晨检】" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                        <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
+                        <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
+                                Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件、卖出纪律与回测说明" />
+                        <Button Content="加入自选" Command="{Binding AddToWatchlistCommand}" Width="80" Margin="16,0,0,0"
+                                ToolTip="把左边表格里勾选的股票加入自选，供以后跟踪" />
+                        <Button Content="导出Excel" Command="{Binding ExportCommand}" Width="80" Margin="8,0,0,0"
+                                ToolTip="把当前结果列表导出成 Excel(.xlsx)" />
+                        <TextBlock Text="{Binding ProgressText}" Margin="12,0,0,0" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                    </StackPanel>
+
+                    <!-- 只列满足全部 8 条的票，按 250 日位置升序（见 ProfitableSmallCapTabViewModel.RunAnalyzeAsync）。 -->
+                    <DataGrid x:Name="ProfitableSmallCapGrid" Grid.Row="1" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="False"
+                              CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
+                              AlternatingRowBackground="{DynamicResource Theme.Grid.Row.Alternate}"
+                              ToolTip="勾选后点&quot;加入自选&quot;可以跟踪。&#10;点代码看分析详情、点名称看K线、点位置看条件详情。">
+                        <DataGrid.Columns>
+                            <DataGridTemplateColumn Width="36" CanUserSort="False"
+                                                    CellTemplate="{StaticResource SelectCheckBoxCell}">
+                                <DataGridTemplateColumn.Header>
+                                    <CheckBox Click="SelectAllHeader_Click" ToolTip="全选 / 全不选" HorizontalAlignment="Center" />
+                                </DataGridTemplateColumn.Header>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="80" IsReadOnly="True" local:CellAction.Kind="Detail" />
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="120" IsReadOnly="True" local:CellAction.Kind="Quote" />
+                            <DataGridTextColumn Header="板块" Binding="{Binding Board}" Width="90" IsReadOnly="True" />
+                            <DataGridTextColumn Header="收盘" Binding="{Binding LastClose, StringFormat=F2}" Width="70" IsReadOnly="True" SortMemberPath="LastClose" />
+                            <DataGridTextColumn Header="250日位置%" Binding="{Binding SortScore, StringFormat=F0}" Width="85" IsReadOnly="True" SortMemberPath="SortScore" local:CellAction.Kind="Criteria" />
+                            <DataGridTextColumn Header="建仓名单" Binding="{Binding Category}" Width="70" IsReadOnly="True" SortMemberPath="Category" />
+                            <DataGridTextColumn Header="备注(缩量天数｜今日量比=成交额÷前20日均)" Binding="{Binding PatternNote}" Width="380" IsReadOnly="True" SortMemberPath="PatternNote" />
                         </DataGrid.Columns>
                     </DataGrid>
 

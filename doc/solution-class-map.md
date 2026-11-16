@@ -799,6 +799,7 @@ DetailWindow --> XxxChartBuilder
 | 阶梯低点法 | `RisingLowsAnalysisEngine` + `MarketEnvironmentCalculator`（宽度/热度）+ `CutoffBarRepository`（按历史日期截断验证） | `RisingLowsDetector` | `RisingLowsChartBuilder` / `RisingLowsDetailWindow` |
 | 短线法 | `ShortTermAnalysisEngine` + `TradeDiscipline`（止盈止损默认幅度） | — | 复用 `DetailWindow` |
 | 底仓法 | `CorePositionAnalysisEngine` + `DividendMetrics`（股息率口径） | — | `CorePositionChartBuilder` / `CorePositionCriteriaWindow` |
+| 陈峰法 | `ProfitableSmallCapAnalysisEngine` + `VolumeExitDiscipline`（成交额缩量/放量口径 + 晨检里的持仓纪律） | — | 纯文字条件详情（`MainWindow.OpenProfitableSmallCapCriteria`） |
 
 ### 图 A3 · 持仓、自选与本地文件
 

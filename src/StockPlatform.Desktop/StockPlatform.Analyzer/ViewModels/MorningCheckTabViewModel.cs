@@ -174,7 +174,8 @@ public class MorningStockRowViewModel
     /// 合并成"耀哥法、阶梯低点法"，同时原样留一份给方法过滤器做包含匹配。体检基准（自选日期/价格）
     /// 用最早那条记录（entry）：最早的峰值最高，止损纪律触发得最保守。</param>
     /// <param name="earningsDate">手填的财报披露日，见 <see cref="EarningsDate"/>。</param>
-    public MorningStockRowViewModel(WatchlistEntry entry, IReadOnlyList<string> methods, IBarRepository barRepository, IShareholderRepository shareholderRepository, DateTime? earningsDate = null)
+    /// <param name="financialRepository">只有陈峰法持仓用（近四季净利/现金流转负→清仓）；null 时那条不判。</param>
+    public MorningStockRowViewModel(WatchlistEntry entry, IReadOnlyList<string> methods, IBarRepository barRepository, IShareholderRepository shareholderRepository, DateTime? earningsDate = null, IFinancialRepository? financialRepository = null)
     {
         EarningsDate = earningsDate;
         Code = entry.Code;
@@ -188,10 +189,10 @@ public class MorningStockRowViewModel
                                   : ("待买", ThemeBrushes.Gray);   // 在主动仓里但还没有买入记录=打算买、还没买
         var basisDate = IsHolding ? (entry.FirstBuyDate ?? entry.DataDate) : entry.DataDate;
         DataDate = basisDate.ToString("yyyy-MM-dd") + (IsHolding ? "买" : "");
-        Compute(entry, basisDate, barRepository, shareholderRepository);
+        Compute(entry, basisDate, barRepository, shareholderRepository, financialRepository);
     }
 
-    private void Compute(WatchlistEntry entry, DateTime basisDate, IBarRepository barRepository, IShareholderRepository shareholderRepository)
+    private void Compute(WatchlistEntry entry, DateTime basisDate, IBarRepository barRepository, IShareholderRepository shareholderRepository, IFinancialRepository? financialRepository)
     {
         var bars = barRepository.Query(entry.Code, Granularity.Day);
         if (bars.Count == 0) return;
@@ -320,6 +321,40 @@ public class MorningStockRowViewModel
         }
 
         var actions = new List<string>();
+
+        // ── 陈峰法持仓（2026-11-16）：走自己那套长持纪律，**跳过**下面的短线口径 ──────────────
+        // 15%回撤止损 / +50%减1/3 / MA5 卖点 / 20天时间止损 / 60日线下不加仓 都是短线法的纪律，
+        // 跟"跌15%加仓、放量才减、不设止损"的陈峰法正面冲突（时间止损会逼着20天就清仓）。
+        // 判据和回测依据见 VolumeExitDiscipline.EvaluateHolding。
+        bool chenFeng = IsHolding && Methods.Contains(ProfitableSmallCapTabViewModel.MethodName);
+        if (chenFeng)
+        {
+            var buys = entry.BuyLots.OrderBy(l => l.Date).ToList();
+            double? ttmNp = null, ttmOcf = null;
+            if (financialRepository != null)
+            {
+                var fins = financialRepository.GetAllByCode(entry.Code);
+                ttmNp = ProfitableSmallCapAnalysisEngine.Ttm(fins, FinancialKeys.NetProfitParent).Value;
+                ttmOcf = ProfitableSmallCapAnalysisEngine.Ttm(fins, FinancialKeys.Ocf).Value;
+            }
+            var state = new VolumeExitDiscipline.HoldingState(
+                AvgBuyPrice: basisPrice,
+                LastBuyPrice: buys.Count > 0 ? buys[^1].Price : basisPrice,
+                BuyLotCount: buys.Count,
+                HasSoldSinceFirstBuy: entry.SellLots.Any(l => entry.FirstBuyDate is { } fb && l.Date >= fb),
+                TtmNetProfit: ttmNp,
+                TtmOcf: ttmOcf);
+            AdviceText = VolumeExitDiscipline.AdviceText(state);
+            foreach (var a in VolumeExitDiscipline.EvaluateHolding(bars, state))
+            {
+                actions.Add(a.Text);
+                Severity = Math.Min(Severity, a.Severity);
+            }
+            if (holderChgPct > 20) { actions.Add($"筹码警示：户数环比+{holderChgPct:F0}%，散户涌入"); Severity = Math.Min(Severity, 2); }
+            FinishActions(actions);
+            return;
+        }
+
         // 止损/止盈只对真实持仓生效——待买的票没有可卖的仓位，跌破也只是"这次选中失效"，不发操作指令。
         if (IsHolding && drawdownPct <= -15) { actions.Add($"止损纪律：距买入后高点回撤{-drawdownPct:F0}%，减仓/清仓并复核逻辑"); Severity = Math.Min(Severity, 0); }
         if (IsHolding && sinceBasisPct >= 50) { actions.Add($"止盈纪律：较买入价+{sinceBasisPct:F0}%，减仓1/3锁定利润"); Severity = Math.Min(Severity, 1); }
@@ -368,6 +403,19 @@ public class MorningStockRowViewModel
         if (holderChgPct > 20) { actions.Add($"筹码警示：户数环比+{holderChgPct:F0}%，散户涌入"); Severity = Math.Min(Severity, 2); }
         if (above60 == false) { actions.Add(IsHolding ? "趋势弱：在60日线下，不加仓" : "趋势弱：在60日线下，暂不买入"); Severity = Math.Min(Severity, 3); }
 
+        // 其它持仓：今天放量收涨只附一句参考，不改分档和颜色——事件研究里放量收涨后20日同池平均跑输1.6%，
+        // 但那是陈峰法候选池（5~50亿盈利小盘）上测的，没在别的方法上验证过，所以不当纪律。
+        string spikeNote = "";
+        if (IsHolding && VolumeExitDiscipline.IsSpikeUp(bars, bars.Count - 1, out var spikeRatio))
+            spikeNote = $"｜参考：今天放量收涨（成交额为20日均×{spikeRatio:F1}），陈峰法纪律会在这种日子减仓";
+
+        FinishActions(actions, spikeNote);
+    }
+
+    /// <summary>把动作清单落成"今日动作"列的文字和颜色，再附 <paramref name="note"/>（只提示、不改分档）
+    /// 和财报窗口提醒。陈峰法分支和通用分支共用。</summary>
+    private void FinishActions(List<string> actions, string note = "")
+    {
         if (actions.Count == 0)
         {
             ActionText = IsHolding ? "✓ 正常，继续持有" : "✓ 正常，等买点";
@@ -384,6 +432,7 @@ public class MorningStockRowViewModel
                 _ => ThemeBrushes.Gray,
             };
         }
+        ActionText += note;
 
         // 财报窗口的提醒**附加**在动作后面，故意不进 actions、也不动 Severity：那几档是止损/止盈/筹码/
         // 趋势的固定含义（汇总按它分组），混进来会把分组意思搞乱；而且这是提醒不是指令——回测参数
@@ -437,6 +486,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
 
     private readonly IBarRepository _barRepository;
     private readonly IShareholderRepository _shareholderRepository;
+    private readonly IFinancialRepository _financialRepository;
     private readonly JsonWatchlistStore _watchlistStore;
     private readonly IIndexConsRepository _indexConsRepository;
 
@@ -492,10 +542,11 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
     public RelayCommand RefreshCommand { get; }
     public RelayCommand ShowCriteriaInfoCommand { get; }
 
-    public MorningCheckTabViewModel(IBarRepository barRepository, IShareholderRepository shareholderRepository, JsonWatchlistStore watchlistStore, IIndexConsRepository indexConsRepository)
+    public MorningCheckTabViewModel(IBarRepository barRepository, IShareholderRepository shareholderRepository, IFinancialRepository financialRepository, JsonWatchlistStore watchlistStore, IIndexConsRepository indexConsRepository)
     {
         _barRepository = barRepository;
         _shareholderRepository = shareholderRepository;
+        _financialRepository = financialRepository;
         _watchlistStore = watchlistStore;
         _indexConsRepository = indexConsRepository;
 
@@ -523,7 +574,11 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
             "   2. 止盈纪律[仅持仓]：较买入价涨幅≥50% → 减仓1/3锁定利润\n" +
             "   3. 筹码警示：最新股东户数环比>+20% → 散户涌入，几乎每期回测垫底组\n" +
             "      （户数只用于排雷，不用于选股——检验显示\"户数下降\"没有选股超额）\n" +
-            "   4. 趋势弱：收盘在自身60日线下 → 持仓不加仓 / 待买暂不买入（月均落后线上组0.6pp）\n\n" +
+            "   4. 趋势弱：收盘在自身60日线下 → 持仓不加仓 / 待买暂不买入（月均落后线上组0.6pp）\n" +
+            "   ★ 来源是\"陈峰法\"的持仓不走上面的短线纪律，改用陈峰法自己的一套（详见陈峰法页的 ⓘ）：\n" +
+            "     放量收涨(成交额>前20日均×2且收涨)先减半、减过再放量清仓；较买入均价+25%减半、\n" +
+            "     +50%或250日位置>80%清仓；较上次买入价跌15%且不足3笔可加仓；近四季净利转亏/现金流转负清仓。\n" +
+            "     其它持仓遇到放量收涨只在动作后附一句参考，不改排序和颜色。\n\n" +
             "三、使用节奏\n" +
             "   每天早上开盘前：先\"从服务端更新数据\"，再看本Tab → 按\"今日行动建议\"执行。\n" +
             "   规则参数（MA60/15%/50%/20%）为回测原值，请勿为了历史好看微调——那是过拟合。\n" +
@@ -587,7 +642,7 @@ public class MorningCheckTabViewModel : INotifyPropertyChanged
                 // 财报披露日是"这只票"的属性，不是"这条自选记录"的——同一只票哪条记录上填了都算，
                 // 取最早的那个（多条填得不一致时，按更早的提醒更保守）。
                 var earnings = g.Select(e => e.EarningsDate).Where(d => d.HasValue).Min();
-                return new MorningStockRowViewModel(basis, methods, _barRepository, _shareholderRepository, earnings);
+                return new MorningStockRowViewModel(basis, methods, _barRepository, _shareholderRepository, earnings, _financialRepository);
             })
             .OrderByDescending(r => r.IsHolding)   // 持仓排在待买前面——真金白银的先看
             .ThenBy(r => r.Severity).ThenBy(r => r.Code));

@@ -66,6 +66,7 @@ public class MainViewModel : INotifyPropertyChanged
     public MidCapPullbackTabViewModel MidCapPullbackTab { get; }
     public TriangleConvergenceTabViewModel TriangleConvergenceTab { get; }
     public RisingLowsTabViewModel RisingLowsTab { get; }
+    public ProfitableSmallCapTabViewModel ProfitableSmallCapTab { get; }
     public ShortTermTabViewModel ShortTermTab { get; }
     public QueryTabViewModel QueryTab { get; }
     public BoardTabViewModel BoardTab { get; }
@@ -119,7 +120,7 @@ public class MainViewModel : INotifyPropertyChanged
         // 两个入口（"主动仓"页顶部按钮、每行的【仓位】按钮）打开的是同一份设置。
         SizingStore = new PositionSizingStore(paths.PositionSizingPath);
         NoteStore = new StockNoteStore(paths.NotesDir);
-        MorningCheckTab = new MorningCheckTabViewModel(barRepository, shareholderRepository, watchlistStore, indexConsRepository);
+        MorningCheckTab = new MorningCheckTabViewModel(barRepository, shareholderRepository, financialRepository, watchlistStore, indexConsRepository);
         FoundationTab = new FoundationTabViewModel(paths, barRepository, watchlistStore);
         GoldenCrossTab = new GoldenCrossTabViewModel(paths, barRepository, watchlistStore);
         // 底仓记录存在自己的 core-positions.json 里（不是 watchlist.json 加标记），理由见
@@ -141,6 +142,7 @@ public class MainViewModel : INotifyPropertyChanged
         MidCapPullbackTab = new MidCapPullbackTabViewModel(paths, barRepository, fundamentalRepository, shareholderRepository, marginRepository, watchlistStore);
         TriangleConvergenceTab = new TriangleConvergenceTabViewModel(paths, barRepository, watchlistStore);
         RisingLowsTab = new RisingLowsTabViewModel(paths, barRepository, watchlistStore);
+        ProfitableSmallCapTab = new ProfitableSmallCapTabViewModel(paths, barRepository, fundamentalRepository, financialRepository, watchlistStore);
         ShortTermTab = new ShortTermTabViewModel(paths, barRepository, financialRepository, watchlistStore);
         QueryTab = new QueryTabViewModel(paths, barRepository, watchlistStore, corePositionStore);
         BoardTab = new BoardTabViewModel(boardRepository, barRepository, paths);

@@ -137,6 +137,7 @@ public class HolderPortfolioTests : IDisposable
         Assert.Equal(0, s.GroupColumn);
         Assert.Equal(2, s.LinkColumn);
         Assert.Equal(TopShareholderRow.KindFloat, s.LinkTag);
+        Assert.Null(s.Chart);   // 前十合计占比的趋势图已去掉（流通股本随解禁跳变，图没用）
 
         // 最新一期在前、组内按名次
         Assert.Equal(new[] { "2026-09-30", "2026-09-30", "2026-09-30" }, s.Rows.Take(3).Select(r => r[0]));

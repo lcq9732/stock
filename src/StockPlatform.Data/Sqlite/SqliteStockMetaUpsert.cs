@@ -107,6 +107,30 @@ public static class SqliteStockMetaUpsert
     }
 
     /// <summary>
+    /// 各标的的上市日（StockMeta.list_date，【新股发行】从 2026-10-16 起写在市个股；退市股多数为空）。
+    /// 只返回有值的行——没有的票由调用方自己兜底（陈峰法退回"第一根日K"）。值可能带时间部分，只取前 10 位。
+    /// </summary>
+    public static Dictionary<string, DateTime> GetListDates(string dbFilePath)
+    {
+        using var conn = new SqliteConnection($"Data Source={dbFilePath}");
+        conn.Open();
+        SqliteSchema.EnsureSchema(conn);
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT code, list_date FROM StockMeta WHERE list_date IS NOT NULL AND list_date <> '';";
+        var result = new Dictionary<string, DateTime>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var s = reader.GetString(1);
+            if (DateTime.TryParseExact(s.Length >= 10 ? s[..10] : s, "yyyy-MM-dd",
+                    System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d))
+                result[reader.GetString(0)] = d;
+        }
+        return result;
+    }
+
+    /// <summary>
     /// 按 type 取标的。<see cref="GetAll"/> 只给个股（它被 20 多处共用，选股页、Mobile 都靠它补名称，
     /// 混进别的类型会污染候选池，所以那个方法不能动），需要别的组合就用这个。
     ///

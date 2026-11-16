@@ -60,6 +60,32 @@ public partial class StockDossierWindow : Window
         BuildTabs(dossier);
     }
 
+    /// <summary>
+    /// 打开某只票的"其他数据"——**唯一入口**：【行情详情】和【分析详情】两个窗口的按钮都走这里。
+    /// 读库放后台（十几张表、附 25GB 库），读完再 ShowDialog。股东持仓窗口里双击某只票时
+    /// 用 <paramref name="openQuote"/> 打开它的行情详情（由调用方给，因为要用到仓储和笔记存储）。
+    /// </summary>
+    public static async Task OpenAsync(Window owner, string dbPath, string code, string name,
+        Action<Window, string, string>? openQuote)
+    {
+        var previousCursor = owner.Cursor;
+        owner.Cursor = Cursors.Wait;
+        try
+        {
+            var dossier = await Task.Run(() => new SqliteStockDossierReader(dbPath).Read(code, name));
+            owner.Cursor = previousCursor;
+            new StockDossierWindow(dossier, dbPath, openQuote) { Owner = owner }.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(owner, $"读取其他数据失败：{ex.Message}", "其他数据", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            owner.Cursor = previousCursor;
+        }
+    }
+
     private void BuildTabs(StockDossier dossier)
     {
         foreach (var section in dossier.Sections)

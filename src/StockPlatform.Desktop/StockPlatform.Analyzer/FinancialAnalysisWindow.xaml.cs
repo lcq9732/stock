@@ -113,6 +113,11 @@ public partial class FinancialAnalysisWindow : Window
     /// <summary>窗口关掉之后就别再往控件里填了（后台那几趟读库还在路上）。见 <see cref="OnClosed"/>。</summary>
     private bool _closed;
 
+    /// <summary>【其他数据】按钮要用：库路径 + 打开行情详情所需的仓储/笔记存储。在 <see cref="Open"/> 里装进来。</summary>
+    private ViewModels.MainViewModel? _vm;
+    private string _code = "";
+    private string _name = "";
+
     /// <summary>
     /// 只搭骨架，不读任何数据（2026-09-17 改）。
     ///
@@ -139,6 +144,21 @@ public partial class FinancialAnalysisWindow : Window
         // 的做法，那边注释也记了这一点）。
         TextFitter.SizeToScreen(this);
         Loaded += (_, _) => WindowState = WindowState.Maximized;
+    }
+
+    private async void OtherDataButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is not { } vm) return;
+        OtherDataButton.IsEnabled = false;
+        try
+        {
+            await StockDossierWindow.OpenAsync(this, vm.CurrentDbPath, _code, _name, (owner, code, name) =>
+                new QuoteDetailWindow(code, name, vm.BarRepository, vm.CurrentDbPath, vm.NoteStore) { Owner = owner }.ShowDialog());
+        }
+        finally
+        {
+            OtherDataButton.IsEnabled = true;
+        }
     }
 
     protected override void OnClosed(EventArgs e)
@@ -420,7 +440,7 @@ public partial class FinancialAnalysisWindow : Window
     /// </summary>
     public static void Open(Window owner, ViewModels.MainViewModel vm, string code, string name)
     {
-        var w = new FinancialAnalysisWindow(code, name) { Owner = owner };
+        var w = new FinancialAnalysisWindow(code, name) { Owner = owner, _vm = vm, _code = code, _name = name };
 
         // 三个 `_ =`：不等它们，让 ShowDialog 立刻把窗口显示出来，各自算完再回 UI 线程填自己那块。
         // 在 ShowDialog **之前**启动是安全的——await 之后的 continuation 排进 UI 线程的消息队列，
