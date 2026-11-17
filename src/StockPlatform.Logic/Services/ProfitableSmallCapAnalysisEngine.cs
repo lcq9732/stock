@@ -12,11 +12,12 @@ namespace StockPlatform.Logic.Services;
 /// · 收益来自卖出纪律——"放量就减"叠加价格版加减仓后年化 +9.3%、最大回撤 −31%
 ///   （同池盈利股等权基准 +6.4% / −53%）。所以这一页只是"建仓名单"，卖出纪律在每日晨检里
 ///   （<see cref="VolumeExitDiscipline.EvaluateHolding"/>），两半要一起用。
-/// · 用户加的"股价≥15元"在回测里是负贡献（同池等权 +6.4% → +3.5%），按用户要求保留。
+/// · 股价门槛：最初按用户要求是 15 元（回测里是负贡献，同池等权 +6.4% → +3.5%）；
+///   2026-11-17 用户改为默认 10 元、界面可调（<see cref="MinPrice"/>）。
 ///
 /// 八条全部满足才入选：
 ///   1 非北交所、非ST　2 流通市值 5~50 亿　3 上市满 1 年（StockMeta.list_date，缺了退回第一根K线）
-///   4 TTM 归母净利 &gt; 0　5 TTM 经营现金流 &gt; 0　6 股价 ≥ 15 元
+///   4 TTM 归母净利 &gt; 0　5 TTM 经营现金流 &gt; 0　6 股价 ≥ MinPrice（默认 10 元，可调）
 ///   7 250 日位置 &lt; 30%　8 近 5 个交易日（含当天）至少 1 天缩量（成交额 &lt; 前20日均×0.6）
 ///
 /// 性能：全市场 5500 只逐只跑。先判不用查库的 1、2（市值逐只查一次 FundamentalMetric），不过就直接返回；
@@ -27,7 +28,9 @@ public class ProfitableSmallCapAnalysisEngine
 {
     public double MinMarketCap { get; init; } = 5e8;
     public double MaxMarketCap { get; init; } = 50e8;
-    public double MinPrice { get; init; } = 15;
+    /// <summary>最低股价（元），默认 10，界面可调。</summary>
+    public const double DefaultMinPrice = 10;
+    public double MinPrice { get; init; } = DefaultMinPrice;
     public int PositionDays { get; init; } = 250;
     public double MaxPosition { get; init; } = 0.30;
     /// <summary>"前几天或当天缩量"的窗口（含当天）。</summary>
@@ -96,9 +99,9 @@ public class ProfitableSmallCapAnalysisEngine
             Basis = $"上市日={listed:yyyy-MM-dd}" + (listDate == null ? "（名册里没有上市日，用第一根日K代替）" : ""),
         });
 
-        // 6 股价 ≥ 15 元——前复权的最新收盘就是实际价
+        // 6 股价 ≥ MinPrice——前复权的最新收盘就是实际价
         bool priceOk = last.Close >= MinPrice;
-        c.Add(new() { Name = $"6 股价 ≥ {MinPrice:F0} 元", Satisfied = priceOk, Basis = $"最新收盘={last.Close:F2}（{last.PeriodStart:MM-dd}）" });
+        c.Add(new() { Name = $"6 股价 ≥ {MinPrice:0.##} 元", Satisfied = priceOk, Basis = $"最新收盘={last.Close:F2}（{last.PeriodStart:MM-dd}）" });
 
         // 7 一年低位
         var pos = VolumeExitDiscipline.Position(bars, PositionDays);

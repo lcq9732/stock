@@ -12,7 +12,7 @@ namespace StockPlatform.Tests;
 ///   · 缩量/放量按**成交额**算，不按换手率；
 ///   · 缩量是"近5个交易日（含当天）任一天"，不是只看当天；备注列要写缩量天数和日期；
 ///   · 上市满1年用名册上市日，没有才退回第一根日K；
-///   · 股价≥15元、250日位置&lt;30% 是两条独立条件。
+///   · 股价≥MinPrice（默认10元，可调）、250日位置&lt;30% 是两条独立条件。
 /// </summary>
 public class ProfitableSmallCapTests
 {
@@ -50,9 +50,12 @@ public class ProfitableSmallCapTests
     };
 
     private static StockScreenResult Run(List<Bar> bars, double? cap = 20e8, DateTime? listDate = null, string name = "测试股份",
-        Func<List<FinancialSnapshot>>? fins = null, bool noListDate = false)
+        Func<List<FinancialSnapshot>>? fins = null, bool noListDate = false, double? minPrice = null)
     {
-        var engine = new ProfitableSmallCapAnalysisEngine(null!, null!, null!, new Dictionary<string, DateTime>());
+        var engine = new ProfitableSmallCapAnalysisEngine(null!, null!, null!, new Dictionary<string, DateTime>())
+        {
+            MinPrice = minPrice ?? ProfitableSmallCapAnalysisEngine.DefaultMinPrice,
+        };
         return engine.Evaluate(Code, name, cap, noListDate ? null : listDate ?? new DateTime(2015, 1, 1),
             () => bars, fins ?? GoodFins);
     }
@@ -98,9 +101,17 @@ public class ProfitableSmallCapTests
     }
 
     [Fact]
-    public void 股价低于15_不通过()
+    public void 默认门槛10元_14元的票通过()
     {
         var r = Run(Bars(priceShift: -2, shrinkAt: [279]));   // 最新收盘 14.05
+        Assert.True(r.Passed);
+        Assert.Equal("6 股价 ≥ 10 元", r.Criteria.Single(c => c.Name.StartsWith("6")).Name);
+    }
+
+    [Fact]
+    public void 门槛调到15元_14元的票不通过()
+    {
+        var r = Run(Bars(priceShift: -2, shrinkAt: [279]), minPrice: 15);   // 最新收盘 14.05
         Assert.False(r.Passed);
         Assert.False(r.Criteria.Single(c => c.Name.StartsWith("6")).Satisfied);
     }

@@ -219,7 +219,9 @@ public class MorningStockRowViewModel
             double gap = (last.Close / ma5 - 1) * 100;
             Ma5Text = $"{ma5:F2}（{(belowMa5 ? "跌破" : "站上")}{gap:+0.0;-0.0}%）";
             Ma5Value = ma5;
-            Ma5Color = belowMa5 ? ThemeBrushes.Firebrick : ThemeBrushes.SeaGreen;
+            // 涨红跌绿，跟"较基准涨跌"列同一套色（2026-11-17 用户要求；原来按"跌破=卖出警示"标红，
+            // 两列红色意思相反容易看反）。跌破要不要卖由"今日动作"列给出，不靠颜色。
+            Ma5Color = belowMa5 ? ThemeBrushes.Green : ThemeBrushes.Red;
         }
 
         // 日均波幅：决定时间止损天数（>4.5% 用15天，其余20天），也提示这票适不适合做。

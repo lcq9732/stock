@@ -602,6 +602,9 @@
                                   CanUserAddRows="False" GridLinesVisibility="Horizontal" HeadersVisibility="Column"
                                   AlternatingRowBackground="{DynamicResource Theme.Grid.Row.Alternate}"
                                   ToolTip="从各选股Tab“加入自选”的股票每天在这里逐只体检；问题最严重的排最前。&#10;点代码看分析详情、点名称看K线、点方法看当时的条件详情。">
+                            <DataGrid.Resources>
+                                <local:BindingProxy x:Key="MorningCheckProxy" Data="{Binding}" />
+                            </DataGrid.Resources>
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="代码" Binding="{Binding Code}" Width="70" local:CellAction.Kind="Detail" />
                                 <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="100" local:CellAction.Kind="Quote" />
@@ -620,16 +623,16 @@
                                 </DataGridTextColumn>
                                 <!-- 方法列表头带下拉过滤器：选某个方法后，表格和下面的"今日行动建议"都只算
                                      该方法选出的股票（含平均涨跌/上涨占比），用来横向对比各选股方法的表现。
-                                     列头不在行的可视树里、拿不到 Tab 的 DataContext，所以用 RelativeSource
-                                     往上找 DataGrid 再取它的 DataContext（WPF 里列头绑定的标准做法）。
+                                     列头里的控件拿不到 Tab 的 DataContext；原来用 RelativeSource 往上找 DataGrid，
+                                     实机绑不上（下拉空、点了没东西），改走 DataGrid.Resources 里的 BindingProxy。
                                      CanUserSort=False：避免点下拉时顺带触发这一列的排序。 -->
                                 <DataGridTextColumn Binding="{Binding Method}" Width="150" CanUserSort="False" local:CellAction.Kind="Criteria">
                                     <DataGridTextColumn.Header>
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Text="方法" VerticalAlignment="Center" />
                                             <ComboBox Width="98" Margin="6,0,0,0" Padding="4,1"
-                                                      ItemsSource="{Binding DataContext.MethodFilters, RelativeSource={RelativeSource AncestorType=DataGrid}}"
-                                                      SelectedItem="{Binding DataContext.SelectedMethodFilter, RelativeSource={RelativeSource AncestorType=DataGrid}, Mode=TwoWay}"
+                                                      ItemsSource="{Binding Data.MethodFilters, Source={StaticResource MorningCheckProxy}}"
+                                                      SelectedItem="{Binding Data.SelectedMethodFilter, Source={StaticResource MorningCheckProxy}, Mode=TwoWay}"
                                                       DisplayMemberPath="Display"
                                                       ToolTip="按选股方法过滤：只看某个方法选出的股票，表格和&quot;今日行动建议&quot;（含平均涨跌、上涨占比）都跟着只算这个方法，便于横向对比各方法表现。括号里是该方法的股票只数。切回&quot;全部方法&quot;看全部" />
                                         </StackPanel>
@@ -1360,6 +1363,10 @@
 
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
                         <TextBlock Text="固定使用日线；卖出纪律在【每日晨检】" VerticalAlignment="Center" Foreground="{DynamicResource Theme.Foreground.Muted}" />
+                        <TextBlock Text="股价≥" VerticalAlignment="Center" Margin="16,0,0,0"
+                                   ToolTip="第6条：最新收盘价下限（元），默认10。回测用的是15元，股价门槛在回测里是负贡献" />
+                        <TextBox Text="{Binding MinPrice, UpdateSourceTrigger=PropertyChanged}" Width="40" Margin="4,0" />
+                        <TextBlock Text="元" VerticalAlignment="Center" />
                         <Button Content="开始分析" Command="{Binding AnalyzeCommand}" Width="90" Margin="16,0,0,0" />
                         <Button Content="&#8505;" FontWeight="Bold" FontSize="16" Width="28" Margin="6,0,0,0"
                                 Command="{Binding ShowCriteriaInfoCommand}" ToolTip="查看入选条件、卖出纪律与回测说明" />
